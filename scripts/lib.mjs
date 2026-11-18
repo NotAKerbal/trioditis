@@ -758,42 +758,17 @@ export function writeDevEnv(values) {
 
 export const convex = (...args) => ['exec', 'convex', ...args]
 
-/**
- * The backend's migrations: the internal functions in packages/backend/convex/migrations.ts,
- * which fix rows an older version wrote. Each is safe to run any number of times, so a backend
- * that keeps its data runs them all after its functions are pushed. Empty on a branch without
- * the file. Comments are ignored, so a commented-out migration doesn't run.
- */
-export function migrationNames() {
-  return migrations().map((migration) => migration.name)
-}
-
-function migrations() {
-  const file = resolve(backendDir, 'convex/migrations.ts')
-  if (!existsSync(file)) return []
-  return parseMigrations(readFileSync(file, 'utf8'))
-}
-
-/** The exported internal mutations and actions declared in `source`, ignoring comments. */
-export function parseMigrationNames(source) {
-  return parseMigrations(source).map((migration) => migration.name)
-}
-
-/** Each migration in `source` with its kind, which decides how it's called. */
-export function parseMigrations(source) {
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  // A type annotation or type arguments may sit between the name and the call, nested or not.
-  const declaration = /^export const (\w+)\s*(?::[^=]+)?=\s*internal(Mutation|Action)\s*(?:<.*>)?\s*\(/gm
-  return [...code.matchAll(declaration)].map((match) => ({
-    name: match[1],
-    kind: match[2] === 'Action' ? 'action' : 'mutation',
-  }))
+/** Whether this branch's backend has migrations (packages/backend/convex/migrations.ts). */
+export function hasMigrations() {
+  return existsSync(resolve(backendDir, 'convex/migrations.ts'))
 }
 
 /**
- * Runs every migration on this checkout's local backend, called directly over HTTP with the
- * admin key from its own `.convex/local/default/config.json`. It doesn't go through the Convex
- * CLI, which would read the dotenv files again and could be pointed somewhere else by then.
+ * Runs the backend's migrations on this checkout's local backend: its one entry point,
+ * `migrations:runAll`, which runs every migration in order, each safe to run any number of
+ * times. It's called directly over HTTP with the admin key from the checkout's own
+ * `.convex/local/default/config.json`, not through the Convex CLI, which would read the
+ * dotenv files again and could be pointed somewhere else by then.
  */
 export async function runMigrations(url) {
   const config = JSON.parse(readFileSync(resolve(backendDir, '.convex/local/default/config.json'), 'utf8'))
@@ -802,11 +777,8 @@ export async function runMigrations(url) {
   const { makeFunctionReference } = backendRequire('convex/server')
   const client = new ConvexHttpClient(url)
   client.setAdminAuth(config.adminKey)
-  for (const { name, kind } of migrations()) {
-    const reference = makeFunctionReference(`migrations:${name}`)
-    await (kind === 'action' ? client.action(reference, {}) : client.mutation(reference, {}))
-    console.log(`Ran ${name}.`)
-  }
+  await client.action(makeFunctionReference('migrations:runAll'), {})
+  console.log('Ran migrations:runAll.')
 }
 
 /**

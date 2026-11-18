@@ -39,7 +39,7 @@ import {
   holdLock,
   isFree,
   localConvex,
-  migrationNames,
+  hasMigrations,
   parseDotenv,
   portsFor,
   privateDir,
@@ -286,7 +286,7 @@ try {
       setTimeout(() => failWait(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000),
     ),
   ])
-  if (migrationNames().length > 0) {
+  if (hasMigrations()) {
     step('Running migrations')
     await runMigrations(convexUrl)
   }

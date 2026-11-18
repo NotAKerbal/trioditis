@@ -708,24 +708,3 @@ void test('--reset-ignoring takes a whole process ID, and only with --setup --re
     assert.match(result.stdout, /Throwing this checkout’s backend data away/, option.join(' '))
   }
 })
-
-void test('lists the backend’s migrations from migrations.ts', async () => {
-  const { migrationNames, parseMigrationNames } = await import('../lib.mjs')
-  assert.deepEqual(migrationNames(), ['scheduleCommandDeadlines'])
-  const source = [
-    'export const one = internalMutation({',
-    'export const typed: RegisteredMutation<"internal", {}, null> = internalMutation({',
-    'export const generic = internalAction<{}>({',
-    'export const nested = internalMutation<Record<string, Array<number>>>({',
-    '/* export const commented = internalMutation({ */',
-    '// export const lineCommented = internalMutation({',
-    'export const notAMigration = query({',
-    'const helper = internalMutation({',
-  ].join('\n')
-  assert.deepEqual(parseMigrationNames(source), ['one', 'typed', 'generic', 'nested'])
-  const { parseMigrations } = await import('../lib.mjs')
-  assert.deepEqual(
-    parseMigrations(source).map((migration) => migration.kind),
-    ['mutation', 'mutation', 'action', 'mutation'],
-  )
-})

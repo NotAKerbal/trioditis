@@ -243,12 +243,12 @@ For example, chats now must have a `view` and reactions a `chatId`, which rows w
 before it takes this schema.
 
 One-off fixes for rows an older version wrote are internal functions in
-`packages/backend/convex/migrations.ts`, each safe to run any number of times. `pnpm dev`
-(and `--setup`) runs every one once its functions are pushed, so a backend that keeps its
-data is always caught up; after adding a migration while `pnpm dev` runs, restart it. It
-calls them on this checkout's backend directly, with its own admin key (each as the mutation
-or action it is). The self-hosted installer runs them after each of its deploys as well: see
-`docs/deploy.md`.
+`packages/backend/convex/migrations.ts`, each safe to run any number of times, and
+`migrations:runAll` runs them all in order: add a new one there too. `pnpm dev` (and
+`--setup`) calls `runAll` once its functions are pushed, directly on this checkout's backend
+with its own admin key, so a backend that keeps its data is always caught up; after adding a
+migration while `pnpm dev` runs, restart it. The self-hosted installer calls it after each of
+its deploys as well: see `docs/deploy.md`.
 
 ### End-to-end check
 
