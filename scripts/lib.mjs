@@ -765,16 +765,29 @@ export const convex = (...args) => ['exec', 'convex', ...args]
  * the file. Comments are ignored, so a commented-out migration doesn't run.
  */
 export function migrationNames() {
+  return migrations().map((migration) => migration.name)
+}
+
+function migrations() {
   const file = resolve(backendDir, 'convex/migrations.ts')
   if (!existsSync(file)) return []
-  return parseMigrationNames(readFileSync(file, 'utf8'))
+  return parseMigrations(readFileSync(file, 'utf8'))
 }
 
 /** The exported internal mutations and actions declared in `source`, ignoring comments. */
 export function parseMigrationNames(source) {
+  return parseMigrations(source).map((migration) => migration.name)
+}
+
+/** Each migration in `source` with its kind, which decides how it's called. */
+export function parseMigrations(source) {
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  const declaration = /^export const (\w+)\s*(?::[^=]+)?=\s*internal(?:Mutation|Action)\s*(?:<[^>]*>)?\(/gm
-  return [...code.matchAll(declaration)].map((match) => match[1])
+  // A type annotation or type arguments may sit between the name and the call, nested or not.
+  const declaration = /^export const (\w+)\s*(?::[^=]+)?=\s*internal(Mutation|Action)\s*(?:<.*>)?\s*\(/gm
+  return [...code.matchAll(declaration)].map((match) => ({
+    name: match[1],
+    kind: match[2] === 'Action' ? 'action' : 'mutation',
+  }))
 }
 
 /**
@@ -789,8 +802,9 @@ export async function runMigrations(url) {
   const { makeFunctionReference } = backendRequire('convex/server')
   const client = new ConvexHttpClient(url)
   client.setAdminAuth(config.adminKey)
-  for (const name of migrationNames()) {
-    await client.mutation(makeFunctionReference(`migrations:${name}`), {})
+  for (const { name, kind } of migrations()) {
+    const reference = makeFunctionReference(`migrations:${name}`)
+    await (kind === 'action' ? client.action(reference, {}) : client.mutation(reference, {}))
     console.log(`Ran ${name}.`)
   }
 }
