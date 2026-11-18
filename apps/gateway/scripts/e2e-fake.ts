@@ -117,7 +117,9 @@ const incoming = await fetch(`${fakeControl}/fake/incoming`, {
 })
 if (incoming.status !== 202) throw new Error(`Fake incoming failed: ${incoming.status}`)
 // This run's chat: on this run's login.
-const findChat = async () => (await client.query(api.chats.list, {})).find((c) => c.network === 'fake' && c.loginId === loginId)
+// The inbox is paged; this run's chat is among the most recent.
+const inbox = async () => (await client.query(api.chats.list, { paginationOpts: { numItems: 50, cursor: null } })).page
+const findChat = async () => (await inbox()).find((c) => c.network === 'fake' && c.loginId === loginId)
 const chat = await until('the chat to appear', findChat)
 const received = await until('the message to arrive', async () => {
   const page = await client.query(api.messages.list, { chatId: chat._id, paginationOpts: { numItems: 10, cursor: null } })
@@ -159,7 +161,7 @@ if (all.page.length !== 2) throw new Error(`Expected 2 messages, found ${all.pag
 step('Reply sent, echoed once, delivery "sent", and its sealed copy opens')
 
 // Nothing a person wrote is readable in what Convex returned.
-const everything = JSON.stringify([await client.query(api.chats.list, {}), all, await client.query(api.logins.accounts, {})])
+const everything = JSON.stringify([await inbox(), all, await client.query(api.logins.accounts, {})])
 for (const plaintext of [secretText, reply.body, loginUser, 'alice']) {
   if (everything.includes(plaintext)) throw new Error(`Plaintext "${plaintext}" reached Convex`)
 }
