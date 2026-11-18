@@ -1,5 +1,9 @@
 # The checks docs/CONTRIBUTING.md asks for, on every pull request and on pushes to dev and
 # main: TypeScript typecheck, lint and tests, and the bridge host's Go vet and tests.
+#
+# Jobs run on GitHub's ubuntu-24.04 runners unless the repository variable CI_RUNS_ON says
+# otherwise, as a JSON runs-on value. '["self-hosted","trioditis"]' sends them to the
+# self-hosted runners on Isaac's VM; delete the variable to go back to GitHub's runners.
 name: Checks
 
 on:
@@ -18,7 +22,7 @@ concurrency:
 jobs:
   typescript:
     name: TypeScript
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +40,7 @@ jobs:
 
   go:
     name: Bridge host
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
     timeout-minutes: 15
     defaults:
       run:
