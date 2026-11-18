@@ -143,9 +143,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     if (scheduling.get(chatId) === rev) return
     scheduling.set(chatId, rev)
     const reply = replyTo
-    const clientMessageId = newClientId()
-    const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
+      // Inside try, so a sealing failure is said and lets the draft be scheduled again.
+      const clientMessageId = newClientId()
+      const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
       checkWithinAYear(sendAt)
       await schedule({
         chatId,

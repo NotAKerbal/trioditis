@@ -80,7 +80,7 @@ function MemberGate({ children }: { children: ReactNode }) {
     )
   }
   return (
-    <KeyGate userId={me.data.userId} role={me.data.role}>
+    <KeyGate key={me.data.userId} userId={me.data.userId} role={me.data.role}>
       {children}
     </KeyGate>
   )
@@ -103,7 +103,9 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       onSaving={() => setHeld(setupFor)}
       onLeave={() => setHeld(null)}
       onDone={async (doneKid) => {
-        await local.refetch()
+        const { data } = await local.refetch()
+        // Until the key reads back from this device, setup stays on screen, with Try again.
+        if (data?.kid !== doneKid) throw new Error('the key couldn’t be read back from this device')
         setSetUpKid(doneKid)
         setHeld(null)
         void remote.refetch()
@@ -369,13 +371,22 @@ function KeySetup({
       return
     }
     // Done, unless the recovery key shown here lost the race: then say so before going on.
-    if (!lost) {
-      await onDone(kid)
-      return
-    }
+    if (!lost) return complete(kid)
     setKeptKid(null)
     setFinished(kid)
     setBusy(false)
+  }
+
+  /** Opens the app with the key kept here; if it won't read back, Try again stays on offer. */
+  async function complete(kid: string) {
+    try {
+      await onDone(kid)
+    } catch (e) {
+      setFinished(null)
+      setKeptKid(kid)
+      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
+      setBusy(false)
+    }
   }
 
   if (keyTaken) {
@@ -408,9 +419,13 @@ function KeySetup({
         >
           Check again
         </Button>
-        <div className="mt-2">
-          <SignOutButton />
-        </div>
+        {/* keys.setup succeeded, so both backups exist: signing out forgets this device's copy.
+            Not while a step is running, which could keep it again afterwards. */}
+        {busy ? null : (
+          <div className="mt-2">
+            <SignOutButton userId={userId} />
+          </div>
+        )}
       </AuthCard>
     )
   }
@@ -421,7 +436,7 @@ function KeySetup({
         title="Your recovery key is the other one"
         description="Your key is set up, but another device finished saving its recovery key a moment earlier. The recovery key shown here won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
       >
-        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void onDone(finished)}>
+        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void complete(finished)}>
           Continue
         </Button>
         {/* The backups are complete and the key is kept here, so signing out forgets it, as ever. */}
@@ -457,7 +472,8 @@ function KeySetup({
         <Button block className="mb-2" onClick={onLeave}>
           Unlock with my password
         </Button>
-        <SignOutButton />
+        {/* As above: the backups exist, and a save in progress could put the key back. */}
+        {busy ? null : <SignOutButton userId={userId} />}
       </AuthCard>
     )
   }
