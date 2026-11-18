@@ -4,6 +4,7 @@ import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
 import { deletePayload } from './outbox'
+import { internal } from '../_generated/api'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -197,6 +198,9 @@ async function settleSend(ctx: MutationCtx, send: Doc<'outbox'>, delivery: Deliv
     ...(pending ? { state: 'dispatched' as const, leaseUntil: undefined } : {}),
   })
   await deletePayload(ctx, send._id)
+  // The payload deleted above, at its largest.
+  const meter = meters.get(ctx)
+  if (meter) meter.bytes += 2 * 64 * 1024
 }
 
 async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, origin: Origin) {
@@ -318,12 +322,9 @@ async function applyRedaction(
     sealedEdit: undefined,
     editEventId: undefined,
   })
-  for (const reaction of await ctx.db
-    .query('reactions')
-    .withIndex('by_message', (q) => q.eq('messageId', message._id))
-    .collect()) {
-    await ctx.db.delete(reaction._id)
-  }
+  // A message can have any number of reactions, so they're deleted in bounded batches after
+  // this transaction, rather than all inside it.
+  await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId: message._id })
 }
 
 async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'receipt' }>, network: Network) {
@@ -423,7 +424,7 @@ async function applyLoginState(
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
   const { hostId } = origin
   const sessionId = ctx.db.normalizeId('loginSessions', event.loginSessionId)
-  const session = sessionId ? await ctx.db.get(sessionId) : null
+  const session = charge(ctx, sessionId ? await ctx.db.get(sessionId) : null)
   if (!session || session.userId !== event.userId) throw new Unmappable('unknown_login_session')
   // Only the host the login was handed to speaks for it (it is pinned when the start command
   // is handed out, before any host can have a step to report).
@@ -498,8 +499,14 @@ function hasOversizedId(event: BridgeEventDoc) {
     ...ID_FIELDS.map((name) => fields[name]),
     event.userId,
     'sender' in event && 'ghostId' in event.sender ? event.sender.ghostId : undefined,
-    event.type === 'loginStep' ? event.step.stepId : undefined,
-    event.type === 'loginStep' ? event.step.loginId : undefined,
+    ...(event.type === 'loginStep'
+      ? [
+          event.step.stepId,
+          event.step.loginId,
+          ...(event.step.fields ?? []).map((field) => field.id),
+          ...(event.step.cookies?.fields ?? []).map((field) => field.id),
+        ]
+      : []),
   ]
   return ids.some((id) => typeof id === 'string' && id.length > MAX_ID_LENGTH)
 }
