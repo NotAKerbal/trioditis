@@ -1,9 +1,11 @@
 import { getAuthConfigProvider } from '@convex-dev/better-auth/auth-config'
 import type { AuthConfig } from 'convex/server'
 
-// With JWKS set (a static key set, from `npx convex run auth:rotateKeys`), Convex checks
-// tokens against it directly instead of fetching Better Auth's JWKS from this deployment's
-// public URL, which fails on a server behind NAT that can't reach its own public address.
+// Convex checks tokens against Better Auth's JWKS, fetched from this deployment's site URL.
+// It reads no optional environment variable: Convex refuses to deploy an auth config that
+// references one that isn't set. (A static key set, for a server that can't reach its own
+// public address, is a Phase 1 follow-up; the self-hosted bundle routes that address to
+// itself instead.)
 export default {
-  providers: [getAuthConfigProvider(process.env.JWKS ? { jwks: process.env.JWKS } : undefined)],
+  providers: [getAuthConfigProvider()],
 } satisfies AuthConfig
