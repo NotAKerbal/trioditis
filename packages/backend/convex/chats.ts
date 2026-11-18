@@ -132,14 +132,14 @@ export const list = query({
     const pinned =
       args.paginationOpts.cursor === null
         ? network
-          ? (
-              await ctx.db
-                .query('chats')
-                .withIndex('by_user_view_network_last', (q) => q.eq('userId', userId).eq('view', view).eq('network', network))
-                .order('desc')
-                .filter((q) => q.eq(q.field('pinned'), true))
-                .take(MAX_PINS)
-            )
+          ? await ctx.db
+              .query('chats')
+              .withIndex('by_user_view_network_last', (q) =>
+                q.eq('userId', userId).eq('view', view).eq('network', network),
+              )
+              .order('desc')
+              .filter((q) => q.eq(q.field('pinned'), true))
+              .take(MAX_PINS)
           : await ctx.db
               .query('chats')
               .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view).eq('pinned', true))
@@ -199,7 +199,9 @@ export const counts = query({
     const capped = (n: number, partial: boolean) => ({ count: Math.min(n, COUNT_CAP), more: n > COUNT_CAP || partial })
     const scannedAll = inbox.length < scan
     const unread = inbox.filter(
-      (chat) => (chat.unreadCount > 0 || chat.markedUnread === true) && !(chat.mutedUntil !== undefined && chat.mutedUntil > now),
+      (chat) =>
+        (chat.unreadCount > 0 || chat.markedUnread === true) &&
+        !(chat.mutedUntil !== undefined && chat.mutedUntil > now),
     ).length
     return {
       inbox: capped(unread, !scannedAll),

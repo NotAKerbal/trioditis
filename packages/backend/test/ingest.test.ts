@@ -504,4 +504,31 @@ describe('ingest', () => {
     })
     expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
   })
+
+  it('keeps messages newer than a delayed receipt unread', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000 }),
+      message('e2', { networkTs: 2_000 }),
+      message('e3', { networkTs: 3_000 }),
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
+    ])
+    expect((await chat(t)).unreadCount).toBe(2)
+  })
+
+  it('recounts unread and mentions after a delayed read receipt', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000, mentionsMe: true }),
+      message('e2', { networkTs: 2_000, mentionsMe: true }),
+      message('e3', { networkTs: 3_000 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 3, mentionCount: 2 })
+    await ingest(t, [
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 2, mentionCount: 1 })
+  })
 })

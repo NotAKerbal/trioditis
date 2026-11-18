@@ -41,7 +41,12 @@ const CHATS: Fixture[] = [
     kind: 'dm',
     name: 'Alice Moreno',
     people: ['g_demo_alice'],
-    lines: ['Are we still on for lunch?', 'Yes! 12:30 at the usual place', 'Perfect, see you there', 'Running 5 min late'],
+    lines: [
+      'Are we still on for lunch?',
+      'Yes! 12:30 at the usual place',
+      'Perfect, see you there',
+      'Running 5 min late',
+    ],
     unread: 2,
     pinned: true,
   },
@@ -50,7 +55,13 @@ const CHATS: Fixture[] = [
     kind: 'group',
     name: 'Family',
     people: ['g_demo_alice', 'g_demo_bob', 'g_demo_carol'],
-    lines: ['Dinner on Sunday?', 'I can bring dessert', 'Who’s picking up Grandma?', 'I will', 'Photos from last week 📸'],
+    lines: [
+      'Dinner on Sunday?',
+      'I can bring dessert',
+      'Who’s picking up Grandma?',
+      'I will',
+      'Photos from last week 📸',
+    ],
     unread: 5,
   },
   {
@@ -158,7 +169,12 @@ export const writeContacts = internalMutation({
   handler: async (ctx, { userId, contacts }) => {
     assertDemo()
     for (const contact of contacts.slice(0, 50)) {
-      await ctx.db.insert('contacts', { userId, network: 'fake', ghostId: contact.ghostId, sealedProfile: contact.sealed })
+      await ctx.db.insert('contacts', {
+        userId,
+        network: 'fake',
+        ghostId: contact.ghostId,
+        sealedProfile: contact.sealed,
+      })
     }
     return null
   },
@@ -167,7 +183,17 @@ export const writeContacts = internalMutation({
 async function insertChat(
   ctx: MutationCtx,
   userId: string,
-  chat: { portalId: string; kind: 'dm' | 'group' | 'channel' | 'space'; sealed: typeof envelope.type; unread: number; isRequest: boolean; snoozed: boolean; archived: boolean; pinned: boolean; lastMessageAt: number },
+  chat: {
+    portalId: string
+    kind: 'dm' | 'group' | 'channel' | 'space'
+    sealed: typeof envelope.type
+    unread: number
+    isRequest: boolean
+    snoozed: boolean
+    archived: boolean
+    pinned: boolean
+    lastMessageAt: number
+  },
 ) {
   const fields = {
     userId,
@@ -238,10 +264,14 @@ export const seedForMe = action({
     const start = await ctx.runMutation(internal.demo.begin, { userId })
     if (!start) return { seeded: false }
     const recipients = [start.publicKey]
-    const seal = (value: unknown, kind: string, objectId: string) => sealJson(value, recipients, { kind, ownerUserId: userId, objectId })
+    const seal = (value: unknown, kind: string, objectId: string) =>
+      sealJson(value, recipients, { kind, ownerUserId: userId, objectId })
     await ctx.runMutation(internal.demo.writeContacts, {
       userId,
-      contacts: CONTACTS.map(({ ghostId, name, handle }) => ({ ghostId, sealed: seal({ name, handle }, 'contact', ghostId) })),
+      contacts: CONTACTS.map(({ ghostId, name, handle }) => ({
+        ghostId,
+        sealed: seal({ name, handle }, 'contact', ghostId),
+      })),
     })
     const now = Date.now()
     for (const [index, chat] of CHATS.entries()) {

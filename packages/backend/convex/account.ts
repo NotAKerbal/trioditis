@@ -35,7 +35,7 @@ export const changePassword = action({
     expectedRevision: v.number(),
   },
   returns: v.object({ revision: v.number() }),
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<{ revision: number }> => {
     const userId = await requireUserId(ctx)
     const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision }
     await ctx.runMutation(internal.keys.checkPasswordChange, { userId, proof: args.proof, ...wrap })
@@ -45,7 +45,8 @@ export const changePassword = action({
     try {
       await change(args.currentAuthPassword, args.newAuthPassword)
     } catch (error) {
-      if (error instanceof APIError) throw new ConvexError('Your current password is wrong, or the new one isn’t allowed.')
+      if (error instanceof APIError)
+        throw new ConvexError('Your current password is wrong, or the new one isn’t allowed.')
       throw error
     }
     try {

@@ -60,7 +60,10 @@ export function sealJson(
     v: 1 as const,
     nonce: encode(nonce),
     ct: encode(ct),
-    keys: recipientPublicKeys.map((publicKey) => ({ kid: keyIdOf(publicKey), sk: encode(sealBox(contentKey, decode(publicKey))) })),
+    keys: recipientPublicKeys.map((publicKey) => ({
+      kid: keyIdOf(publicKey),
+      sk: encode(sealBox(contentKey, decode(publicKey))),
+    })),
   }
   contentKey.fill(0)
   return envelopeOut

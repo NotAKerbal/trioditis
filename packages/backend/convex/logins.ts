@@ -97,7 +97,9 @@ export const start = mutation({
     // Nothing can be sealed to someone without an identity key, and a key without both backups
     // could be lost with the device, so no network can be connected until both exist.
     if (keyState(member, await backupsOf(ctx, member.userId)) !== 'ready') {
-      throw new ConvexError('Finish setting up your key, with its password and recovery key, before connecting a network.')
+      throw new ConvexError(
+        'Finish setting up your key, with its password and recovery key, before connecting a network.',
+      )
     }
     const now = Date.now()
     const loginSessionId = await ctx.db.insert('loginSessions', {

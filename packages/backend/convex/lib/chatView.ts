@@ -14,7 +14,9 @@ import type { MutationCtx } from '../_generated/server'
 //   inbox     everything else, including a woken snooze
 // Waking a snooze (by time or a new message) also unarchives the chat: it comes back.
 
-type ViewFields = Pick<Doc<'chats'>, 'blocked' | 'isRequest' | 'snoozedUntil' | 'woke' | 'archived' | 'deleted'>
+type ViewFields = Partial<
+  Pick<Doc<'chats'>, 'blocked' | 'isRequest' | 'snoozedUntil' | 'woke' | 'archived' | 'deleted'>
+>
 
 export function chatViewOf(chat: ViewFields): ChatView | undefined {
   if (chat.deleted) return undefined

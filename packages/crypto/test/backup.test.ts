@@ -3,6 +3,7 @@ import {
   SealError,
   authPassword,
   makeKeyBackup,
+  makeKeySetup,
   toBase64Url,
   decodeRecoveryKey,
   encodeRecoveryKey,
@@ -76,11 +77,31 @@ describe('auth passwords', () => {
     expect(authPassword('pw pw pw pw', 'a@b.c')).not.toBe(toBase64Url(passwordKey('pw pw pw pw', params)))
   })
 
+  it('makes everything keys.setup takes, opening with the password or the recovery key', () => {
+    const identity = generateKeyPair()
+    const { args, recoveryText } = makeKeySetup(identity.privateKey, 'demo password', 'user_1')
+    const kid = keyId(identity.publicKey)
+    expect(args.publicKey).toBe(toBase64Url(identity.publicKey))
+    expect(
+      unwrapIdentityKey(
+        args.recovery,
+        decodeRecoveryKey(recoveryText),
+        { userId: 'user_1', kid, kind: 'recovery' },
+        identity.publicKey,
+      ).privateKey,
+    ).toEqual(identity.privateKey)
+  })
+
   it('makes a password backup that the normal unlock opens', () => {
     const identity = generateKeyPair()
     const backup = makeKeyBackup(identity.privateKey, 'demo password', 'user_1')
     expect(backup.kid).toBe(keyId(identity.publicKey))
-    const opened = unwrapIdentityKey(backup.password, passwordKey('demo password', backup.password.params), { userId: 'user_1', kid: backup.kid, kind: 'password' }, identity.publicKey)
+    const opened = unwrapIdentityKey(
+      backup.password,
+      passwordKey('demo password', backup.password.params),
+      { userId: 'user_1', kid: backup.kid, kind: 'password' },
+      identity.publicKey,
+    )
     expect(opened.privateKey).toEqual(identity.privateKey)
   })
 })

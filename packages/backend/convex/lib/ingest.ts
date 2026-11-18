@@ -220,6 +220,8 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     sealed: event.sealed,
     sealedObjectId: event.eventId,
     historical: event.historical,
+    // Kept so a read receipt can recount mentions among the messages after it.
+    ...(event.mentionsMe && !('self' in event.sender) ? { mentionsMe: true } : {}),
     ...(event.replyTo ? { replyTo: event.replyTo } : {}),
     ...(event.threadRoot ? { threadRoot: event.threadRoot } : {}),
   }
@@ -350,8 +352,26 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
       networkTs: event.networkTs,
     })
   }
-  // The person reading a chat elsewhere (on their phone) clears it here too.
-  if (key === 'self') await ctx.db.patch(chat._id, { unreadCount: 0, mentionCount: 0 })
+  // The person reading a chat elsewhere (on their phone) clears it here too, up to the
+  // message the receipt covers: a delayed receipt doesn't clear messages that came after it.
+  if (key === 'self')
+    await ctx.db.patch(chat._id, await unreadAfter(ctx, chat, event.userId, network, event.upToEventId))
+}
+
+/**
+ * How many messages from other people, and how many of those mention the person, newer than
+ * `eventId` the chat holds (counted up to 100).
+ */
+async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+  const read = await findMessage(ctx, userId, network, eventId)
+  if (!read) return { unreadCount: 0, mentionCount: 0 }
+  const newer = await ctx.db
+    .query('messages')
+    .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', read.sortKey))
+    .take(100)
+  charge(ctx, newer)
+  const unread = newer.filter((message) => !('self' in message.sender) && !message.historical)
+  return { unreadCount: unread.length, mentionCount: unread.filter((message) => message.mentionsMe).length }
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {

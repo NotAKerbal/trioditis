@@ -352,6 +352,24 @@ export function makeKeyBackup(privateKey: Uint8Array, password: string, userId: 
 }
 
 /**
+ * Everything `keys.setup` takes for an identity key, from a password: the public key, the
+ * password backup and a recovery-key backup, plus the recovery key's text. For scripts that
+ * set up a known account (previews); a browser does the same through the first-device flow.
+ */
+export function makeKeySetup(privateKey: Uint8Array, password: string, userId: string) {
+  const backup = makeKeyBackup(privateKey, password, userId)
+  const recovery = generateRecoveryKey()
+  return {
+    args: {
+      publicKey: backup.publicKey,
+      password: backup.password,
+      recovery: wrapIdentityKey(privateKey, recovery.bytes, { userId, kid: backup.kid, kind: 'recovery' }),
+    },
+    recoveryText: recovery.text,
+  }
+}
+
+/**
  * What a person's password becomes before it goes to the sign-in server, so the server never
  * sees the password itself and can't unwrap the key backup with it. It is Argon2id over the
  * password (NFKC-normalised), salted by the person's email, then BLAKE2b-256, as base64url.

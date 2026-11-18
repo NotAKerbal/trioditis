@@ -146,7 +146,7 @@ export const invite = mutation({
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx)
     const email = normalizeEmail(args.email)
-    if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
     const token = randomToken()
     const invitationId = await ctx.db.insert('invitations', {
       email,

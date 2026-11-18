@@ -296,7 +296,11 @@ export const checkPasswordChange = internalMutation({
   handler: async (ctx, args) => {
     const member = await memberById(ctx, args.userId)
     checkWrapped(args)
-    await checkReplacement(ctx, member, { kind: 'password', expectedRevision: args.expectedRevision, params: args.params })
+    await checkReplacement(ctx, member, {
+      kind: 'password',
+      expectedRevision: args.expectedRevision,
+      params: args.params,
+    })
     await consumeProof(ctx, member.userId, args.proof)
     return null
   },

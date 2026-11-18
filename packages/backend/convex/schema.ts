@@ -239,6 +239,8 @@ export default defineSchema({
     editEventId: v.optional(v.string()),
     editedAt: v.optional(v.number()),
     redactedAt: v.optional(v.number()),
+    /** The bridge host flagged it as mentioning the person. */
+    mentionsMe: v.optional(v.boolean()),
     /** For the person's own sends. */
     delivery: v.optional(deliveryState),
     sentByAgentId: v.optional(v.string()),
@@ -331,6 +333,7 @@ export default defineSchema({
     // eslint-disable-next-line @convex-dev/no-duplicate-indexes
     .index('by_state', ['state'])
     .index('by_lease', ['state', 'leaseUntil'])
+    .index('by_expiry', ['state', 'expiresAt'])
     .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
@@ -344,6 +347,12 @@ export default defineSchema({
     commandId: v.id('outbox'),
     sealed: envelope,
   }).index('by_command', ['commandId']),
+
+  /** Where the last command claim stopped scanning, so the next one carries on from there. */
+  claimCursor: defineTable({
+    key: v.literal('queued'),
+    after: v.number(),
+  }).index('by_key', ['key']),
 
   /** Each bridge host's position in its event journal. */
   bridgeHosts: defineTable({
