@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../convex/_generated/api'
 import { GATEWAY_SECRET, sealed, setup, type T } from './setup'
 
 const HOST = { hostId: 'whatsapp-1', network: 'whatsapp' as const }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 const base = { userId: 'user_a', loginId: 'login_a', at: 1_000 }
 
 let seq = 0
@@ -163,6 +167,7 @@ describe('ingest', () => {
   })
 
   it('applies edits, reactions and deletes to their message', async () => {
+    vi.useFakeTimers()
     seq = 0
     const t = setup()
     const reaction = (eventId: string) =>
@@ -202,6 +207,7 @@ describe('ingest', () => {
     expect(row).toMatchObject({ redactedAt: 3_000 })
     expect(row!.sealed).toBeUndefined()
     expect(row!.sealedEdit).toBeUndefined()
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
 
     // Nothing brings a deleted message's content back.
@@ -418,5 +424,82 @@ describe('ingest', () => {
     ])
     expect(result).toEqual({ ackedThrough: 2 })
     expect((await quarantined(t)).map((row) => row.reason)).toEqual(['too_large', 'unknown_login_session'])
+  })
+
+  it('deletes a message with many reactions, cleaning the reactions up afterwards', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    await ingest(t, [message('e1')])
+    const messageId = (await messages(t))[0]!._id
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 500; i++) {
+        await ctx.db.insert('reactions', {
+          userId: 'user_a',
+          messageId,
+          senderKey: `ghost:g${i}`,
+          key: '👍',
+          eventId: `r${i}`,
+          addedAt: 1,
+          networkTs: 1,
+        })
+      }
+    })
+    const redaction = event('redaction', {
+      portalId: 'portal_1',
+      targetEventId: 'e1',
+      sender: { ghostId: 'ghost_1' },
+      networkTs: 3_000,
+    })
+    expect(await ingest(t, [redaction])).toEqual({ ackedThrough: 2 })
+    expect((await messages(t))[0]!.redactedAt).toBe(3_000)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+    vi.useRealTimers()
+  })
+
+  it('caps login form field IDs and keeps no oversized user ID in quarantine', async () => {
+    seq = 0
+    const t = setup()
+    const step = event('loginStep', {
+      loginSessionId: 'x',
+      step: { stepId: 's', type: 'userInput', fields: [{ id: 'f'.repeat(300), type: 'text', name: 'Name' }] },
+    })
+    const longUser = { ...message('e2'), userId: 'u'.repeat(300) }
+    expect(await ingest(t, [step, longUser])).toEqual({ ackedThrough: 2 })
+    expect((await quarantined(t)).map((row) => [row.reason, row.userId])).toEqual([
+      ['too_large', 'user_a'],
+      ['too_large', ''],
+    ])
+  })
+
+  it('quarantines chat metadata over its cap', async () => {
+    seq = 0
+    const t = setup()
+    const big = { ...sealed('meta'), ct: 'A'.repeat(12_000) }
+    expect(await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: big }), message('e2')])).toEqual({
+      ackedThrough: 2,
+    })
+    expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
+  })
+
+  it('keeps messages newer than a delayed receipt unread', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000 }),
+      message('e2', { networkTs: 2_000 }),
+      message('e3', { networkTs: 3_000 }),
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
+    ])
+    expect((await chat(t)).unreadCount).toBe(2)
+  })
+
+  it('refuses events for a network the server doesn’t offer', async () => {
+    seq = 0
+    const t = setup()
+    await expect(
+      t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId: 'signal-1', network: 'signal', events: [] }),
+    ).rejects.toThrow(/not enabled/)
   })
 })

@@ -168,8 +168,11 @@ export const invite = mutation({
   returns: v.object({ invitationId: v.id('invitations'), token: v.string() }),
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx)
+    // A demo deployment (previews, nightly) has a shared, published login; nobody can be
+    // invited into it, so it can never hold a real person's account.
+    if (process.env.TRIODITIS_DEMO === '1') throw new ConvexError('Invitations are turned off on demo servers.')
     const email = normalizeEmail(args.email)
-    if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
     const token = randomToken()
     const invitationId = await ctx.db.insert('invitations', {
       email,

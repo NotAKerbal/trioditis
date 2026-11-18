@@ -138,7 +138,10 @@ later addition.
 ## What else is stored in plaintext
 
 The network connectors keep their own state in the bridge host's database, and some of it
-is plaintext the operator could read with database access: bridgev2's portal and ghost
-tables (chat names, contact names, phone numbers), and WhatsApp's history-sync table (raw
-history until it is imported). That database must live on an encrypted volume; pruning or
-sealing those columns is an open question in docs/PLAN.md.
+is plaintext the operator could read with database access: bridgev2's portal, ghost and
+login tables (chat names, contact names, phone numbers), WhatsApp's history-sync table (raw
+history until it is imported) and whatsmeow's contacts.
+
+**Phase 0:** that database lives on an **encrypted disk, with encrypted backups**; the
+installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
+columns are sealed with a server-held key. See docs/PLAN.md, Open questions.

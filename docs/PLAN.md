@@ -636,21 +636,25 @@ minutes.
 Found in Phase 0 reviews and accepted for a single-household, single-host spike:
 
 - **Claim byte bound:** claims bound commands, expiries and index lookups, but not bytes
-  read; bound them by bytes once login steps or host metadata can be large.
+  read; bound them by bytes once login steps or host metadata can be large. Rows written
+  before the current size caps (login steps up to the old document limit) stay readable at
+  their old size; before the first release, reset dev data instead (CONTRIBUTING.md).
 - **Echo without a client message ID:** before a login's owning host is recorded, a copy
   of a sent message without its `clientMessageId` from another host can win dedup and
   leave the pending copy unreconciled. Matters only with several hosts per network.
 - **Cancel is best effort:** a login that completes while its cancel is in flight still
   connects the account. Decide what Cancel promises, and disconnect if needed.
-- **Bridge host:** see `apps/bridge-host/README.md`, Known follow-ups.
+- **Bridge host:** see `apps/bridge-host/README.md`, Known follow-ups (on the bridge host
+  branch until it lands).
 
 ## Open questions
 
-0. **Connector state at rest:** bridgev2's portal and ghost tables and WhatsApp's
-   history-sync table hold chat names, contact names, phone numbers and raw history in
-   plaintext. Options: rely on the encrypted volume, prune history-sync rows once
-   imported, and/or seal those columns with a server key. Found in the Phase 0 spike.
-
+0. **Connector state at rest:** decided for Phase 0 (2026-11-18, the working default,
+   which Isaac can overrule). The connectors' own plaintext (bridgev2 portal, ghost and login
+   tables, WhatsApp history not yet imported, whatsmeow contacts) is protected by an
+   **encrypted disk and encrypted backups**; the installer warns when the data directory
+   isn't on an encrypted volume. Phase 1 adds sealing those columns with a server-held key.
+   Patching the connectors to store nothing in plaintext stays an option after that.
 1. **Bridge host spike:** does bridgev2 run fully without a homeserver (provisioning,
    commands, backfill, media), and how much of `MatrixAPI` each connector actually
    exercises?

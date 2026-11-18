@@ -4,6 +4,7 @@ import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
 import { deletePayload } from './outbox'
+import { internal } from '../_generated/api'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -196,7 +197,7 @@ async function settleSend(ctx: MutationCtx, send: Doc<'outbox'>, delivery: Deliv
     delivery: advance(send.delivery, delivery),
     ...(pending ? { state: 'dispatched' as const, leaseUntil: undefined } : {}),
   })
-  await deletePayload(ctx, send._id)
+  charge(ctx, await deletePayload(ctx, send._id))
 }
 
 async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, origin: Origin) {
@@ -318,12 +319,9 @@ async function applyRedaction(
     sealedEdit: undefined,
     editEventId: undefined,
   })
-  for (const reaction of await ctx.db
-    .query('reactions')
-    .withIndex('by_message', (q) => q.eq('messageId', message._id))
-    .collect()) {
-    await ctx.db.delete(reaction._id)
-  }
+  // A message can have any number of reactions, so they're deleted in bounded batches after
+  // this transaction, rather than all inside it.
+  await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId: message._id })
 }
 
 async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'receipt' }>, network: Network) {
@@ -345,8 +343,52 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
       networkTs: event.networkTs,
     })
   }
-  // The person reading a chat elsewhere (on their phone) clears it here too.
-  if (key === 'self') await ctx.db.patch(chat._id, { unreadCount: 0 })
+  // The person reading a chat elsewhere (on their phone) clears it here too, up to the
+  // message the receipt covers: a delayed receipt doesn't clear messages that came after it.
+  if (key === 'self') {
+    const unread = await unreadAfter(ctx, chat, event.userId, network, event.upToEventId)
+    await ctx.db.patch(chat._id, { unreadCount: unread })
+  }
+}
+
+/**
+ * The most a recount reads. A message row can hold two sealed objects near 256 KiB, so a
+ * recount by count alone could pass a transaction's read limit and stall the host's journal.
+ */
+const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
+/** The largest a message row can be: two sealed objects at the cap, their keys and IDs. */
+const MAX_MESSAGE_ROW_BYTES = 768 * 1024
+
+/**
+ * How many messages from other people, newer than `eventId`, the chat holds (counted up to
+ * 100). It reads a few rows at a time, only as many as can't pass `MAX_RECOUNT_BYTES` however
+ * large they are. If the newer messages are more than that allows, the chat keeps at least
+ * the count it had: a receipt only ever clears what it was seen to cover.
+ */
+async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+  const read = await findMessage(ctx, userId, network, eventId)
+  if (!read) return 0
+  let after = read.sortKey
+  let seen = 0
+  let counted = 0
+  let bytes = 0
+  while (seen < 100) {
+    const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), 100 - seen)
+    if (room < 1) return Math.max(counted, chat.unreadCount)
+    const batch = await ctx.db
+      .query('messages')
+      .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', after))
+      .take(room)
+    charge(ctx, batch)
+    for (const message of batch) {
+      bytes += byteSize(message)
+      if (!('self' in message.sender) && !message.historical) counted++
+    }
+    seen += batch.length
+    if (batch.length < room) break
+    after = batch.at(-1)!.sortKey
+  }
+  return counted
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {
@@ -423,7 +465,7 @@ async function applyLoginState(
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
   const { hostId } = origin
   const sessionId = ctx.db.normalizeId('loginSessions', event.loginSessionId)
-  const session = sessionId ? await ctx.db.get(sessionId) : null
+  const session = charge(ctx, sessionId ? await ctx.db.get(sessionId) : null)
   if (!session || session.userId !== event.userId) throw new Unmappable('unknown_login_session')
   // Only the host the login was handed to speaks for it (it is pinned when the start command
   // is handed out, before any host can have a step to report).
@@ -472,6 +514,11 @@ async function applySendStatus(
  * its latest edit), which must fit in Convex's 1 MiB document limit as base64 text.
  */
 export const MAX_INCOMING_SEALED_BYTES = 256 * 1024
+/**
+ * Chat and contact metadata (a name, a topic, an avatar's file reference) is small. Capping
+ * it keeps a whole inbox of rows well inside one query's read limit.
+ */
+export const MAX_METADATA_SEALED_BYTES = 8 * 1024
 /** The longest ID an event may carry: they are hashes and opaque IDs, never content. */
 export const MAX_ID_LENGTH = 256
 /** The most a login step may hold, in UTF-8 bytes. */
@@ -498,8 +545,14 @@ function hasOversizedId(event: BridgeEventDoc) {
     ...ID_FIELDS.map((name) => fields[name]),
     event.userId,
     'sender' in event && 'ghostId' in event.sender ? event.sender.ghostId : undefined,
-    event.type === 'loginStep' ? event.step.stepId : undefined,
-    event.type === 'loginStep' ? event.step.loginId : undefined,
+    ...(event.type === 'loginStep'
+      ? [
+          event.step.stepId,
+          event.step.loginId,
+          ...(event.step.fields ?? []).map((field) => field.id),
+          ...(event.step.cookies?.fields ?? []).map((field) => field.id),
+        ]
+      : []),
   ]
   return ids.some((id) => typeof id === 'string' && id.length > MAX_ID_LENGTH)
 }
@@ -530,7 +583,9 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
   if (hasOversizedId(event)) throw new Unmappable('too_large')
   if ('sealed' in event) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
-    if (!isEnvelope(event.sealed, MAX_INCOMING_SEALED_BYTES)) throw new Unmappable('too_large')
+    const limit =
+      event.type === 'chat' || event.type === 'contact' ? MAX_METADATA_SEALED_BYTES : MAX_INCOMING_SEALED_BYTES
+    if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')
   }
   await assertLoginOwner(ctx, event, origin)
   switch (event.type) {
