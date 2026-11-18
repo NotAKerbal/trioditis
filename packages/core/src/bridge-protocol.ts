@@ -45,6 +45,8 @@ export interface MessageEvent extends EventBase {
   replyTo?: string
   threadRoot?: string
   clientMessageId?: string
+  /** The message mentions the person: the bridge host can tell, as it sees the plaintext. */
+  mentionsMe?: boolean
 }
 
 export interface EditEvent extends EventBase {
@@ -108,6 +110,8 @@ export interface ChatEvent extends EventBase {
   sealed: Envelope
   parentPortalId?: string
   deleted?: boolean
+  /** The network says this chat is a message request the person hasn't accepted. */
+  isRequest?: boolean
 }
 
 export interface ContactEvent extends EventBase {
