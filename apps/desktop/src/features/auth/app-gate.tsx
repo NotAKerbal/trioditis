@@ -92,12 +92,34 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // While setup is saving, the server's state turns `ready` before this device has kept the key.
   // Holding the setup screen until it's done keeps its progress, errors and retry on screen.
   const [held, setHeld] = useState<SetupFor | null>(null)
+  // The key setup just finished and kept here: it's ready, even before the live query says so
+  // (it can lag, or still hold an error from during setup).
+  const [setUpKid, setSetUpKid] = useState<string | null>(null)
+  const setupScreen = (setupFor: SetupFor) => (
+    <KeySetup
+      userId={userId}
+      existing={setupFor.existing}
+      has={setupFor.has}
+      onSaving={() => setHeld(setupFor)}
+      onLeave={() => setHeld(null)}
+      onDone={async (doneKid) => {
+        await local.refetch()
+        setSetUpKid(doneKid)
+        setHeld(null)
+        void remote.refetch()
+      }}
+    />
+  )
+  if (held) return setupScreen(held)
+  if (local.data && setUpKid && local.data.kid === setUpKid) {
+    const session: Session = { userId, role, kid: local.data.kid, keyPair: local.data.keyPair }
+    return <SessionContext value={session}>{children}</SessionContext>
+  }
   if (remote.isPending || local.isPending || !remote.data) return <Splash />
   const { state, publicKey, kid, backups } = remote.data
   const here = local.data && local.data.kid === kid ? local.data : null
   const setupFor: SetupFor | null =
-    held ??
-    (state === 'none'
+    state === 'none'
       ? { has: { password: false, recovery: false } }
       : state === 'needsBackup' && here
         ? {
@@ -107,23 +129,11 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
               recovery: backups.some((b) => b.kind === 'recovery'),
             },
           }
-        : null)
+        : null
   if (setupFor) {
     // Setting up a key keeps it on this device, which an insecure page can't do.
     if (!canKeepKeys()) return <InsecurePage />
-    return (
-      <KeySetup
-        userId={userId}
-        existing={setupFor.existing}
-        has={setupFor.has}
-        onSaving={() => setHeld(setupFor)}
-        onLeave={() => setHeld(null)}
-        onDone={async () => {
-          await Promise.all([local.refetch(), remote.refetch()])
-          setHeld(null)
-        }}
-      />
-    )
+    return setupScreen(setupFor)
   }
   if (state === 'needsBackup') {
     // The key exists but its backups aren't both there: only a device holding the key can make them.
@@ -203,7 +213,8 @@ function KeySetup({
   onSaving: () => void
   /** The person gave up keeping the key here after the server saved it; they'll unlock instead. */
   onLeave: () => void
-  onDone: () => Promise<void>
+  /** Setup is done and the key is kept here, as `kid`. */
+  onDone: (kid: string) => Promise<void>
 }) {
   const setup = useMutation(api.keys.setup)
   // The password backup must open with the password that signs in, so it's only ever the one
@@ -222,7 +233,8 @@ function KeySetup({
   const [keptKid, setKeptKid] = useState<string | null>(null)
   // Another device installed its recovery key first, so the one shown here doesn't work.
   const [recoveryLost, setRecoveryLost] = useState(false)
-  const [finished, setFinished] = useState(false)
+  // Set once setup is done and the key kept here, if the shown recovery key lost the race.
+  const [finished, setFinished] = useState<string | null>(null)
   // Set when the server has the backups but which recovery key it kept couldn't be checked.
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
@@ -237,11 +249,10 @@ function KeySetup({
     try {
       if (fresh) {
         const { data } = await authClient.convex.token({ fetchOptions: { throw: false } })
-        if (data?.token) {
-          const http = new ConvexHttpClient(config.convexUrl)
-          http.setAuth(data.token)
-          return await http.query(api.keys.identity, {})
-        }
+        if (!data?.token) return undefined
+        const http = new ConvexHttpClient(config.convexUrl)
+        http.setAuth(data.token)
+        return await http.query(api.keys.identity, {})
       }
       // Inside try: with a failed cached result, the client can throw before giving a promise.
       return await convex.query(api.keys.identity, {})
@@ -359,11 +370,11 @@ function KeySetup({
     }
     // Done, unless the recovery key shown here lost the race: then say so before going on.
     if (!lost) {
-      await onDone()
+      await onDone(kid)
       return
     }
     setKeptKid(null)
-    setFinished(true)
+    setFinished(kid)
     setBusy(false)
   }
 
@@ -410,10 +421,11 @@ function KeySetup({
         title="Your recovery key is the other one"
         description="Your key is set up, but another device finished saving its recovery key a moment earlier. The recovery key shown here won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
       >
-        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void onDone()}>
+        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void onDone(finished)}>
           Continue
         </Button>
-        <SignOutButton />
+        {/* The backups are complete and the key is kept here, so signing out forgets it, as ever. */}
+        <SignOutButton userId={userId} />
       </AuthCard>
     )
   }

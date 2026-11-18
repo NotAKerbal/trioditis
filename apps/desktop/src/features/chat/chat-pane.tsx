@@ -62,6 +62,9 @@ interface ChatPaneProps {
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
 }
 
+// Each chat's draft revision being scheduled now, outside any pane, like the drafts themselves.
+const scheduling = new Map<string, number>()
+
 export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
   const chat = useChat(chatId)
   useEffect(() => {
@@ -136,6 +139,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
     const chatId = chat.id
     const rev = getDraft(chatId).rev
+    // This draft is already being scheduled: a second pick would schedule it twice.
+    if (scheduling.get(chatId) === rev) return
+    scheduling.set(chatId, rev)
     const reply = replyTo
     const clientMessageId = newClientId()
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
@@ -153,6 +159,8 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
       toast(`Scheduled for ${formatWhen(sendAt)}`)
     } catch (e) {
       toast(errorMessage(e, 'That message couldn’t be scheduled.'))
+    } finally {
+      if (scheduling.get(chatId) === rev) scheduling.delete(chatId)
     }
   }
 
