@@ -42,8 +42,12 @@ const NETWORKS = ['fake', 'whatsapp']
 
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')
-const networkArg = args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
-const networks = (networkArg ?? 'fake').split(',').map((name) => name.trim()).filter(Boolean)
+const networkArg =
+  args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
+const networks = (networkArg ?? 'fake')
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean)
 for (const name of networks) {
   if (!NETWORKS.includes(name)) {
     console.error(`"${name}" isn't a network the dev stack can run. Choose from: ${NETWORKS.join(', ')}`)
@@ -141,9 +145,9 @@ function stop(code) {
     for (const child of children) stopGroup(child, 'SIGKILL')
     process.exit(code)
   }, 3000).unref()
-  Promise.all(children.map((child) => new Promise((done) => (child.exitCode !== null ? done() : child.once('exit', done))))).then(() =>
-    process.exit(code),
-  )
+  void Promise.all(
+    children.map((child) => new Promise((done) => (child.exitCode !== null ? done() : child.once('exit', done)))),
+  ).then(() => process.exit(code))
 }
 function launch(name, cmd, cmdArgs, options) {
   const child = start(name, cmd, cmdArgs, options)
@@ -173,7 +177,9 @@ try {
   await waitFor(`${convexSiteUrl}/api/auth/ok`, 120)
   await Promise.race([
     pushed,
-    new Promise((_, fail) => setTimeout(() => fail(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000)),
+    new Promise((_, fail) =>
+      setTimeout(() => fail(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000),
+    ),
   ])
   step('Creating the test account')
   await ensureTester({ authUrl: convexSiteUrl, origin: siteUrl, setupToken: secrets.TRIODITIS_SETUP_TOKEN })

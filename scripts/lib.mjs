@@ -13,6 +13,8 @@ export const backendDir = resolve(root, 'packages/backend')
 export const gatewayDir = resolve(root, 'apps/gateway')
 export const bridgeDir = resolve(root, 'apps/bridge-host')
 export const desktopDir = resolve(root, 'apps/desktop')
+/** The desktop and web app's package (apps/desktop). */
+export const DESKTOP_PACKAGE = '@trioditis/desktop'
 /** Everything a checkout's dev instance keeps: secrets, ports, bridge host data. Git ignores it. */
 export const dataDir = resolve(root, '.data')
 
@@ -42,6 +44,9 @@ export const convexRef = (deployment) => `${accounts.convexTeam}:${accounts.conv
  */
 export const environments = {
   nightly: { siteUrl: null, deployment: null },
+  // A Vercel production site for main, if there is ever one. Until then vercel-ignore.mjs
+  // skips main's builds.
+  production: null,
 }
 
 /**
@@ -181,11 +186,24 @@ export async function claimSlot() {
     .split('\n')
     .filter((line) => line.startsWith('worktree '))
     .map((line) => line.slice('worktree '.length))
-  const claimed = new Set([main, ...worktrees].filter((path) => path !== root).map(readInstance).filter(Boolean).map((i) => i.slot))
+  const claimed = new Set(
+    [main, ...worktrees]
+      .filter((path) => path !== root)
+      .map(readInstance)
+      .filter(Boolean)
+      .map((i) => i.slot),
+  )
   for (let slot = main === root ? 0 : 1; slot < 100; slot++) {
     if (claimed.has(slot)) continue
     const ports = portsFor(slot)
-    const all = [ports.web, ports.convexCloud, ports.convexSite, ports.gateway, ...Object.values(ports.bridge), ports.fakeControl]
+    const all = [
+      ports.web,
+      ports.convexCloud,
+      ports.convexSite,
+      ports.gateway,
+      ...Object.values(ports.bridge),
+      ports.fakeControl,
+    ]
     if ((await Promise.all(all.map(isFree))).every(Boolean)) {
       mkdirSync(dataDir, { recursive: true })
       writeFileSync(instanceFile(root), JSON.stringify({ slot }, null, 2) + '\n')
@@ -239,7 +257,13 @@ export function devSecrets() {
 export function writeDevEnv(values) {
   mkdirSync(dataDir, { recursive: true })
   const file = resolve(dataDir, 'dev.env')
-  writeFileSync(file, Object.entries(values).map(([name, value]) => `${name}=${value}`).join('\n') + '\n', { mode: 0o600 })
+  writeFileSync(
+    file,
+    Object.entries(values)
+      .map(([name, value]) => `${name}=${value}`)
+      .join('\n') + '\n',
+    { mode: 0o600 },
+  )
   chmodSync(file, 0o600)
 }
 
@@ -273,9 +297,10 @@ export function desktopPackage() {
 }
 
 /**
- * Creates the test account on a backend unless it is already there. The first account on a
- * server is its admin and needs the setup token; on a backend that already has an admin who
- * isn't the test account, it says so instead. Requests go to `authUrl` as if sent from `origin`.
+ * Creates the test account on a backend unless it is already there, and returns its user ID.
+ * The first account on a server is its admin and needs the setup token; on a backend that
+ * already has an admin who isn't the test account, it says so instead. Requests go to
+ * `authUrl` as if sent from `origin`.
  */
 export async function ensureTester({ authUrl, origin, setupToken }) {
   const post = (path, body, headers = {}) =>
@@ -287,12 +312,12 @@ export async function ensureTester({ authUrl, origin, setupToken }) {
   const signIn = await post('sign-in/email', { email: TESTER.email, password: TESTER.password })
   if (signIn.ok) {
     console.log('Already there from an earlier run.')
-    return
+    return (await signIn.json()).user.id
   }
   const signUp = await post('sign-up/email', TESTER, { 'x-trioditis-invite': setupToken })
   if (signUp.ok) {
     console.log('Created, as the admin.')
-    return
+    return (await signUp.json()).user.id
   }
   if (signUp.status === 403) {
     throw new Error(

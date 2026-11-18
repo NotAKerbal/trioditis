@@ -19,3 +19,6 @@ apps/bridge-host/bin/
 
 # Local runtime data for the dev stack.
 .data/
+
+# Vercel CLI state and build output.
+.vercel/

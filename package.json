@@ -27,5 +27,8 @@
     "turbo": "2.11.11",
     "typescript": "7.0.2"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@trioditis/crypto": "workspace:*"
+  }
 }

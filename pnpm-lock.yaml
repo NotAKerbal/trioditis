@@ -165,6 +165,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@trioditis/crypto':
+        specifier: workspace:*
+        version: link:packages/crypto
     devDependencies:
       '@convex-dev/eslint-plugin':
         specifier: 5.0.1

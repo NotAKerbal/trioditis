@@ -1,0 +1,13 @@
+# Kept out of the web app's deployment upload: local data, secrets, build outputs and other
+# checkouts. Vercel installs dependencies itself.
+.data/
+.worktrees/
+**/.convex/
+**/.env.local
+.env
+.env.*
+**/node_modules/
+**/dist/
+apps/bridge-host/bin/
+.turbo/
+.vercel/
