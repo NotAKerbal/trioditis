@@ -690,4 +690,41 @@ describe('sending', () => {
     await status(t, id(1), 'sent')
     expect(await outboxRow(t, id(1))).toMatchObject({ state: 'dispatched', delivery: 'sent' })
   })
+
+  it('ends a page of large messages early instead of failing', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+    // One transaction per message: seeding them all at once would itself exceed the limits.
+    for (let i = 0; i < 40; i++) {
+      await t.run(async (ctx) => {
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId: `m${i}`,
+          networkTs: i,
+          sortKey: `${String(i).padStart(16, '0')}:m${i}`,
+          sender: { ghostId: 'g' },
+          sealed: big(`m${i}`),
+          sealedObjectId: `m${i}`,
+          sealedEdit: big(`e${i}`),
+          editEventId: `e${i}`,
+          historical: false,
+        })
+      })
+    }
+    let cursor: string | null = null
+    let seen = 0
+    for (let pages = 0; pages < 20; pages++) {
+      const page: { page: unknown[]; isDone: boolean; continueCursor: string } = await as.query(api.messages.list, {
+        chatId,
+        paginationOpts: { numItems: 40, cursor },
+      })
+      seen += page.page.length
+      if (page.isDone) break
+      cursor = page.continueCursor
+    }
+    expect(seen).toBe(40)
+  })
 })

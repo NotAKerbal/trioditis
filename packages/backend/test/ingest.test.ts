@@ -494,4 +494,14 @@ describe('ingest', () => {
     ])
     expect(await chat(t)).toMatchObject({ unreadCount: 0, mentionCount: 0 })
   })
+
+  it('quarantines chat metadata over its cap', async () => {
+    seq = 0
+    const t = setup()
+    const big = { ...sealed('meta'), ct: 'A'.repeat(12_000) }
+    expect(await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: big }), message('e2')])).toEqual({
+      ackedThrough: 2,
+    })
+    expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
+  })
 })

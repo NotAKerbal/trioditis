@@ -5,17 +5,29 @@ import { ownChat, requireMember } from './lib/access'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
+/** The most messages one page holds. */
+const MAX_PAGE_ITEMS = 100
+/** The most one page reads, well under a query's 16 MiB limit. */
+const MAX_PAGE_BYTES = 8 * 1024 * 1024
+
 /** A chat's messages, newest first, a page at a time. Content is sealed. */
 export const list = query({
   args: { chatId: v.id('chats'), paginationOpts: paginationOptsValidator },
   handler: async (ctx, { chatId, paginationOpts }) => {
     const member = await requireMember(ctx)
     await ownChat(ctx, member.userId, chatId)
+    // A page holds what the client asks for, up to a size the server bounds: messages can be
+    // large (a capped original plus its latest edit), so a page ends early rather than
+    // failing. The client keeps loading with the returned cursor.
     return await ctx.db
       .query('messages')
       .withIndex('by_chat_sort', (q) => q.eq('chatId', chatId))
       .order('desc')
-      .paginate(paginationOpts)
+      .paginate({
+        ...paginationOpts,
+        numItems: Math.min(Math.max(1, paginationOpts.numItems), MAX_PAGE_ITEMS),
+        maximumBytesRead: Math.min(paginationOpts.maximumBytesRead ?? MAX_PAGE_BYTES, MAX_PAGE_BYTES),
+      })
   },
 })
 

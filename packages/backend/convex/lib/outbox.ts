@@ -25,7 +25,9 @@ export async function commandPayload(ctx: QueryCtx, commandId: Id<'outbox'>) {
     .unique()
 }
 
+/** Deletes a command's payload, returning it (for callers that meter what they read). */
 export async function deletePayload(ctx: MutationCtx, commandId: Id<'outbox'>) {
   const payload = await commandPayload(ctx, commandId)
   if (payload) await ctx.db.delete(payload._id)
+  return payload
 }
