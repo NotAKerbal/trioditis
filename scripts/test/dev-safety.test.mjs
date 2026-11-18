@@ -582,50 +582,95 @@ void test('a reset sees a backend started with relative paths, or holding its fi
   assert.equal(await backendInUse(dir), null)
 })
 
-void test('a reset refuses a local backend it can’t inspect unless every path it was given is elsewhere', async () => {
+/** A stand-in for /proc in `dir`, with one process, 4242, whose files are laid out as given. */
+function fakeProc(dir, { comm = 'convex-local-ba', args = ['convex-local-backend'], cgroup, cwd = null, fds = null }) {
+  const proc = join(dir, 'proc')
+  rmSync(proc, { recursive: true, force: true })
+  mkdirSync(join(proc, '4242'), { recursive: true })
+  writeFileSync(join(proc, '4242/comm'), `${comm}\n`)
+  writeFileSync(join(proc, '4242/cmdline'), args.join('\0') + '\0')
+  if (cgroup !== undefined) writeFileSync(join(proc, '4242/cgroup'), `${cgroup}\n`)
+  // Another user's process: a cwd that isn't a link and an fd that isn't a directory make
+  // reading them fail, as EACCES would. A readable one gets a real link and directory.
+  if (cwd === null) writeFileSync(join(proc, '4242/cwd'), '')
+  else symlinkSync(cwd, join(proc, '4242/cwd'))
+  if (fds === null) writeFileSync(join(proc, '4242/fd'), '')
+  else mkdirSync(join(proc, '4242/fd'))
+  return proc
+}
+
+void test('a reset refuses a backend it can’t inspect, unless it runs in a container or is ignored', async () => {
   const dir = temp()
   mkdirSync(join(dir, '.convex/local/default'), { recursive: true })
-  // A stand-in for /proc with another user's backend: its directory and open files can't be read.
-  const proc = join(dir, 'proc')
-  const backendProcess = (args) => {
-    rmSync(proc, { recursive: true, force: true })
-    mkdirSync(join(proc, '4242'), { recursive: true })
-    writeFileSync(join(proc, '4242/comm'), 'convex-local-ba\n')
-    writeFileSync(join(proc, '4242/cmdline'), ['convex-local-backend', ...args].join('\0') + '\0')
-    writeFileSync(join(proc, '4242/cwd'), '') // Not a link: reading it fails, as EACCES would.
-    writeFileSync(join(proc, '4242/fd'), '') // Not a directory: listing it fails.
-  }
-  const inUse = (args) => {
-    backendProcess(args)
-    return backendInUse(dir, { proc })
-  }
-  const options = ['--port', '4390', '--site-proxy-port', '4391', '--instance-name', 'anonymous-agent']
-  const secret = ['--instance-secret', 'not-a-path']
-  const refused = /process 4242 .*(can't be read|is using its data)/
-  // The review's case: run from .convex/local/default with a relative database and its blob
-  // storage elsewhere. Only the storage path is absolute, so it may be this checkout's database.
-  assert.match(
-    await inUse([...options, ...secret, '--local-storage', '/srv/elsewhere/storage', 'convex_local_backend.sqlite3']),
-    /process 4242 is a Convex local backend whose open files can't be read here, and not every path/,
-  )
+  const host = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/some-terminal.scope'
+  const refused =
+    /process 4242 \(convex-local-backend\) is a Convex local backend, not in a container, .*--reset-ignoring 4242/
+  // What it opens can't be told from its arguments, so every one of these is refused: the
+  // review's cases (a relative database beside absolute storage; no database or storage given,
+  // so the defaults in its directory; a dash-prefixed database after --; colons in names; SQLite
+  // URIs; paths through links), and all-absolute paths elsewhere too.
   for (const args of [
-    ['--local-storage', 'storage', '/srv/elsewhere/db.sqlite3'],
-    ['--port', '3210', 'relative/db.sqlite3'],
-    ['--local-storage', '/srv/elsewhere/storage', join(dir, 'db.sqlite3')],
-    ['--local-storage', '/srv/elsewhere/storage', join(dir, '.convex/local/default/db.sqlite3')],
-    ['--local-storage', join(dir, '.convex/local/default/storage'), '/srv/elsewhere/db.sqlite3'],
-    ['--local-storage=/srv/elsewhere/storage', 'sqlite://db.sqlite3'],
-    ['--local-storage', '/srv/elsewhere/storage', '--disable-beacon', 'db.sqlite3'],
-    ['--local-storage', '/srv/elsewhere/storage', '--something-new', '7'],
-  ]) {
-    assert.match((await inUse(args)) ?? '', refused, args.join(' '))
-  }
-  // Every path absolute and elsewhere, or a database that isn't a file: let through.
-  for (const args of [
-    [...options, ...secret, '--local-storage', '/srv/elsewhere/storage', '/srv/elsewhere/db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', 'convex_local_backend.sqlite3'],
+    ['--port', '4390'],
+    ['--local-storage', '/srv/elsewhere/storage', '--', '-db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', 'a:b.sqlite3'],
+    ['--local-storage', 'store:age', '/srv/elsewhere/db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', 'sqlite:/srv/elsewhere/db.sqlite3?mode=rwc'],
+    ['--local-storage', '/srv/link/../storage', 'file:/srv/link/db.sqlite3?mode=rwc'],
+    ['--local-storage', '/srv/elsewhere/storage', '/srv/elsewhere/db.sqlite3'],
     ['--db', 'postgres-v5', '--local-storage', '/srv/elsewhere/storage', 'postgres://convex@db:5432'],
-    ['--local-storage=/srv/elsewhere/storage', 'file:///srv/elsewhere/db.sqlite3', '--disable-beacon'],
   ]) {
-    assert.equal(await inUse(args), null, args.join(' '))
+    const proc = fakeProc(dir, { args: ['convex-local-backend', ...args], cgroup: host })
+    assert.match((await backendInUse(dir, { proc })) ?? '', refused, args.join(' '))
   }
+  // --reset-ignoring lets through exactly the PID it names.
+  const proc = fakeProc(dir, { args: ['convex-local-backend', '--port', '4390'], cgroup: host })
+  assert.equal(await backendInUse(dir, { proc, ignoring: [4242] }), null)
+  assert.match((await backendInUse(dir, { proc, ignoring: [4243, 42] })) ?? '', refused)
+  // In a container, as the self-hosted bundle's backend is: its paths are the container's own.
+  for (const cgroup of [
+    '0::/system.slice/docker-ed27313a7eedfefbde5ac7b73f65f19ada50b131c4ebdf9fd434fa326a497d81.scope',
+    '0::/docker/ed27313a7eedfefbde5ac7b73f65f19ada50b131c4ebdf9fd434fa326a497d81',
+    '0::/machine.slice/libpod-3f2a.scope/container',
+    '0::/kubepods.slice/kubepods-besteffort.slice/cri-containerd-9c1d.scope',
+    '12:memory:/lxc/web\n0::/lxc/web',
+  ]) {
+    const inContainer = fakeProc(dir, { args: ['convex-local-backend', 'convex_local_backend.sqlite3'], cgroup })
+    assert.equal(await backendInUse(dir, { proc: inContainer }), null, cgroup)
+  }
+  // Not a local backend at all: another user's process is none of this check's business.
+  assert.equal(await backendInUse(dir, { proc: fakeProc(dir, { comm: 'sshd', cgroup: host }) }), null)
+})
+
+void test('a reset refuses a backend it can inspect that runs anywhere in this checkout', async () => {
+  const dir = temp()
+  mkdirSync(join(dir, '.convex/local/default'), { recursive: true })
+  mkdirSync(join(dir, 'src'))
+  const host = '0::/user.slice/some-terminal.scope'
+  // Its directory is in the checkout, though not in .convex/local: it opens data relative to it.
+  const backend = fakeProc(dir, { cwd: join(dir, 'src'), fds: [], cgroup: host })
+  assert.match(
+    (await backendInUse(dir, { proc: backend })) ?? '',
+    /process 4242 .* is a Convex local backend running in this checkout/,
+  )
+  // Another program there is fine, and so is a backend in another checkout inside this one.
+  assert.equal(
+    await backendInUse(dir, { proc: fakeProc(dir, { comm: 'bash', cwd: join(dir, 'src'), fds: [], cgroup: host }) }),
+    null,
+  )
+  mkdirSync(join(dir, '.worktrees/other/.git'), { recursive: true })
+  const nested = fakeProc(dir, { cwd: join(dir, '.worktrees/other'), fds: [], cgroup: host })
+  assert.equal(await backendInUse(dir, { proc: nested }), null)
+})
+
+void test('--reset-ignoring takes a process ID, and only with --setup --reset', () => {
+  const run = (args) =>
+    spawnSync(process.execPath, ['scripts/dev.mjs', ...args], {
+      cwd: new URL('../..', import.meta.url),
+      env: { ...process.env, XDG_STATE_HOME: temp() },
+      encoding: 'utf8',
+    })
+  assert.match(run(['--setup', '--reset-ignoring', '42']).stderr, /only goes with `--setup --reset`/)
+  assert.match(run(['--setup', '--reset', '--reset-ignoring', 'x']).stderr, /takes a process ID/)
+  assert.match(run(['--setup', '--reset', '--reset-ignoring']).stderr, /takes a process ID/)
 })

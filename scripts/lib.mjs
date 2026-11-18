@@ -513,15 +513,16 @@ export function assertCheckoutPaths(top = root) {
  *
  * - something listens on the ports the backend last ran on (.convex/local/default/config.json);
  * - on Linux, a process (from `proc`) has a file there open, runs in a directory there, or names
- *   a path there in its arguments, relative ones read from its working directory. A Convex local
- *   backend whose open files or directory can't be read (another user's) counts too, unless
- *   every path it was given is absolute and outside the checkout (`localPathsElsewhere`);
+ *   a path there in its arguments, relative ones read from its working directory; or it is a
+ *   Convex local backend running anywhere in the checkout. One that can't be inspected
+ *   (another user's) counts unless it runs in a container, or its PID is in `ignoring`
+ *   (`procUsing` says why);
  * - elsewhere, a process names the data's absolute path in its arguments (`ps`).
  *
  * Only a process's ID and program name are ever shown: the local backend's arguments include
  * its instance secret.
  */
-export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
+export async function backendInUse(dir = backendDir, { proc = '/proc', ignoring = [] } = {}) {
   const local = resolve(dir, '.convex/local')
   let config = null
   try {
@@ -532,31 +533,34 @@ export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
       return `something is listening on port ${port}, where this checkout's backend last ran`
     }
   }
-  const roots = new Set([local])
-  try {
-    roots.add(realpathSync(local))
-  } catch {}
-  const under = (path) => [...roots].some((top) => path === top || path.startsWith(top + sep))
-  // Compared as written, against both spellings of the data's path: /proc gives open files and
-  // working directories already resolved, and arguments are as the process was given them.
-  const ours = (path) => Boolean(path) && isAbsolute(path) && under(resolve(path))
-  // The whole checkout, for a backend that can't be inspected (`procUsing`).
-  const tops = dir === backendDir ? [dir, root] : [dir]
-  const checkout = new Set(tops)
-  for (const top of tops) {
-    try {
-      checkout.add(realpathSync(top))
-    } catch {}
+  // Each place as given and as resolved: /proc gives open files and working directories
+  // resolved, and arguments as the process was given them.
+  const spellings = (paths) => {
+    const all = new Set(paths)
+    for (const path of paths) {
+      try {
+        all.add(realpathSync(path))
+      } catch {}
+    }
+    return [...all]
   }
-  const outside = (path) => {
-    const lexical = resolve(path)
-    let real = lexical
-    try {
-      real = realpathSync(path)
-    } catch {}
-    return [lexical, real].every((at) => [...checkout].every((top) => at !== top && !at.startsWith(top + sep)))
+  const within = (tops) => (path) =>
+    Boolean(path) &&
+    isAbsolute(path) &&
+    tops.some((top) => resolve(path) === top || resolve(path).startsWith(top + sep))
+  const ours = within(spellings([local]))
+  // In this checkout, and not in another one inside it (the main checkout holds the worktrees
+  // in .worktrees): no directory between it and the checkout's top has a .git of its own.
+  const checkoutTops = spellings(dir === backendDir ? [root] : [dir])
+  const inCheckout = (path) => {
+    if (!within(checkoutTops)(path)) return false
+    for (let at = resolve(path); !checkoutTops.includes(at); at = dirname(at)) {
+      if (existsSync(join(at, '.git'))) return false
+      if (dirname(at) === at) return false
+    }
+    return true
   }
-  if (proc !== '/proc' || existsSync('/proc/self')) return procUsing(proc, ours, outside)
+  if (proc !== '/proc' || existsSync('/proc/self')) return procUsing(proc, { ours, inCheckout, ignoring })
   const listed = spawnSync('ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (listed.status !== 0) {
     console.warn("Couldn't list processes, so only the backend's ports were checked.")
@@ -566,62 +570,45 @@ export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
     const match = line.match(/^\s*(\d+)\s+(\S+)(.*)$/)
     if (!match || Number(match[1]) === process.pid) continue
     const args = match[2] + match[3]
-    if ([...roots].some((path) => args.includes(path + sep) || args.endsWith(path))) {
+    if (spellings([local]).some((path) => args.includes(path + sep) || args.endsWith(path))) {
       return `process ${match[1]} (${basename(match[2])}) is using its data`
     }
   }
   return null
 }
 
-/** The local backend's options whose values are never paths. Any other value may be one. */
-const NOT_PATHS = new Set([
-  '--port',
-  '--site-proxy-port',
-  '--instance-name',
-  '--instance-secret',
-  '--sentry-identifier',
-  '--beacon-tag',
-  '--beacon-fields',
-  '--convex-origin',
-  '--convex-site',
-  '--db',
-])
+/** Container runtimes' cgroup paths: `/system.slice/docker-<id>.scope`, `/docker/<id>`, and so on. */
+const CONTAINER_CGROUP = /(?:^|[/.-])(?:docker|containerd|cri-containerd|crio|podman|libpod|kubepods|lxc)(?:[/.-]|$)/
 
 /**
- * Whether every argument in `args` that could be a path is absolute and `outside` this
- * checkout. Values of NOT_PATHS options aren't paths; a URL with a scheme other than file: or
- * sqlite: isn't one either. Everything else is: a positional argument, the value of any other
- * option, and the path in a file: or sqlite: URL.
+ * Whether process `base` (a /proc entry) runs in a container: its cgroup is a container
+ * runtime's, or (where it can be read) its cgroup namespace isn't ours. Its cgroup file is
+ * readable by everyone, even when its files and directory aren't.
  */
-export function localPathsElsewhere(args, outside) {
-  for (let i = 0; i < args.length; i++) {
-    let value = args[i]
-    if (value.startsWith('-')) {
-      const at = value.indexOf('=')
-      if (at < 0) {
-        // `--option value`: the next argument is its value, unless it is an option itself.
-        if (NOT_PATHS.has(value) && i + 1 < args.length && !args[i + 1].startsWith('-')) i++
-        continue
-      }
-      if (NOT_PATHS.has(value.slice(0, at))) continue
-      value = value.slice(at + 1)
-    }
-    const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1].toLowerCase()
-    if (scheme && scheme.length > 1 && scheme !== 'file' && scheme !== 'sqlite') continue
-    let path = value
-    if (scheme) {
-      // Only `file:///path` and `file:/path` name a local path plainly; `file://host/...` doesn't.
-      path = value.slice(scheme.length + 1)
-      if (path.startsWith('///')) path = path.slice(2)
-      else if (path.startsWith('//')) return false
-    }
-    if (!isAbsolute(path) || !outside(path)) return false
+function inContainer(base) {
+  try {
+    const lines = readFileSync(join(base, 'cgroup'), 'utf8').split('\n')
+    if (lines.some((line) => CONTAINER_CGROUP.test(line.split(':').slice(2).join(':')))) return true
+  } catch {}
+  try {
+    return readlinkSync(join(base, 'ns/cgroup')) !== readlinkSync('/proc/self/ns/cgroup')
+  } catch {
+    return false
   }
-  return true
 }
 
-/** The Linux half of `backendInUse`: every process in `proc`, by its open files, directory and arguments. */
-function procUsing(proc, ours, outside) {
+/**
+ * The Linux half of `backendInUse`: every process in `proc`, by its open files, directory and
+ * arguments.
+ *
+ * A Convex local backend whose files and directory can't be read is another user's, and what it
+ * opens can't be told from its arguments: it opens a database and storage in its directory when
+ * none is given, and SQLite paths and URIs are read in ways a check here can't reproduce. So it
+ * counts as using this checkout's data, unless it runs in a container (its paths are the
+ * container's own; the self-hosted bundle keeps its data in named volumes, not a checkout) or
+ * its PID is in `ignoring`, which someone sure it is unrelated passes with `--reset-ignoring`.
+ */
+function procUsing(proc, { ours, inCheckout, ignoring }) {
   const gone = (error) => error.code === 'ENOENT' || error.code === 'ESRCH'
   for (const entry of readdirSync(proc)) {
     if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
@@ -653,25 +640,25 @@ function procUsing(proc, ours, outside) {
       }
     })
     if (exited) continue
+    // Its program, not its arguments: the first argument is the program's path.
+    const program = args[0] ? basename(args[0]) : name
+    const backend = name.startsWith('convex-local-ba')
     // An argument can be a path, or end in one (`--local-storage=<path>`); relative ones are
     // relative to the process's working directory.
     const named = args
       .flatMap((arg) => [arg, arg.slice(arg.indexOf('=') + 1)])
       .map((arg) => (isAbsolute(arg) || !cwd ? arg : resolve(cwd, arg)))
     if ([cwd, ...fds.map((fd) => fd.replace(/ \(deleted\)$/, '')), ...named].some(ours)) {
-      // Its program, not its arguments: the first argument is the program's path.
-      return `process ${entry} (${args[0] ? basename(args[0]) : name}) is using its data`
+      return `process ${entry} (${program}) is using its data`
     }
-    // A local backend whose files and directory can't be read is another user's, so it can reach
-    // this checkout's data (readable only by you) only as root, and only through the paths it
-    // was given: its storage (`--local-storage`) and its database (the last argument), whose
-    // relative paths can't be read without its directory. It is let through only if every
-    // argument that could be a path is an absolute one outside this checkout, or a URL that
-    // isn't a file (a Postgres database, say).
-    if (unreadable && name.startsWith('convex-local-ba') && !localPathsElsewhere(args.slice(1), outside)) {
+    // A local backend opens its data relative to its directory by default.
+    if (backend && inCheckout(cwd))
+      return `process ${entry} (${program}) is a Convex local backend running in this checkout`
+    if (backend && unreadable && !inContainer(base) && !ignoring.includes(Number(entry))) {
       return (
-        `process ${entry} is a Convex local backend whose open files can't be read here, and not every path ` +
-        'it was given is an absolute one outside this checkout, so it may be using this checkout’s data. Stop it first'
+        `process ${entry} (${program}) is a Convex local backend, not in a container, whose open files can't be ` +
+        'read here, so it may be using this checkout’s data. Stop it, or if it is certainly unrelated, run again ' +
+        `with --reset-ignoring ${entry}`
       )
     }
   }

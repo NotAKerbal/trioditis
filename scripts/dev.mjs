@@ -6,6 +6,8 @@
 //   pnpm dev --network fake,whatsapp
 //   pnpm dev --setup               set up and stop; run for each new worktree
 //   pnpm dev --setup --reset       throw this checkout's backend data away first, then set up
+//   pnpm dev --setup --reset --reset-ignoring <pid>
+//                                  the same, past a backend it can't inspect but you know is unrelated
 //
 // Only one of these runs at a time for a checkout: each holds .data/dev.lock while it runs.
 //
@@ -57,6 +59,10 @@ const NETWORKS = ['fake', 'whatsapp']
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')
 const reset = args.includes('--reset')
+// PIDs of backends a reset may ignore, from `--reset-ignoring <pid>` (or `=<pid>`), repeatable.
+const resetIgnoring = args.flatMap((arg, i) =>
+  arg === '--reset-ignoring' ? [args[i + 1]] : arg.startsWith('--reset-ignoring=') ? [arg.split('=')[1]] : [],
+)
 const networkArg =
   args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
 const networks = (networkArg ?? 'fake')
@@ -76,6 +82,8 @@ const fail = (message) => {
 }
 
 if (reset && !setupOnly) fail('`--reset` only goes with `--setup`: run `pnpm dev --setup --reset`.')
+if (resetIgnoring.length > 0 && !reset) fail('`--reset-ignoring` only goes with `--setup --reset`.')
+if (!resetIgnoring.every((pid) => /^[1-9]\d*$/.test(pid ?? ''))) fail('`--reset-ignoring` takes a process ID.')
 
 // Before anything is written: this checkout's data must really be in this checkout.
 try {
@@ -104,7 +112,7 @@ if (reset) {
   // The lock above keeps out this checkout's own runs; this catches a backend started by hand,
   // on this slot's ports or any others.
   if (!(await isFree(ports.convexCloud))) fail('Stop this checkout’s backend first: something is using its port.')
-  const inUse = await backendInUse()
+  const inUse = await backendInUse(backendDir, { ignoring: resetIgnoring.map(Number) })
   if (inUse) fail(`Stop this checkout’s backend first: ${inUse}.`)
   step('Throwing this checkout’s backend data away')
   try {

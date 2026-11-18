@@ -198,18 +198,31 @@ It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the s
 A reset refuses while this checkout's `pnpm dev` runs, and while any backend is using this
 checkout's data, on any port: something listening on the ports in
 `.convex/local/default/config.json`, or a process using `packages/backend/.convex/local`
-(one you started by hand with `npx convex dev`, say). On Linux that means a process with a
-file there open, running in a directory there, or naming a path there in its arguments,
-relative paths read from its working directory. A Convex local backend whose open files
-and directory can't be read (another user's, such as one in Docker) counts unless every path
-it was given (its storage, its database and any other argument that could be a path) is an
-absolute one outside this checkout; a database given as a URL that isn't a file, such as
-Postgres, isn't a path. On other systems only absolute paths in a process's arguments are
-checked. Only a process's ID and program are shown, never its
-arguments, which include the backend's instance secret. A reset deletes nothing a symlink
-leads to outside the checkout. `--reset` on its own is refused. When a reset names a
-process, stop that backend (Ctrl+C where it runs, or end the process it names) and run the
-reset again.
+(one you started by hand with `npx convex dev`, say). On Linux that means:
+
+- a process with a file there open, running in a directory there, or naming a path there in
+  its arguments, relative paths read from its working directory;
+- a Convex local backend running anywhere in this checkout (not in another checkout inside
+  it), since it opens its data relative to its directory by default;
+- a Convex local backend whose open files and directory can't be read (another user's), unless
+  it runs in a container. What such a backend opens can't be told from its arguments, so it
+  counts as using this checkout's data. A container's backend is ignored, recognised by its
+  cgroup (Docker, containerd, Podman, Kubernetes, LXC) or a cgroup namespace other than yours:
+  its paths are the container's own, and the self-hosted bundle keeps its data in named
+  volumes, not in a checkout.
+
+On other systems only absolute paths in a process's arguments are checked, so a backend
+started there with relative paths isn't seen. Only a process's ID and program are shown,
+never its arguments, which include the backend's instance secret.
+
+When a reset names a process, stop that backend (Ctrl+C where it runs, or end the process it
+names) and run the reset again. If it names another user's backend you are certain has
+nothing to do with this checkout, run `pnpm dev --setup --reset --reset-ignoring <pid>` with
+the ID it gave; repeat the option for several. It skips only those processes, and only when
+they can't be inspected: one seen using this checkout's data still stops the reset.
+
+A reset deletes nothing a symlink leads to outside the checkout. `--reset` on its own is
+refused.
 
 Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
 secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.
