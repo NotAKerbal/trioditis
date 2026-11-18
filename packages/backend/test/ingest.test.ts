@@ -482,4 +482,24 @@ describe('ingest', () => {
     })
     expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
   })
+
+  it('keeps messages newer than a delayed receipt unread', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000 }),
+      message('e2', { networkTs: 2_000 }),
+      message('e3', { networkTs: 3_000 }),
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
+    ])
+    expect((await chat(t)).unreadCount).toBe(2)
+  })
+
+  it('refuses events for a network the server doesn’t offer', async () => {
+    seq = 0
+    const t = setup()
+    await expect(
+      t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId: 'signal-1', network: 'signal', events: [] }),
+    ).rejects.toThrow(/not enabled/)
+  })
 })

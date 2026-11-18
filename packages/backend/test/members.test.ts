@@ -69,6 +69,19 @@ describe('accounts', () => {
     vi.useRealTimers()
   })
 
+  it('turns invitations off on demo servers', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    process.env.TRIODITIS_DEMO = '1'
+    try {
+      await expect(admin.mutation(api.members.invite, { email: 'real@example.com', role: 'member' })).rejects.toThrow(
+        /demo/,
+      )
+    } finally {
+      delete process.env.TRIODITIS_DEMO
+    }
+  })
+
   it('only lets admins invite', async () => {
     const t = setup()
     const member = await signIn(t, 'sam')
@@ -82,7 +95,9 @@ describe('accounts', () => {
     await signIn(t, 'sam')
     expect(await t.query(api.members.me, {})).toBeNull()
     const ended = t.withIdentity({ subject: 'sam', sessionId: 'not-a-session' })
-    await expect(ended.query(api.chats.list, {})).rejects.toThrow(/signed out/)
+    await expect(ended.query(api.chats.list, { paginationOpts: { numItems: 10, cursor: null } })).rejects.toThrow(
+      /signed out/,
+    )
   })
 
   it('sets a valid identity key once, deriving its key ID', async () => {
@@ -147,8 +162,8 @@ describe('privacy between people', () => {
           archived: false,
         }),
     )
-    expect(await a.query(api.chats.list, {})).toHaveLength(1)
-    expect(await b.query(api.chats.list, {})).toHaveLength(0)
+    expect((await a.query(api.chats.list, { paginationOpts: { numItems: 10, cursor: null } })).page).toHaveLength(1)
+    expect((await b.query(api.chats.list, { paginationOpts: { numItems: 10, cursor: null } })).page).toHaveLength(0)
     await expect(b.query(api.chats.get, { chatId })).rejects.toThrow(/doesn’t exist/)
     await expect(
       b.query(api.messages.list, { chatId, paginationOpts: { numItems: 10, cursor: null } }),

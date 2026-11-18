@@ -99,7 +99,10 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 - **Ownership:** once a host is running a login, only it may send events for that login
   (a login moves to another host only through a newer `CONNECTED` report). A login's steps
   are accepted only from the host its start command was handed to.
-- **Sizes:** a sealed object in an event may be at most 256 KiB; files travel separately.
+- **Sizes:** a sealed message or edit in an event may be at most 256 KiB; files travel
+  separately. Chat and contact metadata (`chat`, `contact`) may be at most **8 KiB** sealed:
+  a name, a topic and an avatar's file reference. A bridge host with longer metadata
+  truncates the name or topic to fit; anything over the limit is quarantined as `too_large`.
   A login step may be at most 64 KiB (UTF-8), and a `hostId` at most 64 characters.
   Clients may seal at most 64 KiB into a send or login input.
 - **Routing:** a command for a connected login goes to the host that reported that login's
@@ -154,8 +157,11 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- The bridge host keeps a safety margin (currently 2 minutes) before `notAfter` for the
-  connector's own waits, so a send can be refused as `expired` slightly before `notAfter`.
+- The bridge host keeps a safety margin (currently 11 minutes) before `notAfter` for the
+  connector's own waits, so a send can be refused as `expired` before `notAfter`. Phase 0
+  limit: a send already handed to the connector can still go out after `notAfter` if it waits
+  behind more than two incoming events that each hit bridgev2's 5-minute handler limit;
+  closing that needs a pre-send hook in bridgev2 (bridge host README, Known follow-ups).
 - A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
   the bridge host emits `failed` with error `expired`, and the person decides.
 
