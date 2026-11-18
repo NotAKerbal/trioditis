@@ -41,8 +41,8 @@ Options (each one is kept for later reruns):
   --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
-                       from, as Caddy ranges (default private_ranges; set it to the proxy's
-                       address when it's on another machine)
+                       from, as Caddy ranges (default private_ranges on a loopback bind;
+                       required with any other --bind: the proxy's address)
   --new-server-keys    Only when the server's private keys are lost: make new key pairs.
                        Sends sealed to the old bridge key then fail, and agent access must
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
@@ -263,6 +263,11 @@ if [ "$mode" = domain ]; then
   caddy_site=$domain
   caddy_global=''
   compose_files="$compose_files:compose.domain.yml:compose.hostmap.yml"
+  # Domain mode publishes 80 and 443 on every address, IPv6 included. Into an IPv4-only
+  # network, Docker's proxy brings every IPv6 client in from the network's gateway, so they'd
+  # all share one client address (and one rate limit). With IPv6 on the network, Docker
+  # forwards them with their own addresses; it picks the network's IPv6 subnet itself.
+  [ ! -s /proc/net/if_inet6 ] || compose_files="$compose_files:compose.ipv6.yml"
 elif [ -n "$proxy_url" ]; then
   proxy_url=${proxy_url%/}
   # An origin only: the web app, auth and the Convex API live at fixed paths under it.
@@ -281,9 +286,19 @@ elif [ -n "$proxy_url" ]; then
   public_url=$proxy_url
   http_bind=${bind:-127.0.0.1}
   # Requests arrive through the proxy, so the scheme and client address are in its
-  # X-Forwarded-* headers. By default that's any private address: the proxy reaches Caddy
-  # through Docker from the loopback, or from the LAN with --bind.
-  trusted_proxies=${trusted:-private_ranges}
+  # X-Forwarded-* headers, which Caddy takes only from --trusted-proxies. On a loopback
+  # bind only this machine can connect, and the proxy arrives through Docker from the
+  # network's gateway, so private addresses are trusted by default (a gateway that changes
+  # when the network is made again stays covered). With the port reachable from other
+  # machines, any of them could send its own X-Forwarded-For, so the proxy's address must be
+  # given.
+  case "$http_bind" in
+    127.* | localhost | ::1) trusted_proxies=${trusted:-private_ranges} ;;
+    *)
+      [ -n "$trusted" ] || die "With --bind $http_bind, other machines can reach the port directly and send their own X-Forwarded-For. Pass --trusted-proxies <the proxy's address>/32 (and let only the proxy reach the port)."
+      trusted_proxies=$trusted
+      ;;
+  esac
   # The backend fetches sign-in keys from the public address. If that's served on this
   # machine, compose.hostmap.yml points the backend at Docker's host address. A proxy that
   # already listens there (on all interfaces) needs nothing more. One that listens only where
@@ -447,6 +462,13 @@ write_file "$here/runtime/config.json" \
 docker build -q -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
+# Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
+# else stay on the internal network, since the backend trusts the client address Caddy
+# gives it (X-Trioditis-Client-IP). The fake network's test endpoint (--e2e) is the one
+# exception, and only on this machine's loopback.
+compose --profile '*' config | sh "$here/scripts/check-ports.sh" ||
+  die "The compose files publish more than Caddy's port (above). This is a bug in the bundle."
+
 # Compose leaves a service whose profile is no longer enabled running, even with
 # --remove-orphans, so a network dropped from --networks is stopped and removed here. Its
 # volume and database stay, in case it's enabled again.
@@ -486,6 +508,16 @@ ensure_database() {
   done
   die "Couldn't create the database $database."
 }
+
+# A network made with another IPv6 setting (the mode changed) is made again; Compose won't
+# change it in place. Only containers go: the data is in volumes.
+want_ipv6=false
+case ":$compose_files:" in *:compose.ipv6.yml:*) want_ipv6=true ;; esac
+have_ipv6=$(docker network inspect -f '{{.EnableIPv6}}' "${project}_default" 2>/dev/null || echo none)
+if [ "$have_ipv6" != none ] && [ "$have_ipv6" != "$want_ipv6" ]; then
+  say "Making the server's network again, with IPv6 $([ "$want_ipv6" = true ] && echo on || echo off)"
+  compose --profile '*' down
+fi
 
 say "Starting the database"
 compose up -d --remove-orphans postgres

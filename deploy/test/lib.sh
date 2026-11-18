@@ -54,6 +54,7 @@ cleanup() {
   status=$?
   docker ps -aq --filter "name=^$project" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker volume ls -q | grep "^$project" | xargs -r docker volume rm -f >/dev/null 2>&1 || true
+  docker network ls -q --filter "name=^$project" | xargs -r docker network rm >/dev/null 2>&1 || true
   rm -rf "$root" "$backups"
   exit "$status"
 }

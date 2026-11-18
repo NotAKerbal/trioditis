@@ -5,7 +5,8 @@
 # deploy/runtime/config.json is replaced, not followed; the values Compose gets come from
 # deploy/.env only, not from exported variables; and half a key pair (a public key without
 # its private one, as a backup's secrets.env leaves) stops the install, unless
-# --new-server-keys asks for a new pair. TRIODITIS_INSTALLER=<path> tests another
+# --new-server-keys asks for a new pair; and --public-url with the port reachable from other
+# machines needs --trusted-proxies, since any of them could send its own X-Forwarded-For. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 set -eu
@@ -91,6 +92,20 @@ install --new-server-keys || true
 [ "$(value BRIDGE_PUBLIC_KEY)" = stub-public ] && [ "$(value BRIDGE_PRIVATE_KEY)" = stub-private ] &&
   [ "$(value AGENT_ACCESS_PUBLIC_KEY)" = agent-public ] && [ "$(value AGENT_ACCESS_PRIVATE_KEY)" = agent-private ] &&
   check ok "--new-server-keys makes a new pair for that half only" || check fail "--new-server-keys makes a new pair for that half only"
+
+# --public-url on a LAN bind: refused without --trusted-proxies, kept with it. (The proxy's
+# name doesn't resolve, so no hairpin is looked for.)
+checkout
+if install --public-url https://proxy.invalid:8443 --bind 192.168.0.96; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q -- "--trusted-proxies" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+  check ok "--public-url on a LAN bind needs --trusted-proxies" || check fail "--public-url on a LAN bind needs --trusted-proxies"
+install --public-url https://proxy.invalid:8443 --bind 192.168.0.96 --trusted-proxies 192.168.0.10/32 || true
+[ "$(value CADDY_TRUSTED_PROXIES)" = 192.168.0.10/32 ] && check ok "and trusts only the proxy given" ||
+  check fail "and trusts only the proxy given ($(value CADDY_TRUSTED_PROXIES))"
+checkout
+install --public-url https://proxy.invalid:8443 || true
+[ "$(value CADDY_TRUSTED_PROXIES)" = private_ranges ] && [ "$(value HTTP_BIND)" = 127.0.0.1 ] &&
+  check ok "on the loopback, private addresses are trusted by default" || check fail "on the loopback, private addresses are trusted by default"
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

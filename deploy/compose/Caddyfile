@@ -5,9 +5,12 @@
 	admin off
 	{$CADDY_GLOBAL_OPTIONS}
 	# Behind a proxy (install.sh --public-url), the scheme and client address come from its
-	# X-Forwarded-* headers; otherwise Caddy is the edge and trusts no one's.
+	# X-Forwarded-* headers; otherwise Caddy is the edge and trusts no one's. Strict: the
+	# client address is the rightmost one a trusted proxy didn't add, since the leftmost
+	# X-Forwarded-For entry is whatever the client sent.
 	servers {
 		trusted_proxies static {$CADDY_TRUSTED_PROXIES}
+		trusted_proxies_strict
 	}
 }
 
@@ -24,6 +27,12 @@ http://127.0.0.1:8090 {
 }
 
 {$TRIODITIS_SITE_ADDRESS::80} {
+	# The client's address, as Caddy determines it, for every request: the backend takes the
+	# client address from this header only (its auth rate limits), and Convex passes headers
+	# through as they arrive and adds none of its own. Set for the whole site, overwriting any
+	# value a client sent, since /convex/http/* reaches the same HTTP actions as /api/auth/*.
+	request_header X-Trioditis-Client-IP {client_ip}
+
 	encode zstd gzip
 
 	# The Convex client API and its websocket, under a prefix the client keeps

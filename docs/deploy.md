@@ -102,15 +102,18 @@ name (not an IPv6 address or a loopback name) and no path. The port is bound to 
 so it's only reachable through the proxy.
 
 Caddy takes the client's address and scheme from the proxy's `X-Forwarded-For` and
-`X-Forwarded-Proto` headers in this mode, from the addresses in `--trusted-proxies`
-(default `private_ranges`). For a proxy on another machine, pass `--bind` with an address
-that proxy can reach, and then:
+`X-Forwarded-Proto` headers in this mode, from the addresses in `--trusted-proxies`. On the
+default loopback bind only this machine can connect, and the proxy arrives through Docker
+from the network's gateway, so private addresses (`private_ranges`) are trusted by default.
+For a proxy on another machine, pass `--bind` with an address that proxy can reach, and
+then:
 
-- let only the proxy reach the port (a firewall rule allowing just its address), since
-  anything else that can reach it is treated as the proxy;
-- have the proxy overwrite `X-Forwarded-For` and `X-Forwarded-Proto` rather than append to
-  what the client sent (most do by default for `X-Forwarded-Proto`; check `X-Forwarded-For`);
-- pass `--trusted-proxies <its address>/32`, so headers are only taken from it.
+- pass `--trusted-proxies <its address>/32` (the installer refuses a non-loopback `--bind`
+  without it: any machine that can reach the port could send its own `X-Forwarded-For`, and
+  most LAN addresses are private);
+- let only the proxy reach the port (a firewall rule allowing just its address);
+- have the proxy overwrite `X-Forwarded-Proto`; for `X-Forwarded-For`, Caddy uses the
+  rightmost address the proxy didn't add, so one a client put first is ignored.
 
 The backend has to reach the public address to check sign-ins. When the public host name
 resolves to this machine, the installer points it at Docker's host address inside the
@@ -186,6 +189,32 @@ works without the router looping traffic back; on a loopback address the `loopba
 forwarder serves it inside the container. Otherwise the name resolves as it does anywhere
 else. The installer checks that the backend gets the key set from the address and warns if
 it doesn't.
+
+Caddy tells the backend each client's address in `X-Trioditis-Client-IP`, which it sets on
+every request and overwrites if a client sent one; the backend's auth rate limits take the
+client address from that header only. Behind a proxy (`--public-url`), Caddy takes the
+address from the proxy's `X-Forwarded-For`, and only from `--trusted-proxies` addresses, using
+the rightmost entry the proxy didn't add (`trusted_proxies_strict`), not the leftmost one,
+which the client controls. So the Convex backend must never be reachable except through
+Caddy: the bundle publishes only Caddy's port, and anything else in front of the backend
+could set the header to any address. The installer checks the compose files publish nothing
+else (`deploy/scripts/check-ports.sh`; the one exception is `--e2e`'s test endpoint, on the
+loopback).
+
+What Caddy takes as the client's address, as observed with Docker 29 (`deploy/test/caddy-headers.sh`):
+
+| Mode                                            | A request                                                                 | Client address                                                                                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--public-url`, loopback bind (Tailscale Serve) | from the proxy, `X-Forwarded-For: 100.64.1.2`                             | `100.64.1.2` (Caddy's peer is the network's gateway, such as `172.18.0.1`)                                                                  |
+|                                                 | with a client's address put first, `X-Forwarded-For: 6.6.6.6, 100.64.1.2` | `100.64.1.2`                                                                                                                                |
+|                                                 | with no `X-Forwarded-For` (from this machine)                             | the network's gateway                                                                                                                       |
+| Local mode, direct                              | from a LAN client                                                         | the client's own address; any `X-Forwarded-For` is ignored                                                                                  |
+|                                                 | from an IPv6 client                                                       | can't connect: local mode publishes on IPv4 only                                                                                            |
+| Domain mode                                     | from an IPv4 client                                                       | the client's own address                                                                                                                    |
+|                                                 | from an IPv6 client, on a machine with IPv6                               | its own address: the network has IPv6 on (`compose.ipv6.yml`); without it, Docker's proxy would bring every IPv6 client in from the gateway |
+
+Behind a proxy, every request without `X-Forwarded-For` (only this machine can send one)
+counts as the gateway's.
 
 Caddy also listens on `127.0.0.1:8090` inside its container, for its healthcheck only: the
 site itself may only answer HTTPS for its domain.
@@ -380,6 +409,8 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 | `keys.sh`              | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                                                                                                  |
 | `lock.sh`              | While the lock is held, `start`, `up`, `create-admin` and `backup` are refused and `ps` and `config` run                                                                                                                                                                                                                |
 | `env-source.sh`        | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                               |
+| `caddy-headers.sh`     | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                  |
+| `ports.sh`             | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                  |
 | `install-settings.sh`  | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                               |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
