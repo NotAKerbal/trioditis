@@ -25,8 +25,8 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
-import { canKeepKeys, loadIdentity, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
+import { canKeepKeys, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
+import { SIGN_OUT_FAILED, signOut, stillSignedIn } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -90,21 +90,38 @@ function MemberGate({ children }: { children: ReactNode }) {
 
 function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | 'member'; children: ReactNode }) {
   const remote = useQuery(convexQuery(api.keys.identity, {}))
-  // Not kept once the gate is gone (gcTime 0): after a sign-out, in any tab, the next session
-  // reads storage afresh rather than reusing a key that may have been forgotten since.
+  // The save token (lib/keys.ts): taken as the gate opens, before any setup or unlock, and again
+  // whenever saves are fenced in any tab (a sign-out attempt, whichever way it went) or this tab
+  // comes back into view. Work begun under an older token stays fenced; work begun after uses the
+  // new one. If it can't be read, nothing is kept here: saving fails closed.
+  const [token, setToken] = useState<number | 'failed' | null>(null)
+  useEffect(() => {
+    let current: number | 'failed' | null = null
+    const take = () =>
+      saveToken(userId).then(
+        (next) => {
+          if (next !== current) setToken((current = next))
+        },
+        () => setToken((current = 'failed')),
+      )
+    void take()
+    const stopListening = onFence(userId, () => void take())
+    const onVisible = () => document.visibilityState === 'visible' && void take()
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      stopListening()
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [userId])
+  // This device's key, read afresh for each token, so after a fence anywhere the gate never goes on
+  // with a key that may have been forgotten since; not kept once the gate is gone (gcTime 0).
   const local = useQuery({
-    queryKey: ['identity', userId],
+    queryKey: ['identity', userId, token],
     queryFn: () => loadIdentity(userId),
+    enabled: token !== null,
     staleTime: Infinity,
     gcTime: 0,
   })
-  // Taken once, as the gate opens for this session, before any setup or unlock: a key worked out
-  // here is kept only if no sign-out, in any tab, has happened since (lib/keys.ts saveToken). If
-  // it can't be read, nothing is kept here: saving fails closed.
-  const [token, setToken] = useState<number | 'failed' | null>(null)
-  useEffect(() => {
-    saveToken(userId).then(setToken, () => setToken('failed'))
-  }, [userId])
   // While setup is saving, the server's state turns `ready` before this device has kept the key.
   // Holding the setup screen until it's done keeps its progress, errors and retry on screen.
   const [held, setHeld] = useState<SetupFor | null>(null)
@@ -197,7 +214,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     const session: Session = { userId, role, kid: local.data.kid, keyPair: local.data.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
-  if (remote.isPending || local.isPending || !remote.data || token === null) return <Splash />
+  if (token === null || remote.isPending || local.isPending || !remote.data) return <Splash />
   const { state, publicKey, kid, backups } = remote.data
   const here = local.data && local.data.kid === kid ? local.data : null
   const setupFor: SetupFor | null =
@@ -525,7 +542,7 @@ function KeySetup({
     setError(null)
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token)
+      await storeIdentity(userId, kid, keyPair, token, () => stillSignedIn(userId))
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
@@ -783,7 +800,7 @@ function Unlock({
     if (isLeaving()) return
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token)
+      await storeIdentity(userId, kid, keyPair, token, () => stillSignedIn(userId))
     } catch (e) {
       return fail(
         `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
