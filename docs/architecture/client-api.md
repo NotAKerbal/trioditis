@@ -511,11 +511,10 @@ backend tests; the ones that need the bridge host change the protocol in the sam
 request. Until one lands, the UI keeps the control disabled or shows the fallback named
 here.
 
-1. **Server info.** `api.server.info` (a query, no sign-in needed) returns
-   `{ demo, invitations, networks }`: whether this is a demo server, whether an admin can
-   invite here, and the networks it has enabled. The client hides demo-only and invite
-   controls from it instead of waiting for the mutation's error. Fallback: none needed;
-   this lands first.
+1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
+   `{ demo, invitations }`: whether this is a demo server, and whether admins can invite
+   people here. The client hides invite controls, and shows demo-only ones, from it instead
+   of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
 2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
