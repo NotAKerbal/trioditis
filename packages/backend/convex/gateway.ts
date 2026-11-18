@@ -121,7 +121,8 @@ export const ingest = mutation({
           hostId: args.hostId,
           seq: event.seq,
           type: event.type,
-          userId: event.userId,
+          // An ID too long to be one is what got this event quarantined; it isn't kept.
+          userId: event.userId.length <= 256 ? event.userId : '',
           reason: error.reason,
           at: now,
         })

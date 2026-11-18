@@ -98,9 +98,83 @@ export default defineSchema({
     archived: v.boolean(),
     mutedUntil: v.optional(v.number()),
     deleted: v.optional(v.boolean()),
+    /** Unread messages the bridge host flagged as mentioning the person. */
+    mentionCount: v.optional(v.number()),
+    /** Marked unread by the person, whatever the count says. Trioditis-side only. */
+    markedUnread: v.optional(v.boolean()),
+    /** Hidden from the inbox until then, or until a new message wakes it. */
+    snoozedUntil: v.optional(v.number()),
+    woke: v.optional(v.boolean()),
+    /** A message request the person hasn't accepted. */
+    isRequest: v.optional(v.boolean()),
+    /** Hidden by the person. Trioditis-side only; the network isn't told yet. */
+    blocked: v.optional(v.boolean()),
   })
     .index('by_user_lastMessage', ['userId', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
+
+  /**
+   * The person's own labels for chats. Name and colour are sealed to the person (kind
+   * `label`, object ID `labelKey`, which the client chooses before sealing).
+   */
+  labels: defineTable({
+    userId: v.string(),
+    labelKey: v.string(),
+    sealed: envelope,
+    createdAt: v.number(),
+  }).index('by_user', ['userId']),
+
+  chatLabels: defineTable({
+    userId: v.string(),
+    chatId: v.id('chats'),
+    labelId: v.id('labels'),
+  })
+    .index('by_chat', ['chatId'])
+    .index('by_label', ['labelId']),
+
+  preferences: defineTable({
+    userId: v.string(),
+    sidebarLayout: v.union(v.literal('focused'), v.literal('simple')),
+  }).index('by_user', ['userId']),
+
+  /**
+   * The identity private key, wrapped for new devices (docs/architecture/client-api.md, Keys).
+   * Never unwrapped here: the server can't open any of these.
+   */
+  keyBackups: defineTable({
+    userId: v.string(),
+    kid: v.string(),
+    kind: v.union(v.literal('password'), v.literal('recovery'), v.literal('passkey')),
+    nonce: v.string(),
+    ct: v.string(),
+    /** For `password`: how the password becomes the wrapping key. */
+    params: v.optional(
+      v.object({ alg: v.literal('argon2id13'), salt: v.string(), opslimit: v.number(), memlimit: v.number() }),
+    ),
+    /** For `passkey`: which credential, and its PRF salt. */
+    credentialId: v.optional(v.string()),
+    prfSalt: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index('by_user', ['userId', 'kind']),
+
+  /**
+   * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
+   * then the bridge-readable copy waits here, and is deleted when it goes out or is cancelled.
+   */
+  scheduledSends: defineTable({
+    userId: v.string(),
+    chatId: v.id('chats'),
+    clientMessageId: v.string(),
+    sendAt: v.number(),
+    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled')),
+    forBridge: v.optional(envelope),
+    copy: v.optional(envelope),
+    replyTo: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId', 'state', 'sendAt'])
+    .index('by_chat', ['chatId', 'state'])
+    .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
   contacts: defineTable({
     userId: v.string(),

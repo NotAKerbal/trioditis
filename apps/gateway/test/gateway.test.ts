@@ -97,6 +97,19 @@ describe('events', () => {
     expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 3])
   })
 
+  it('quarantines an unknown type as unknown, never passing it on', async () => {
+    const backend = fakeBackend()
+    backend.ingest = vi.fn(async () => Promise.reject(new Error('ArgumentValidationError')))
+    const result = await post(await serve(backend), batch([{ ...event(1), type: 'x'.repeat(10_000) }]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 1 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 1,
+      type: 'unknown',
+    })
+  })
+
   it('quarantines an event whose type isn’t a string', async () => {
     const backend = fakeBackend()
     backend.ingest = vi.fn(async (args) => {

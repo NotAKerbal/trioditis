@@ -80,6 +80,8 @@ export const bridgeEvent = v.union(
     replyTo: v.optional(v.string()),
     threadRoot: v.optional(v.string()),
     clientMessageId: v.optional(v.string()),
+    /** The message mentions the person: the bridge host can tell, as it sees the plaintext. */
+    mentionsMe: v.optional(v.boolean()),
   }),
   v.object({
     ...base,
@@ -143,6 +145,8 @@ export const bridgeEvent = v.union(
     sealed: envelope,
     parentPortalId: v.optional(v.string()),
     deleted: v.optional(v.boolean()),
+    /** The network says this chat is a message request the person hasn't accepted. */
+    isRequest: v.optional(v.boolean()),
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
   v.object({

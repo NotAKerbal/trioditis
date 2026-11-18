@@ -10,9 +10,11 @@
 
 import type * as auth from "../auth.js";
 import type * as chats from "../chats.js";
+import type * as cleanup from "../cleanup.js";
 import type * as gateway from "../gateway.js";
 import type * as http from "../http.js";
 import type * as keys from "../keys.js";
+import type * as labels from "../labels.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_envelope from "../lib/envelope.js";
@@ -20,10 +22,14 @@ import type * as lib_hash from "../lib/hash.js";
 import type * as lib_ingest from "../lib/ingest.js";
 import type * as lib_networks from "../lib/networks.js";
 import type * as lib_outbox from "../lib/outbox.js";
+import type * as lib_send from "../lib/send.js";
 import type * as logins from "../logins.js";
 import type * as mcp from "../mcp.js";
 import type * as members from "../members.js";
 import type * as messages from "../messages.js";
+import type * as networks from "../networks.js";
+import type * as preferences from "../preferences.js";
+import type * as scheduled from "../scheduled.js";
 import type * as validators from "../validators.js";
 
 import type {
@@ -35,9 +41,11 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   chats: typeof chats;
+  cleanup: typeof cleanup;
   gateway: typeof gateway;
   http: typeof http;
   keys: typeof keys;
+  labels: typeof labels;
   "lib/access": typeof lib_access;
   "lib/audit": typeof lib_audit;
   "lib/envelope": typeof lib_envelope;
@@ -45,10 +53,14 @@ declare const fullApi: ApiFromModules<{
   "lib/ingest": typeof lib_ingest;
   "lib/networks": typeof lib_networks;
   "lib/outbox": typeof lib_outbox;
+  "lib/send": typeof lib_send;
   logins: typeof logins;
   mcp: typeof mcp;
   members: typeof members;
   messages: typeof messages;
+  networks: typeof networks;
+  preferences: typeof preferences;
+  scheduled: typeof scheduled;
   validators: typeof validators;
 }>;
 

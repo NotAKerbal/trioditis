@@ -5,30 +5,75 @@ import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
-import { envelope, network } from './validators'
+import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
 // pairing codes, cookies), which arrive as `loginStep` events on the session. What the
 // person types is sealed to the bridge key, never stored in plaintext.
 
+/** The person's connected network accounts, including ones that need attention. */
 export const accounts = query({
   args: {},
+  returns: v.array(
+    v.object({
+      _id: v.id('networkAccounts'),
+      network,
+      state: loginState,
+      error: v.union(v.null(), errorCode),
+      lastHealthyAt: v.union(v.null(), v.number()),
+      updatedAt: v.number(),
+    }),
+  ),
   handler: async (ctx) => {
     const member = await requireMember(ctx)
-    return await ctx.db
+    const rows = await ctx.db
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
-      .collect()
+      .take(100)
+    return rows.map((row) => ({
+      _id: row._id,
+      network: row.network,
+      state: row.state,
+      error: row.error ?? null,
+      lastHealthyAt: row.lastHealthyAt ?? null,
+      updatedAt: row.updatedAt,
+    }))
   },
 })
 
+/**
+ * A login in progress, for the stepper: `step` is what to show now (a QR code, a pairing code,
+ * fields to fill in, cookies to paste), and `state` says when it's over.
+ */
 export const session = query({
   args: { loginSessionId: v.id('loginSessions') },
+  returns: v.union(
+    v.null(),
+    v.object({
+      _id: v.id('loginSessions'),
+      network,
+      state: v.union(
+        v.literal('pending'),
+        v.literal('active'),
+        v.literal('complete'),
+        v.literal('cancelled'),
+        v.literal('error'),
+      ),
+      step: v.union(v.null(), loginStep),
+      updatedAt: v.number(),
+    }),
+  ),
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId) return null
-    return session
+    return {
+      _id: session._id,
+      network: session.network,
+      state: session.state,
+      step: session.step ?? null,
+      updatedAt: session.updatedAt,
+    }
   },
 })
 
@@ -124,6 +169,34 @@ export const cancel = mutation({
       createdAt: now,
       expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
+    return null
+  },
+})
+
+/**
+ * Disconnects a network account: the bridge host logs it out of the network. The account's
+ * chats stay in Trioditis; its state becomes `LOGGED_OUT` when the bridge host reports it.
+ */
+export const logout = mutation({
+  args: { networkAccountId: v.id('networkAccounts') },
+  returns: v.null(),
+  handler: async (ctx, { networkAccountId }) => {
+    const member = await requireMember(ctx)
+    const account = await ctx.db.get(networkAccountId)
+    if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
+    if (account.state === 'LOGGED_OUT') return null
+    const now = Date.now()
+    await queueCommand(ctx, {
+      userId: member.userId,
+      network: account.network,
+      loginId: account.loginId,
+      payload: { type: 'logout' },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + LOGIN_COMMAND_TTL_MS,
+    })
+    await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return null
   },
 })
