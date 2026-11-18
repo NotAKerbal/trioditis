@@ -69,14 +69,14 @@ list when the bridge host runs their connectors.
 
 ## What's running
 
-| Service | What it is | Exposed |
-|---|---|---|
-| `caddy` | The web app, and the proxy to everything below | Yes: the only published port |
-| `backend` | The Convex backend, on Postgres | No |
-| `postgres` | Postgres 17: Convex's data and each bridge host's | No |
-| `functions` | One-shot: sets Convex's environment and deploys the functions | No |
-| `gateway` | Moves events between bridge hosts and Convex | No |
-| `bridge-<network>` | A bridge host: runs that network's connector | No |
+| Service            | What it is                                                    | Exposed                      |
+| ------------------ | ------------------------------------------------------------- | ---------------------------- |
+| `caddy`            | The web app, and the proxy to everything below                | Yes: the only published port |
+| `backend`          | The Convex backend, on Postgres                               | No                           |
+| `postgres`         | Postgres 17: Convex's data and each bridge host's             | No                           |
+| `functions`        | One-shot: sets Convex's environment and deploys the functions | No                           |
+| `gateway`          | Moves events between bridge hosts and Convex                  | No                           |
+| `bridge-<network>` | A bridge host: runs that network's connector                  | No                           |
 
 `deploy/trioditis` is `docker compose` for this install, with its settings:
 
@@ -92,13 +92,13 @@ deploy/trioditis up -d         # start it again
 
 Everything is on one origin, so the web app's auth cookies are first-party:
 
-| Path | Goes to |
-|---|---|
-| `/convex/*` | The Convex client API and its websocket (port 3210), prefix stripped. The client is given `<origin>/convex` and keeps the prefix (`ws://<origin>/convex/api/<version>/sync`) |
-| `/api/auth/*` | Better Auth, in Convex's HTTP actions (port 3211) |
-| `/mcp`, `/mcp/*`, `/.well-known/oauth-*` | The MCP server and its OAuth discovery, in Convex's HTTP actions |
-| `/config.json` | The web app's runtime config, written by the installer: `{ "convexUrl": "<origin>/convex", "convexSiteUrl": "<origin>", "environment": "selfhosted" }`. Never cached |
-| Everything else | The web app's static files, falling back to `index.html` |
+| Path                                     | Goes to                                                                                                                                                                      |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/convex/*`                              | The Convex client API and its websocket (port 3210), prefix stripped. The client is given `<origin>/convex` and keeps the prefix (`ws://<origin>/convex/api/<version>/sync`) |
+| `/api/auth/*`                            | Better Auth, in Convex's HTTP actions (port 3211)                                                                                                                            |
+| `/mcp`, `/mcp/*`, `/.well-known/oauth-*` | The MCP server and its OAuth discovery, in Convex's HTTP actions                                                                                                             |
+| `/config.json`                           | The web app's runtime config, written by the installer: `{ "convexUrl": "<origin>/convex", "convexSiteUrl": "<origin>", "environment": "selfhosted" }`. Never cached         |
+| Everything else                          | The web app's static files, falling back to `index.html`                                                                                                                     |
 
 The Convex backend also calls its own public origin: it checks sign-in tokens against the
 signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`. The bundle maps the

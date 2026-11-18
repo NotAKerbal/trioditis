@@ -1,6 +1,6 @@
 // End to end on the dev stack with the fake network: Convex, the gateway and a fake-network
 // bridge host must be running (docs/CONTRIBUTING.md, Run the stack locally; the bridge host
-// with BRIDGE_FAKE_CONTROL_ADDR set). It signs in as the dev admin, sets an identity key,
+// with BRIDGE_FAKE_CONTROL_ADDR set). It signs in as the dev admin, sets up an identity key,
 // connects the fake network through a sealed login, receives a message, sends one, and checks
 // that what reached Convex is sealed.
 //
@@ -14,7 +14,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { ConvexHttpClient } from 'convex/browser'
 import { api } from '@trioditis/backend/api'
-import { fromBase64Url, generateKeyPair, keyId, openJson, ready, sealJson, toBase64Url, type KeyPair } from '@trioditis/crypto'
+import {
+  authPassword,
+  fromBase64Url,
+  generateKeyPair,
+  keyId,
+  makeKeySetup,
+  openJson,
+  ready,
+  sealJson,
+  toBase64Url,
+  type KeyPair,
+} from '@trioditis/crypto'
 
 const [email, password] = process.argv.slice(2)
 if (!email || !password) throw new Error('Usage: e2e-fake.ts <admin email> <password>')
@@ -25,7 +36,11 @@ const internalToken = process.env.TRIODITIS_INTERNAL_TOKEN!
 
 await ready()
 
-async function until<T>(what: string, check: () => Promise<T | null | undefined | false>, timeoutMs = 20_000): Promise<T> {
+async function until<T>(
+  what: string,
+  check: () => Promise<T | null | undefined | false>,
+  timeoutMs = 20_000,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const value = await check()
@@ -43,17 +58,22 @@ function step(message: string) {
 const signIn = await fetch(`${site}/api/auth/sign-in/email`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', origin: site },
-  body: JSON.stringify({ email, password }),
+  // The server only ever sees the derived password, as from the app.
+  body: JSON.stringify({ email, password: authPassword(password, email) }),
 })
 if (!signIn.ok) throw new Error(`Sign-in failed: ${signIn.status}`)
-const cookie = signIn.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
+const cookie = signIn.headers
+  .getSetCookie()
+  .map((value) => value.split(';')[0])
+  .join('; ')
 const tokenResponse = await fetch(`${site}/api/auth/convex/token`, { headers: { cookie, origin: site } })
 const { token } = (await tokenResponse.json()) as { token: string }
 const client = new ConvexHttpClient(convexUrl)
 client.setAuth(token)
 step('Signed in')
 
-const identityFile = process.env.E2E_IDENTITY_FILE ?? new URL('../../../.data/e2e-identity.json', import.meta.url).pathname
+const identityFile =
+  process.env.E2E_IDENTITY_FILE ?? new URL('../../../.data/e2e-identity.json', import.meta.url).pathname
 const me = await client.query(api.members.me, {})
 if (!me) throw new Error('Not a member')
 let userIdentity: KeyPair
@@ -62,15 +82,19 @@ if (me.identityKid) {
   if (!existsSync(identityFile)) throw new Error(`The account has an identity key but ${identityFile} doesn't hold it`)
   const saved = JSON.parse(readFileSync(identityFile, 'utf8')) as { publicKey: string; privateKey: string }
   userIdentity = { publicKey: fromBase64Url(saved.publicKey), privateKey: fromBase64Url(saved.privateKey) }
-  if (keyId(userIdentity.publicKey) !== me.identityKid) throw new Error(`${identityFile} isn't this account's identity key`)
+  if (keyId(userIdentity.publicKey) !== me.identityKid)
+    throw new Error(`${identityFile} isn't this account's identity key`)
   step('Identity key reused')
 } else {
   userIdentity = generateKeyPair()
-  await client.mutation(api.members.setIdentityKey, { publicKey: toBase64Url(userIdentity.publicKey) })
+  await client.mutation(api.keys.setup, makeKeySetup(userIdentity.privateKey, password, me.userId).args)
   mkdirSync(dirname(identityFile), { recursive: true })
   writeFileSync(
     identityFile,
-    JSON.stringify({ publicKey: toBase64Url(userIdentity.publicKey), privateKey: toBase64Url(userIdentity.privateKey) }),
+    JSON.stringify({
+      publicKey: toBase64Url(userIdentity.publicKey),
+      privateKey: toBase64Url(userIdentity.privateKey),
+    }),
     { mode: 0o600 },
   )
   step('Identity key set')
@@ -101,7 +125,10 @@ await until('the login to complete', async () => {
   if (session?.state === 'error') throw new Error(`Login failed: ${session.step?.error}`)
   return session?.state === 'complete'
 })
-const loginId = await until('the login ID', async () => (await client.query(api.logins.session, { loginSessionId }))?.loginId)
+const loginId = await until(
+  'the login ID',
+  async () => (await client.query(api.logins.session, { loginSessionId }))?.loginId,
+)
 await until('the account to connect', async () => {
   const accounts = await client.query(api.logins.accounts, {})
   return accounts.find((account) => account.loginId === loginId && account.state === 'CONNECTED')
@@ -113,7 +140,13 @@ const secretText = `hello from alice ${Date.now()}`
 const incoming = await fetch(`${fakeControl}/fake/incoming`, {
   method: 'POST',
   headers: { authorization: `Bearer ${internalToken}`, 'content-type': 'application/json' },
-  body: JSON.stringify({ loginId: loginUser, chatId: 'chat-alice', senderId: 'alice', messageId: 'm1', text: secretText }),
+  body: JSON.stringify({
+    loginId: loginUser,
+    chatId: 'chat-alice',
+    senderId: 'alice',
+    messageId: 'm1',
+    text: secretText,
+  }),
 })
 if (incoming.status !== 202) throw new Error(`Fake incoming failed: ${incoming.status}`)
 // This run's chat: on this run's login.
@@ -122,7 +155,10 @@ const inbox = async () => (await client.query(api.chats.list, { paginationOpts: 
 const findChat = async () => (await inbox()).find((c) => c.network === 'fake' && c.loginId === loginId)
 const chat = await until('the chat to appear', findChat)
 const received = await until('the message to arrive', async () => {
-  const page = await client.query(api.messages.list, { chatId: chat._id, paginationOpts: { numItems: 10, cursor: null } })
+  const page = await client.query(api.messages.list, {
+    chatId: chat._id,
+    paginationOpts: { numItems: 10, cursor: null },
+  })
   return page.page.find((message) => 'ghostId' in message.sender)
 })
 const opened = openJson<{ body: string }>(received.sealed!, userIdentity, {
@@ -146,7 +182,10 @@ await client.mutation(api.messages.send, {
   copy: sealJson(reply, [userIdentity], { kind: 'message', ownerUserId: me.userId, objectId: clientMessageId }),
 })
 const echoed = await until('the send to be echoed', async () => {
-  const page = await client.query(api.messages.list, { chatId: chat._id, paginationOpts: { numItems: 10, cursor: null } })
+  const page = await client.query(api.messages.list, {
+    chatId: chat._id,
+    paginationOpts: { numItems: 10, cursor: null },
+  })
   const mine = page.page.find((message) => message.clientMessageId === clientMessageId)
   return mine && !mine.eventId.startsWith('pending:') && mine.delivery === 'sent' ? mine : null
 })
