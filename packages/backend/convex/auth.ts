@@ -107,10 +107,11 @@ const STRICT_LIMIT = { window: 60, max: 10 }
 /** Per client address, on every other auth route. */
 const DEFAULT_LIMIT = { window: 60, max: 300 }
 /**
- * Per account, by email, on password sign-in and on sign-up, whatever the address. It
- * refills at three times the strict limit, so keeping someone's account refused takes
- * requests from more than three addresses, while guessing at it stays bounded even from
- * many. A passkey sign-in isn't counted here, so it still works for someone kept out this way.
+ * Per account, by email, on password sign-in and on sign-up, whatever the address. It refills
+ * at 30 a minute, three times the strict limit per address, so guessing at an account stays
+ * bounded even from many addresses. The cost: requests from three or more addresses together
+ * can take each token as it refills, and a real sign-in may then lose the race for it. A
+ * passkey sign-in isn't counted here, so it still works for someone kept out this way.
  */
 const ACCOUNT_LIMIT = { window: 60, max: 30 }
 
@@ -133,7 +134,7 @@ const ipOptions = { advanced: { ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER
  * limit applies.
  */
 const perClient = (rule: { window: number; max: number }) => (request: Request) =>
-  request.headers.has(CLIENT_IP_HEADER) && getIP(request, ipOptions) ? rule : false
+  request.headers.has(CLIENT_IP_HEADER) && getIP(request, ipOptions) && isRouted(request) ? rule : false
 
 /** Where Better Auth serves its routes: its default, which `registerRoutes` uses too. */
 const AUTH_BASE_PATH = '/api/auth'
@@ -142,7 +143,7 @@ const AUTH_BASE_PATH = '/api/auth'
  * Better Auth's routes, as patterns (a `:name` segment matches any one segment), filled in by
  * `createAuth`. Until then every path counts as one.
  */
-let authRoutes: { template: string; pattern: RegExp }[] | null = null
+let authRoutes: { template: string; pattern: RegExp; methods: string[] | null }[] | null = null
 
 /** The route `path` is a request to, as Better Auth declares it (`/callback/:id`), or null. */
 function authRouteOf(path: string) {
@@ -150,13 +151,49 @@ function authRouteOf(path: string) {
   return authRoutes.find((route) => route.pattern.test(path))?.template ?? null
 }
 
-function routePattern(path: string) {
+export function routePattern(path: string) {
   const escaped = path
     .split('/')
-    .map((segment) => (segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .map((segment) =>
+      // As better-call's router: `:name` and `*` are one segment, `**` any number of them.
+      segment === '**'
+        ? '.*'
+        : segment.startsWith(':') || segment === '*'
+          ? '[^/]+'
+          : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    )
     .join('/')
   return new RegExp(`^${escaped}$`)
 }
+
+/**
+ * Whether Better Auth would serve `request`: its exact path (a trailing slash is turned away)
+ * with a method the route takes. Better Auth counts a request before it looks, so one it then
+ * answers 404 would otherwise use up the route's bucket.
+ */
+function isRouted(request: Request) {
+  if (!authRoutes) return true
+  const path = routedPath(request.url, authBase ?? authBaseUrl())
+  if (path === null) return false
+  // As better-call's router: an endpoint without a method takes every one; otherwise only those
+  // it names (`'*'` among them only as itself).
+  return authRoutes.some(
+    (route) => route.pattern.test(path) && (route.methods === null || route.methods.includes(request.method)),
+  )
+}
+
+/**
+ * The path of `url` under Better Auth's base, exactly as its router sees it (a trailing slash
+ * kept, so it matches nothing), or null if it isn't under the base.
+ */
+export function routedPath(url: string, baseURL: string) {
+  const base = new URL(baseURL).pathname.replace(/\/+$/, '')
+  const raw = new URL(url).pathname
+  return raw.startsWith(`${base}/`) ? raw.slice(base.length) : null
+}
+
+/** Better Auth's own base URL, as its context has it, set on the first request. */
+let authBase: string | null = null
 
 /** Better Auth's base URL, however `SITE_URL` ends. */
 export function authBaseUrl(site = siteUrl) {
@@ -229,7 +266,7 @@ const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
     id: 'trioditis-account-rate-limit',
     onRequest: async (request, auth) => {
       const path = authPath(request, auth.baseURL)
-      if (!ACCOUNT_PATHS.includes(path) || !('runMutation' in ctx)) return
+      if (!ACCOUNT_PATHS.includes(path) || !isRouted(request) || !('runMutation' in ctx)) return
       // Better Auth also takes these as forms, which this couldn't count: the app sends JSON,
       // so anything else is refused rather than let past the limit.
       if (!isJson(request)) {
@@ -277,10 +314,9 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       // rules for sign-in and sign-up.
       customRules: {
         ...Object.fromEntries(STRICT_PATHS.map((path) => [path, perClient(STRICT_LIMIT)])),
-        // Only Better Auth's own routes: a request to any other path would otherwise leave a
-        // bucket behind for each path made up.
-        '/**': (request: Request) =>
-          authRouteOf(authPath(request, authBaseUrl())) !== null ? perClient(DEFAULT_LIMIT)(request) : false,
+        // Only requests Better Auth serves (`perClient` checks): a request to any other path
+        // would otherwise leave a bucket behind for each path made up.
+        '/**': perClient(DEFAULT_LIMIT),
       },
       customStorage: {
         consume: async (key, rule) => {
@@ -386,11 +422,26 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
 export const createAuth = (ctx: GenericCtx<DataModel>) => {
   const auth = betterAuth(createAuthOptions(ctx))
   // Only routes served over HTTP: Better Auth leaves out those marked server-only.
-  type Endpoint = { path?: unknown; options?: { metadata?: { SERVER_ONLY?: boolean } } }
+  type Endpoint = {
+    path?: unknown
+    options?: { method?: string | string[]; metadata?: { SERVER_ONLY?: boolean } }
+  }
   authRoutes ??= Object.values(auth.api as Record<string, Endpoint>)
     .filter((endpoint) => typeof endpoint.path === 'string' && !endpoint.options?.metadata?.SERVER_ONLY)
-    .map((endpoint) => ({ template: endpoint.path as string, pattern: routePattern(endpoint.path as string) }))
-  return { ...auth, handler: async (request: Request) => withRetryAfter(await auth.handler(request)) }
+    .map((endpoint) => ({
+      template: endpoint.path as string,
+      pattern: routePattern(endpoint.path as string),
+      methods: endpoint.options?.method === undefined ? null : [endpoint.options.method].flat(),
+    }))
+  return {
+    ...auth,
+    handler: async (request: Request) => {
+      // The base Better Auth routes under, from its own context, so the limits match the router
+      // whatever path SITE_URL has.
+      authBase ??= (await auth.$context).baseURL
+      return withRetryAfter(await auth.handler(request))
+    },
+  }
 }
 
 /**
