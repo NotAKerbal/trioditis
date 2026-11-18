@@ -1,0 +1,39 @@
+# The only service an install publishes. One origin serves the web app, Better Auth and the
+# MCP server (Convex's HTTP actions), and the Convex sync API, so auth cookies are
+# first-party. See docs/deploy.md, Routing.
+{
+	admin off
+	{$CADDY_GLOBAL_OPTIONS}
+}
+
+{$TRIODITIS_SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# The Convex client API and its websocket, under a prefix the client keeps
+	# (http://host/convex → ws://host/convex/api/<version>/sync).
+	handle_path /convex/* {
+		reverse_proxy backend:3210
+	}
+
+	# Convex HTTP actions: Better Auth, and the MCP server with its OAuth discovery.
+	@site path /api/auth/* /mcp /mcp/* /.well-known/oauth-*
+	handle @site {
+		reverse_proxy backend:3211
+	}
+
+	# Where the web app finds its backend, written by install.sh. Never cached, so a changed
+	# address takes effect on the next load.
+	handle /config.json {
+		header Cache-Control "no-store"
+		root * /srv/runtime
+		file_server
+	}
+
+	handle {
+		root * /srv/web
+		@html path / /index.html
+		header @html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
