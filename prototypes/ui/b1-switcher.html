@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crossroads Switcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="crossroads-core.css">
+<style>
+  .top1 { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .switch { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 6px; margin-left: 2px; border-radius: 9px; font-size: 18px; font-weight: 700; letter-spacing: -.015em; }
+  .switch:hover { background: var(--soft); }
+  .switch .vi { color: var(--accent); }
+  .switch .n { font-size: 12.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 10px; padding: 1px 7px; }
+  .switch .dn { color: var(--faint); }
+  .top1 .sp { flex: 1; }
+  .menu.mega { width: 520px; padding: 8px; }
+  .mega .cols { display: grid; grid-template-columns: 1fr 1.15fr; gap: 6px; }
+  .mega .col + .col { border-left: 1px solid var(--line); padding-left: 6px; }
+  .mega .foot { display: flex; gap: 4px; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+  .mega .foot .mi { width: auto; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="backbar"><a class="back" href="index.html">← All prototypes</a></div>
+<div id="wrap"><div id="stage" tabindex="0">
+  <div class="main">
+    <section class="list">
+      <div class="lh">
+        <div class="top1">
+          <span class="logo">T</span>
+          <button class="switch" id="switch" data-menu="switch"></button>
+          <span class="sp"></span>
+          <button class="iconbtn" data-act="new" title="New message"></button>
+          <button class="meav" data-menu="account" data-align="right" title="Account">IC</button>
+        </div>
+        <label class="search" id="searchbox"><input id="q" placeholder="Search chats and people" autocomplete="off"></label>
+        <div id="fchips"></div>
+      </div>
+      <div class="rows" id="rows"></div>
+    </section>
+    <section class="chat" id="chat"></section>
+    <aside class="det" id="det"></aside>
+  </div>
+  <div class="via-menu" id="viamenu" hidden></div>
+  <div class="menu mega" id="menu" hidden></div>
+  <div class="toast" id="toast" hidden></div>
+</div></div>
+
+<script src="shared.js"></script>
+<script>
+// Iteration 1: no sidebar. The list title is a switcher holding views, networks and labels.
+const NAV = {
+  healthBanner: true,
+  render() {
+    const v = viewOf(filt.view);
+    const n = viewCount(v);
+    $('switch').innerHTML = `<span class="vi">${icon(v.ic, 18)}</span>${v.name}${n ? `<span class="n">${n}</span>` : ''}<span class="dn">${icon('down', 16)}</span>`;
+    $('fchips').innerHTML = activeFiltersHTML();
+  },
+  menus: {
+    switch() {
+      const views = VIEWS.map((v) => `<button class="mi${filt.view === v.id ? ' on' : ''}" data-view="${v.id}">${icon(v.ic, 16)}${v.name}<span class="c">${viewCount(v) || ''}</span></button>`).join('');
+      const nets = NET_KEYS.map((k) => `<button class="mi${filt.net === k ? ' on' : ''}" data-net="${k}">${netBadge(k, 16)}${NETS[k].name}${maturityTag(k)}${NETS[k].health ? '<span class="warn">offline</span>' : ''}<span class="c">${netCount(k) || ''}</span></button>`).join('');
+      const labels = Object.keys(LABELS).map((l) => `<button class="mi${filt.label === l ? ' on' : ''}" data-label="${l}"><span class="dot" style="background:${LABELS[l]}"></span>${l}<span class="c">${labelCount(l) || ''}</span></button>`).join('');
+      return `<div class="cols"><div class="col"><div class="mh">Show</div>${views}</div>
+        <div class="col"><div class="mh">Only this network</div>${nets}<div class="mh">Only this label</div>${labels}</div></div>
+        <div class="foot"><button class="mi" data-act="connect">${icon('plus', 15)} Connect a network</button><button class="mi" data-act="labels">${icon('tag', 15)} Edit labels</button></div>`;
+    },
+  },
+};
+</script>
+<script src="crossroads-core.js"></script>
+<script>
+document.querySelector('[data-act="new"]').innerHTML = icon('pencil', 17);
+</script>
+</body>
+</html>

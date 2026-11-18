@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crossroads Tabs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="crossroads-core.css">
+<style>
+  .lh { padding-bottom: 0; border-bottom: 1px solid var(--line); }
+  .top1 { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .top1 b { font-weight: 700; font-size: 15px; letter-spacing: -.01em; }
+  .top1 .sp { flex: 1; }
+  .tabs { display: flex; gap: 0; margin: 12px -6px 0; }
+  .tab { position: relative; height: 34px; padding: 0 7px; color: var(--dim); font-weight: 500; font-size: 13.5px; display: flex; align-items: center; gap: 6px; border-radius: 8px 8px 0 0; }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); font-weight: 600; }
+  .tab.on::after { content: ''; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; border-radius: 2px; background: var(--accent); }
+  .tab .n { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .tab.on .n { color: var(--accent); }
+  .tab.more { margin-left: auto; color: var(--faint); padding: 0 6px; }
+  .strip-wrap { position: relative; margin: 0 -16px; }
+  .strip-wrap::after { content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 28px; background: linear-gradient(90deg, transparent, #fff); pointer-events: none; }
+  .strip { display: flex; gap: 6px; overflow-x: auto; padding: 10px 16px 12px; scrollbar-width: none; }
+  .strip::-webkit-scrollbar { display: none; }
+  .nc { position: relative; flex: none; height: 28px; padding: 0 10px 0 6px; border-radius: 14px; border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--dim); }
+  .nc:hover { border-color: var(--line2); color: var(--text); }
+  .nc.on { background: var(--text); border-color: var(--text); color: #fff; }
+  .nc.lb { padding-left: 10px; }
+  .nc .lbdot { width: 8px; height: 8px; border-radius: 50%; }
+  .nc .c { font-size: 11px; color: var(--accent); font-weight: 700; }
+  .nc.on .c { color: #7dd3fc; }
+  .nc .wd { position: absolute; top: -1px; right: -1px; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px #fff; }
+  .strip .div { flex: none; width: 1px; margin: 4px 2px; background: var(--line); }
+  .rows { padding-top: 6px; }
+</style>
+</head>
+<body>
+<div class="backbar"><a class="back" href="index.html">← All prototypes</a></div>
+<div id="wrap"><div id="stage" tabindex="0">
+  <div class="main">
+    <section class="list">
+      <div class="lh">
+        <div class="top1">
+          <span class="logo">T</span><b>Trioditis</b>
+          <span class="sp"></span>
+          <button class="iconbtn" data-act="new" title="New message"></button>
+          <button class="meav" data-menu="account" data-align="right" title="Account">IC</button>
+        </div>
+        <label class="search" id="searchbox"><input id="q" placeholder="Search chats and people" autocomplete="off"></label>
+        <nav class="tabs" id="tabs"></nav>
+        <div class="strip-wrap"><div class="strip" id="strip"></div></div>
+      </div>
+      <div class="rows" id="rows"></div>
+    </section>
+    <section class="chat" id="chat"></section>
+    <aside class="det" id="det"></aside>
+  </div>
+  <div class="via-menu" id="viamenu" hidden></div>
+  <div class="menu" id="menu" hidden></div>
+  <div class="toast" id="toast" hidden></div>
+</div></div>
+
+<script src="shared.js"></script>
+<script>
+// Iteration 2: no sidebar. Views are tabs over the list; networks and labels are one chip strip.
+const TAB_IDS = ['inbox', 'unread', 'mentions', 'requests'];
+const NAV = {
+  healthBanner: true,
+  render() {
+    const extra = VIEWS.filter((v) => !TAB_IDS.includes(v.id));
+    const extraOn = extra.find((v) => v.id === filt.view);
+    $('tabs').innerHTML = TAB_IDS.map((id) => {
+      const v = viewOf(id);
+      const n = viewCount(v);
+      return `<button class="tab${filt.view === id ? ' on' : ''}" data-view="${id}">${v.name}${n ? `<span class="n">${n}</span>` : ''}</button>`;
+    }).join('') + `<button class="tab more${extraOn ? ' on' : ''}" data-menu="more" data-align="right" title="Pinned, Agents, Archived">${extraOn ? `${extraOn.name} ${icon('down', 14)}` : icon('more', 18)}</button>`;
+    const nets = NET_KEYS.map((k) => {
+      const n = netCount(k);
+      const tip = `${NETS[k].name}${NETS[k].health ? `: ${NETS[k].health}` : ''}${NETS[k].maturity === 'beta' || NETS[k].maturity === 'experimental' ? ` (${NETS[k].maturity})` : ''}`;
+      return `<button class="nc${filt.net === k ? ' on' : ''}" data-net="${k}" title="${tip}">${netBadge(k, 16)}${NETS[k].name.replace('Google Messages', 'SMS')}${n ? `<span class="c">${n}</span>` : ''}${NETS[k].health ? '<span class="wd"></span>' : ''}</button>`;
+    }).join('');
+    const labels = Object.keys(LABELS).map((l) => `<button class="nc lb${filt.label === l ? ' on' : ''}" data-label="${l}"><span class="lbdot" style="background:${LABELS[l]}"></span>${l}</button>`).join('');
+    const strip = $('strip');
+    const x = strip.scrollLeft;
+    strip.innerHTML = `${nets}<span class="div"></span>${labels}`;
+    strip.scrollLeft = x;
+  },
+  menus: {
+    more() {
+      return VIEWS.filter((v) => !TAB_IDS.includes(v.id)).map((v) => `<button class="mi${filt.view === v.id ? ' on' : ''}" data-view="${v.id}">${icon(v.ic, 16)}${v.name}<span class="c">${viewCount(v) || ''}</span></button>`).join('')
+        + `<div class="sep"></div><button class="mi" data-act="connect">${icon('plus', 16)} Connect a network</button>`;
+    },
+  },
+};
+</script>
+<script src="crossroads-core.js"></script>
+<script>
+document.querySelector('[data-act="new"]').innerHTML = icon('pencil', 17);
+// A vertical mouse wheel scrolls the chip strip sideways.
+$('strip').addEventListener('wheel', (e) => {
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { $('strip').scrollLeft += e.deltaY; e.preventDefault(); }
+}, { passive: false });
+</script>
+</body>
+</html>
