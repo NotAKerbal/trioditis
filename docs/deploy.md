@@ -57,7 +57,7 @@ leaves the install as it is, and an option changes only its own setting. See
 [Upgrade](#upgrade).
 
 `deploy/.env` is the only source of the install's settings and secrets: the installer and
-`deploy/trioditis` drop any exported variable of the same name (and Compose's own), so the
+`deploy/trioditis` drop any exported variable of the same name (and every `COMPOSE_*` one), so the
 running server always matches the file a backup saves. To change one, such as the setup
 token, edit `deploy/.env` and run the installer again; the new value replaces the saved one.
 
@@ -254,8 +254,9 @@ install's, and including the volume of a network you've dropped) and `secrets.en
 (`deploy/.env` without the server's private keys: see [The server's keys](#the-servers-keys)).
 The archive's last entry is a manifest of every volume with its number of
 entries and bytes. The backup stops the server, writes both files in a private directory
-beside the destination, publishes it with one rename that fails rather than replace anything
-at the name, and starts again what was running. So there's either a whole backup at the
+beside the destination, reserves the name with `mkdir` (which fails if anything is there, so
+it moves on to the next suffix), renames the private directory onto it in one step, checks
+both files are there, and starts again what was running. So there's either a whole backup at the
 name or none: an interrupted backup (Ctrl-C), even while the server is still stopping,
 leaves nothing behind, and if the server doesn't start again the backup counts as failed. The
 destination must be outside the checkout (symlinks resolved): image builds copy the checkout.
@@ -298,8 +299,10 @@ its own (`trioditis.restore.<nonce>.…`). Archives from before the manifest can
 this way. Keep backups encrypted: they contain the connector state above, and `secrets.env`
 holds every other secret the server has.
 
-Backup, restore and the installer take a lock in `deploy/`, so only one of them runs at a
-time for an install.
+Backup, restore, the installer, `create-admin`, `keys import`, and every `deploy/trioditis`
+Compose command that can start, stop or change services take a lock in `deploy/`, so only
+one of them runs at a time for an install. Only read-only commands (`ps`, `logs`, `config`,
+`top`, `images`, `ls`, `port`, `version`, `events`) run beside them.
 
 ### The server's keys
 
@@ -363,14 +366,15 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
 `docker` and needs none of that.
 
-| Test                  | What it checks                                                                                                                                                                                                                            |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back                                                                   |
-| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                      |
-| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a taken name moves the backup to the next one; Ctrl-C while it streams leaves nothing behind |
-| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                    |
-| `env-source.sh`       | Exported variables don't override `deploy/.env` for Compose                                                                                                                                                                               |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one |
+| Test                  | What it checks                                                                                                                                                                                                                                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back                                                                                                                                                 |
+| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                                                                                                    |
+| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind |
+| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                                                                                                  |
+| `lock.sh`             | While the lock is held, `start`, `up`, `create-admin` and `backup` are refused and `ps` and `config` run                                                                                                                                                                                                                |
+| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                               |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                               |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).

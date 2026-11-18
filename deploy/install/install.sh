@@ -400,15 +400,16 @@ keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 # Exported COMPOSE_* variables would override deploy/.env (and name the images), so they're
 # dropped: this install's settings are the ones it saved.
 # deploy/.env is the only source of the install's settings and secrets: every variable it
-# sets, every one the compose files read, and Compose's own are dropped from the environment
-# Compose runs in, since an exported one would override the file (and the running stack would
-# no longer match the .env a backup saves).
+# sets, every one the compose files read, and every COMPOSE_* one (found in the environment,
+# since Compose adds new ones) are dropped from the environment Compose runs in, since an
+# exported one would override the file (and the running stack would no longer match the .env
+# a backup saves).
 compose() {
   local name scrub=()
   for name in $( {
     printf '%s\n' "$env_text" | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'
     grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$here"/compose/*.yml | cut -c3-
-    printf '%s\n' COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+    compgen -e | grep '^COMPOSE_' || true
   } | sort -u); do
     scrub+=(-u "$name")
   done

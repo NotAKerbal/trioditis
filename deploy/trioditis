@@ -22,7 +22,8 @@ fi
 project=$(grep -E '^COMPOSE_PROJECT_NAME=' "$env_file" | tail -1 | cut -d= -f2-)
 project=${project:-trioditis}
 # deploy/.env is the only source of the install's settings and secrets, so every variable it
-# sets, every one the compose files read, and Compose's own are dropped here: an exported one
+# sets, every one the compose files read, and every COMPOSE_* one (Compose's own settings,
+# found in the environment, since new ones appear) are dropped here: an exported one
 # would override the file, and the running stack would no longer match the .env a backup
 # saves. Compose reads COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs,
 # so it runs in the compose directory; this script stays where it was called, so paths given
@@ -30,7 +31,7 @@ project=${project:-trioditis}
 for name in $( {
   sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file"
   grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$here"/compose/*.yml | cut -c3-
-  printf '%s\n' COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+  env | sed -n 's/^\(COMPOSE_[A-Za-z0-9_]*\)=.*/\1/p'
 } | sort -u); do
   unset "$name"
 done
@@ -160,16 +161,24 @@ case "${1:-}" in
     grep -vE "^($private_keys)=" "$env_file" >"$work/secrets.env" || read_status=$?
     [ "$read_status" -le 1 ] || { echo "Couldn't read deploy/.env." >&2; exit 1; }
 
+    # The name is reserved with mkdir, which fails if anything (a file, a directory, a link) is
+    # there; then the private directory is renamed onto that empty one in one step, so the
+    # pair of files appears whole or not at all. No exit status is taken on trust: after the
+    # rename, the private directory must be gone and the name must hold both files.
     stamp="$dir/$project-$(date +%Y%m%d-%H%M%S)"
     n=1
     name=$stamp
-    # `mv -T --no-clobber` renames with RENAME_NOREPLACE: it fails if anything is at the name.
-    until mv -T --no-clobber "$work" "$name" 2>/dev/null; do
-      [ -e "$name" ] || [ -L "$name" ] || { echo "Couldn't publish the backup in $dir." >&2; exit 1; }
+    until mkdir "$name" 2>/dev/null; do
+      [ -e "$name" ] || [ -L "$name" ] || { echo "Couldn't create the backup in $dir." >&2; exit 1; }
       n=$((n + 1))
       [ "$n" -le 100 ] || { echo "No free name for the backup in $dir." >&2; exit 1; }
       name="$stamp-$n"
     done
+    if ! mv -T "$work" "$name" 2>/dev/null || [ -e "$work" ] || [ ! -f "$name/archive.tgz" ] || [ ! -f "$name/secrets.env" ]; then
+      rmdir "$name" 2>/dev/null || true
+      echo "Couldn't publish the backup in $dir." >&2
+      exit 1
+    fi
     work=''
     published=$name
     ;;
@@ -395,7 +404,9 @@ $name=$value"
       tmp=$(mktemp "$dir/.trioditis-keys-XXXXXX")
       trap 'rm -f "$tmp"' EXIT
       printf '%s\n' "$text" >"$tmp"
-      if ! mv -T --no-clobber "$tmp" "$file" 2>/dev/null; then
+      # A hard link, which fails if anything is at the name (and doesn't depend on mv's
+      # no-clobber behaviour, which differs between versions).
+      if ! ln -T "$tmp" "$file" 2>/dev/null; then
         if [ -e "$file" ] || [ -L "$file" ]; then echo "$file already exists and was left as it is; pick another name." >&2; else echo "Couldn't write $file." >&2; fi
         exit 1
       fi
@@ -430,6 +441,7 @@ ${pair}_PRIVATE_KEY=$private"
     ;;
   create-admin)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis create-admin <email>" >&2; exit 2; }
+    take_lock
     [ -t 0 ] || { echo "create-admin asks for the password, so run it in a terminal." >&2; exit 2; }
     # Asked here without echo (back on however it ends) and handed to the container by name,
     # so it's never an argument.
@@ -447,6 +459,16 @@ ${pair}_PRIVATE_KEY=$private"
       deploy/scripts/create-admin.ts "$2"
     ;;
   *)
+    # Only commands that change nothing run beside a backup, restore or install; anything else
+    # (start, stop, up, down, run, exec…) takes the lock first and holds it while it runs. The
+    # command is the first argument that isn't an option, so an unknown shape takes the lock.
+    for arg in "$@"; do
+      case "$arg" in -*) ;; *) break ;; esac
+    done
+    case "${arg:-}" in
+      ps | logs | config | top | images | ls | port | version | events) ;;
+      *) take_lock ;;
+    esac
     cd "$here/compose"
     exec docker compose --env-file "$env_file" -p "$project" "$@"
     ;;

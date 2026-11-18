@@ -39,7 +39,7 @@ case "$1" in
   compose)
     [ "${2:-}" != version ] || exit 0
     # What Compose would have been handed from the environment, then stop the install.
-    echo "TRIODITIS_SETUP_TOKEN=${TRIODITIS_SETUP_TOKEN-unset} COMPOSE_FILE=${COMPOSE_FILE-unset}" >>"$STUB_LOG"
+    echo "TRIODITIS_SETUP_TOKEN=${TRIODITIS_SETUP_TOKEN-unset} COMPOSE_FILE=${COMPOSE_FILE-unset} COMPOSE_PATH_SEPARATOR=${COMPOSE_PATH_SEPARATOR-unset}" >>"$STUB_LOG"
     echo "stub: stopping at docker compose $*" >&2
     exit 1
     ;;
@@ -68,14 +68,14 @@ printf 'not yours\n' >"$work/victim"
 chmod 600 "$work/victim"
 ln -s "$work/victim" "$work/checkout/deploy/runtime/config.json"
 rm -f "$work/compose.log"
-TRIODITIS_SETUP_TOKEN=exported COMPOSE_FILE=exported.yml install || true
+TRIODITIS_SETUP_TOKEN=exported COMPOSE_FILE=exported.yml COMPOSE_PATH_SEPARATOR=, install || true
 [ "$(cat "$work/victim")" = "not yours" ] && [ "$(stat -c %a "$work/victim")" = 600 ] &&
   check ok "the symlink's target is untouched" || check fail "the symlink's target is untouched"
 config="$work/checkout/deploy/runtime/config.json"
 [ -f "$config" ] && [ ! -L "$config" ] && [ "$(stat -c %a "$config")" = 644 ] && grep -q '"convexUrl": "http://127.0.0.1:18999/convex"' "$config" &&
   check ok "config.json is a new 0644 file in its place" || check fail "config.json is a new 0644 file in its place"
 [ "$(stat -c %a "$work/checkout/deploy/.env")" = 600 ] && check ok ".env is 0600" || check fail ".env is 0600"
-[ -s "$work/compose.log" ] && ! grep -qv 'TRIODITIS_SETUP_TOKEN=unset COMPOSE_FILE=unset' "$work/compose.log" &&
+[ -s "$work/compose.log" ] && ! grep -qv 'TRIODITIS_SETUP_TOKEN=unset COMPOSE_FILE=unset COMPOSE_PATH_SEPARATOR=unset' "$work/compose.log" &&
   check ok "Compose gets no exported value" || check fail "Compose gets no exported value ($(cat "$work/compose.log" 2>/dev/null))"
 
 # Half the bridge key pair, as after restoring a backup's secrets.env.
