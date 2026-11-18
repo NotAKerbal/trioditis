@@ -1,6 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server'
-import { currentSession } from './auth'
+import { currentSession, requireSessionIfGiven } from './auth'
 import { requireAdmin } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
@@ -161,9 +161,10 @@ export const me = query({
  * token's hash is stored.
  */
 export const invite = mutation({
-  args: { email: v.string(), role },
+  args: { email: v.string(), role, sessionId: v.optional(v.string()) },
   returns: v.object({ invitationId: v.id('invitations'), token: v.string() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const admin = await requireAdmin(ctx)
     // A demo deployment (previews, nightly) has a shared, published login; nobody can be
     // invited into it, so it can never hold a real person's account.

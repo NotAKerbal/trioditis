@@ -673,11 +673,21 @@ describe('key writes bound to a session', () => {
         sessionId: alicePage,
       }),
     ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.preferences.set, { sidebarLayout: 'simple', sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+    // An admin's page switched to another admin.
+    const admin = await signIn(t, 'admin', 'admin')
+    await expect(
+      admin.mutation(api.members.invite, { email: 'x@example.com', role: 'member', sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
 
     expect(await rows(t, 'bob')).toEqual(before)
     expect((await rows(t, 'alice')).challenges).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('loginSessions').collect())).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('labels').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('preferences').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('invitations').collect())).toEqual([])
   })
 
   it('starts a network login with the page’s session named', async () => {

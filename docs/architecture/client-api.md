@@ -98,7 +98,7 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
 | Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
 | Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                   |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
 | Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
@@ -246,13 +246,15 @@ characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 ### Key writes are bound to the page's session
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
-`account.changePassword`, `logins.start`, `labels.create` and `demo.seedForMe` take an
-optional `sessionId`: pass the `sessionId` from
+`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`preferences.set` and `members.invite` take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
 signing in as someone else can switch the token the page's calls run as while the page still
 shows the first account; a key or backup meant for one account would then be written to the
 other, which can never open it, or a network connected to the other account, whose key then
-seals what it brings in, or a label or demo data sealed to the wrong key. With `sessionId`, the call is refused before it writes
+seals what it brings in, or a label or demo data sealed to the wrong key, or a setting or an
+invitation made as the wrong person. The others act only on an ID the page already holds,
+which each checks belongs to the caller, so a switched page finds nothing to change. With `sessionId`, the call is refused before it writes
 anything unless it runs as that same Better Auth session, with `ConvexError` data
 `{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
 A session that has ended is refused the same way. The actions, `account.changePassword` and
@@ -310,10 +312,10 @@ password settings.` (a defensive check: the arguments of `keys.setup` and
 
 ## Preferences
 
-| Function              | Arguments            | Returns                                                                                              |
-| --------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
-| `api.preferences.get` | none                 | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
-| `api.preferences.set` | `{ sidebarLayout? }` | `null`. Changes only what it's given                                                                 |
+| Function              | Arguments                        | Returns                                                                                              |
+| --------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `api.preferences.get` | none                             | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
+| `api.preferences.set` | `{ sidebarLayout?, sessionId? }` | `null`. Changes only what it's given                                                                 |
 
 `DEFAULT_PREFERENCES` and the `Preferences` type are in `@trioditis/core`.
 
