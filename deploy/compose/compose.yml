@@ -181,6 +181,18 @@ services:
       interval: 10s
       timeout: 3s
 
+  # Only behind a proxy on this machine (install.sh --public-url, e.g. Tailscale Serve): lets
+  # the backend reach the public address, which that proxy only offers to the tailnet.
+  # Listens on Docker's host address, where the backend's extra_hosts entry points.
+  hairpin:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: [hairpin]
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - TCP-LISTEN:${HAIRPIN_PORT:-443},bind=${HAIRPIN_BIND:-172.17.0.1},fork,reuseaddr
+      - TCP:${HAIRPIN_TARGET:-127.0.0.1}:${HAIRPIN_PORT:-443}
+
 volumes:
   postgres:
   convex:

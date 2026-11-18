@@ -23,6 +23,7 @@ domain=''
 networks=whatsapp
 bind=''
 proxy_url=unset
+hairpin=0
 e2e=0
 
 usage() {
@@ -134,6 +135,19 @@ if [ "$mode" = local ] && [ -n "$proxy_url" ]; then
   host=${host%%[:/]*}
   public_url=$proxy_url
   [ -n "$bind" ] || bind=127.0.0.1
+  # The backend fetches sign-in keys from the public address. When that's a proxy on this
+  # machine, such as Tailscale Serve, it listens only where people connect (the tailnet), not
+  # where containers do, so a sidecar on the host network forwards from Docker's host address.
+  proxy_port=${proxy_url#https://*:}
+  proxy_port=${proxy_port%%/*}
+  [ "$proxy_port" != "$proxy_url" ] || proxy_port=443
+  proxy_ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR == 1 {print $1}')
+  if [ -n "$proxy_ip" ] && ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$proxy_ip"; then
+    hairpin=1
+    set_var HAIRPIN_BIND "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
+    set_var HAIRPIN_PORT "$proxy_port"
+    set_var HAIRPIN_TARGET "$proxy_ip"
+  fi
   set_var CADDY_SITE_ADDRESS ':80'
   set_var CADDY_GLOBAL_OPTIONS 'auto_https off'
   set_var HTTP_BIND "$bind"
@@ -177,7 +191,9 @@ set_var INSTALL_MODE "$mode"
 set_var PUBLIC_HOST "$host"
 set_var PUBLIC_URL "$public_url"
 set_var COMPOSE_FILE "$compose_files"
-set_var COMPOSE_PROFILES "$networks"
+profiles=$networks
+[ "$hairpin" = 0 ] || profiles="$profiles,hairpin"
+set_var COMPOSE_PROFILES "$profiles"
 set_var TRIODITIS_NETWORKS "$networks"
 set_var BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
 
