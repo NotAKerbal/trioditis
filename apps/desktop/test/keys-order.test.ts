@@ -86,6 +86,8 @@ const server = vi.hoisted(() => {
     onRequest: async () => {},
     /** The server acts on /end-session, but its answer never reaches the browser. */
     loseResponse: false,
+    /** Runs on every session read. */
+    onRead: () => {},
     ended: [] as string[],
     signIn(userId: string) {
       const token = `token-${++n}`
@@ -99,6 +101,7 @@ const server = vi.hoisted(() => {
 vi.mock('../src/lib/auth-client.ts', () => ({
   authClient: {
     getSession: async () => {
+      server.onRead()
       if (!server.reachable) throw new TypeError('Failed to fetch')
       const mine = server.cookie ? server.sessions.get(server.cookie) : undefined
       return {
@@ -253,7 +256,7 @@ describe('signing out, as the key on this device sees it', () => {
   /** Signs in, as the gate opens (noting the session's token), and keeps a key here. */
   async function keptHere(userId: string) {
     const session = server.signIn(userId)
-    await rememberSession()
+    expect(await rememberSession(session.id)).toBe('noted')
     const keyPair = generateKeyPair()
     const kid = keyId(keyPair.publicKey)
     await storeIdentity(userId, kid, keyPair, await saveToken(userId), inSession(session.id))
@@ -310,14 +313,15 @@ describe('signing out, as the key on this device sees it', () => {
   it('says it can’t end a session it never learned the token of, while someone else is signed in', async () => {
     await keptHere('v16')
     server.signIn('someone-else')
-    expect(await signOut('v16', 'a-session-never-seen-here')).toMatch(/can’t end your session/)
+    expect(await signOut('v16', 'a-session-never-seen-here')).toMatch(/couldn’t end your session/)
     expect(server.ended).toEqual([])
     await expect(
       storeIdentity('v16', 'k', generateKeyPair(), await saveToken('v16'), inSession('a-session-never-seen-here')),
     ).rejects.toEqual(refusal('signingOut'))
-    // With no one signed in here, there's nothing to end from here: on to the sign-in page.
+    // With no one signed in here, it still can't tell whether that session ended: it says so.
     server.cookie = null
-    expect(await signOut('v16', 'a-session-never-seen-here')).toBeNull()
+    expect(await signOut('v16', 'a-session-never-seen-here')).toMatch(/couldn’t end your session/)
+    expect(server.ended).toEqual([])
   })
 
   it('never lets one sign-out undo another’s fence, across two sessions', async () => {
@@ -373,14 +377,33 @@ describe('signing out, as the key on this device sees it', () => {
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
   })
 
-  it('changes nothing here when the server can’t be reached to start with', async () => {
+  it('asks nothing of the server but to end the session, and says when that can’t be done', async () => {
     const kept = await keptHere('v6')
-    const token = await saveToken('v6')
+    let reads = 0
+    const read = server.onRead
+    server.onRead = () => void reads++
     server.reachable = false
-    expect(await signOut('v6', kept.session.id)).toMatch(/didn’t go through/)
-    expect((await loadIdentity('v6'))?.kid).toBe(kept.kid)
-    expect(await saveToken('v6')).toBe(token)
-    expect(server.ended).toEqual([])
+    try {
+      expect(await signOut('v6', kept.session.id)).toMatch(/didn’t go through/)
+    } finally {
+      server.onRead = read
+    }
+    // No session read, which could set or clear the cookie: only the one request to end it.
+    expect(reads).toBe(0)
+    expect(server.ended).toEqual([kept.session.token])
+    // Signing out stands here all the same: the key is gone, and none comes back for the session.
+    expect(await loadIdentity('v6')).toBeNull()
+    server.reachable = true
+    await expect(saveIn(otherTab, 'v6', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+    expect(await signOut('v6', kept.session.id)).toBeNull()
+  })
+
+  it('notes only the session the page opened with', async () => {
+    const opened = server.signIn('v17')
+    server.signIn('someone-else')
+    expect(await rememberSession(opened.id)).toBe('changed')
+    server.reachable = false
+    expect(await rememberSession(opened.id)).toBe('unknown')
   })
 
   it('tries forgetting again when storage fails once, so no save slips in', async () => {
@@ -432,7 +455,7 @@ describe('signing out, as the key on this device sees it', () => {
     expect((await loadIdentity('v14'))?.kid).toBe(first.kid)
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
     const again = server.signIn('v14')
-    await rememberSession()
+    await rememberSession(again.id)
     const unsure = () => Promise.reject(new Error('offline'))
     expect(await signOut('v14', again.id, { onlyKid: null, backedUpKid: unsure })).toBeNull()
     expect((await loadIdentity('v14'))?.kid).toBe(first.kid)

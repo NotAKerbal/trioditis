@@ -3,6 +3,8 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+// Every tab follows sign-ins and sign-outs in the others (lib/account-tabs.ts).
+import './lib/account-tabs.ts'
 import { authClient } from './lib/auth-client.ts'
 import { convex, queryClient } from './lib/convex.ts'
 import { applyTheme } from './lib/prefs.ts'

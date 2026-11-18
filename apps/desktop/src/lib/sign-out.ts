@@ -1,3 +1,4 @@
+import { announceAccountChange } from './account-tabs.ts'
 import { authClient } from './auth-client.ts'
 import { forgetIdentity } from './keys.ts'
 
@@ -12,9 +13,9 @@ export const SIGN_OUT_FAILED =
 export const SIGN_OUT_UNSTORED =
   'You’re still signed in: this device couldn’t record the sign-out, so it wasn’t sent. Check that this site may store data, then try again.'
 
-/** What to say when this page never learned the session's token, so it can't end it. */
+/** What to say when this page never learned its session's token, so it can't end it. */
 export const SIGN_OUT_SWITCHED =
-  'Someone else has signed in on this device since, in another tab, so this page can’t end your session. Sign in as yourself again, then sign out, to end it.'
+  'This page couldn’t end your session: who’s signed in on this device may have changed in another tab. Reload the page, then sign out again.'
 
 /** How long a call to the auth server may take before it's given up on. */
 export const AUTH_WAIT_MS = 10_000
@@ -36,17 +37,28 @@ async function signedIn(): Promise<SignedIn | null> {
   })
   if (error) throw new Error(error.message ?? 'the server couldn’t say who’s signed in')
   if (!data) return null
-  tokens.set(data.session.id, data.session.token)
   return { userId: data.user.id, id: data.session.id, token: data.session.token }
 }
 
-// The token of every session this page has seen, by ID, to end a session the gate was opened
-// for even once the cookie holds another (another tab signed in since). Memory only.
+// The token of the session this page opened with (members.me names it), to end exactly that
+// session later. Memory only.
 const tokens = new Map<string, string>()
 
-/** Notes the token of the session this browser is in, for signOut to end it later. */
-export function rememberSession(): Promise<unknown> {
-  return signedIn().catch(() => undefined)
+/**
+ * Notes the token of `sessionId`, the session this page opened with, if it's the one this
+ * browser is in: 'noted'. 'changed' if the browser is in another by now (the page should
+ * reload), 'unknown' if the server couldn't say.
+ */
+export async function rememberSession(sessionId: string): Promise<'noted' | 'changed' | 'unknown'> {
+  if (tokens.has(sessionId)) return 'noted'
+  try {
+    const now = await signedIn()
+    if (now?.id !== sessionId) return 'changed'
+    tokens.set(sessionId, now.token)
+    return 'noted'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** The session this tab is signed in to as `userId` (see signedIn); null if not signed in as them. */
@@ -99,13 +111,15 @@ interface SignOutOptions {
 }
 
 /**
- * Signs `userId` out of `sessionId`, the session the screen is for: that one, and no other,
+ * Signs `userId` out of `sessionId`, the session the page opened with: that one, and no other,
  * whatever session this browser's cookie holds by now.
  *
  * It first forgets this device's copy of their key (or only key `onlyKid`; with null, none,
  * though saves under way anywhere are still stopped), noting the session it's ending: from then
  * on no tab keeps a key here for that session, whatever comes of this (lib/keys.ts). Only once
- * that's recorded does it end the session, by its token. Then it goes to the sign-in page.
+ * that's recorded does it end the session, by the token noted when the page opened
+ * (rememberSession), asking nothing else of the server: no read that could set or clear the
+ * cookie. Then every other tab reloads (lib/account-tabs.ts), and this one goes to sign in.
  *
  * Returns null when it went through; otherwise, what to tell the person, who can try again.
  */
@@ -114,13 +128,6 @@ export async function signOut(
   sessionId: string,
   { onlyKid, backedUpKid }: SignOutOptions = {},
 ): Promise<string | null> {
-  let now: SignedIn | null
-  try {
-    now = await signedIn()
-  } catch {
-    // Nothing is changed when the server can't be reached: signing out couldn't go through.
-    return SIGN_OUT_FAILED
-  }
   let unconfirmed = false
   try {
     await forgetFirmly(userId, { onlyKid, endingSession: sessionId })
@@ -138,12 +145,11 @@ export async function signOut(
       unconfirmed = true
     }
   }
-  const token = tokens.get(sessionId)
-  // Never seen here, and someone else's session is the cookie's now: it can't be ended from
-  // here. With no one signed in here, the sign-in page is where this tab belongs.
-  if (!token && now) return SIGN_OUT_SWITCHED
-  if (token && !(await endSession(token))) return SIGN_OUT_FAILED
+  // Not noted yet (signing out as the page opens): note it now, if it's still this browser's.
+  if ((await rememberSession(sessionId)) !== 'noted') return SIGN_OUT_SWITCHED
+  if (!(await endSession(tokens.get(sessionId)!))) return SIGN_OUT_FAILED
   tokens.delete(sessionId)
+  announceAccountChange()
   window.location.assign(unconfirmed ? KEY_UNCONFIRMED : '/sign-in')
   return null
 }

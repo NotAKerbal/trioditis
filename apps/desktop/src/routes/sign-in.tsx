@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
 import { errorMessage } from '~/lib/errors.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
@@ -23,11 +24,15 @@ function SignIn() {
     event.preventDefault()
     setBusy('password')
     setError(null)
-    const { error } = await authClient.signIn.email({ email, password: await derivedAuthPassword(password, email) })
+    const { data, error } = await authClient.signIn.email({
+      email,
+      password: await derivedAuthPassword(password, email),
+    })
     setBusy(null)
-    if (error) return setError(errorMessage(error, 'That email and password didn’t match.'))
+    if (error || !data) return setError(errorMessage(error, 'That email and password didn’t match.'))
+    announceAccountChange()
     // The same password unlocks the identity key on the next screen.
-    holdPassword(password)
+    holdPassword(password, data.user.id)
     await navigate({ to: '/' })
   }
 
@@ -38,6 +43,7 @@ function SignIn() {
     setBusy(null)
     if (result?.error)
       return setError(errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'))
+    announceAccountChange()
     await navigate({ to: '/' })
   }
 

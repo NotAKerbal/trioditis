@@ -73,11 +73,17 @@ function MemberGate({ children }: { children: ReactNode }) {
   // signing out always ends the session this page is for (members.me).
   const me = useQuery(convexQuery(api.members.me, {}))
   const sessionId = me.data?.sessionId
-  // Notes that session's token while the cookie holds it, to end it even after another tab has
-  // signed in since (lib/sign-out.ts).
+  // A page belongs to the session it opened with (lib/account-tabs.ts): if another turns up,
+  // it starts again as that one. Its token is noted while this browser is in it, for signing
+  // out of exactly it (lib/sign-out.ts).
+  const opened = useRef<string | null>(null)
   useEffect(() => {
-    if (sessionId) void rememberSession()
+    if (!sessionId) return
+    if (opened.current && opened.current !== sessionId) return window.location.reload()
+    opened.current = sessionId
+    void rememberSession(sessionId).then((noted) => noted === 'changed' && window.location.reload())
   }, [sessionId])
+  if (opened.current && sessionId && opened.current !== sessionId) return <Splash />
   if (me.isPending) return <Splash />
   // The session Convex was given has ended.
   if (!me.data) return <Navigate to="/sign-in" />
@@ -215,6 +221,7 @@ function KeyGate({
       has={setupFor.has}
       onSaving={() => setHeld(setupFor)}
       onLeave={() => setHeld(null)}
+      sessionId={sessionId}
       onSignOut={(keyKid) => void signOutHere(keyKid)}
       isLeaving={isLeaving}
       onBackup={(call) => {
@@ -311,6 +318,7 @@ function KeyGate({
       publicKey={publicKey!}
       backups={backups}
       isLeaving={isLeaving}
+      sessionId={sessionId}
       token={token}
       onSignOut={() => void signOutHere(kid ?? null)}
       onDone={() => void local.refetch()}
@@ -321,12 +329,25 @@ function KeyGate({
 /** How long signing out from setup waits for a step under way before going on without it. */
 const LEAVE_WAIT_MS = 10_000
 
+/** The session this browser is in, if it's still `sessionId`, the one the page opened with. */
+const sessionStill = (userId: string, sessionId: string) =>
+  currentSessionId(userId).then((now) => (now === sessionId ? now : null))
+
 /** The key the server has both backups of now, if any (see signOut's backedUpKid). */
 async function backedUpNow(): Promise<string | null> {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error('the server didn’t answer in time')), LEAVE_WAIT_MS),
   )
-  const identity = await Promise.race([convex.query(api.keys.identity, {}), timeout])
+  // Asked of the server itself: the app's client would answer from its live subscription,
+  // which can still hold the state from before another tab finished the backups.
+  const read = async () => {
+    const { data } = await authClient.convex.token({ fetchOptions: { throw: false } })
+    if (!data?.token) throw new Error('this page isn’t signed in to the server any more')
+    const http = new ConvexHttpClient(config.convexUrl)
+    http.setAuth(data.token)
+    return http.query(api.keys.identity, {})
+  }
+  const identity = await Promise.race([read(), timeout])
   return identity.state === 'ready' ? identity.kid : null
 }
 
@@ -387,6 +408,7 @@ function KeySetup({
   onBackup,
   onRecoveryLost,
   onRecoveryUntracked,
+  sessionId,
   token,
   onDone,
 }: {
@@ -407,6 +429,8 @@ function KeySetup({
   onRecoveryLost: (lost: boolean) => void
   /** The recovery key shown here couldn't be noted for checking after a reload. */
   onRecoveryUntracked: () => void
+  /** The session the page opened with: a key is kept here only for it. */
+  sessionId: string
   /** The session's save token (see KeyGate), or 'failed' when it couldn't be read. */
   token: number | 'failed' | null
   /** Setup is done and the key is kept here, as `kid`. */
@@ -415,7 +439,7 @@ function KeySetup({
   const setup = useMutation(api.keys.setup)
   // The password backup must open with the password that signs in, so it's only ever the one
   // just used to sign in or up, which the server has checked. Without it, sign in again.
-  const [password] = useState(() => (has.password ? null : takePassword()))
+  const [password] = useState(() => (has.password ? null : takePassword(userId)))
   const [prepared, setPrepared] = useState<{
     keyPair: KeyPair
     setup: ReturnType<typeof makeKeySetup>
@@ -540,6 +564,11 @@ function KeySetup({
       setBusy(false)
       return
     }
+    // Saves were fenced since this page took its token (signing out, in another tab): no backups
+    // start now either, since the key they'd be for can't be kept here.
+    if (typeof token === 'number' && (await saveToken(userId).catch(() => null)) !== token) {
+      return fail(`Your key couldn’t be set up on this device: ${new KeepRefused('fenced').message}`)
+    }
     let kid: string
     onSaving()
     try {
@@ -589,7 +618,7 @@ function KeySetup({
     setError(null)
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => currentSessionId(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => sessionStill(userId, sessionId))
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device${because(e)}`)
@@ -787,6 +816,7 @@ function Unlock({
   publicKey,
   backups,
   isLeaving,
+  sessionId,
   token,
   onSignOut,
   onDone,
@@ -797,6 +827,8 @@ function Unlock({
   backups: Backup[]
   /** Signing out (the gate's) has begun: an unlock that finishes after it doesn't open the app. */
   isLeaving: () => boolean
+  /** The session the page opened with: a key is kept here only for it. */
+  sessionId: string
   /** The session's save token (see KeyGate), or 'failed' when it couldn't be read. */
   token: number | 'failed' | null
   onSignOut: () => void
@@ -847,7 +879,7 @@ function Unlock({
     if (isLeaving()) return
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => currentSessionId(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => sessionStill(userId, sessionId))
     } catch (e) {
       return fail(
         e instanceof KeepRefused
@@ -862,7 +894,7 @@ function Unlock({
   // Coming straight from sign-in, try the password that was just typed. It is taken once, so
   // this does nothing on later renders.
   useEffect(() => {
-    const password = takePassword()
+    const password = takePassword(userId)
     if (password) void unlock(password, 'password')
   }, [])
 
