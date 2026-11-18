@@ -4,7 +4,10 @@ import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
 import { deletePayload } from './outbox'
+import { patchChat } from './chatView'
+import { onLoggedOut } from './commandOutcome'
 import { internal } from '../_generated/api'
+import { MAX_MESSAGE_ROW_BYTES, byteSize } from './bounded'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -54,12 +57,6 @@ export function startMeter(ctx: MutationCtx) {
   const meter = { bytes: 0 }
   meters.set(ctx, meter)
   return meter
-}
-
-const encoder = new TextEncoder()
-
-export function byteSize(value: unknown) {
-  return encoder.encode(JSON.stringify(value) ?? '').length
 }
 
 /** Counts a row read and, as most are, rewritten. */
@@ -113,6 +110,7 @@ async function chatFor(
     unreadCount: 0,
     pinned: false,
     archived: false,
+    view: 'inbox',
   })
   return (await ctx.db.get(chatId))!
 }
@@ -220,6 +218,8 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     sealed: event.sealed,
     sealedObjectId: event.eventId,
     historical: event.historical,
+    // Kept so a read receipt can recount mentions among the messages after it.
+    ...(event.mentionsMe && !('self' in event.sender) ? { mentionsMe: true } : {}),
     ...(event.replyTo ? { replyTo: event.replyTo } : {}),
     ...(event.threadRoot ? { threadRoot: event.threadRoot } : {}),
   }
@@ -238,9 +238,16 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   // Imported history neither notifies, counts as unread, nor reorders the inbox.
   if (event.historical) return
   const fromSomeoneElse = !('self' in event.sender)
-  await ctx.db.patch(chat._id, {
+  await patchChat(ctx, chat, {
     lastMessageAt: Math.max(chat.lastMessageAt, event.networkTs),
-    ...(fromSomeoneElse ? { unreadCount: chat.unreadCount + 1 } : {}),
+    ...(fromSomeoneElse
+      ? {
+          unreadCount: chat.unreadCount + 1,
+          ...(event.mentionsMe ? { mentionCount: (chat.mentionCount ?? 0) + 1 } : {}),
+          // A new message wakes a snoozed chat early.
+          ...(chat.snoozedUntil !== undefined && !chat.woke ? { woke: true } : {}),
+        }
+      : {}),
   })
 }
 
@@ -274,6 +281,7 @@ async function applyReaction(ctx: MutationCtx, event: Extract<BridgeEventDoc, { 
   if (!existing) {
     await ctx.db.insert('reactions', {
       userId: event.userId,
+      chatId: message.chatId,
       messageId: message._id,
       senderKey: senderKey(event.sender),
       key: event.key,
@@ -320,7 +328,8 @@ async function applyRedaction(
     editEventId: undefined,
   })
   // A message can have any number of reactions, so they're deleted in bounded batches after
-  // this transaction, rather than all inside it.
+  // this transaction, rather than all inside it. Until they're gone, the marker hides them.
+  await ctx.db.insert('reactionCleanups', { messageId: message._id })
   await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId: message._id })
 }
 
@@ -345,10 +354,8 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   }
   // The person reading a chat elsewhere (on their phone) clears it here too, up to the
   // message the receipt covers: a delayed receipt doesn't clear messages that came after it.
-  if (key === 'self') {
-    const unread = await unreadAfter(ctx, chat, event.userId, network, event.upToEventId)
-    await ctx.db.patch(chat._id, { unreadCount: unread })
-  }
+  if (key === 'self')
+    await ctx.db.patch(chat._id, await unreadAfter(ctx, chat, event.userId, network, event.upToEventId))
 }
 
 /**
@@ -356,26 +363,30 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
  * recount by count alone could pass a transaction's read limit and stall the host's journal.
  */
 const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
-/** The largest a message row can be: two sealed objects at the cap, their keys and IDs. */
-const MAX_MESSAGE_ROW_BYTES = 768 * 1024
 
 /**
- * How many messages from other people, newer than `eventId`, the chat holds. It reads a few
- * rows at a time, only as many as can't pass `MAX_RECOUNT_BYTES` however large they are, and
- * at most 100. If it can't see them all, the chat keeps at least the count it had: a receipt
- * only ever clears what it was seen to cover.
+ * How many messages from other people, and how many of those mention the person, newer than
+ * `eventId` the chat holds. It reads a few rows at a time, only as many as can't pass
+ * `MAX_RECOUNT_BYTES` however large they are, and at most 100. If it can't see them all, the
+ * chat keeps at least the counts it had: a receipt only ever clears what it was seen to cover.
  */
 async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+  const prior = { unreadCount: chat.unreadCount, mentionCount: chat.mentionCount ?? 0 }
   const read = await findMessage(ctx, userId, network, eventId)
   // A receipt for a message this chat doesn't have says nothing about what's been read here.
-  if (!read || read.chatId !== chat._id) return chat.unreadCount
+  if (!read || read.chatId !== chat._id) return prior
+  const atLeastPrior = (unread: number, mentions: number) => ({
+    unreadCount: Math.max(unread, prior.unreadCount),
+    mentionCount: Math.max(mentions, prior.mentionCount),
+  })
   let after = read.sortKey
   let seen = 0
-  let counted = 0
+  let unread = 0
+  let mentions = 0
   let bytes = 0
   while (seen < 100) {
     const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), 100 - seen)
-    if (room < 1) return Math.max(counted, chat.unreadCount)
+    if (room < 1) return atLeastPrior(unread, mentions)
     const batch = await ctx.db
       .query('messages')
       .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', after))
@@ -383,14 +394,16 @@ async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string,
     charge(ctx, batch)
     for (const message of batch) {
       bytes += byteSize(message)
-      if (!('self' in message.sender) && !message.historical) counted++
+      if ('self' in message.sender || message.historical) continue
+      unread++
+      if (message.mentionsMe) mentions++
     }
     seen += batch.length
-    if (batch.length < room) return counted
+    if (batch.length < room) return { unreadCount: unread, mentionCount: mentions }
     after = batch.at(-1)!.sortKey
   }
-  // A hundred newer messages and maybe more: the count can't be lowered past the prior one.
-  return Math.max(counted, chat.unreadCount)
+  // A hundred newer messages and maybe more: the counts can't be lowered past the prior ones.
+  return atLeastPrior(unread, mentions)
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {
@@ -412,9 +425,13 @@ async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { ty
 
 async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'chat' }>, network: Network) {
   const chat = await chatFor(ctx, event, network)
-  await ctx.db.patch(chat._id, {
+  await patchChat(ctx, chat, {
     kind: event.kind,
     sealedMeta: event.sealed,
+    // A request stays accepted once the person accepts it: only a chat seen for the first
+    // time can become one. The network saying it's no longer a request always counts.
+    ...(event.isRequest === false ? { isRequest: false } : {}),
+    ...(event.isRequest === true && chat.isRequest === undefined ? { isRequest: true } : {}),
     ...(event.parentPortalId ? { parentPortalId: event.parentPortalId } : {}),
     ...(event.deleted ? { deleted: true } : {}),
   })
@@ -460,8 +477,10 @@ async function applyLoginState(
     ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
   }
-  if (existing) await ctx.db.patch(existing._id, fields)
-  else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
+  if (existing) {
+    await ctx.db.patch(existing._id, fields)
+    if (event.state === 'LOGGED_OUT') await onLoggedOut(ctx, existing)
+  } else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {

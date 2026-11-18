@@ -758,6 +758,27 @@ export function writeDevEnv(values) {
 export const convex = (...args) => ['exec', 'convex', ...args]
 
 /**
+ * The backend's migrations: the internal functions in packages/backend/convex/migrations.ts,
+ * which fix rows an older version wrote. Each is safe to run any number of times, so a backend
+ * that keeps its data runs them all after its functions are pushed. Empty on a branch without
+ * the file.
+ */
+export function migrationNames() {
+  const file = resolve(backendDir, 'convex/migrations.ts')
+  if (!existsSync(file)) return []
+  const source = readFileSync(file, 'utf8')
+  return [...source.matchAll(/^export const (\w+) = internal(?:Mutation|Action)\(/gm)].map((match) => match[1])
+}
+
+/** Runs every migration on a backend (`options` points the Convex CLI at it). */
+export function runMigrations(options) {
+  for (const name of migrationNames()) {
+    capture('pnpm', convex('run', `migrations:${name}`), { ...options, quiet: true })
+    console.log(`Ran ${name}.`)
+  }
+}
+
+/**
  * The environment variables the Convex CLI reads to choose a deployment, or that point it at
  * one (convex 1.50, from its CLI source). Every one is removed for the local backend's commands,
  * so a `CONVEX_DEPLOY_KEY` or `CONVEX_DEPLOYMENT` in your shell can never send `pnpm dev`'s

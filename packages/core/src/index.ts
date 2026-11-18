@@ -46,6 +46,8 @@ export interface MessagePlaintext {
   html?: string
   attachments?: Attachment[]
   mentions?: string[]
+  /** Cut short to fit the sealed size limit: `html` dropped, `body` possibly incomplete. */
+  truncated?: boolean
   [extra: string]: unknown
 }
 
@@ -74,3 +76,5 @@ export interface ContactPlaintext {
   avatarUnchanged?: boolean
   [extra: string]: unknown
 }
+
+export * from './client.ts'

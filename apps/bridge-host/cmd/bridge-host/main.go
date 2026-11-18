@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/host"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/wabuffer"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
 )
 
@@ -40,6 +42,13 @@ func env(name, fallback string) string {
 }
 
 func main() {
+	// Set to fail the process once everything deferred below has run (the host stopped).
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	network := flag.String("network", env("BRIDGE_NETWORK", "whatsapp"), "network to bridge: whatsapp or fake")
 	dataDir := flag.String("data", env("BRIDGE_DATA_DIR", ".data/bridge-host"), "data directory")
 	user := flag.String("user", "", "login/inspect: the Trioditis user ID")
@@ -57,6 +66,16 @@ func main() {
 		level = zerolog.DebugLevel
 	}
 	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}).Level(level).With().Timestamp().Logger()
+	// Checked before anything starts, so a usage error never leaves a host running.
+	switch command {
+	case "run", "inspect":
+	case "login":
+		if *user == "" {
+			log.Fatal().Msg("login needs --user")
+		}
+	default:
+		log.Fatal().Str("command", command).Msg("Unknown command")
+	}
 
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		log.Fatal().Err(err).Msg("Failed to create data directory")
@@ -114,7 +133,20 @@ func main() {
 	if err = h.Start(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start the bridge host")
 	}
-	defer h.Stop()
+	// Shutdown, on every return from here: the sweeper is stopped (cancelled, then waited
+	// for) before the host and its database stop.
+	stopSweeping := func() {}
+	defer func() {
+		stopSweeping()
+		h.Stop()
+		log.Info().Msg("Bridge host stopped")
+	}()
+	if wa, ok := netConn.(*connector.WhatsAppConnector); ok {
+		// Plaintext left in whatsmeow's decrypted-event buffer is deleted once it is past
+		// WhatsApp's redelivery window: now, and hourly, rather than only when a message
+		// arrives.
+		stopSweeping = wabuffer.Start(ctx, wa.DeviceStore, wabuffer.Interval, log.With().Str("component", "whatsapp buffer").Logger())
+	}
 	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
 		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
 	}
@@ -122,16 +154,16 @@ func main() {
 	case "run":
 		log.Info().Str("network", *network).Str("addr", h.Addr()).Msg("Bridge host running")
 	case "login":
-		if *user == "" {
-			log.Fatal().Msg("login needs --user")
-		}
-		if err = terminalLogin(ctx, h, *network, *user, *flow, bridgeKey); err != nil {
-			log.Error().Err(err).Msg("Login failed")
+		if err = terminalLogin(ctx, h, *network, *user, *flow, bridgeKey, os.Stdin); err != nil {
+			if errors.Is(err, context.Canceled) {
+				log.Warn().Msg("Login interrupted")
+			} else {
+				log.Error().Err(err).Msg("Login failed")
+			}
+			exitCode = 1
 			return
 		}
 		log.Info().Msg("Logged in. Messages are being bridged into the journal; run `inspect` in another terminal to read them. Ctrl+C to stop.")
-	default:
-		log.Fatal().Str("command", command).Msg("Unknown command")
 	}
 	<-ctx.Done()
 }
@@ -188,8 +220,9 @@ func loadBridgeKey(dataDir string, log zerolog.Logger) (seal.KeyPair, error) {
 }
 
 // terminalLogin runs a login flow through the same commands the gateway would send,
-// showing each step in the terminal.
-func terminalLogin(ctx context.Context, h *host.Host, network, userID, flowID string, bridgeKey seal.KeyPair) error {
+// showing each step in the terminal and reading what a step asks for from in. It returns as
+// soon as ctx ends, even mid-prompt, so the caller's shutdown runs.
+func terminalLogin(ctx context.Context, h *host.Host, network, userID, flowID string, bridgeKey seal.KeyPair, in io.Reader) error {
 	session := fmt.Sprintf("terminal-%d", time.Now().UnixNano())
 	from, err := h.Store.LastSeq(ctx)
 	if err != nil {
@@ -201,7 +234,7 @@ func terminalLogin(ctx context.Context, h *host.Host, network, userID, flowID st
 	}); err != nil {
 		return err
 	}
-	stdin := bufio.NewReader(os.Stdin)
+	var input *lineReader
 	for {
 		events, err := h.Store.After(ctx, from, 100)
 		if err != nil {
@@ -225,20 +258,27 @@ func terminalLogin(ctx context.Context, h *host.Host, network, userID, flowID st
 				}
 			case protocol.StepUserInput, protocol.StepCookies:
 				fmt.Println(step.Instructions)
-				input := make(map[string]string)
+				values := make(map[string]string)
 				fields := step.Fields
 				if step.Cookies != nil {
 					for _, f := range step.Cookies.Fields {
 						fields = append(fields, protocol.LoginField{ID: f.ID, Name: f.ID})
 					}
 				}
+				if input == nil {
+					input = newLineReader(in)
+				}
 				for _, field := range fields {
 					fmt.Printf("%s: ", field.Name)
-					line, _ := stdin.ReadString('\n')
-					input[field.ID] = strings.TrimSpace(line)
+					line, err := input.next(ctx)
+					if err != nil {
+						fmt.Println()
+						return err
+					}
+					values[field.ID] = strings.TrimSpace(line)
 				}
 				// Sealed to the bridge key, exactly as a client would.
-				sealed, err := seal.SealJSON(protocol.LoginSubmitPlaintext{Input: input}, []seal.PublicKey{bridgeKey.Public},
+				sealed, err := seal.SealJSON(protocol.LoginSubmitPlaintext{Input: values}, []seal.PublicKey{bridgeKey.Public},
 					seal.Context{Kind: seal.KindOutbound, OwnerUserID: userID, ObjectID: session + "/" + step.StepID})
 				if err != nil {
 					return err
@@ -261,5 +301,47 @@ func terminalLogin(ctx context.Context, h *host.Host, network, userID, flowID st
 			return ctx.Err()
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+}
+
+// lineReader reads lines in the background, so a prompt can give up when its context ends:
+// a read from a terminal or an open pipe can't itself be interrupted. A read still waiting
+// when the process exits is abandoned with it.
+type lineReader struct {
+	lines chan string
+	err   error // set before lines is closed
+}
+
+func newLineReader(r io.Reader) *lineReader {
+	lr := &lineReader{lines: make(chan string)}
+	go func() {
+		defer close(lr.lines)
+		br := bufio.NewReader(r)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				if line != "" {
+					lr.lines <- line
+				}
+				lr.err = err
+				return
+			}
+			lr.lines <- line
+		}
+	}()
+	return lr
+}
+
+// next is the next line, or ctx's error once it ends, or the read's error (io.EOF when the
+// input is closed).
+func (lr *lineReader) next(ctx context.Context) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case line, ok := <-lr.lines:
+		if !ok {
+			return "", fmt.Errorf("reading the terminal: %w", lr.err)
+		}
+		return line, nil
 	}
 }

@@ -39,12 +39,14 @@ import {
   holdLock,
   isFree,
   localConvex,
+  migrationNames,
   parseDotenv,
   portsFor,
   privateDir,
   removeFromCheckout,
   root,
   run,
+  runMigrations,
   setConvexEnv,
   signInPassword,
   start,
@@ -284,6 +286,10 @@ try {
       setTimeout(() => failWait(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000),
     ),
   ])
+  if (migrationNames().length > 0) {
+    step('Running migrations')
+    runMigrations(localConvex)
+  }
   step('Creating the test account')
   await ensureTester({
     authUrl: convexSiteUrl,

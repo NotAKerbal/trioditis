@@ -10,6 +10,7 @@ import {
   loginStep,
   network,
   sender,
+  storedChatView,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -24,6 +25,12 @@ export default defineSchema({
     /** The person's identity public key, base64url, set by their first device. */
     identityPublicKey: v.optional(v.string()),
     identityKid: v.optional(v.string()),
+    /**
+     * The highest revision any of the person's key backups has had. Each new or replaced
+     * backup takes the next one, so a revision is never reused, even for a passkey backup
+     * removed and made again.
+     */
+    backupRevision: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -62,6 +69,12 @@ export default defineSchema({
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
     updatedAt: v.number(),
+    /** A logout was asked for and hasn't been confirmed yet. */
+    logoutPending: v.optional(v.boolean()),
+    /** The command of that pending logout: only its own outcome or timeout ends it. */
+    logoutCommandId: v.optional(v.id('outbox')),
+    /** Why the last logout didn't happen. */
+    logoutError: v.optional(errorCode),
   })
     .index('by_user', ['userId'])
     .index('by_login', ['network', 'loginId']),
@@ -100,9 +113,119 @@ export default defineSchema({
     archived: v.boolean(),
     mutedUntil: v.optional(v.number()),
     deleted: v.optional(v.boolean()),
+    /** Unread messages the bridge host flagged as mentioning the person. */
+    mentionCount: v.optional(v.number()),
+    /** Marked unread by the person, whatever the count says. Trioditis-side only. */
+    markedUnread: v.optional(v.boolean()),
+    /** Hidden from the inbox until then, or until a new message wakes it. */
+    snoozedUntil: v.optional(v.number()),
+    woke: v.optional(v.boolean()),
+    /** A message request the person hasn't accepted. */
+    isRequest: v.optional(v.boolean()),
+    /** Hidden by the person. Trioditis-side only; the network isn't told yet. */
+    blocked: v.optional(v.boolean()),
+    /**
+     * Which list the chat is in, kept by `lib/chatView.ts` on every write so the lists are
+     * index ranges; `deleted` for a deleted chat, which is in none. Required, so a backend
+     * holding chats from before views existed refuses this schema rather than hide them.
+     */
+    view: storedChatView,
   })
     .index('by_user_lastMessage', ['userId', 'lastMessageAt'])
+    // Descending, `pinned: true` sorts before `false`: one range gives the pins, then the rest.
+    .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
+    .index('by_user_view_network_pinned_last', ['userId', 'view', 'network', 'pinned', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
+
+  /**
+   * The person's own labels for chats. Name and colour are sealed to the person (kind
+   * `label`, object ID `labelKey`, which the client chooses before sealing).
+   */
+  labels: defineTable({
+    userId: v.string(),
+    labelKey: v.string(),
+    sealed: envelope,
+    createdAt: v.number(),
+  }).index('by_user', ['userId']),
+
+  chatLabels: defineTable({
+    userId: v.string(),
+    chatId: v.id('chats'),
+    labelId: v.id('labels'),
+  })
+    .index('by_chat', ['chatId'])
+    .index('by_label', ['labelId']),
+
+  preferences: defineTable({
+    userId: v.string(),
+    sidebarLayout: v.union(v.literal('focused'), v.literal('simple')),
+  }).index('by_user', ['userId']),
+
+  /**
+   * The identity private key, wrapped for new devices (docs/architecture/client-api.md, Keys).
+   * Never unwrapped here: the server can't open any of these.
+   */
+  keyBackups: defineTable({
+    userId: v.string(),
+    kid: v.string(),
+    kind: v.union(v.literal('password'), v.literal('recovery'), v.literal('passkey')),
+    nonce: v.string(),
+    ct: v.string(),
+    /** For `password`: how the password becomes the wrapping key. */
+    params: v.optional(
+      v.object({ alg: v.literal('argon2id13'), salt: v.string(), opslimit: v.number(), memlimit: v.number() }),
+    ),
+    /** For `passkey`: which credential, and its PRF salt. */
+    credentialId: v.optional(v.string()),
+    prfSalt: v.optional(v.string()),
+    /**
+     * Changes each time this backup is replaced, never to a value it had before (see
+     * `members.backupRevision`); a replacement names the one it replaces.
+     */
+    revision: v.number(),
+    createdAt: v.number(),
+  }).index('by_user', ['userId', 'kind']),
+
+  /**
+   * Proofs that a device holds the identity private key: a random challenge, sealed to the
+   * public key for the device to open. Only its hash is kept, for five minutes, and it works
+   * once.
+   */
+  keyChallenges: defineTable({
+    userId: v.string(),
+    hash: v.string(),
+    /** The public key it was sealed to: a proof counts only for that key. */
+    publicKey: v.string(),
+    expiresAt: v.number(),
+  }).index('by_user', ['userId']),
+
+  /**
+   * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
+   * then the bridge-readable copy waits here, and is deleted when it goes out or is cancelled.
+   */
+  scheduledSends: defineTable({
+    userId: v.string(),
+    chatId: v.id('chats'),
+    clientMessageId: v.string(),
+    sendAt: v.number(),
+    /** `failed` when its time came and its chat was gone: it was never sent. */
+    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled'), v.literal('failed')),
+    replyTo: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId', 'state', 'sendAt'])
+    .index('by_chat', ['chatId', 'state'])
+    .index('by_clientMessageId', ['userId', 'clientMessageId']),
+
+  /**
+   * A scheduled message's sealed copies, kept apart so listing and counting scheduled
+   * messages never reads them. Deleted when the message goes out or is cancelled.
+   */
+  scheduledPayloads: defineTable({
+    scheduledId: v.id('scheduledSends'),
+    forBridge: envelope,
+    copy: envelope,
+  }).index('by_scheduled', ['scheduledId']),
 
   contacts: defineTable({
     userId: v.string(),
@@ -134,6 +257,8 @@ export default defineSchema({
     editEventId: v.optional(v.string()),
     editedAt: v.optional(v.number()),
     redactedAt: v.optional(v.number()),
+    /** The bridge host flagged it as mentioning the person. */
+    mentionsMe: v.optional(v.boolean()),
     /** For the person's own sends. */
     delivery: v.optional(deliveryState),
     sentByAgentId: v.optional(v.string()),
@@ -144,6 +269,8 @@ export default defineSchema({
 
   reactions: defineTable({
     userId: v.string(),
+    /** The message's chat, so a lookup by chat needn't read the (large) message row. */
+    chatId: v.id('chats'),
     messageId: v.id('messages'),
     /** `self`, or the ghost ID. */
     senderKey: v.string(),
@@ -154,7 +281,19 @@ export default defineSchema({
     networkTs: v.number(),
     /** Kept as a tombstone rather than deleted, for the same reason. */
     removedAt: v.optional(v.number()),
-  }).index('by_message', ['messageId', 'senderKey', 'key']),
+  })
+    .index('by_message', ['messageId', 'senderKey', 'key'])
+    // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
+    .index('by_message_active', ['messageId', 'removedAt']),
+
+  /**
+   * A deleted message whose reactions are still being removed (in batches, by
+   * `cleanup.reactionsOfMessage`). `messages.reactions` shows none for it meanwhile, without
+   * reading the message row, which can be large.
+   */
+  reactionCleanups: defineTable({
+    messageId: v.id('messages'),
+  }).index('by_message', ['messageId']),
 
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
@@ -176,7 +315,9 @@ export default defineSchema({
     chatId: v.id('chats'),
     senderKey: v.string(),
     expiresAt: v.number(),
-  }).index('by_chat_sender', ['chatId', 'senderKey']),
+  })
+    .index('by_chat_sender', ['chatId', 'senderKey'])
+    .index('by_chat_expires', ['chatId', 'expiresAt']),
 
   /**
    * Commands for the bridge host. Each row's ID is the command's `commandId`, so the bridge
@@ -215,6 +356,11 @@ export default defineSchema({
     createdAt: v.number(),
     /** A send can't go out after this; it asks the person instead. */
     expiresAt: v.optional(v.number()),
+    /**
+     * `gateway.commandDeadline` is scheduled for it. Set when it is queued;
+     * `migrations.scheduleCommandDeadlines` schedules one for rows from before that.
+     */
+    deadlineScheduled: v.optional(v.boolean()),
   })
     // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
     // ones by deadline. Both orders are needed.

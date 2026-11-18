@@ -1,34 +1,87 @@
 import { ConvexError, v } from 'convex/values'
+import { NETWORK_INFO } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
+import { backupsOf, keyState } from './keys'
 import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
-import { envelope, network } from './validators'
+import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
 // pairing codes, cookies), which arrive as `loginStep` events on the session. What the
 // person types is sealed to the bridge key, never stored in plaintext.
 
+/** The person's connected network accounts, including ones that need attention. */
 export const accounts = query({
   args: {},
+  returns: v.array(
+    v.object({
+      _id: v.id('networkAccounts'),
+      network,
+      state: loginState,
+      error: v.union(v.null(), errorCode),
+      lastHealthyAt: v.union(v.null(), v.number()),
+      updatedAt: v.number(),
+      /** A logout was asked for and hasn't been confirmed yet. */
+      logoutPending: v.boolean(),
+      /** Why the last logout didn't happen, if it didn't. */
+      logoutError: v.union(v.null(), errorCode),
+    }),
+  ),
   handler: async (ctx) => {
     const member = await requireMember(ctx)
-    return await ctx.db
+    const rows = await ctx.db
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
       .take(100)
+    return rows.map((row) => ({
+      _id: row._id,
+      network: row.network,
+      state: row.state,
+      error: row.error ?? null,
+      lastHealthyAt: row.lastHealthyAt ?? null,
+      updatedAt: row.updatedAt,
+      logoutPending: row.logoutPending ?? false,
+      logoutError: row.logoutError ?? null,
+    }))
   },
 })
 
+/**
+ * A login in progress, for the stepper: `step` is what to show now (a QR code, a pairing code,
+ * fields to fill in, cookies to paste), and `state` says when it's over.
+ */
 export const session = query({
   args: { loginSessionId: v.id('loginSessions') },
+  returns: v.union(
+    v.null(),
+    v.object({
+      _id: v.id('loginSessions'),
+      network,
+      state: v.union(
+        v.literal('pending'),
+        v.literal('active'),
+        v.literal('complete'),
+        v.literal('cancelled'),
+        v.literal('error'),
+      ),
+      step: v.union(v.null(), loginStep),
+      updatedAt: v.number(),
+    }),
+  ),
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId) return null
-    return session
+    return {
+      _id: session._id,
+      network: session.network,
+      state: session.state,
+      step: session.step ?? null,
+      updatedAt: session.updatedAt,
+    }
   },
 })
 
@@ -37,14 +90,19 @@ export const start = mutation({
   returns: v.id('loginSessions'),
   handler: async (ctx, args) => {
     const member = await requireMember(ctx)
-    // Login flow IDs are short names like `qr` or `phone`; anything else isn't one.
-    if (args.flowId !== undefined && !/^[A-Za-z0-9_.-]{1,64}$/.test(args.flowId)) {
+    if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
+    // Only the flows `networks.list` offers for this network. Without one, the bridge host
+    // uses the network's first.
+    if (args.flowId !== undefined && !NETWORK_INFO[args.network].flows.some((flow) => flow.id === args.flowId)) {
       throw new ConvexError('That isn’t a login method this network offers.')
     }
-    if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
-    // Nothing can be sealed to someone without an identity key, so no network can be
-    // connected until their first device has set one.
-    if (!member.identityPublicKey) throw new ConvexError('Finish setting up this device before connecting a network.')
+    // Nothing can be sealed to someone without an identity key, and a key without both backups
+    // could be lost with the device, so no network can be connected until both exist.
+    if (keyState(member, await backupsOf(ctx, member.userId)) !== 'ready') {
+      throw new ConvexError(
+        'Finish setting up your key, with its password and recovery key, before connecting a network.',
+      )
+    }
     const now = Date.now()
     const loginSessionId = await ctx.db.insert('loginSessions', {
       userId: member.userId,
@@ -129,6 +187,35 @@ export const cancel = mutation({
       createdAt: now,
       expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
+    return null
+  },
+})
+
+/**
+ * Disconnects a network account: the bridge host logs it out of the network. The account's
+ * chats stay in Trioditis; its state becomes `LOGGED_OUT` when the bridge host reports it.
+ */
+export const logout = mutation({
+  args: { networkAccountId: v.id('networkAccounts') },
+  returns: v.null(),
+  handler: async (ctx, { networkAccountId }) => {
+    const member = await requireMember(ctx)
+    const account = await ctx.db.get(networkAccountId)
+    if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
+    if (account.state === 'LOGGED_OUT' || account.logoutPending) return null
+    const now = Date.now()
+    const logoutCommandId = await queueCommand(ctx, {
+      userId: member.userId,
+      network: account.network,
+      loginId: account.loginId,
+      payload: { type: 'logout' },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + LOGIN_COMMAND_TTL_MS,
+    })
+    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
+    await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return null
   },
 })

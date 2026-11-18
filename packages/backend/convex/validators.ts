@@ -24,6 +24,18 @@ export const loginState = v.union(...LOGIN_STATES.map((state) => v.literal(state
 /** Why something failed: a fixed code, never free text. See bridge-protocol.md, Errors. */
 export const errorCode = v.union(...ERROR_CODES.map((code) => v.literal(code)))
 
+/** Which list a chat is in. See lib/chatView.ts. */
+export const chatView = v.union(
+  v.literal('inbox'),
+  v.literal('snoozed'),
+  v.literal('archived'),
+  v.literal('requests'),
+  v.literal('blocked'),
+)
+
+/** What a chat stores as its `view`: one of the lists, or `deleted`, which is in none. */
+export const storedChatView = v.union(chatView, v.literal('deleted'))
+
 export const chatKind = v.union(v.literal('dm'), v.literal('group'), v.literal('channel'), v.literal('space'))
 
 export const loginStep = v.object({
@@ -80,6 +92,8 @@ export const bridgeEvent = v.union(
     replyTo: v.optional(v.string()),
     threadRoot: v.optional(v.string()),
     clientMessageId: v.optional(v.string()),
+    /** The message mentions the person: the bridge host can tell, as it sees the plaintext. */
+    mentionsMe: v.optional(v.boolean()),
   }),
   v.object({
     ...base,
@@ -143,6 +157,8 @@ export const bridgeEvent = v.union(
     sealed: envelope,
     parentPortalId: v.optional(v.string()),
     deleted: v.optional(v.boolean()),
+    /** The network says this chat is a message request the person hasn't accepted. */
+    isRequest: v.optional(v.boolean()),
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
   v.object({

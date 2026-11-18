@@ -191,3 +191,38 @@ func TestPostgres(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// A login in progress when the process stops (its QR or input step shown, nobody answered
+// yet) ends with an error after the restart, instead of leaving the person waiting.
+func TestLoginInProgressEndsAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, dir, gw)
+	session := "session-restart"
+	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "fake"})
+	gw.waitFor(t, "first login step", func(e *protocol.Event) bool {
+		return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
+	})
+	h.host.Stop()
+
+	h2 := startHost(t, dir, gw)
+	defer h2.host.Stop()
+	ended := gw.waitFor(t, "login ended by the restart", func(e *protocol.Event) bool {
+		return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepError
+	})
+	if ended.Step.Error != protocol.ErrInternal {
+		t.Fatalf("expected an internal error, got %q", ended.Step.Error)
+	}
+	// Input for the lost login ends it too, rather than being dropped.
+	status, _ := h2.command(protocol.Command{
+		CommandID: nextCommandID(), Type: protocol.CommandLoginSubmit, UserID: "alice", LoginSessionID: session, StepID: "fake.username",
+		Sealed: h2.sealForBridge("alice", session+"/fake.username", protocol.LoginSubmitPlaintext{Input: map[string]string{"username": "x"}}),
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 for input to a lost login, got %d", status)
+	}
+	sessions, err := h2.host.Store.LoginSessions(context.Background())
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("expected no login left in progress, got %v (%v)", sessions, err)
+	}
+}

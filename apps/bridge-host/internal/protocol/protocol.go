@@ -3,6 +3,10 @@
 package protocol
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
@@ -15,6 +19,16 @@ type Sender struct {
 }
 
 var SelfSender = Sender{Self: true}
+
+// MarshalJSON writes exactly one of the two shapes the backend accepts.
+func (s Sender) MarshalJSON() ([]byte, error) {
+	if s.Self {
+		return []byte(`{"self":true}`), nil
+	}
+	return json.Marshal(struct {
+		GhostID string `json:"ghostId"`
+	}{s.GhostID})
+}
 
 // Event is one entry of an event batch. Which fields are set depends on Type; the JSON
 // matches the TypeScript union, which leaves absent fields out.
@@ -59,6 +73,189 @@ type Event struct {
 
 	Direction string `json:"direction,omitempty"`
 	More      *bool  `json:"more,omitempty"`
+
+	// bare marks a stand-in for a journal event too big to send: only the fields every event
+	// has are written, so the gateway quarantines it instead of refusing the whole batch.
+	bare bool
+}
+
+// Size limits, from docs/architecture/bridge-protocol.md (Sizes, and the gateway's batch
+// rules). The backend quarantines anything over them, and the gateway refuses a request
+// body over 32 MiB, so the bridge host keeps every event within them.
+const (
+	// MaxMessageSealedBytes is the most a message or edit's sealed ciphertext may hold.
+	MaxMessageSealedBytes = 256 * 1024
+	// MaxMetadataSealedBytes is the most a chat or contact's sealed ciphertext may hold.
+	MaxMetadataSealedBytes = 8 * 1024
+	// MaxEventBytes is the most one event's JSON may hold (the gateway quarantines more).
+	MaxEventBytes = 1024 * 1024
+	// MaxClientSealedBytes is the most a client may seal into a send, an edit or login
+	// input (the backend refuses more, so a bigger one didn't come from a client).
+	MaxClientSealedBytes = 64 * 1024
+)
+
+// eventShape is what one event type carries beyond seq, type, userId, loginId and at.
+type eventShape struct{ required, optional []string }
+
+// eventShapes mirrors the backend's bridgeEvent validator
+// (packages/backend/convex/validators.ts), which the gateway also checks every event
+// against before sending it on: a field it doesn't expect, or a required one missing, gets
+// the event quarantined.
+var eventShapes = map[string]eventShape{
+	EventMessage:        {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId"}},
+	EventEdit:           {[]string{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, []string{"clientMessageId"}},
+	EventReaction:       {[]string{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	EventReactionRemove: {[]string{"portalId", "targetEventId", "sender", "key"}, nil},
+	EventRedaction:      {[]string{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	EventReceipt:        {[]string{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	EventTyping:         {[]string{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	EventChat:           {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted"}},
+	EventContact:        {[]string{"ghostId", "sealed"}, nil},
+	EventLoginState:     {[]string{"state"}, []string{"error"}},
+	EventLoginStep:      {[]string{"loginSessionId", "step"}, nil},
+	EventSendStatus:     {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
+	EventBackfillDone:   {[]string{"portalId", "direction", "more"}, nil},
+}
+
+// field returns an event field by its JSON name, and whether it is set.
+func (e *Event) field(name string) (any, bool) {
+	str := func(s string) (any, bool) { return s, s != "" }
+	switch name {
+	case "portalId":
+		return str(e.PortalID)
+	case "eventId":
+		return str(e.EventID)
+	case "targetEventId":
+		return str(e.TargetEventID)
+	case "networkTs":
+		return e.NetworkTS, e.NetworkTS != 0
+	case "sender":
+		return e.Sender, e.Sender != nil && (e.Sender.Self || e.Sender.GhostID != "")
+	case "sealed":
+		return e.Sealed, e.Sealed != nil
+	case "historical":
+		return e.Historical, e.Historical != nil
+	case "replyTo":
+		return str(e.ReplyTo)
+	case "threadRoot":
+		return str(e.ThreadRoot)
+	case "clientMessageId":
+		return str(e.ClientMessageID)
+	case "key":
+		return str(e.Key)
+	case "upToEventId":
+		return str(e.UpToEventID)
+	case "typing":
+		return e.Typing, e.Typing != nil
+	case "timeoutMs":
+		return e.TimeoutMS, e.TimeoutMS != nil
+	case "kind":
+		return str(e.Kind)
+	case "parentPortalId":
+		return str(e.ParentPortalID)
+	case "deleted":
+		return e.Deleted, e.Deleted
+	case "ghostId":
+		return str(e.GhostID)
+	case "state":
+		return str(e.State)
+	case "error":
+		return str(e.Error)
+	case "loginSessionId":
+		return str(e.LoginSessionID)
+	case "step":
+		return e.Step, e.Step != nil
+	case "status":
+		return str(e.Status)
+	case "direction":
+		return str(e.Direction)
+	case "more":
+		return e.More, e.More != nil
+	}
+	return nil, false
+}
+
+// MarshalJSON writes the fields the event's type has and no others: required ones always,
+// optional ones only when set. A required field that is unset is left out rather than
+// written as a zero value the backend might accept; Validate catches that before an event
+// is journaled, and a stored event that has it is quarantined rather than applied.
+func (e Event) MarshalJSON() ([]byte, error) {
+	out := map[string]any{"seq": e.Seq, "type": e.Type, "userId": e.UserID, "loginId": e.LoginID, "at": e.At}
+	if e.bare {
+		return json.Marshal(out)
+	}
+	shape := eventShapes[e.Type]
+	for _, name := range shape.required {
+		if value, set := e.field(name); set || writesZero(name) {
+			out[name] = value
+		}
+	}
+	for _, name := range shape.optional {
+		if value, set := e.field(name); set {
+			out[name] = value
+		}
+	}
+	return json.Marshal(out)
+}
+
+// writesZero is a required field written even when unset: a string or a number, whose zero
+// value still has the right type. A missing object or flag is left out instead.
+func writesZero(name string) bool {
+	switch name {
+	case "sender", "sealed", "historical", "typing", "timeoutMs", "step", "more":
+		return false
+	}
+	return true
+}
+
+// Bare is a stand-in for evt with only the fields every event has. The pusher sends it in
+// place of an event too large to send, so the journal moves past it: the gateway
+// quarantines it, as it would the full event, without its content.
+func Bare(evt *Event) *Event {
+	return &Event{Seq: evt.Seq, Type: evt.Type, UserID: evt.UserID, LoginID: evt.LoginID, At: evt.At, bare: true}
+}
+
+// ErrInvalidEvent is an event the backend would refuse. Writing it again can't succeed, so
+// callers treat it as permanent rather than retrying.
+var ErrInvalidEvent = errors.New("event the backend would refuse")
+
+// ErrTooLarge is an event over one of the size limits.
+var ErrTooLarge = fmt.Errorf("%w: over the protocol's size limit", ErrInvalidEvent)
+
+// Validate checks an event before it is journaled: a known type with every field the
+// backend requires, and within the size limits. An event that fails it is a bug in the
+// bridge host; journaling it would only get it quarantined.
+func (e *Event) Validate() error {
+	shape, ok := eventShapes[e.Type]
+	if !ok {
+		return fmt.Errorf("%w: unknown event type %q", ErrInvalidEvent, e.Type)
+	}
+	if e.UserID == "" {
+		return fmt.Errorf("%w: %s event has no userId", ErrInvalidEvent, e.Type)
+	}
+	for _, name := range shape.required {
+		// A network timestamp of 0 is odd but valid; every other required field must be set.
+		if _, set := e.field(name); !set && name != "networkTs" {
+			return fmt.Errorf("%w: %s event is missing %s", ErrInvalidEvent, e.Type, name)
+		}
+	}
+	if e.Sealed != nil {
+		limit := MaxMessageSealedBytes
+		if e.Type == EventChat || e.Type == EventContact {
+			limit = MaxMetadataSealedBytes
+		}
+		if seal.DecodedLen(e.Sealed.CT) > limit {
+			return fmt.Errorf("%s event: %w (sealed)", e.Type, ErrTooLarge)
+		}
+	}
+	data, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
+	}
+	if len(data) > MaxEventBytes {
+		return fmt.Errorf("%s event: %w", e.Type, ErrTooLarge)
+	}
+	return nil
 }
 
 // Event types.
@@ -142,6 +339,15 @@ type LoginCookies struct {
 	URL       string             `json:"url"`
 	UserAgent string             `json:"userAgent,omitempty"`
 	Fields    []LoginCookieField `json:"fields"`
+}
+
+// MarshalJSON writes no fields as `[]`: the backend wants an array, never null.
+func (c LoginCookies) MarshalJSON() ([]byte, error) {
+	type plain LoginCookies
+	if c.Fields == nil {
+		c.Fields = []LoginCookieField{}
+	}
+	return json.Marshal(plain(c))
 }
 
 type LoginCookieField struct {
@@ -233,6 +439,9 @@ type MessagePlaintext struct {
 	HTML        string       `json:"html,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Mentions    []string     `json:"mentions,omitempty"`
+	// Truncated means the message was cut short to fit the sealed size limit: its
+	// formatted body was dropped, and its body may end early.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type Attachment struct {

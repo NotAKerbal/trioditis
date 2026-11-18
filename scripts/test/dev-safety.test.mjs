@@ -708,3 +708,8 @@ void test('--reset-ignoring takes a whole process ID, and only with --setup --re
     assert.match(result.stdout, /Throwing this checkout’s backend data away/, option.join(' '))
   }
 })
+
+void test('lists the backend’s migrations from migrations.ts', async () => {
+  const { migrationNames } = await import('../lib.mjs')
+  assert.deepEqual(migrationNames(), ['scheduleCommandDeadlines'])
+})

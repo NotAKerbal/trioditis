@@ -238,6 +238,16 @@ migrations. If a change no longer matches what a dev backend holds, `convex dev`
 push it: start over as above. From the first release on, every schema change ships with its
 migration.
 
+For example, chats now must have a `view` and reactions a `chatId`, which rows written by
+`dev` before the client API (b61b99b) don't have: a backend holding those must start over
+before it takes this schema.
+
+One-off fixes for rows an older version wrote are internal functions in
+`packages/backend/convex/migrations.ts`, each safe to run any number of times. `pnpm dev`
+(and `--setup`) runs every one once its functions are pushed, so a backend that keeps its
+data is always caught up; after adding a migration while `pnpm dev` runs, restart it. The
+self-hosted installer runs them after each deploy too.
+
 ### End-to-end check
 
 With `pnpm dev` running, the end-to-end script signs in as the test account, connects the fake
