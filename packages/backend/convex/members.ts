@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server'
-import { requireAdmin, requireMember } from './lib/access'
+import { currentSession } from './auth'
+import { requireAdmin } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
 
@@ -123,15 +124,34 @@ export const isMember = internalQuery({
   },
 })
 
-/** The signed-in person's membership, or null if they aren't a member. */
+/**
+ * Who is signed in, and their membership: null when signed out, and `member: null` when the
+ * account isn't a member of this server. The identity comes in the same result as the
+ * membership, so the app never pairs one account's membership with another's session (for
+ * example when another tab signs in as someone else). `sessionId` is the Better Auth
+ * session's ID, as `getSession` gives it in `session.id`.
+ */
 export const me = query({
   args: {},
+  returns: v.union(
+    v.null(),
+    v.object({
+      userId: v.string(),
+      sessionId: v.string(),
+      member: v.union(v.null(), v.object({ userId: v.string(), role, identityKid: v.union(v.string(), v.null()) })),
+    }),
+  ),
   handler: async (ctx) => {
-    try {
-      const member = await requireMember(ctx)
-      return { userId: member.userId, role: member.role, identityKid: member.identityKid ?? null }
-    } catch {
-      return null
+    const session = await currentSession(ctx)
+    if (!session) return null
+    const member = await ctx.db
+      .query('members')
+      .withIndex('by_userId', (q) => q.eq('userId', session.userId))
+      .unique()
+    return {
+      userId: session.userId,
+      sessionId: session.sessionId,
+      member: member ? { userId: member.userId, role: member.role, identityKid: member.identityKid ?? null } : null,
     }
   },
 })
