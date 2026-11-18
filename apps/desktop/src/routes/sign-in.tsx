@@ -5,8 +5,8 @@ import { KeyRound } from 'lucide-react'
 import { useConvexAuth } from 'convex/react'
 import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
-import { errorMessage } from '~/lib/errors.ts'
-import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
+import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 
@@ -33,7 +33,11 @@ function SignIn() {
       password: await derivedAuthPassword(password, email),
     })
     setBusy(null)
-    if (error || !data) return setError(errorMessage(error, 'That email and password didn’t match.'))
+    if (error || !data) {
+      return setError(
+        tooManyAttempts(error, lastRetryAfter()) ?? errorMessage(error, 'That email and password didn’t match.'),
+      )
+    }
     announceAccountChange()
     // The same password unlocks the identity key on the next screen.
     holdPassword(password, data.user.id)
@@ -46,7 +50,10 @@ function SignIn() {
     const result = await authClient.signIn.passkey()
     setBusy(null)
     if (result?.error)
-      return setError(errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'))
+      return setError(
+        tooManyAttempts(result.error, lastRetryAfter()) ??
+          errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'),
+      )
     announceAccountChange()
     await navigate({ to: '/' })
   }

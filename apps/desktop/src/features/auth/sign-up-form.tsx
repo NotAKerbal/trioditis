@@ -2,10 +2,10 @@ import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
-import { INVITE_HEADER, authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { INVITE_HEADER, authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
 import { Field, FormError } from './auth-card.tsx'
 
 /**
@@ -42,7 +42,11 @@ export function SignUpForm({
       fetchOptions: { headers: { [INVITE_HEADER]: setupToken.trim() } },
     })
     setBusy(false)
-    if (error || !data) return setError(errorMessage(error, 'That account couldn’t be created.'))
+    if (error || !data) {
+      return setError(
+        tooManyAttempts(error, lastRetryAfter()) ?? errorMessage(error, 'That account couldn’t be created.'),
+      )
+    }
     announceAccountChange()
     // The same password protects the identity key backup, made on the next screen.
     holdPassword(password, data.user.id)

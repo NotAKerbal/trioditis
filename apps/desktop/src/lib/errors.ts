@@ -8,3 +8,14 @@ export function errorMessage(error: unknown, fallback: string): string {
   }
   return fallback
 }
+
+/**
+ * What to say when an auth request was refused for too many attempts (a 429), with the wait
+ * the server gave (Retry-After); null for any other error.
+ */
+export function tooManyAttempts(error: unknown, retryAfterSeconds: number | null): string | null {
+  const status = error && typeof error === 'object' ? (error as { status?: unknown }).status : undefined
+  if (status !== 429) return null
+  if (!retryAfterSeconds) return 'Too many attempts. Wait a moment, then try again.'
+  return `Too many attempts. Try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}.`
+}
