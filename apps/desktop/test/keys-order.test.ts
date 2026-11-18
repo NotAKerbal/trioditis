@@ -125,7 +125,7 @@ vi.mock('../src/lib/auth-client.ts', () => ({
 }))
 
 const db = fakeIndexedDB()
-const location = { assign: vi.fn() }
+const location = { assign: vi.fn(), reload: vi.fn() }
 Object.assign(globalThis, { indexedDB: db, window: { isSecureContext: true, location } })
 const keys = await import('../src/lib/keys.ts')
 const { forgetIdentity, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } = keys
@@ -528,6 +528,44 @@ describe('signing out, as the key on this device sees it', () => {
     expect(await fenceSession('v21', kept.session.id)).toBe(true)
     expect((await loadIdentity('v21'))?.kid).toBe(kept.kid)
     await expect(saveIn(otherTab, 'v21', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+  })
+
+  it('leaves with the warning when its session turns out ended though the answer was lost', async () => {
+    // A page of its own: one that hasn't left for the sign-in page yet.
+    vi.resetModules()
+    const page = await import('../src/lib/sign-out.ts')
+    const kept = await keptHere('v22')
+    expect(await page.rememberSession(kept.session.id)).toBe('noted')
+    server.loseResponse = true
+    // The key's removal can't be confirmed, and the server's answer never arrives.
+    const failure = await page.signOut('v22', kept.session.id, {
+      onlyKid: null,
+      backedUpKid: () => Promise.reject(new Error('offline')),
+    })
+    expect(failure).toMatch(/didn’t go through/)
+    expect(server.sessions.has(kept.session.token)).toBe(false)
+    // The page then sees its session gone (members.me): that sign-out went through after all.
+    location.assign.mockClear()
+    await page.leaveForSignIn(kept.session.id)
+    expect(location.assign).toHaveBeenCalledWith('/sign-in?key=unconfirmed')
+    // Once left, it doesn't leave again.
+    await page.leaveForSignIn(kept.session.id)
+    expect(location.assign).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves plainly when its session ended without a sign-out here, once one under way is over', async () => {
+    vi.resetModules()
+    const page = await import('../src/lib/sign-out.ts')
+    let finish!: () => void
+    const underWay = page.signingOut(new Promise<void>((resolve) => (finish = resolve)))
+    location.assign.mockClear()
+    const leaving = page.leaveForSignIn('a-session-ended-elsewhere')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(location.assign).not.toHaveBeenCalled()
+    finish()
+    await underWay
+    await leaving
+    expect(location.assign).toHaveBeenCalledWith('/sign-in')
   })
 
   it('turns saves away with a reason that says what to do', () => {

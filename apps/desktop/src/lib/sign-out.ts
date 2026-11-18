@@ -115,6 +115,8 @@ export const fenceSession = (userId: string, sessionId: string, onlyKid: string 
 // the sign-in page saying what they must (KEY_UNCONFIRMED) and tell the other tabs.
 const underWay = new Set<Promise<unknown>>()
 let leaving = false
+/** The last session a sign-out here asked the server to end, and whether its key's removal was confirmed. */
+let asked: { sessionId: string; unconfirmed: boolean } | null = null
 
 /** Counts `work` as a sign-out under way on this page until it settles. */
 export function signingOut<T>(work: Promise<T>): Promise<T> {
@@ -125,14 +127,18 @@ export function signingOut<T>(work: Promise<T>): Promise<T> {
 
 /**
  * Goes to the sign-in page once any sign-out under way here is over, unless one has already
- * left for it: for a page that saw its session end (members.me), maybe by its own sign-out.
+ * left for it: for a page that saw `sessionId`, the session it opened with, end (members.me).
+ * If a sign-out here had asked to end it, and didn't hear back, this is that sign-out going
+ * through after all: it leaves as that one would have, warning if the key's removal wasn't
+ * confirmed, and telling the other tabs.
  */
-export async function leaveForSignIn() {
+export async function leaveForSignIn(sessionId: string | null) {
   while (underWay.size) await Promise.allSettled(underWay)
-  if (!leaving) {
-    leaving = true
-    window.location.assign('/sign-in')
-  }
+  if (leaving) return
+  leaving = true
+  const ours = asked !== null && asked.sessionId === sessionId
+  if (ours) announceAccountChange()
+  window.location.assign(ours && asked!.unconfirmed ? KEY_UNCONFIRMED : '/sign-in')
 }
 
 /** Forgets the key, trying a few times: storage that fails once may not the next time. */
@@ -201,6 +207,7 @@ async function endThisSession(
       unconfirmed = true
     }
   }
+  asked = { sessionId, unconfirmed }
   if (!(await endSession(token))) return SIGN_OUT_FAILED
   tokens.delete(sessionId)
   announceAccountChange()

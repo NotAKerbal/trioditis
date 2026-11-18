@@ -106,7 +106,7 @@ function MemberGate({ children }: { children: ReactNode }) {
   // finds none, rather than going on with the one it holds until it expires.
   // A sign-out under way here goes on to the sign-in page itself, with what it must say.
   if (!me.data) {
-    void leaveForSignIn()
+    void leaveForSignIn(opened.current)
     return <Splash />
   }
   if (!me.data.member) {
@@ -205,11 +205,13 @@ function KeyGate({
   // The key the first attempt was for; a retry is for the same one (null: keep whatever's here).
   const leavingFor = useRef<string | null>(null)
   const signOutHere = (keyKid: string | null) => signingOut(leave(keyKid))
-  const backedUpNowHere = (keyKid: string | null) => {
+  // The key whose backups are known to exist now, if any: the account's ready key, whichever it
+  // is (another device may have won setup, and another tab unlocked it here), or the one setup
+  // here saw saved. Removing it touches only that key, and only if it's the one stored.
+  const knownBackedUp = (keyKid: string | null) => {
     const server = remoteNow.current
-    return (
-      keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
-    )
+    if (server?.state === 'ready' && server.kid) return server.kid
+    return keyKid !== null && backup.current.savedKid === keyKid ? keyKid : null
   }
   const leave = async (keyKid: string | null) => {
     leavingRef.current = true
@@ -218,17 +220,17 @@ function KeyGate({
     // Saves for this session stop first, in every tab, before anything is waited on: if this page
     // goes away meanwhile (another tab's sign-in reloads it), no key lands after the sign-out began.
     // A key already known to be backed up goes in the same step, saved here just before or not.
-    if (!(await fenceSession(userId, sessionId, backedUpNowHere(keyKid) ? keyKid : null))) {
+    if (!(await fenceSession(userId, sessionId, knownBackedUp(keyKid)))) {
       leavingFailure.current = SIGN_OUT_UNSTORED
       setLeaving('failed')
       return
     }
     await settled(backup.current.call)
-    const backedUp = backedUpNowHere(keyKid)
+    const backedUp = knownBackedUp(keyKid)
     // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
     // none is, but saves still under way in any tab are stopped all the same.
     const failure = await signOut(userId, sessionId, {
-      onlyKid: backedUp ? keyKid : null,
+      onlyKid: backedUp,
       backedUpKid: backedUp ? undefined : () => backedUpNow(sessionId),
     })
     if (failure === null) return
