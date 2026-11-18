@@ -25,8 +25,8 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
-import { canKeepKeys, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { SIGN_OUT_FAILED, signOut, stillSignedIn } from '~/lib/sign-out.ts'
+import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
+import { currentSession, SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -115,12 +115,15 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   }, [userId])
   // This device's key, read afresh for each token, so after a fence anywhere the gate never goes on
   // with a key that may have been forgotten since; not kept once the gate is gone (gcTime 0).
+  // While that read runs, "no key here" stays as it was, so an unlock or setup screen keeps what's
+  // typed in it; a key read before, though, is never shown again.
   const local = useQuery({
     queryKey: ['identity', userId, token],
     queryFn: () => loadIdentity(userId),
     enabled: token !== null,
     staleTime: Infinity,
     gcTime: 0,
+    placeholderData: (previous) => (previous === null ? null : undefined),
   })
   // While setup is saving, the server's state turns `ready` before this device has kept the key.
   // Holding the setup screen until it's done keeps its progress, errors and retry on screen.
@@ -136,7 +139,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // nothing (setup finishing, the app opening) takes its screen while it runs. It waits a little
   // for a backup call under way, then forgets this device's key if its backups are known to
   // exist, from setup's own answer or from the server for this key; unsure, it keeps it (it may
-  // be the only copy). Saving and forgetting take turns (lib/keys.ts), so no save lands after.
+  // be the only copy). From then on no tab keeps a key for this session (lib/keys.ts).
   // If it fails, going back reloads the page, to start again from what's really there.
   const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
   const leavingRef = useRef(false)
@@ -317,6 +320,11 @@ function InsecurePage() {
 /** What an error says went wrong, for the end of a sentence. */
 function reason(error: unknown): string {
   return error instanceof Error && error.message ? error.message : 'the browser gave no reason'
+}
+
+/** Why keeping the key didn't work, to end a sentence: what to do, if it was turned away. */
+function because(error: unknown): string {
+  return error instanceof KeepRefused ? `: ${error.message}` : ` (${reason(error)}).`
 }
 
 /** Lets the browser paint a spinner before a blocking computation like Argon2id. */
@@ -542,10 +550,10 @@ function KeySetup({
     setError(null)
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => stillSignedIn(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => currentSession(userId))
     } catch (e) {
       setKeptKid(kid)
-      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
+      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device${because(e)}`)
       setBusy(false)
       return
     }
@@ -567,7 +575,7 @@ function KeySetup({
     } catch (e) {
       setFinished(null)
       setKeptKid(kid)
-      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
+      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device${because(e)}`)
       setBusy(false)
     }
   }
@@ -800,10 +808,12 @@ function Unlock({
     if (isLeaving()) return
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => stillSignedIn(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => currentSession(userId))
     } catch (e) {
       return fail(
-        `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
+        e instanceof KeepRefused
+          ? `Your key opened, but it couldn’t be kept on this device: ${e.message}`
+          : `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
       )
     }
     if (isLeaving()) return

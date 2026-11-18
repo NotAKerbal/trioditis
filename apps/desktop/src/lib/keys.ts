@@ -94,38 +94,37 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
   return { kid: stored.kid, keyPair: { publicKey: fromBase64Url(stored.publicKey), privateKey } }
 }
 
-// Changes to a person's stored key are coordinated across every tab of this app:
+// Changes to a person's stored key are coordinated across every tab of this app, through the
+// database itself, so they hold without Web Locks and never wait on the network:
 //
-// - A lock (Web Locks, per person) runs them one at a time, and signing out holds it from the
-//   moment it forgets the key until the server has answered (lib/sign-out.ts). So no save runs
-//   while a sign-out is under way, in any tab; it waits until the sign-out is over.
-// - A save then writes only if the session it was worked out for is still signed in (asked of
-//   the server, inside the lock), and only if no sign-out has happened since its work began: each
-//   forget bumps a per-person count, in the same transaction as its delete, and the save checks
-//   the count it was given (its token) in the same transaction as its write.
-// - After every sign-out attempt, whether it worked or not, every tab hears that saves were
-//   fenced (onFence), so a tab still signed in takes a new token for new work, and reads its key
-//   afresh, while work begun before the fence stays fenced.
+// - Each forget bumps a per-person count, in the same transaction as its delete, and a save
+//   checks the count it was given (its token) in the same transaction as its write. So work begun
+//   before a sign-out never lands after it.
+// - Signing out also notes, in that transaction, the session it's ending (lib/sign-out.ts). A save
+//   asks the server which session it's in first, and writes only for another one: so once a
+//   sign-out has begun, no save for that session lands, in any tab, until the server has said the
+//   session lives on (and the note is cleared). If the server never says, it stays: a session
+//   whose sign-out may have gone through keeps nothing more here.
+// - After every forget, every tab hears that saves were fenced (onFence), so a tab still signed
+//   in takes a new token for new work, and reads its key afresh.
 const forgetsKey = (userId: string) => `${userId}\u0000forgets`
 
-function forgetCount(store: IDBObjectStore, userId: string, then: (count: number) => void) {
+interface Forgets {
+  count: number
+  /** The session a sign-out under way, or unconfirmed, is ending. */
+  endingSession?: string
+}
+
+function readForgets(store: IDBObjectStore, userId: string, then: (forgets: Forgets) => void) {
   const request = store.get(forgetsKey(userId))
-  request.onsuccess = () => then((request.result as { count?: number } | undefined)?.count ?? 0)
+  request.onsuccess = () => {
+    const stored = request.result as Partial<Forgets> | undefined
+    then({ count: stored?.count ?? 0, endingSession: stored?.endingSession })
+  }
 }
 
-const inTab = new Map<string, Promise<unknown>>()
-
-/**
- * Runs `run` holding this person's key lock, across every tab. Where the browser has no Web
- * Locks, it orders them within this tab only. Not re-entrant: never call it from inside `run`.
- */
-export function withKeyLock<T>(userId: string, run: () => Promise<T>): Promise<T> {
-  const locks = (globalThis.navigator as Navigator | undefined)?.locks
-  if (locks) return locks.request(`trioditis-key:${userId}`, { mode: 'exclusive' }, run) as Promise<T>
-  const next = (inTab.get(userId) ?? Promise.resolve()).catch(() => undefined).then(run)
-  inTab.set(userId, next)
-  return next
-}
+const writeForgets = (store: IDBObjectStore, userId: string, forgets: Forgets) =>
+  store.put({ userId: forgetsKey(userId), ...forgets })
 
 const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('trioditis-keys')
 const fenceListeners = new Set<(userId: string) => void>()
@@ -148,68 +147,102 @@ export function onFence(userId: string, onFenced: () => void): () => void {
 
 /**
  * A token for keeping a key that's about to be worked out (unlocked or set up), passed to
- * storeIdentity: a sign-out anywhere since it was taken stops the save. Taking it waits for a
- * sign-out under way to be over.
+ * storeIdentity: a forget anywhere since it was taken stops the save.
  */
 export function saveToken(userId: string): Promise<number> {
-  return withKeyLock(userId, () =>
-    inTransaction<number>('readonly', (store, answer) => forgetCount(store, userId, answer)),
-  )
+  return inTransaction<number>('readonly', (store, answer) => readForgets(store, userId, (f) => answer(f.count)))
+}
+
+/** Why a key wasn't kept, each saying what to do about it. */
+export type KeepRefusal = 'unreachable' | 'signedOut' | 'fenced' | 'signingOut'
+
+const REFUSALS: Record<KeepRefusal, string> = {
+  unreachable: 'the server couldn’t be reached to check you’re still signed in. Try again.',
+  signedOut: 'you’ve been signed out meanwhile. Sign in again.',
+  fenced: 'signing out was tried in another tab meanwhile. Try again.',
+  signingOut:
+    'signing out on this device hasn’t been confirmed by the server. Sign out, then sign in again, to keep it here.',
+}
+
+/** A save that was turned away, not one the browser's storage failed. */
+export class KeepRefused extends Error {
+  readonly why: KeepRefusal
+  constructor(why: KeepRefusal) {
+    super(REFUSALS[why])
+    this.why = why
+  }
 }
 
 /**
- * Keeps an unwrapped identity key on this device, if `stillSignedIn` says the session is, and no
- * sign-out has happened since `token`. Both are checked holding the key lock.
+ * Keeps an unwrapped identity key on this device, for the session `currentSession` names (it
+ * answers null when signed out, and throws when it can't tell), if that session isn't being
+ * signed out of and no forget has happened since `token`. Throws KeepRefused if not.
  */
 export async function storeIdentity(
   userId: string,
   kid: string,
   keyPair: KeyPair,
   token: number,
-  stillSignedIn: () => Promise<boolean>,
+  currentSession: () => Promise<string | null>,
 ): Promise<void> {
   if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
   const record: StoredIdentity = { userId, kid, publicKey: toBase64Url(keyPair.publicKey), iv, wrapped, deviceKey }
-  const written = await withKeyLock(userId, async () => {
-    if (!(await stillSignedIn().catch(() => false))) return false
-    return inTransaction<boolean>('readwrite', (store, answer) =>
-      forgetCount(store, userId, (count) => {
-        answer(count === token)
-        if (count === token) store.put(record)
-      }),
-    )
-  })
-  if (!written) throw new Error('this device was signed out of meanwhile')
+  let session: string | null
+  try {
+    session = await currentSession()
+  } catch {
+    throw new KeepRefused('unreachable')
+  }
+  if (session === null) throw new KeepRefused('signedOut')
+  const refused = await inTransaction<KeepRefusal | null>('readwrite', (store, answer) =>
+    readForgets(store, userId, (forgets) => {
+      const why = forgets.count !== token ? 'fenced' : forgets.endingSession === session ? 'signingOut' : null
+      answer(why)
+      if (!why) store.put(record)
+    }),
+  )
+  if (refused) throw new KeepRefused(refused)
 }
 
 /**
- * Forgets this device's key and fences saves begun before it, without taking the key lock: for
- * signing out, which holds it already (lib/sign-out.ts). With `onlyKid`, it removes the stored key
- * only if it's that one: a different key here is someone else's evidence to keep. With `onlyKid`
- * null it removes nothing, and only fences: signing out while a key's backups aren't known to exist.
+ * Forgets this device's key and fences saves begun before it. With `onlyKid`, it removes the
+ * stored key only if it's that one: a different key here is someone else's evidence to keep.
+ * With `onlyKid` null it removes nothing, and only fences: signing out while a key's backups
+ * aren't known to exist. With `endingSession`, saves for that session stay refused until
+ * `sessionLivesOn` (for signing out). Every tab hears of it once the forget has committed.
  */
-export function forgetHeld(userId: string, onlyKid?: string | null): Promise<void> {
-  return inTransaction<void>('readwrite', (store) =>
-    forgetCount(store, userId, (count) => {
-      store.put({ userId: forgetsKey(userId), count: count + 1 })
-      if (onlyKid === null) return
-      if (onlyKid === undefined) return void store.delete(userId)
-      const stored = store.get(userId)
-      stored.onsuccess = () => {
-        if ((stored.result as StoredIdentity | undefined)?.kid === onlyKid) store.delete(userId)
-      }
-    }),
-  )
-}
-
-/** Forgets this device's key (see forgetHeld), holding the key lock, and tells every tab. */
-export async function forgetIdentity(userId: string, onlyKid?: string | null): Promise<void> {
+export async function forgetIdentity(
+  userId: string,
+  { onlyKid, endingSession }: { onlyKid?: string | null; endingSession?: string } = {},
+): Promise<void> {
   try {
-    await withKeyLock(userId, () => forgetHeld(userId, onlyKid))
+    await inTransaction<void>('readwrite', (store) =>
+      readForgets(store, userId, (forgets) => {
+        writeForgets(store, userId, {
+          count: forgets.count + 1,
+          endingSession: endingSession ?? forgets.endingSession,
+        })
+        if (onlyKid === null) return
+        if (onlyKid === undefined) return void store.delete(userId)
+        const stored = store.get(userId)
+        stored.onsuccess = () => {
+          if ((stored.result as StoredIdentity | undefined)?.kid === onlyKid) store.delete(userId)
+        }
+      }),
+    )
   } finally {
     announceFence(userId)
   }
+}
+
+/** The server said signing out of `session` didn't happen: saves for it may go ahead again. */
+export function sessionLivesOn(userId: string, session: string): Promise<void> {
+  return inTransaction<void>('readwrite', (store) =>
+    readForgets(store, userId, (forgets) => {
+      if (forgets.endingSession === session) writeForgets(store, userId, { count: forgets.count })
+    }),
+  )
 }
