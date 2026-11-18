@@ -5,3 +5,4 @@ apps/desktop/src/routeTree.gen.ts
 LICENSE
 apps/bridge-host/
 **/testdata/**
+deploy/runtime/
