@@ -63,6 +63,8 @@ export function Composer({
           </Button>
         </div>
       ) : null}
+      {/* The placeholder says why too, but it's gone once there's text. */}
+      {disabled && !empty ? <p className="mx-3 mt-2 text-sm text-subtle-foreground">{disabled}</p> : null}
       <div className="flex items-end gap-1 p-1.5">
         <Textarea
           variant="bare"

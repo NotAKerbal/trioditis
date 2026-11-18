@@ -21,6 +21,7 @@ import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
+import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
@@ -217,6 +218,9 @@ function KeySetup({
   const [error, setError] = useState<string | null>(null)
   // Set once the server has the backups, if keeping the key on this device then failed.
   const [keptKid, setKeptKid] = useState<string | null>(null)
+  // Another device installed its recovery key first, so the one shown here doesn't work.
+  const [recoveryLost, setRecoveryLost] = useState(false)
+  const [finished, setFinished] = useState(false)
 
   async function prepare(event?: React.FormEvent) {
     event?.preventDefault()
@@ -271,11 +275,22 @@ function KeySetup({
       onLeave()
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
-    await keep(kid, job.keyPair)
+    // keys.setup stores only what's missing, so if another device holding this key installed a
+    // recovery key a moment before, the one shown here isn't it. Check which one is there.
+    let lost = false
+    if (job.showRecovery) {
+      const installed = await convex
+        .query(api.keys.identity, {})
+        .then((identity) => identity?.backups.find((b) => b.kind === 'recovery'))
+        .catch(() => undefined)
+      lost = !!installed && installed.ct !== job.setup.args.recovery.ct
+      setRecoveryLost(lost)
+    }
+    await keep(kid, job.keyPair, lost)
   }
 
   /** Keeps the key on this device, once the server has its backups. */
-  async function keep(kid: string, keyPair: KeyPair) {
+  async function keep(kid: string, keyPair: KeyPair, lost: boolean) {
     setBusy(true)
     setError(null)
     try {
@@ -286,7 +301,27 @@ function KeySetup({
       setBusy(false)
       return
     }
-    await onDone()
+    // Done, unless the recovery key shown here lost the race: then say so before going on.
+    if (!lost) {
+      await onDone()
+      return
+    }
+    setKeptKid(null)
+    setFinished(true)
+    setBusy(false)
+  }
+
+  if (finished && recoveryLost) {
+    return (
+      <AuthCard
+        title="Your recovery key is the other one"
+        description="Your key is set up, but another device finished saving its recovery key a moment earlier. The recovery key shown here won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
+      >
+        <Button variant="primary" size="lg" block onClick={() => void onDone()}>
+          Continue
+        </Button>
+      </AuthCard>
+    )
   }
 
   if (keptKid && prepared) {
@@ -302,7 +337,7 @@ function KeySetup({
           block
           className="mb-2"
           loading={busy}
-          onClick={() => void keep(keptKid, prepared.keyPair)}
+          onClick={() => void keep(keptKid, prepared.keyPair, recoveryLost)}
         >
           Try again
         </Button>

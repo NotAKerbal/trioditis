@@ -145,10 +145,17 @@ export function Sidebar({
     for (const list of [inbox, snoozed, requests, archived, blocked]) for (const c of list ?? []) seen.set(c.id, c)
     return [...seen.values()]
   }, [inbox, snoozed, requests, archived, blocked])
-  // Search looks through the chats loaded so far; these are the views with more to load.
-  const unloaded = (focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]).filter(
-    (l) => l.canLoadMore,
-  )
+  // Search looks through the chats loaded so far, of the views shown; these are the ones with more.
+  const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
+  const unloaded = searched.filter((l) => l.canLoadMore)
+  const searchedAll = searched.every((l) => l.chats !== undefined && !l.canLoadMore)
+  const searchLabel = !searchedAll
+    ? 'Results in loaded chats'
+    : focused
+      ? 'Results in all chats'
+      : simpleShow === 'inbox'
+        ? 'Results in the inbox'
+        : `Results in ${SIMPLE_SHOWS.find((v) => v.view === simpleShow)!.label.toLowerCase()}`
   const results = searching
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
@@ -349,10 +356,7 @@ export function Sidebar({
           <ListSkeleton />
         ) : searching ? (
           <>
-            <SectionHeader
-              label={unloaded.length ? 'Results in loaded chats' : 'Results in all chats'}
-              count={results.length}
-            />
+            <SectionHeader label={searchLabel} count={results.length} />
             {results.length ? results.map((c) => row(c)) : <Empty>No chats match.</Empty>}
             {unloaded.length ? (
               <LoadMore
@@ -378,7 +382,8 @@ export function Sidebar({
           )
         ) : (
           <>
-            {unread.length ? (
+            {/* Shown too when the server counts unread chats not loaded yet: the next page has them. */}
+            {unread.length || counts?.inbox.count || counts?.woke.count ? (
               <>
                 <SectionHeader
                   label="Unread"

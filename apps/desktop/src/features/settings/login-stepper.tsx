@@ -12,7 +12,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { useEffect, useRef, useState } from 'react'
 import { networkName } from '~/data/chats.ts'
 import { loginInputBlocked } from '~/data/bridge-ready.ts'
-import { useBridgeKey } from '~/data/messages.ts'
+import { useBridge } from '~/data/messages.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { sealLoginInput } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -48,7 +48,8 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const start = useMutation(api.logins.start)
   const submit = useMutation(api.logins.submit)
   const cancel = useMutation(api.logins.cancel)
-  const bridgeKey = useBridgeKey()
+  const bridge = useBridge()
+  const bridgeKey = bridge.key
   const [loginSessionId, setLoginSessionId] = useState<Id<'loginSessions'> | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, string>>({})
@@ -253,7 +254,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                     autoComplete="off"
                     spellCheck={false}
                     required
-                    disabled={submission.sentStepId === step.stepId || !bridgeKey}
+                    disabled={submission.sentStepId === step.stepId || !!loginInputBlocked(bridge.status)}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
                   />
@@ -262,8 +263,8 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                   ) : null}
                 </label>
               ))}
-              {loginInputBlocked(bridgeKey) ? (
-                <p className="mb-3 text-sm text-muted-foreground">{loginInputBlocked(bridgeKey)}</p>
+              {loginInputBlocked(bridge.status) ? (
+                <p className="mb-3 text-sm text-muted-foreground">{loginInputBlocked(bridge.status)}</p>
               ) : null}
               {submission.error ? (
                 <p role="alert" className="mb-3 text-sm text-danger">
@@ -274,7 +275,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                 <Button
                   type="submit"
                   variant="primary"
-                  loading={submission.sending}
+                  loading={submission.sending || bridge.status === 'loading'}
                   disabled={!bridgeKey || submission.sentStepId === step.stepId}
                 >
                   Continue

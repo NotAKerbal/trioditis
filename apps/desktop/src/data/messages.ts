@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
+import type { BridgeStatus } from './bridge-ready.ts'
 import { reactionGroups, reactionRequests } from './reaction-requests.ts'
 
 export interface Message {
@@ -135,10 +136,12 @@ export function useTyping(chatId: ChatId) {
   return (data ?? []).filter((t) => t.expiresAt > now)
 }
 
-/** The bridge's public key: undefined while it loads, null when the server has none (see bridge-ready.ts). */
-export function useBridgeKey(): string | null | undefined {
-  const { data, isPending } = useQuery(convexQuery(api.keys.bridge, {}))
-  return isPending ? undefined : (data?.publicKey ?? null)
+/** The bridge's public key, once there is one, and where it stands (see bridge-ready.ts). */
+export function useBridge(): { key: string | undefined; status: BridgeStatus } {
+  const { data, isPending, isError } = useQuery(convexQuery(api.keys.bridge, {}))
+  if (isPending) return { key: undefined, status: 'loading' }
+  if (isError) return { key: undefined, status: 'error' }
+  return data?.publicKey ? { key: data.publicKey, status: 'ready' } : { key: undefined, status: 'missing' }
 }
 
 export function useSendMutations() {

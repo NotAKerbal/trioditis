@@ -24,7 +24,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   networkName,
   useChat,
@@ -35,7 +35,17 @@ import {
   type ChatId,
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
-import { useBridgeKey, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
+import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
+import {
+  appendToDraft,
+  clearDraftIf,
+  getDraft,
+  restoreDraft,
+  setDraftReply,
+  setDraftText,
+  takeDraft,
+  useDraft,
+} from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
@@ -43,9 +53,6 @@ import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
 import { MessageList } from './message-list.tsx'
-
-// Drafts live in memory only, per chat: they are plaintext, so they never touch the disk.
-const drafts = new Map<string, string>()
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
@@ -81,26 +88,15 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   )
   const typing = useTyping(chat.id)
   const scheduledRows = useScheduled(chat.id)
-  const bridgeKey = useBridgeKey()
+  const bridge = useBridge()
+  const bridgeKey = bridge.key
   const { send, discard, schedule, cancelScheduled, sendScheduledNow } = useSendMutations()
-  const [draft, setDraftState] = useState(() => drafts.get(chat.id) ?? '')
-  const [replyTo, setReplyTo] = useState<Message | null>(null)
+  // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
+  // after this pane was left and opened again still changes what's on screen.
+  const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
+  const setDraft = (text: string) => setDraftText(chat.id, text)
+  const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
   const [details, setDetails] = useState(true)
-
-  // Counts every change to the draft, so a send or schedule that ends later can tell whether
-  // the person typed in the meantime.
-  const draftRev = useRef(0)
-  const setDraft = (text: string) => {
-    draftRev.current++
-    setDraftState(text)
-    if (text) drafts.set(chat.id, text)
-    else drafts.delete(chat.id)
-  }
-  /** Puts back text whose send didn't go, ahead of anything typed since, so nothing is lost. */
-  const restoreDraft = (text: string) => {
-    const now = drafts.get(chat.id) ?? ''
-    setDraft(now ? `${text}\n${now}` : text)
-  }
 
   // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
@@ -123,42 +119,36 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   }
 
   async function onSend() {
-    const text = draft.trim()
-    if (!text) return
+    if (!draft.trim()) return
     // Nothing leaves the composer until it can be sent.
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
-    const reply = replyTo
-    setDraft('')
-    setReplyTo(null)
+    const chatId = chat.id
+    const taken = takeDraft<Message>(chatId)
+    if (!taken) return
     // Put the text and reply back if the send didn't reach the server, keeping anything newer.
-    await sendText(text, reply?.eventId).catch(() => {
-      restoreDraft(text)
-      setReplyTo((current) => current ?? reply)
-    })
+    await sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply))
   }
 
   async function onSchedule(sendAt: number) {
     const text = draft.trim()
     if (!text) return
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
-    const rev = draftRev.current
+    const chatId = chat.id
+    const rev = getDraft(chatId).rev
     const reply = replyTo
     const clientMessageId = newClientId()
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
       checkWithinAYear(sendAt)
       await schedule({
-        chatId: chat.id,
+        chatId,
         clientMessageId,
         sendAt,
         ...sealed,
         ...(reply ? { replyTo: reply.eventId } : {}),
       })
       // Clear what was scheduled, unless the person has typed since: then that stays.
-      if (draftRev.current === rev) {
-        setDraft('')
-        setReplyTo((current) => (current === reply ? null : current))
-      }
+      clearDraftIf(chatId, rev)
       toast(`Scheduled for ${formatWhen(sendAt)}`)
     } catch (e) {
       toast(errorMessage(e, 'That message couldn’t be scheduled.'))
@@ -331,11 +321,11 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onCancelScheduled={(id, body) =>
             void cancelScheduled({ scheduledId: id }).then(
               () => {
-                // Keep anything in the composer by now; add the cancelled text below it.
-                const now = drafts.get(chat.id) ?? ''
-                setDraft(now.trim() ? `${now}\n${body}` : body)
+                // Keep anything in the composer by now; add the cancelled text below it. A copy
+                // this device couldn't open has nothing to put back.
+                if (body === null) return toast('Cancelled. It won’t be sent.')
                 toast(
-                  now.trim()
+                  appendToDraft(chat.id, body)
                     ? 'Cancelled. The message was added below your draft.'
                     : 'Cancelled. The message is back in the composer.',
                 )
@@ -352,7 +342,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onCancelReply={() => setReplyTo(null)}
           onSend={() => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
-          disabled={composerBlocked(chat.row, bridgeKey)}
+          disabled={composerBlocked(chat.row, bridge.status)}
         />
       </main>
       {details ? <DetailsPanel chat={chat} act={act} /> : null}

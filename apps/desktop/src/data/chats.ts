@@ -242,7 +242,7 @@ const copiesOf = (results: { data?: ScheduledCopy[] | undefined }[]) => results.
  * The person's sealed copies of scheduled messages, opened on this device, by scheduled ID.
  * `scheduled.list` carries no content; copies are asked for 20 at a time, the most it takes.
  */
-export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, string> {
+export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, string | null> {
   const session = useSession()
   const batches: Id<'scheduledSends'>[][] = []
   for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20))
@@ -252,7 +252,8 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
   })
   const clientIds = useScheduled()
   return useMemo(() => {
-    const out = new Map<string, string>()
+    // Text once opened; null for a copy that came but doesn't open here; missing while it loads.
+    const out = new Map<string, string | null>()
     for (const row of data) {
       const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
@@ -263,7 +264,7 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
         session.userId,
         clientMessageId,
       )?.body
-      if (body !== undefined) out.set(row._id, body)
+      out.set(row._id, body ?? null)
     }
     return out
   }, [data, clientIds, session])

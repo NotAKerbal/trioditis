@@ -9,8 +9,8 @@ import { formatWhen } from '~/data/snooze.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
-  /** Its text, once its copy is opened here; undefined until then. */
-  body: string | undefined
+  /** Its text once its copy is opened here; null if the copy doesn't open here; undefined until then. */
+  body: string | null | undefined
   sendAt: number
 }
 
@@ -27,7 +27,8 @@ interface MessageListProps {
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
-  onCancelScheduled: (id: Id<'scheduledSends'>, body: string) => void
+  /** Cancels it; `body` is its text to put back, or null when this device couldn't open it. */
+  onCancelScheduled: (id: Id<'scheduledSends'>, body: string | null) => void
 }
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
@@ -44,12 +45,26 @@ export function MessageList(props: MessageListProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
-  // Set while earlier messages load: where the list was, to keep the same messages in view.
-  const before = useRef<{ firstId: string | undefined; height: number } | null>(null)
+  // Set while earlier messages load: the top-most message in view and how far down it sat, to
+  // put it back there. Anchoring on a message, not the list's height, keeps it still even if a
+  // new message arrives at the bottom meanwhile.
+  const before = useRef<{ firstId: string | undefined; anchorId: string; offset: number } | null>(null)
 
   const loadEarlier = () => {
     const el = scroller.current
-    if (el) before.current = { firstId: messages[0]?.id, height: el.scrollHeight }
+    if (el) {
+      const top = el.getBoundingClientRect().top
+      const anchor = [...el.querySelectorAll<HTMLElement>('[data-message-id]')].find(
+        (m) => m.getBoundingClientRect().bottom > top,
+      )
+      if (anchor) {
+        before.current = {
+          firstId: messages[0]?.id,
+          anchorId: anchor.dataset.messageId!,
+          offset: anchor.getBoundingClientRect().top - top,
+        }
+      }
+    }
     props.onLoadMore()
   }
   const loadEarlierRef = useRef(loadEarlier)
@@ -62,7 +77,8 @@ export function MessageList(props: MessageListProps) {
     if (!el) return
     const was = before.current
     if (was && messages[0]?.id !== was.firstId) {
-      el.scrollTop += el.scrollHeight - was.height
+      const anchor = el.querySelector<HTMLElement>(`[data-message-id="${was.anchorId}"]`)
+      if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
       before.current = null
     } else if (atBottom.current) el.scrollTop = el.scrollHeight
   }, [messages, scheduled.length, props.typing])
@@ -116,7 +132,7 @@ export function MessageList(props: MessageListProps) {
         const showWho = props.group && !m.self && (!prev || prev.ghostId !== m.ghostId || showDay)
         const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
         return (
-          <div key={m.id}>
+          <div key={m.id} data-message-id={m.id}>
             {showDay ? (
               <div className="my-3 flex justify-center">
                 <span className="rounded-[10px] bg-surface px-2.5 py-0.5 text-xs text-subtle-foreground shadow-[0_0_0_1px_var(--border)]">
@@ -195,14 +211,23 @@ export function MessageList(props: MessageListProps) {
       {scheduled.map((s) => (
         <div key={s.id} className="mb-2 ml-auto flex max-w-[78%] flex-col items-end">
           <div className="rounded-[18px] px-3 py-2 leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
-            {s.body ?? <span className="text-subtle-foreground">Opening…</span>}
+            {s.body === undefined ? (
+              <span className="text-subtle-foreground">Opening…</span>
+            ) : s.body === null ? (
+              <span className="text-subtle-foreground italic">
+                This scheduled message can’t be opened on this device.
+              </span>
+            ) : (
+              s.body
+            )}
           </div>
           <div className="mx-2.5 mt-0.5 flex items-center gap-2 text-xs text-primary-ink">
             <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
             <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onSendScheduledNow(s.id)}>
               Send now
             </Button>
-            {/* Cancelling puts the text back in the composer, so it waits until the text is here. */}
+            {/* Cancelling puts the text back in the composer, so it waits for the text; one that
+                can't be opened here can still be stopped, with nothing to put back. */}
             <Button
               variant="link"
               size="sm"
@@ -210,7 +235,7 @@ export function MessageList(props: MessageListProps) {
               disabled={s.body === undefined}
               onClick={() => s.body !== undefined && props.onCancelScheduled(s.id, s.body)}
             >
-              Cancel
+              {s.body === null ? 'Cancel send' : 'Cancel'}
             </Button>
           </div>
         </div>
