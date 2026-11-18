@@ -10,6 +10,7 @@ import {
 } from '@trioditis/crypto'
 import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
+import { Checkbox } from '@trioditis/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@trioditis/ui/dialog'
 import { Input } from '@trioditis/ui/input'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
@@ -59,7 +60,8 @@ export function SettingsDialog({
         >
           <DialogTitle className="mx-2 mb-3.5 text-md">Settings</DialogTitle>
           {sections.map((s) => (
-            <button
+            <Button
+              variant="bare"
               key={s.id}
               type="button"
               aria-current={s.id === current.id ? 'page' : undefined}
@@ -72,7 +74,7 @@ export function SettingsDialog({
             >
               {s.icon}
               {s.name}
-            </button>
+            </Button>
           ))}
         </nav>
         <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
@@ -148,7 +150,8 @@ function Appearance() {
       <Setting title="Sidebar layout" about="How the chat list is organized. You can switch at any time." column>
         <div className="mt-3 grid grid-cols-2 gap-3" role="radiogroup" aria-label="Sidebar layout">
           {options.map((o) => (
-            <button
+            <Button
+              variant="bare"
               key={o.id}
               type="button"
               role="radio"
@@ -166,7 +169,7 @@ function Appearance() {
                 {o.name} {layout === o.id ? <Check className="size-4" /> : null}
               </span>
               <span className="text-sm text-muted-foreground">{o.about}</span>
-            </button>
+            </Button>
           ))}
         </div>
       </Setting>
@@ -362,7 +365,8 @@ function Accounts() {
       <div className="grid grid-cols-2 gap-2">
         {(networks ?? []).flatMap((n) =>
           n.flows.map((f) => (
-            <button
+            <Button
+              variant="bare"
               key={`${n.network}:${f.id}`}
               type="button"
               onClick={() =>
@@ -383,7 +387,7 @@ function Accounts() {
                 <span className="block truncate text-sm text-muted-foreground">{f.name}</span>
               </span>
               <Plus className="size-4 text-subtle-foreground" />
-            </button>
+            </Button>
           )),
         )}
       </div>
@@ -629,12 +633,7 @@ function Keys() {
               {recovery.text}
             </div>
             <label className="mb-3 flex items-center gap-2.5 text-sm">
-              <input
-                type="checkbox"
-                className="size-4 accent-[var(--accent)]"
-                checked={saved}
-                onChange={(e) => setSaved(e.target.checked)}
-              />
+              <Checkbox checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
               I’ve saved this recovery key somewhere safe.
             </label>
             <div className="flex gap-2">

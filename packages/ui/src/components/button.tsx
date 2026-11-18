@@ -4,7 +4,7 @@ import type * as React from 'react'
 import { cn } from '../lib/utils.ts'
 
 const buttonVariants = cva(
-  'inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 font-semibold whitespace-nowrap transition-colors duration-(--duration-fast) ease-(--ease-out) select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-45 [&_svg]:pointer-events-none [&_svg]:shrink-0',
+  'cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-45 [&_svg]:pointer-events-none [&_svg]:shrink-0',
   {
     variants: {
       variant: {
@@ -13,6 +13,10 @@ const buttonVariants = cva(
         ghost: 'text-muted-foreground hover:bg-rail-hover hover:text-foreground',
         link: 'h-auto px-0 text-primary hover:underline',
         danger: 'text-danger shadow-[0_0_0_1px_color-mix(in_srgb,var(--danger)_45%,transparent)] hover:bg-danger/10',
+        // No look of its own, for a control whose content is its shape: a chat row, a settings
+        // tab, a tile or a chip. The caller styles it; it keeps the focus ring and disabled state,
+        // and takes no size.
+        bare: '',
       },
       size: {
         sm: 'h-(--control-sm) rounded-sm px-2.5 text-sm',
@@ -23,6 +27,14 @@ const buttonVariants = cva(
       },
       block: { true: 'w-full' },
     },
+    compoundVariants: [
+      // Every look but bare is a label and icons, centred on one line.
+      {
+        variant: ['primary', 'secondary', 'ghost', 'link', 'danger'],
+        className:
+          'inline-flex shrink-0 items-center justify-center gap-1.5 font-semibold whitespace-nowrap transition-colors duration-(--duration-fast) ease-(--ease-out) select-none',
+      },
+    ],
     defaultVariants: { variant: 'secondary', size: 'md' },
   },
 )
@@ -50,7 +62,8 @@ function Button({
   return (
     <Comp
       data-slot="button"
-      className={cn(buttonVariants({ variant, size, block }), className)}
+      // A bare button has no size: null keeps the default one off it.
+      className={cn(buttonVariants({ variant, size: variant === 'bare' ? null : size, block }), className)}
       disabled={asChild ? undefined : disabled || loading}
       aria-busy={loading || undefined}
       {...props}

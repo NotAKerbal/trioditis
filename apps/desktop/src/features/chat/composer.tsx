@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
+import { Textarea } from '@trioditis/ui/textarea'
 import { Clock, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { networkName } from '~/data/chats.ts'
@@ -63,7 +64,8 @@ export function Composer({
         </div>
       ) : null}
       <div className="flex items-end gap-1 p-1.5">
-        <textarea
+        <Textarea
+          variant="bare"
           ref={input}
           rows={1}
           value={draft}
@@ -78,7 +80,7 @@ export function Composer({
             }
             if (e.key === 'Escape' && replyTo) onCancelReply()
           }}
-          className="max-h-40 min-h-[38px] flex-1 resize-none bg-transparent px-2 py-2 text-base text-foreground outline-none placeholder:text-subtle-foreground"
+          className="max-h-40 min-h-[38px] flex-1 px-2 py-2"
         />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

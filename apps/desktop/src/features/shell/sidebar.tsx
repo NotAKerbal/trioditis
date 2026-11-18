@@ -10,7 +10,7 @@ import {
   DropdownMenuTrail,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
-import { InputGroup } from '@trioditis/ui/input'
+import { Input, InputGroup } from '@trioditis/ui/input'
 import { Kbd } from '@trioditis/ui/kbd'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
@@ -206,7 +206,7 @@ export function Sidebar({
     <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
       <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
         <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />} end={<Kbd>⌘K</Kbd>}>
-          <input
+          <Input
             ref={searchRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -453,7 +453,8 @@ function Divider({
   if (count === 0) return null
   return (
     <>
-      <button
+      <Button
+        variant="bare"
         type="button"
         aria-expanded={open}
         onClick={onToggle}
@@ -467,7 +468,7 @@ function Divider({
           {more?.canLoadMore ? '+' : ''}
         </span>
         <span className="h-px flex-1 bg-border-strong" />
-      </button>
+      </Button>
       {open ? children : null}
       {open && more ? <LoadMore list={more} /> : null}
     </>

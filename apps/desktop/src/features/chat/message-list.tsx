@@ -141,7 +141,8 @@ export function MessageList(props: MessageListProps) {
                 {m.self ? <Delivery m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} /> : null}
               </div>
               {!m.pending && !m.deleted ? (
-                <button
+                <Button
+                  variant="bare"
                   type="button"
                   aria-label="Reply"
                   title="Reply"
@@ -152,7 +153,7 @@ export function MessageList(props: MessageListProps) {
                   )}
                 >
                   <Reply className="size-[15px]" />
-                </button>
+                </Button>
               ) : null}
             </div>
           </div>

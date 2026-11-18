@@ -102,13 +102,14 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
 
   return (
     <div>
-      <button
+      <Button
+        variant="bare"
         type="button"
         onClick={close}
         className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="size-4" /> Accounts
-      </button>
+      </Button>
       <div className="mb-4 flex items-center gap-3">
         <NetworkBadge network={network} label={networkName(network)} size={32} />
         <div>
