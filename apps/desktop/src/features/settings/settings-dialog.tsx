@@ -23,9 +23,15 @@ import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import { Check, Copy, Eye, KeyRound, Plug, Plus, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
-import { networkName, useAccounts, useNetworkHealth, useNetworks, useSidebarLayout } from '~/data/chats.ts'
+import {
+  networkName,
+  useAccounts,
+  useNetworkHealth,
+  useNetworks,
+  useServerInfo,
+  useSidebarLayout,
+} from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
-import { config } from '~/lib/config.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
@@ -265,6 +271,7 @@ function Accounts() {
   const networks = useNetworks()
   const accounts = useAccounts()
   const health = useNetworkHealth()
+  const server = useServerInfo()
   const logout = useMutation(api.logins.logout)
   const [connecting, setConnecting] = useState<{ network: string; flowId: string } | null>(null)
   const [confirmRisk, setConfirmRisk] = useState<{ network: string; flowId: string } | null>(null)
@@ -338,7 +345,7 @@ function Accounts() {
       <h3 className="mt-6 mb-2 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
         Connect a network
       </h3>
-      {config.environment !== 'production' ? <DemoSeed /> : null}
+      {server?.demo ? <DemoSeed /> : null}
       {confirmRisk ? (
         <div className="mb-3 rounded-lg bg-warning-soft p-3.5 text-sm text-warning-ink">
           <b className="font-semibold">
@@ -401,8 +408,8 @@ function Accounts() {
 }
 
 /**
- * Preview and nightly servers can fill an account with made-up chats on a fake network, to try
- * the app without connecting a real one. The server refuses this everywhere else.
+ * A demo server can fill an account with made-up chats on a fake network, to try the app without
+ * connecting a real one. Shown only where server.info says it's a demo.
  */
 function DemoSeed() {
   const seed = useAction(api.demo.seedForMe)
@@ -410,7 +417,7 @@ function DemoSeed() {
   return (
     <div className="mb-3 flex items-center gap-3 rounded-lg bg-surface-2 p-3 text-sm shadow-[inset_0_0_0_1px_var(--border)]">
       <span className="flex-1 text-muted-foreground">
-        This is a {config.environment} server. You can fill your account with made-up demo chats.
+        This is a demo server. You can fill your account with made-up chats.
       </span>
       <Button
         size="sm"
@@ -433,6 +440,7 @@ function DemoSeed() {
 }
 
 function Members() {
+  const server = useServerInfo()
   const invite = useMutation(api.members.invite)
   const revoke = useMutation(api.members.revokeInvitation)
   const { data: invitations } = useQuery(convexQuery(api.members.invitations, {}))
@@ -441,48 +449,62 @@ function Members() {
   const [link, setLink] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
+  // A server that takes no invitations (a demo) has nothing to invite with or list.
+  const closed = server?.invitations === false
 
   return (
     <>
       <Heading
         title="Members"
-        lead="Who can use this server. Everyone signs up from an invitation link you share; they connect their own networks."
+        lead={
+          closed
+            ? 'Who can use this server.'
+            : 'Who can use this server. Everyone signs up from an invitation link you share; they connect their own networks.'
+        }
       />
-      <form
-        className="flex items-end gap-2 border-t border-border pt-4"
-        onSubmit={async (e) => {
-          e.preventDefault()
-          setBusy(true)
-          try {
-            const { token } = await invite({ email, role })
-            // The token goes in the fragment, which never reaches a server or a proxy's logs.
-            const query = new URLSearchParams({ email: email.trim().toLowerCase() })
-            setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
-            setCopied(false)
-            setEmail('')
-          } catch (err) {
-            toast(errorMessage(err, 'That invitation couldn’t be made.'))
-          }
-          setBusy(false)
-        }}
-      >
-        <label className="flex-1">
-          <span className="mb-1.5 block text-sm font-semibold">Email</span>
-          <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <Segmented
-          value={role}
-          onValueChange={(v) => setRole(v as 'member' | 'admin')}
-          className="mb-[3px] w-[160px]"
-          aria-label="Role"
+      {server && closed ? (
+        <p className="border-t border-border pt-4 text-sm text-muted-foreground">
+          {server.demo
+            ? 'This is a demo server, so it doesn’t take invitations.'
+            : 'This server doesn’t take invitations.'}
+        </p>
+      ) : server ? (
+        <form
+          className="flex items-end gap-2 border-t border-border pt-4"
+          onSubmit={async (e) => {
+            e.preventDefault()
+            setBusy(true)
+            try {
+              const { token } = await invite({ email, role })
+              // The token goes in the fragment, which never reaches a server or a proxy's logs.
+              const query = new URLSearchParams({ email: email.trim().toLowerCase() })
+              setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
+              setCopied(false)
+              setEmail('')
+            } catch (err) {
+              toast(errorMessage(err, 'That invitation couldn’t be made.'))
+            }
+            setBusy(false)
+          }}
         >
-          <SegmentedItem value="member">Member</SegmentedItem>
-          <SegmentedItem value="admin">Admin</SegmentedItem>
-        </Segmented>
-        <Button type="submit" variant="primary" loading={busy}>
-          Invite
-        </Button>
-      </form>
+          <label className="flex-1">
+            <span className="mb-1.5 block text-sm font-semibold">Email</span>
+            <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          <Segmented
+            value={role}
+            onValueChange={(v) => setRole(v as 'member' | 'admin')}
+            className="mb-[3px] w-[160px]"
+            aria-label="Role"
+          >
+            <SegmentedItem value="member">Member</SegmentedItem>
+            <SegmentedItem value="admin">Admin</SegmentedItem>
+          </Segmented>
+          <Button type="submit" variant="primary" loading={busy}>
+            Invite
+          </Button>
+        </form>
+      ) : null}
       {link ? (
         <div className="mt-3 rounded-lg bg-surface-2 p-3 shadow-[inset_0_0_0_1px_var(--border)]">
           <p className="mb-2 text-sm text-muted-foreground">
@@ -509,9 +531,11 @@ function Members() {
           </div>
         </div>
       ) : null}
-      <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-        Invitations
-      </h3>
+      {!closed || invitations?.length ? (
+        <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
+          Invitations
+        </h3>
+      ) : null}
       {(invitations ?? []).map((inv) => (
         <div key={inv._id} className="flex items-center gap-3 border-t border-border py-2.5">
           <div className="min-w-0 flex-1">
@@ -536,7 +560,7 @@ function Members() {
           ) : null}
         </div>
       ))}
-      {invitations?.length === 0 ? (
+      {!closed && invitations?.length === 0 ? (
         <p className="border-t border-border py-3 text-sm text-muted-foreground">No invitations yet.</p>
       ) : null}
     </>
