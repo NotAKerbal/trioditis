@@ -148,6 +148,8 @@ const (
 func (p *Pusher) Run(ctx context.Context) {
 	backoff := time.Second
 	var lastContact time.Time
+	var lastConflict int64
+	conflictBackoff := time.Second
 	for ctx.Err() == nil {
 		var sent bool
 		var err error
@@ -160,11 +162,36 @@ func (p *Pusher) Run(ctx context.Context) {
 		var conflict *ConflictError
 		switch {
 		case errors.As(err, &conflict):
-			p.Log.Warn().Int64("expected_seq", conflict.ExpectedSeq).Msg("Gateway asked to resend the journal from an earlier point")
+			lastContact = time.Now()
+			last, lastErr := p.Store.LastSeq(ctx)
+			if lastErr != nil {
+				p.Log.Err(lastErr).Msg("Failed to read the journal")
+				p.sleep(ctx, backoff)
+				continue
+			}
+			// The gateway can only ask for a sequence the journal has (or the next one). Anything
+			// else means the journal and the gateway disagree about history, which resending
+			// can't fix: an operator has to look.
+			if conflict.ExpectedSeq < 1 || conflict.ExpectedSeq > last+1 {
+				p.Log.Error().Int64("expected_seq", conflict.ExpectedSeq).Int64("journal_last", last).
+					Msg("Gateway asked for a sequence the journal doesn't have; not resending")
+				p.sleep(ctx, maxBackoff)
+				continue
+			}
+			// The same request again means the resend didn't help; back off rather than spin.
+			if conflict.ExpectedSeq == lastConflict {
+				p.Log.Error().Int64("expected_seq", conflict.ExpectedSeq).Dur("retry_in", conflictBackoff).
+					Msg("Gateway keeps asking for the same sequence")
+				p.sleep(ctx, conflictBackoff)
+				conflictBackoff = min(conflictBackoff*2, maxBackoff)
+			} else {
+				p.Log.Warn().Int64("expected_seq", conflict.ExpectedSeq).Msg("Gateway asked to resend the journal from an earlier point")
+				conflictBackoff = time.Second
+			}
+			lastConflict = conflict.ExpectedSeq
 			if err = p.rewind(ctx, conflict.ExpectedSeq-1); err != nil {
 				p.Log.Err(err).Msg("Failed to rewind journal acknowledgement")
 			}
-			lastContact = time.Now()
 			continue
 		case err != nil:
 			p.Log.Warn().Err(err).Dur("retry_in", backoff).Msg("Failed to push events to the gateway")
@@ -173,6 +200,7 @@ func (p *Pusher) Run(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
+		lastConflict, conflictBackoff = 0, time.Second
 		if sent {
 			lastContact = time.Now()
 		} else {
@@ -218,7 +246,13 @@ func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
 		if ackedThrough < acked {
 			p.Log.Warn().Int64("gateway", ackedThrough).Int64("local", acked).Msg("Gateway is behind the journal; resending")
 		}
-		return p.Store.SetAckedThrough(ctx, ackedThrough)
+		if err = p.Store.SetAckedThrough(ctx, ackedThrough); err != nil {
+			return err
+		}
+		// A login's QR or pairing code isn't needed once the gateway has it.
+		if err = p.Store.ScrubLoginDisplays(ctx, ackedThrough); err != nil {
+			p.Log.Err(err).Msg("Failed to scrub login codes from the journal")
+		}
 	}
 	return nil
 }

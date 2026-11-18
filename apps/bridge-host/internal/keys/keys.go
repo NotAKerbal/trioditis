@@ -23,6 +23,11 @@ import (
 // TTL is how long fetched keys are trusted before asking the gateway again.
 const TTL = 60 * time.Second
 
+// GrantTTL is how long agent grants from the last fetch are honoured while the gateway is
+// unreachable. After that only the person's identity key is used: a revoked grant mustn't
+// keep sealing messages to the agent-access key through a long outage.
+const GrantTTL = 10 * time.Minute
+
 // ErrNoIdentityKey means the person hasn't finished device setup, so nothing can be sealed
 // to them yet.
 var ErrNoIdentityKey = errors.New("keys: the person has no identity key yet")
@@ -70,9 +75,14 @@ func (k *Keys) For(ctx context.Context, userID string) (*protocol.RecipientKeys,
 	} else if errors.Is(err, ErrNoIdentityKey) {
 		return nil, err
 	}
-	stale, _, storeErr := k.Store.GetRecipientKeys(ctx, userID)
+	stale, fetchedAt, storeErr := k.Store.GetRecipientKeys(ctx, userID)
 	if storeErr != nil {
 		return nil, errors.Join(err, storeErr)
+	}
+	if time.Since(fetchedAt) > GrantTTL {
+		identityOnly := *stale
+		identityOnly.AgentGrantedPortals = nil
+		stale = &identityOnly
 	}
 	zerolog.Ctx(ctx).Warn().Err(err).Str("user_id", userID).Msg("Gateway unreachable, sealing with last known keys")
 	return stale, nil

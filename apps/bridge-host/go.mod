@@ -9,6 +9,7 @@ require (
 	go.mau.fi/mautrix-whatsapp v0.2611.0
 	go.mau.fi/util v0.11.1
 	golang.org/x/crypto v0.59.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 	maunium.net/go/mautrix v0.33.0
 )
@@ -40,7 +41,6 @@ require (
 	golang.org/x/image v0.48.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect

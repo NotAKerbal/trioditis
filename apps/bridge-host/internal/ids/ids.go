@@ -142,11 +142,18 @@ type Opaquer struct {
 	key []byte
 }
 
-// NewOpaquer derives the hashing key from the bridge private key, so every bridge host
-// process on a server, and every restart, produces the same IDs.
-func NewOpaquer(bridgePrivateKey []byte) *Opaquer {
+// LegacyOpaqueKey is the hashing key the first bridge hosts derived from the bridge private
+// key. It is only used to keep the IDs an existing database already has, the first time a
+// host with a dedicated ID key starts on it.
+func LegacyOpaqueKey(bridgePrivateKey []byte) []byte {
 	sum := sha256.Sum256(append([]byte("trioditis opaque ids v1\x00"), bridgePrivateKey...))
-	return &Opaquer{key: sum[:]}
+	return sum[:]
+}
+
+// NewOpaquer hashes with key: the bridge host's dedicated, durable ID key (see
+// store.IDKey). It is separate from the bridge key so rotating that doesn't change every ID.
+func NewOpaquer(key []byte) *Opaquer {
+	return &Opaquer{key: append([]byte(nil), key...)}
 }
 
 // ID returns the opaque ID for a network ID of the given kind, e.g. `p_…`.
@@ -156,12 +163,14 @@ func (o *Opaquer) ID(network, kind, value string) string {
 	return kind + "_" + b64(mac.Sum(nil)[:16])
 }
 
-// PortalValue is the string a portal key is hashed from.
+// PortalValue is the string a portal's opaque ID is hashed from: its key when its room was
+// created. It contains a NUL, so it is only hashed, never stored; the opaque ID's stored
+// value is the room ID, which never changes even when the network re-IDs the portal.
 func PortalValue(key networkid.PortalKey) string {
 	return string(key.ID) + "\x00" + string(key.Receiver)
 }
 
-// ParsePortalValue reverses PortalValue.
+// ParsePortalValue reverses PortalValue, for migrating values stored before room IDs were.
 func ParsePortalValue(value string) networkid.PortalKey {
 	portalID, receiver, _ := strings.Cut(value, "\x00")
 	return networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: networkid.UserLoginID(receiver)}

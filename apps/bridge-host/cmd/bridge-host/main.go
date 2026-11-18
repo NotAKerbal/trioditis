@@ -92,9 +92,13 @@ func main() {
 	}
 	cfg.CommandAddr = "http://" + cfg.ListenAddr
 	keyStore := &devkeys.Keys{Dir: filepath.Join(*dataDir, "dev-keys")}
-	if *devKeys || cfg.GatewayURL == "" {
+	// Dev identity keys are generated and kept on this machine, so whoever runs it could
+	// read everything sealed to them. They are only ever used when asked for by name.
+	if *devKeys {
 		log.Warn().Msg("Using dev identity keys from the data directory. Never do this in production.")
 		cfg.KeyFetcher = keyStore
+	} else if cfg.GatewayURL == "" {
+		log.Fatal().Msg("GATEWAY_URL is required (or --dev-keys, for trying the bridge host without a gateway)")
 	}
 	if command == "login" {
 		// The terminal login drives the host directly; it doesn't serve commands.

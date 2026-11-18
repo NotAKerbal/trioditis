@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"maunium.net/go/mautrix/id"
@@ -140,7 +141,7 @@ func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*pro
 	if err != nil {
 		return nil, err
 	}
-	if err = os.WriteFile(s.path(copyID), enc.Ciphertext, 0o600); err != nil {
+	if err = writeNew(s.path(copyID), enc.Ciphertext); err != nil {
 		return nil, fmt.Errorf("media: failed to write file: %w", err)
 	}
 	att := protocol.Attachment{MediaID: copyID, Mime: up.mime, Size: len(up.data), Name: up.name, Key: enc.Key, Nonce: enc.Nonce}
@@ -167,18 +168,58 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 	if !ok {
 		return nil, ErrUnavailable
 	}
+	// Expiry is checked, and an upload copied, under the lock the sweep clears data under.
 	s.lock.Lock()
+	now := time.Now()
 	up, isUpload := s.uploads[mediaID]
+	if isUpload && now.After(up.expires) {
+		isUpload = false
+	}
+	var data []byte
+	if isUpload {
+		data = append([]byte(nil), up.data...)
+	}
 	reg, isRegistered := s.registered[mediaID]
+	if isRegistered && now.After(reg.expires) {
+		isRegistered = false
+	}
+	var key, nonce, owner string
+	if isRegistered {
+		key, nonce, owner = reg.key, reg.nonce, reg.owner
+	}
 	s.lock.Unlock()
 	if isUpload {
-		return append([]byte(nil), up.data...), nil
+		return data, nil
 	} else if !isRegistered {
 		return nil, ErrUnavailable
 	}
-	ct, err := os.ReadFile(s.path(mediaID))
+	ct, err := readNoFollow(s.path(mediaID))
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	return seal.DecryptMedia(ct, reg.key, reg.nonce, reg.owner, mediaID)
+	return seal.DecryptMedia(ct, key, nonce, owner, mediaID)
+}
+
+// writeNew writes a new file, refusing to follow a symlink or replace anything at path.
+func writeNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// readNoFollow reads a file without following a symlink in its place, so nothing else that
+// can write to the media directory can point the store at another file.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

@@ -44,6 +44,8 @@ type fakeGateway struct {
 	ackShort    int // acknowledge this many fewer events than sent, once
 	conflictSeq int64
 	batches     []*protocol.EventBatch
+	// invalid lists events the backend's validators would refuse.
+	invalid []string
 }
 
 func newFakeGateway(t *testing.T, users ...string) *fakeGateway {
@@ -84,13 +86,27 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	var batch protocol.EventBatch
-	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	var batch protocol.EventBatch
+	if err := json.Unmarshal(raw, &batch); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var rawBatch struct {
+		Events []map[string]json.RawMessage `json:"events"`
+	}
+	_ = json.Unmarshal(raw, &rawBatch)
 	g.lock.Lock()
 	defer g.lock.Unlock()
+	for _, evt := range rawBatch.Events {
+		if problem := validateEvent(evt); problem != "" {
+			g.invalid = append(g.invalid, problem)
+		}
+	}
 	g.batches = append(g.batches, &batch)
 	g.received += len(batch.Events)
 	if g.failNext > 0 {
@@ -124,6 +140,55 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		committed = evt.Seq
 	}
 	_ = json.NewEncoder(w).Encode(protocol.EventBatchResponse{AckedThrough: committed})
+}
+
+// eventFields mirrors the backend's event validators (packages/backend/convex/validators.ts):
+// for each event type, its required and optional fields beyond the ones every event has.
+// The backend refuses an event with a missing or unknown field.
+var eventFields = map[string][2][]string{
+	protocol.EventMessage:        {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
+	protocol.EventEdit:           {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
+	protocol.EventReaction:       {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	protocol.EventReactionRemove: {{"portalId", "targetEventId", "sender", "key"}, nil},
+	protocol.EventRedaction:      {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	protocol.EventReceipt:        {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	protocol.EventTyping:         {{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	protocol.EventChat:           {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
+	protocol.EventContact:        {{"ghostId", "sealed"}, nil},
+	protocol.EventLoginState:     {{"state"}, {"error"}},
+	protocol.EventLoginStep:      {{"loginSessionId", "step"}, nil},
+	protocol.EventSendStatus:     {{"clientMessageId", "status"}, {"eventId", "error"}},
+	protocol.EventBackfillDone:   {{"portalId", "direction", "more"}, nil},
+}
+
+func validateEvent(evt map[string]json.RawMessage) string {
+	var eventType string
+	_ = json.Unmarshal(evt["type"], &eventType)
+	fields, ok := eventFields[eventType]
+	if !ok {
+		return fmt.Sprintf("unknown event type %q", eventType)
+	}
+	allowed := map[string]bool{"seq": true, "type": true, "userId": true, "loginId": true, "at": true}
+	for _, name := range []string{"seq", "type", "userId", "loginId", "at"} {
+		if _, ok := evt[name]; !ok {
+			return fmt.Sprintf("%s event is missing %s", eventType, name)
+		}
+	}
+	for _, name := range fields[0] {
+		allowed[name] = true
+		if _, ok := evt[name]; !ok {
+			return fmt.Sprintf("%s event is missing %s", eventType, name)
+		}
+	}
+	for _, name := range fields[1] {
+		allowed[name] = true
+	}
+	for name := range evt {
+		if !allowed[name] {
+			return fmt.Sprintf("%s event has unexpected field %s", eventType, name)
+		}
+	}
+	return ""
 }
 
 func (g *fakeGateway) snapshot() []*protocol.Event {
@@ -168,10 +233,28 @@ type harness struct {
 
 var testBridgeKey = seal.SeedKeyPair([]byte("trioditis conformance bridge key"))
 
-func startHost(t *testing.T, dir string, gw *fakeGateway) *harness {
+type hostOption func(*Config)
+
+func withBridgeKey(kp seal.KeyPair) hostOption { return func(c *Config) { c.BridgeKey = kp } }
+
+func withDatabase(dbType, uri string) hostOption {
+	return func(c *Config) { c.DatabaseType, c.DatabaseURI = dbType, uri }
+}
+
+func startHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *harness {
+	t.Helper()
+	h := buildHost(t, dir, gw, opts...)
+	if err := h.host.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// buildHost makes a host without starting it, so a test can prepare its database first.
+func buildHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *harness {
 	t.Helper()
 	net := fakenet.New()
-	h, err := New(Config{
+	cfg := Config{
 		Network:          "fake",
 		DataDir:          dir,
 		ListenAddr:       "127.0.0.1:0",
@@ -185,14 +268,15 @@ func startHost(t *testing.T, dir string, gw *fakeGateway) *harness {
 			cfg.Backfill.Queue.Enabled = false
 		},
 		Log: zerolog.New(zerolog.NewTestWriter(t)).Level(testLogLevel),
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	h, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = h.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	return &harness{t: t, dir: dir, gw: gw, net: net, host: h, bridgeKey: testBridgeKey}
+	return &harness{t: t, dir: dir, gw: gw, net: net, host: h, bridgeKey: cfg.BridgeKey}
 }
 
 func (h *harness) command(cmd protocol.Command) (int, string) {
@@ -434,12 +518,16 @@ func TestConformance(t *testing.T) {
 		})
 	})
 
+	sendCommand := func(clientMessageID, body string) protocol.Command {
+		return protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			ClientMessageID: clientMessageID, NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+			Sealed: h.sealForBridge("alice", clientMessageID, protocol.MessagePlaintext{Type: "text", Body: body}),
+		}
+	}
 	send := func(clientMessageID, body string) {
 		t.Helper()
-		h.mustCommand(protocol.Command{
-			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
-			ClientMessageID: clientMessageID, Sealed: h.sealForBridge("alice", clientMessageID, protocol.MessagePlaintext{Type: "text", Body: body}),
-		})
+		h.mustCommand(sendCommand(clientMessageID, body))
 	}
 	statusOf := func(clientMessageID, status string) func(*protocol.Event) bool {
 		return func(e *protocol.Event) bool {
@@ -512,7 +600,91 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("a send without a deadline is refused", func(t *testing.T) {
+		cmd := sendCommand("cm-nodeadline", "x")
+		cmd.NotAfter = 0
+		if status, _ := h.command(cmd); status != http.StatusBadRequest {
+			t.Fatalf("expected 400 for a send without notAfter, got %d", status)
+		}
+	})
+
+	t.Run("a reply to a message in another chat is refused", func(t *testing.T) {
+		if err := h.net.Incoming(aliceNet, "other-chat", "peer-other", "o1", "in another chat", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		other := gw.waitFor(t, "other chat's message", isMessage("in another chat", h, "alice"))
+		cmd := sendCommand("cm-crossreply", "reply")
+		cmd.ReplyTo = other.EventID
+		if status, _ := h.command(cmd); status != http.StatusConflict {
+			t.Fatalf("expected 409 for a reply into another chat, got %d", status)
+		}
+		cmd = sendCommand("cm-reply", "reply")
+		cmd.ReplyTo = gw.waitFor(t, "a message in this chat", isMessage("from my phone", h, "alice")).EventID
+		h.mustCommand(cmd)
+		gw.waitFor(t, "reply sent", statusOf("cm-reply", protocol.StatusSent))
+	})
+
+	t.Run("sends in a chat go one at a time, and a deadline is checked at hand-off", func(t *testing.T) {
+		h.net.SetSendDelay(time.Second)
+		before := len(h.net.Sent())
+		send("cm-slow", "slow one")
+		late := sendCommand("cm-late", "waits behind the slow one")
+		late.NotAfter = time.Now().Add(300 * time.Millisecond).UnixMilli()
+		h.mustCommand(late)
+		gw.waitFor(t, "slow send", statusOf("cm-slow", protocol.StatusSent))
+		h.net.SetSendDelay(0)
+		expired := gw.waitFor(t, "late send expired", statusOf("cm-late", protocol.StatusFailed))
+		if expired.Error != protocol.ErrExpired || len(h.net.Sent()) != before+1 {
+			t.Fatalf("the send behind must expire unsent, got %q with %d sent", expired.Error, len(h.net.Sent())-before)
+		}
+	})
+
+	t.Run("an outcome after a timeout is still reported", func(t *testing.T) {
+		h.host.Connector.SendTimeout = 200 * time.Millisecond
+		h.net.SetSendDelay(800 * time.Millisecond)
+		send("cm-latecomer", "slow network")
+		gw.waitFor(t, "unknown after the timeout", statusOf("cm-latecomer", protocol.StatusUnknown))
+		gw.waitFor(t, "sent once the network answers", statusOf("cm-latecomer", protocol.StatusSent))
+		gw.waitFor(t, "own copy", func(e *protocol.Event) bool { return e.Type == protocol.EventMessage && e.ClientMessageID == "cm-latecomer" })
+		h.net.SetSendDelay(0)
+		h.host.Connector.SendTimeout = 5 * time.Second
+	})
+
+	t.Run("a login step takes one submit", func(t *testing.T) {
+		session := "session-twice"
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "fake"})
+		step := gw.waitFor(t, "username step", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
+		}).Step
+		submit := func() int {
+			status, _ := h.command(protocol.Command{
+				CommandID: nextCommandID(), Type: protocol.CommandLoginSubmit, UserID: "alice", LoginSessionID: session, StepID: step.StepID,
+				Sealed: h.sealForBridge("alice", session+"/"+step.StepID, protocol.LoginSubmitPlaintext{Input: map[string]string{"username": "alice-second"}}),
+			})
+			return status
+		}
+		first, second := submit(), submit()
+		if first != http.StatusAccepted || (second != http.StatusAccepted && second != http.StatusConflict) {
+			t.Fatalf("submits answered %d then %d", first, second)
+		}
+		gw.waitFor(t, "login complete", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepComplete
+		})
+		time.Sleep(300 * time.Millisecond)
+		if n := gw.count(func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type != protocol.StepUserInput
+		}); n != 1 {
+			t.Fatalf("a second submit changed the login: %d further steps", n)
+		}
+	})
+
 	t.Run("every error is a code and every event is well-formed", func(t *testing.T) {
+		gw.lock.Lock()
+		invalid := append([]string(nil), gw.invalid...)
+		gw.lock.Unlock()
+		if len(invalid) > 0 {
+			t.Fatalf("events the backend would refuse: %v", invalid)
+		}
 		codes := map[string]bool{
 			protocol.ErrNetworkRejected: true, protocol.ErrNotConnected: true, protocol.ErrTimeout: true,
 			protocol.ErrInvalidCommand: true, protocol.ErrExpired: true, protocol.ErrUnsupported: true,
@@ -539,7 +711,7 @@ func TestConformance(t *testing.T) {
 	t.Run("commands are idempotent by command ID", func(t *testing.T) {
 		cmd := protocol.Command{
 			CommandID: "fixed-command-id", Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
-			ClientMessageID: "cm-idem", Sealed: h.sealForBridge("alice", "cm-idem", protocol.MessagePlaintext{Type: "text", Body: "once"}),
+			ClientMessageID: "cm-idem", NotAfter: time.Now().Add(time.Hour).UnixMilli(), Sealed: h.sealForBridge("alice", "cm-idem", protocol.MessagePlaintext{Type: "text", Body: "once"}),
 		}
 		h.mustCommand(cmd)
 		h.mustCommand(cmd)
@@ -553,7 +725,7 @@ func TestConformance(t *testing.T) {
 	t.Run("people can only use their own logins", func(t *testing.T) {
 		status, _ := h.command(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "bob", LoginID: aliceLogin, PortalID: portalID,
-			ClientMessageID: "cm-bob", Sealed: h.sealForBridge("bob", "cm-bob", protocol.MessagePlaintext{Type: "text", Body: "x"}),
+			ClientMessageID: "cm-bob", NotAfter: time.Now().Add(time.Hour).UnixMilli(), Sealed: h.sealForBridge("bob", "cm-bob", protocol.MessagePlaintext{Type: "text", Body: "x"}),
 		})
 		if status != http.StatusConflict {
 			t.Fatalf("expected 409 for someone else's login, got %d", status)
@@ -615,7 +787,7 @@ func TestConformance(t *testing.T) {
 		}
 		h.mustCommand(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
-			ClientMessageID: "cm-file", Sealed: h.sealForBridge("alice", "cm-file", protocol.MessagePlaintext{
+			ClientMessageID: "cm-file", NotAfter: time.Now().Add(time.Hour).UnixMilli(), Sealed: h.sealForBridge("alice", "cm-file", protocol.MessagePlaintext{
 				Type: "file", Body: "notes.txt",
 				Attachments: []protocol.Attachment{{MediaID: "outmedia1", Mime: "text/plain", Size: len(data), Name: "notes.txt", Key: enc.Key, Nonce: enc.Nonce}},
 			}),
@@ -657,6 +829,19 @@ func TestConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		time.Sleep(300 * time.Millisecond)
+		// Then a send the network never answers: it holds the chat until the host stops.
+		h.net.SetSendDelay(time.Hour)
+		sentBefore := len(h.net.Sent())
+		send("cm-inflight", "in flight at the restart")
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if out, err := h.host.Store.GetOutgoing(context.Background(), "alice", "cm-inflight"); err == nil && out.Status == protocol.StatusSubmitted {
+				break
+			} else if time.Now().After(deadline) {
+				t.Fatal("the in-flight send was never handed off")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		h.host.Stop()
 
 		gw.lock.Lock()
@@ -669,6 +854,10 @@ func TestConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		gw.waitFor(t, "message after the restart", isMessage("after restart", h2, "alice"))
+		inflight := gw.waitFor(t, "in-flight send unknown", statusOf("cm-inflight", protocol.StatusUnknown))
+		if inflight.Error == "" || gw.count(statusOf("cm-inflight", protocol.StatusSent)) != 0 || len(h.net.Sent()) != sentBefore {
+			t.Fatalf("an interrupted send must be unknown and never sent, got %+v", inflight)
+		}
 		events := gw.snapshot()
 		checkOrdered(t, events)
 		seen := make(map[string]bool)

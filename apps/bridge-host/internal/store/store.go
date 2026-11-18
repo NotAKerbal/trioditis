@@ -1,21 +1,26 @@
 // Package store holds the bridge host's own tables, next to bridgev2's in the same
-// database: the event journal, command dedup, outgoing send state, the opaque ID map, the
-// recipient key cache and room membership.
+// database: the event journal, the command queue, outgoing send state, the opaque ID map,
+// the recipient key cache and room membership.
 //
 // Nothing here holds plaintext content. Journal payloads are protocol events whose content
-// fields are sealed envelopes; everything else is IDs, statuses and public keys.
+// fields are sealed envelopes. A queued command's payload is sealed to the bridge key and is
+// deleted once the command has run. Everything else is IDs, statuses and public keys.
 package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.mau.fi/util/dbutil"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 )
 
@@ -47,14 +52,73 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE INDEX trioditis_member_mxid_idx ON trioditis_member (mxid)`,
 			`CREATE TABLE trioditis_reaction (event_id TEXT PRIMARY KEY, target_event_id TEXT NOT NULL, reaction_key TEXT NOT NULL)`,
 		}
-		for _, statement := range statements {
-			if _, err := db.Exec(ctx, statement); err != nil {
-				return err
-			}
+		return execAll(ctx, db, statements)
+	}).
+	WithRaw(1, 2, 0, "Gap-free journal, durable command queue, dedicated ID key", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		statements := []string{
+			// Sequence numbers are allocated in the appending transaction, from this counter,
+			// so a rolled-back append leaves no gap. (A database sequence keeps values a
+			// rollback discarded, and the gateway would wait for them forever.)
+			`ALTER TABLE trioditis_journal_state ADD COLUMN next_seq BIGINT NOT NULL DEFAULT 1`,
+			`UPDATE trioditis_journal_state SET next_seq=COALESCE((SELECT MAX(seq) FROM trioditis_journal), 0) + 1`,
+			`ALTER TABLE trioditis_journal_state ADD COLUMN next_command BIGINT NOT NULL DEFAULT 1`,
+			// A command is stored, payload included, before it is acknowledged. Existing rows
+			// were run already.
+			`ALTER TABLE trioditis_command ADD COLUMN queue_order BIGINT NOT NULL DEFAULT 0`,
+			`ALTER TABLE trioditis_command ADD COLUMN state TEXT NOT NULL DEFAULT 'done'`,
+			`ALTER TABLE trioditis_command ADD COLUMN payload TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX trioditis_command_state_idx ON trioditis_command (state, queue_order)`,
+			`CREATE TABLE trioditis_secret (name TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		}
-		return nil
+		if db.Dialect == dbutil.Postgres {
+			statements = append(statements, `ALTER TABLE trioditis_journal ALTER COLUMN seq DROP IDENTITY`)
+		}
+		if err := execAll(ctx, db, statements); err != nil {
+			return err
+		}
+		return migratePortalValues(ctx, db)
 	}).
 	Finish()
+
+func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
+	for _, statement := range statements {
+		if _, err := db.Exec(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migratePortalValues replaces stored portal values (the portal key, with a NUL that
+// PostgreSQL's TEXT refuses) with the portal's room ID. The opaque IDs don't change.
+func migratePortalValues(ctx context.Context, db *dbutil.Database) error {
+	rows, err := db.Query(ctx, `SELECT opaque, value FROM trioditis_id WHERE kind=$1`, ids.KindPortal)
+	if err != nil {
+		return err
+	}
+	type pair struct{ opaque, value string }
+	var pending []pair
+	for rows.Next() {
+		var p pair
+		if err = rows.Scan(&p.opaque, &p.value); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if strings.Contains(p.value, "\x00") {
+			pending = append(pending, p)
+		}
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, p := range pending {
+		roomID := string(ids.RoomID(ids.ParsePortalValue(p.value)))
+		if _, err = db.Exec(ctx, `UPDATE trioditis_id SET value=$1 WHERE opaque=$2`, roomID, p.opaque); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Store is the bridge host's own tables.
 type Store struct {
@@ -71,23 +135,64 @@ func (s *Store) Upgrade(ctx context.Context) error {
 	return s.DB.Upgrade(ctx)
 }
 
-// Append writes an event to the journal and sets its sequence number. The caller must
-// only pass events whose content is already sealed.
-func (s *Store) Append(ctx context.Context, evt *protocol.Event) error {
-	evt.Seq = 0
-	payload, err := json.Marshal(evt)
-	if err != nil {
-		return err
+// Txn runs fn in one transaction. Store calls inside it join the transaction, so a state
+// change and the journal events reporting it commit together or not at all.
+func (s *Store) Txn(ctx context.Context, fn func(ctx context.Context) error) error {
+	return s.DB.DoTxn(ctx, nil, fn)
+}
+
+// lockCounters reads the journal state row, locking it on PostgreSQL so concurrent
+// transactions take sequence numbers one at a time. (SQLite transactions are already
+// serialized: the database is opened with _txlock=immediate.)
+func (s *Store) lockCounters(ctx context.Context, column string) (int64, error) {
+	query := `SELECT ` + column + ` FROM trioditis_journal_state WHERE id=1`
+	if s.DB.Dialect == dbutil.Postgres {
+		query += ` FOR UPDATE`
 	}
-	var seq int64
-	err = s.DB.QueryRow(ctx,
-		`INSERT INTO trioditis_journal (payload, created_at) VALUES ($1, $2) RETURNING seq`,
-		string(payload), time.Now().UnixMilli(),
-	).Scan(&seq)
+	var value int64
+	err := s.DB.QueryRow(ctx, query).Scan(&value)
+	return value, err
+}
+
+// Append writes events to the journal in one transaction and sets their sequence numbers.
+// The caller must only pass events whose content is already sealed.
+func (s *Store) Append(ctx context.Context, events ...*protocol.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	err := s.Txn(ctx, func(ctx context.Context) error {
+		next, err := s.lockCounters(ctx, "next_seq")
+		if err != nil {
+			return err
+		}
+		now := time.Now().UnixMilli()
+		for i, evt := range events {
+			evt.Seq = 0
+			payload, err := json.Marshal(evt)
+			if err != nil {
+				return err
+			}
+			if _, err = s.DB.Exec(ctx,
+				`INSERT INTO trioditis_journal (seq, payload, created_at) VALUES ($1, $2, $3)`,
+				next+int64(i), string(payload), now,
+			); err != nil {
+				return err
+			}
+		}
+		_, err = s.DB.Exec(ctx, `UPDATE trioditis_journal_state SET next_seq=$1 WHERE id=1`, next+int64(len(events)))
+		if err == nil {
+			for i, evt := range events {
+				evt.Seq = next + int64(i)
+			}
+		}
+		return err
+	})
 	if err != nil {
+		for _, evt := range events {
+			evt.Seq = 0
+		}
 		return fmt.Errorf("failed to append to journal: %w", err)
 	}
-	evt.Seq = seq
 	return nil
 }
 
@@ -135,24 +240,146 @@ func (s *Store) LastSeq(ctx context.Context) (int64, error) {
 	return seq.Int64, err
 }
 
-// ClaimCommand records a command ID. It returns false if the ID was seen before, so a
-// repeated command isn't run twice.
-func (s *Store) ClaimCommand(ctx context.Context, commandID string) (bool, error) {
-	res, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_command (command_id, received_at) VALUES ($1, $2) ON CONFLICT (command_id) DO NOTHING`,
-		commandID, time.Now().UnixMilli(),
+// ScrubLoginDisplays removes what a login step showed (a QR code or pairing code, which
+// is enough to link a device while it is valid) from journal events the gateway has
+// acknowledged. Nothing needs it after that.
+func (s *Store) ScrubLoginDisplays(ctx context.Context, throughSeq int64) error {
+	rows, err := s.DB.Query(ctx,
+		`SELECT seq, payload FROM trioditis_journal WHERE seq <= $1 AND payload LIKE $2`,
+		throughSeq, `%"display":{%"data":%`,
 	)
+	if err != nil {
+		return err
+	}
+	type update struct {
+		seq     int64
+		payload string
+	}
+	var updates []update
+	for rows.Next() {
+		var u update
+		if err = rows.Scan(&u.seq, &u.payload); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		var evt protocol.Event
+		if json.Unmarshal([]byte(u.payload), &evt) != nil || evt.Step == nil || evt.Step.Display == nil || evt.Step.Display.Data == "" {
+			continue
+		}
+		evt.Step.Display.Data = ""
+		data, err := json.Marshal(&evt)
+		if err != nil {
+			continue
+		}
+		u.payload = string(data)
+		updates = append(updates, u)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, u := range updates {
+		if _, err = s.DB.Exec(ctx, `UPDATE trioditis_journal SET payload=$1 WHERE seq=$2`, u.payload, u.seq); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Command states.
+const (
+	CommandQueued  = "queued"  // stored and acknowledged, not started
+	CommandStarted = "started" // being run; a restart doesn't run it again
+	CommandDone    = "done"    // run, or settled; the payload is gone
+)
+
+// HasCommand reports whether a command ID was stored before.
+func (s *Store) HasCommand(ctx context.Context, commandID string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trioditis_command WHERE command_id=$1)`, commandID).Scan(&exists)
+	return exists, err
+}
+
+// QueuedCommand is a command waiting to run.
+type QueuedCommand struct {
+	Order   int64
+	Command *protocol.Command
+}
+
+// EnqueueCommand stores a command, payload included, for the worker to run. It returns
+// false if the command ID was seen before, in which case nothing is stored: the command is
+// already queued or has run.
+func (s *Store) EnqueueCommand(ctx context.Context, cmd *protocol.Command) (bool, error) {
+	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	var inserted bool
+	err = s.Txn(ctx, func(ctx context.Context) error {
+		order, err := s.lockCounters(ctx, "next_command")
+		if err != nil {
+			return err
+		}
+		res, err := s.DB.Exec(ctx,
+			`INSERT INTO trioditis_command (command_id, received_at, queue_order, state, payload) VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (command_id) DO NOTHING`,
+			cmd.CommandID, time.Now().UnixMilli(), order, CommandQueued, string(payload),
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		inserted = true
+		_, err = s.DB.Exec(ctx, `UPDATE trioditis_journal_state SET next_command=$1 WHERE id=1`, order+1)
+		return err
+	})
+	return inserted, err
 }
 
-// ReleaseCommand forgets a command ID, for a command refused before it ran, so the
-// gateway may send it again once the refusal is fixed.
-func (s *Store) ReleaseCommand(ctx context.Context, commandID string) error {
-	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_command WHERE command_id=$1`, commandID)
+func (s *Store) commandsIn(ctx context.Context, state string) ([]*QueuedCommand, error) {
+	rows, err := s.DB.Query(ctx,
+		`SELECT queue_order, payload FROM trioditis_command WHERE state=$1 ORDER BY queue_order`, state)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*QueuedCommand
+	for rows.Next() {
+		var qc QueuedCommand
+		var payload string
+		if err = rows.Scan(&qc.Order, &payload); err != nil {
+			return nil, err
+		}
+		qc.Command = &protocol.Command{}
+		if err = json.Unmarshal([]byte(payload), qc.Command); err != nil {
+			return nil, fmt.Errorf("queued command %d is corrupt: %w", qc.Order, err)
+		}
+		out = append(out, &qc)
+	}
+	return out, rows.Err()
+}
+
+// QueuedCommands lists commands waiting to run, in the order they arrived.
+func (s *Store) QueuedCommands(ctx context.Context) ([]*QueuedCommand, error) {
+	return s.commandsIn(ctx, CommandQueued)
+}
+
+// StartedCommands lists commands that were being run when the process stopped.
+func (s *Store) StartedCommands(ctx context.Context) ([]*QueuedCommand, error) {
+	return s.commandsIn(ctx, CommandStarted)
+}
+
+// SetCommandState moves a command on. Finishing it deletes its payload: whatever it carried
+// (a message or login input, sealed to the bridge key) isn't kept once used. A started
+// command keeps its payload, in case a restart puts it back in the queue.
+func (s *Store) SetCommandState(ctx context.Context, commandID, state string) error {
+	query := `UPDATE trioditis_command SET state=$2 WHERE command_id=$1`
+	if state == CommandDone {
+		query = `UPDATE trioditis_command SET state=$2, payload='' WHERE command_id=$1`
+	}
+	_, err := s.DB.Exec(ctx, query, commandID, state)
 	return err
 }
 
@@ -185,11 +412,6 @@ func (s *Store) GetOutgoing(ctx context.Context, userID, clientMessageID string)
 		`SELECT `+outgoingColumns+` FROM trioditis_outgoing WHERE user_id=$1 AND client_message_id=$2`, userID, clientMessageID))
 }
 
-// GetOutgoingByEvent looks a send up by its event ID.
-func (s *Store) GetOutgoingByEvent(ctx context.Context, eventID string) (*Outgoing, error) {
-	return scanOutgoing(s.DB.QueryRow(ctx, `SELECT `+outgoingColumns+` FROM trioditis_outgoing WHERE event_id=$1`, eventID))
-}
-
 // InsertOutgoing records a new send. It returns false if one with the same client
 // message ID exists.
 func (s *Store) InsertOutgoing(ctx context.Context, out *Outgoing) (bool, error) {
@@ -215,7 +437,8 @@ func (s *Store) SetOutgoingStatus(ctx context.Context, userID, clientMessageID, 
 }
 
 // OutgoingInFlight lists sends whose outcome wasn't recorded, such as those interrupted by
-// a restart.
+// a restart. A send's status and the event reporting it commit together, so `submitted` is
+// the only state a send can be left in.
 func (s *Store) OutgoingInFlight(ctx context.Context) ([]*Outgoing, error) {
 	rows, err := s.DB.Query(ctx, `SELECT `+outgoingColumns+` FROM trioditis_outgoing WHERE status=$1`, protocol.StatusSubmitted)
 	if err != nil {
@@ -233,7 +456,7 @@ func (s *Store) OutgoingInFlight(ctx context.Context) ([]*Outgoing, error) {
 	return out, rows.Err()
 }
 
-// PutID records what an opaque ID stands for.
+// PutID records what an opaque ID stands for. Values never contain NUL.
 func (s *Store) PutID(ctx context.Context, opaque, kind, value string) error {
 	_, err := s.DB.Exec(ctx,
 		`INSERT INTO trioditis_id (opaque, kind, value) VALUES ($1, $2, $3) ON CONFLICT (opaque) DO NOTHING`,
@@ -250,6 +473,42 @@ func (s *Store) LookupID(ctx context.Context, opaque, kind string) (string, erro
 		return "", ErrNotFound
 	}
 	return value, err
+}
+
+const opaqueIDKeyName = "opaque_id_key"
+
+// IDKey is the key opaque IDs are hashed with, created once per database and kept: the
+// IDs must never change, whatever happens to the bridge key. A database that already has
+// IDs keeps the key they were made with (legacy, derived from the bridge key by the first
+// bridge hosts).
+func (s *Store) IDKey(ctx context.Context, legacy []byte) ([]byte, error) {
+	var key []byte
+	err := s.Txn(ctx, func(ctx context.Context) error {
+		var stored string
+		err := s.DB.QueryRow(ctx, `SELECT value FROM trioditis_secret WHERE name=$1`, opaqueIDKeyName).Scan(&stored)
+		if err == nil {
+			key, err = base64.RawURLEncoding.DecodeString(stored)
+			return err
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		var existing int
+		if err = s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_id`).Scan(&existing); err != nil {
+			return err
+		}
+		if existing > 0 {
+			key = append([]byte(nil), legacy...)
+		} else {
+			key = make([]byte, 32)
+			if _, err = rand.Read(key); err != nil {
+				return err
+			}
+		}
+		_, err = s.DB.Exec(ctx, `INSERT INTO trioditis_secret (name, value) VALUES ($1, $2)`,
+			opaqueIDKeyName, base64.RawURLEncoding.EncodeToString(key))
+		return err
+	})
+	return key, err
 }
 
 // GetRecipientKeys returns the cached public keys for a user.

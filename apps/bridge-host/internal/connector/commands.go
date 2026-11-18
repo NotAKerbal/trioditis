@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
@@ -46,17 +49,24 @@ const (
 )
 
 // pendingCommand is a command whose outcome bridgev2 will report through
-// SendMessageStatus. It holds the plaintext of a send in memory only, to seal the person's
-// copy once the network accepts it. If the process stops first, the send becomes unknown.
+// SendMessageStatus. A send carries the person's copy, already sealed at handoff, so the
+// outcome only has to record it.
 type pendingCommand struct {
 	kind            pendingKind
 	owner           *owner
 	clientMessageID string
 	targetEventID   string
 	key             string
-	plaintext       *protocol.MessagePlaintext
+	echo            *seal.Envelope
 	replyTo         string
-	timer           *time.Timer
+	// lock orders the timeout and the outcome: whichever comes first is recorded first, so
+	// `unknown` can never be recorded after `sent`.
+	lock sync.Mutex
+	// timedOut is set once the send was reported unknown for want of an outcome. The entry
+	// is kept for a while after, so a late outcome is still reported.
+	timedOut bool
+	settled  bool
+	timer    *time.Timer
 }
 
 // target is a command's resolved user, login and portal.
@@ -96,19 +106,25 @@ func (c *Connector) resolve(ctx context.Context, cmd *protocol.Command, needPort
 	if !needPortal {
 		return t, nil
 	}
-	rawPortal, err := c.Store.LookupID(ctx, cmd.PortalID, ids.KindPortal)
+	if cmd.PortalID == "" {
+		return nil, badRequest("portalId is required")
+	}
+	// The opaque portal ID stands for the portal's room, which keeps its ID when the network
+	// re-IDs the portal (as WhatsApp does moving a chat from a phone number to a LID), so
+	// the current portal is looked up by room.
+	roomID, err := c.Store.LookupID(ctx, cmd.PortalID, ids.KindPortal)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, conflict(protocol.ErrInvalidCommand, "unknown portal")
 	} else if err != nil {
 		return nil, err
 	}
-	key := ids.ParsePortalValue(rawPortal)
-	if key.Receiver != t.login.ID {
+	original, ok := ids.ParseRoomID(id.RoomID(roomID))
+	if !ok || original.Receiver != t.login.ID {
 		return nil, conflict(protocol.ErrInvalidCommand, "portal doesn't belong to this login")
 	}
-	if t.portal, err = c.Bridge.GetExistingPortalByKey(ctx, key); err != nil {
+	if t.portal, err = c.Bridge.GetPortalByMXID(ctx, id.RoomID(roomID)); err != nil {
 		return nil, err
-	} else if t.portal == nil || t.portal.MXID == "" {
+	} else if t.portal == nil {
 		return nil, conflict(protocol.ErrInvalidCommand, "portal doesn't exist")
 	}
 	if t.owner, err = c.owner(ctx, t.portal.MXID); err != nil {
@@ -117,30 +133,53 @@ func (c *Connector) resolve(ctx context.Context, cmd *protocol.Command, needPort
 	return t, nil
 }
 
-// HandleCommand runs a gateway command. It returns once the command is queued; outcomes
+// checkTarget makes sure a message a command refers to (a reply, an edit, a reaction, a
+// read marker) is in the command's chat. bridgev2 looks relations up by event ID alone, so
+// one from another chat would otherwise reach the connector with the wrong chat's data.
+func (c *Connector) checkTarget(ctx context.Context, t *target, eventID string) error {
+	part, err := c.Bridge.DB.Message.GetPartByMXID(ctx, id.EventID(eventID))
+	if err != nil {
+		return err
+	} else if part == nil || part.Room != t.portal.PortalKey {
+		return conflict(protocol.ErrInvalidCommand, "the target message isn't in this chat")
+	}
+	return nil
+}
+
+// Prepare checks a command without running it, so the server can refuse it before storing
+// it. Running it later checks again, since things may have changed in between.
+func (c *Connector) Prepare(ctx context.Context, cmd *protocol.Command) error {
+	return c.handle(ctx, cmd, true)
+}
+
+// HandleCommand runs a stored command. It returns once the command is handed on; outcomes
 // arrive as events.
 func (c *Connector) HandleCommand(ctx context.Context, cmd *protocol.Command) error {
+	return c.handle(ctx, cmd, false)
+}
+
+func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check bool) error {
 	switch cmd.Type {
 	case protocol.CommandSend, protocol.CommandEdit:
-		return c.handleSend(ctx, cmd)
+		return c.handleSend(ctx, cmd, check)
 	case protocol.CommandReact:
-		return c.handleReact(ctx, cmd)
+		return c.handleReact(ctx, cmd, check)
 	case protocol.CommandUnreact, protocol.CommandRedact:
-		return c.handleRedact(ctx, cmd)
+		return c.handleRedact(ctx, cmd, check)
 	case protocol.CommandMarkRead:
-		return c.handleMarkRead(ctx, cmd)
+		return c.handleMarkRead(ctx, cmd, check)
 	case protocol.CommandTyping:
-		return c.handleTyping(ctx, cmd)
+		return c.handleTyping(ctx, cmd, check)
 	case protocol.CommandLoginStart:
-		return c.handleLoginStart(ctx, cmd)
+		return c.handleLoginStart(ctx, cmd, check)
 	case protocol.CommandLoginSubmit:
-		return c.handleLoginSubmit(ctx, cmd)
+		return c.handleLoginSubmit(ctx, cmd, check)
 	case protocol.CommandLoginCancel:
-		return c.handleLoginCancel(ctx, cmd)
+		return c.handleLoginCancel(ctx, cmd, check)
 	case protocol.CommandLogout:
-		return c.handleLogout(ctx, cmd)
+		return c.handleLogout(ctx, cmd, check)
 	case protocol.CommandBackfill:
-		return c.handleBackfill(ctx, cmd)
+		return c.handleBackfill(ctx, cmd, check)
 	default:
 		return badRequest("unknown command type %q", cmd.Type)
 	}
@@ -155,7 +194,8 @@ var reverseMsgTypes = func() map[string]event.MessageType {
 }()
 
 // matrixContent builds the Matrix message bridgev2 hands the connector from a sealed send.
-func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, timeout time.Duration) (*event.MessageEventContent, event.Type, error) {
+// With register false it only checks the attachment, without making it readable.
+func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, register bool) (*event.MessageEventContent, event.Type, error) {
 	evtType := event.EventMessage
 	content := &event.MessageEventContent{MsgType: reverseMsgTypes[plain.Type], Body: plain.Body}
 	if plain.Type == "sticker" {
@@ -170,11 +210,16 @@ func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, t
 		return nil, evtType, badRequest("a send carries at most one attachment")
 	} else if len(plain.Attachments) == 1 {
 		att := plain.Attachments[0]
-		uri, err := c.Media.Register(att, t.owner.userID, timeout)
-		if err != nil {
+		if _, ok := media.ParseContentURI(media.ContentURI(att.MediaID)); !ok {
 			return nil, evtType, badRequest("invalid attachment")
 		}
-		content.URL = uri
+		if register {
+			uri, err := c.Media.Register(att, t.owner.userID, c.SendTimeout)
+			if err != nil {
+				return nil, evtType, badRequest("invalid attachment")
+			}
+			content.URL = uri
+		}
 		content.FileName = att.Name
 		content.Info = &event.FileInfo{MimeType: att.Mime, Size: att.Size, Width: att.Width, Height: att.Height, Duration: att.DurationMS}
 	}
@@ -191,14 +236,78 @@ func (c *Connector) openOutbound(cmd *protocol.Command, userID, objectID string,
 	return nil
 }
 
-func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command) error {
+// recordSend writes a send's status and the event reporting it, plus any events that go
+// with it (the person's copy, on success), in one transaction: a crash can't record one
+// without the other.
+func (c *Connector) recordSend(ctx context.Context, o *owner, out *store.Outgoing, insert bool, extra ...*protocol.Event) error {
+	statusEvent := &protocol.Event{
+		Type: protocol.EventSendStatus, UserID: o.userID, LoginID: o.loginID,
+		ClientMessageID: out.ClientMessageID, Status: out.Status, Error: out.Error,
+	}
+	if out.Status == protocol.StatusSent {
+		statusEvent.EventID = out.EventID
+	}
+	events := append([]*protocol.Event{statusEvent}, extra...)
+	now := time.Now().UnixMilli()
+	for _, evt := range events {
+		if evt.At == 0 {
+			evt.At = now
+		}
+	}
+	err := c.Store.Txn(ctx, func(ctx context.Context) error {
+		if insert {
+			inserted, err := c.Store.InsertOutgoing(ctx, out)
+			if err != nil {
+				return err
+			} else if !inserted {
+				return errAlreadyRecorded
+			}
+		} else if err := c.Store.SetOutgoingStatus(ctx, out.UserID, out.ClientMessageID, out.Status, out.Error); err != nil {
+			return err
+		}
+		return c.Store.Append(ctx, events...)
+	})
+	if err == nil {
+		c.Notify()
+	}
+	return err
+}
+
+var errAlreadyRecorded = errors.New("send already recorded")
+
+func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.ClientMessageID == "" {
 		return badRequest("clientMessageId is required")
+	}
+	// A send without a deadline could go out at any time later; every send has one.
+	if cmd.Type == protocol.CommandSend && cmd.NotAfter <= 0 {
+		return badRequest("notAfter is required")
 	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
 		return err
 	}
+	var plain protocol.MessagePlaintext
+	if err = c.openOutbound(cmd, cmd.UserID, cmd.ClientMessageID, &plain); err != nil {
+		return err
+	}
+	if cmd.Type == protocol.CommandEdit {
+		if cmd.TargetEventID == "" {
+			return badRequest("targetEventId is required")
+		}
+		if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil {
+			return err
+		}
+	} else if cmd.ReplyTo != "" {
+		if err = c.checkTarget(ctx, t, cmd.ReplyTo); err != nil {
+			return err
+		}
+	}
+	if check {
+		_, _, err = c.matrixContent(t, &plain, false)
+		return err
+	}
+
 	// A repeated send is never sent again: the last known status is repeated instead.
 	if existing, err := c.Store.GetOutgoing(ctx, cmd.UserID, cmd.ClientMessageID); err == nil {
 		return c.emitSendStatus(ctx, t.owner, existing.ClientMessageID, existing.Status, existing.EventID, existing.Error)
@@ -206,31 +315,22 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command) error
 		return err
 	}
 	eventID := ids.OutgoingEventID(cmd.UserID, cmd.ClientMessageID)
-	// A send that waited too long (for example while the gateway was down) doesn't go out:
-	// the person decides again.
-	if cmd.NotAfter != 0 && time.Now().UnixMilli() > cmd.NotAfter {
-		inserted, err := c.Store.InsertOutgoing(ctx, &store.Outgoing{
-			UserID: cmd.UserID, LoginID: t.owner.loginID, ClientMessageID: cmd.ClientMessageID, EventID: string(eventID),
-			Status: protocol.StatusFailed, Error: protocol.ErrExpired,
-		})
-		if err != nil || !inserted {
-			return err
+	out := &store.Outgoing{UserID: cmd.UserID, LoginID: t.owner.loginID, ClientMessageID: cmd.ClientMessageID, EventID: string(eventID)}
+	// The deadline is checked here, right before the hand-off: a send that waited too long
+	// (for example behind an earlier send in the chat) doesn't go out, and the person decides.
+	if cmd.NotAfter > 0 && time.Now().UnixMilli() > cmd.NotAfter {
+		out.Status, out.Error = protocol.StatusFailed, protocol.ErrExpired
+		if err = c.recordSend(ctx, t.owner, out, true); errors.Is(err, errAlreadyRecorded) {
+			return nil
 		}
-		return c.emitSendStatus(ctx, t.owner, cmd.ClientMessageID, protocol.StatusFailed, "", protocol.ErrExpired)
-	}
-	var plain protocol.MessagePlaintext
-	if err = c.openOutbound(cmd, cmd.UserID, cmd.ClientMessageID, &plain); err != nil {
 		return err
 	}
-	content, evtType, err := c.matrixContent(t, &plain, c.SendTimeout)
+	content, evtType, err := c.matrixContent(t, &plain, true)
 	if err != nil {
 		return err
 	}
-	pending := &pendingCommand{kind: pendingSend, owner: t.owner, clientMessageID: cmd.ClientMessageID, plaintext: &plain}
+	pending := &pendingCommand{kind: pendingSend, owner: t.owner, clientMessageID: cmd.ClientMessageID}
 	if cmd.Type == protocol.CommandEdit {
-		if cmd.TargetEventID == "" {
-			return badRequest("targetEventId is required")
-		}
 		pending.kind, pending.targetEventID = pendingEdit, cmd.TargetEventID
 		edit := *content
 		content = &event.MessageEventContent{MsgType: edit.MsgType, Body: "* " + edit.Body, NewContent: &edit}
@@ -239,30 +339,32 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command) error
 		pending.replyTo = cmd.ReplyTo
 		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(id.EventID(cmd.ReplyTo))
 	}
-	inserted, err := c.Store.InsertOutgoing(ctx, &store.Outgoing{
-		UserID: cmd.UserID, LoginID: t.owner.loginID, ClientMessageID: cmd.ClientMessageID, EventID: string(eventID),
-		Status: protocol.StatusSubmitted,
-	})
-	if err != nil {
+	// The person's copy is sealed now, while the plaintext is in hand, and recorded with
+	// the `sent` outcome. Then the plaintext is dropped.
+	if pending.echo, err = c.seal(ctx, t.owner, seal.KindMessage, string(eventID), &plain); err != nil {
 		return err
-	} else if !inserted {
-		// Raced with the same send: the other request owns it.
+	}
+	out.Status = protocol.StatusSubmitted
+	if err = c.recordSend(ctx, t.owner, out, true); errors.Is(err, errAlreadyRecorded) {
+		// Raced with the same send: the other run owns it.
 		return nil
+	} else if err != nil {
+		return err
 	}
 	c.trackPending(eventID, pending)
-	if err = c.emitSendStatus(ctx, t.owner, cmd.ClientMessageID, protocol.StatusSubmitted, "", ""); err != nil {
-		return err
-	}
 	c.queue(ctx, t, &event.Event{Type: evtType, ID: eventID, Content: event.Content{Parsed: content}})
 	return nil
 }
 
-func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.TargetEventID == "" || cmd.Key == "" {
 		return badRequest("targetEventId and key are required")
 	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
+		return err
+	}
+	if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil || check {
 		return err
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)
@@ -276,12 +378,15 @@ func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command) erro
 	return nil
 }
 
-func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.TargetEventID == "" {
 		return badRequest("targetEventId is required")
 	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
+		return err
+	}
+	if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil {
 		return err
 	}
 	redacts := id.EventID(cmd.TargetEventID)
@@ -295,6 +400,9 @@ func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command) err
 			return err
 		}
 		pending.key = reactionKey(cmd.Key)
+	}
+	if check {
+		return nil
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)
 	c.trackPending(eventID, pending)
@@ -334,12 +442,15 @@ func (c *Connector) ownReaction(ctx context.Context, t *target, target id.EventI
 	return "", conflict(protocol.ErrInvalidCommand, "no reaction with that key from this user")
 }
 
-func (c *Connector) handleMarkRead(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleMarkRead(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.UpToEventID == "" {
 		return badRequest("upToEventId is required")
 	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
+		return err
+	}
+	if err = c.checkTarget(ctx, t, cmd.UpToEventID); err != nil || check {
 		return err
 	}
 	evt := &event.Event{
@@ -353,9 +464,9 @@ func (c *Connector) handleMarkRead(ctx context.Context, cmd *protocol.Command) e
 	return nil
 }
 
-func (c *Connector) handleTyping(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleTyping(ctx context.Context, cmd *protocol.Command, check bool) error {
 	t, err := c.resolve(ctx, cmd, true)
-	if err != nil {
+	if err != nil || check {
 		return err
 	}
 	var typing []id.UserID
@@ -371,34 +482,71 @@ func (c *Connector) handleTyping(ctx context.Context, cmd *protocol.Command) err
 	return nil
 }
 
-func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, check bool) error {
 	t, err := c.resolve(ctx, cmd, false)
-	if err != nil {
+	if err != nil || check {
 		return err
 	}
 	go t.login.Logout(c.Bridge.BackgroundCtx)
 	return nil
 }
 
-func (c *Connector) handleBackfill(ctx context.Context, cmd *protocol.Command) error {
+// maxBackfillLimit bounds one backfill command.
+const maxBackfillLimit = 500
+
+// handleBackfill fetches up to limit messages before beforeEventId (or before the oldest
+// bridged message) and imports them, then reports whether the network has more.
+func (c *Connector) handleBackfill(ctx context.Context, cmd *protocol.Command, check bool) error {
+	if cmd.Limit <= 0 || cmd.Limit > maxBackfillLimit {
+		return badRequest("limit must be between 1 and %d", maxBackfillLimit)
+	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
 		return err
 	}
+	api, ok := t.login.Client.(bridgev2.BackfillingNetworkAPI)
+	if !ok {
+		return conflict(protocol.ErrUnsupported, "the network can't fetch history")
+	}
+	var anchor *database.Message
+	if cmd.BeforeEventID != "" {
+		if err = c.checkTarget(ctx, t, cmd.BeforeEventID); err != nil {
+			return err
+		}
+		if anchor, err = c.Bridge.DB.Message.GetPartByMXID(ctx, id.EventID(cmd.BeforeEventID)); err != nil {
+			return err
+		}
+	} else if anchor, err = c.Bridge.DB.Message.GetFirstPortalMessage(ctx, t.portal.PortalKey); err != nil {
+		return err
+	}
+	if check {
+		return nil
+	}
 	o := t.owner
-	c.Bridge.WakeupBackfillQueue(&bridgev2.ManualBackfill{
-		Source: t.login,
-		Portal: t.portal,
-		DoneCallback: func(err error) {
-			more := err == nil
-			if emitErr := c.emit(c.Bridge.BackgroundCtx, &protocol.Event{
+	go func() {
+		bgCtx := c.Bridge.BackgroundCtx
+		more := false
+		resp, err := api.FetchMessages(bgCtx, bridgev2.FetchMessagesParams{
+			Portal: t.portal, AnchorMessage: anchor, Count: cmd.Limit, Forward: false,
+		})
+		done := func(err error) {
+			if err != nil {
+				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Backfill failed")
+			}
+			if emitErr := c.emit(bgCtx, &protocol.Event{
 				Type: protocol.EventBackfillDone, UserID: o.userID, LoginID: o.loginID, PortalID: o.portalID,
 				Direction: "backward", More: &more,
 			}); emitErr != nil {
 				c.Log.Err(emitErr).Msg("Failed to record backfill completion")
 			}
-		},
-	})
+		}
+		if err != nil {
+			done(err)
+			return
+		}
+		more = resp.HasMore
+		c.Bridge.WakeupBackfillQueue(&bridgev2.ManualBackfill{Source: t.login, Portal: t.portal, Data: resp, DoneCallback: done})
+	}()
 	return nil
 }
 
@@ -410,29 +558,56 @@ func (c *Connector) queue(ctx context.Context, t *target, evt *event.Event) {
 	evt.Mautrix.EventSource = event.SourceTimeline
 	res := c.Bridge.QueueMatrixEvent(c.Bridge.BackgroundCtx, evt)
 	if !res.Success && !res.Queued {
-		c.Log.Warn().Err(res.Error).Stringer("event_id", evt.ID).Msg("bridgev2 refused a command's event")
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", res.Error)).Stringer("event_id", evt.ID).Msg("bridgev2 refused a command's event")
 	}
 }
 
+// pendingRetention is how long a send reported unknown is remembered, so an outcome that
+// arrives late is still reported.
+const pendingRetention = time.Hour
+
 func (c *Connector) trackPending(eventID id.EventID, pending *pendingCommand) {
-	pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
+	if pending.kind == pendingSend || pending.kind == pendingEdit {
+		c.busy.Store(pending.owner.portalID, eventID)
+	}
+	pending.lock.Lock()
+	defer pending.lock.Unlock()
 	c.pending.Store(eventID, pending)
+	pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
 }
 
-// expirePending marks a send unknown when bridgev2 never reported its outcome.
+// release lets the next command for a chat go once a send in it has settled.
+func (c *Connector) release(eventID id.EventID, pending *pendingCommand) {
+	if pending.kind == pendingSend || pending.kind == pendingEdit {
+		c.busy.CompareAndDelete(pending.owner.portalID, eventID)
+		c.wakeWorker()
+	}
+}
+
+// expirePending marks a send unknown when bridgev2 hasn't reported its outcome in time.
+// It isn't forgotten: if bridgev2 does report later, that outcome is recorded too.
 func (c *Connector) expirePending(eventID id.EventID) {
-	raw, ok := c.pending.LoadAndDelete(eventID)
+	raw, ok := c.pending.Load(eventID)
 	if !ok {
 		return
 	}
 	pending := raw.(*pendingCommand)
-	if pending.kind != pendingSend && pending.kind != pendingEdit {
+	pending.lock.Lock()
+	defer pending.lock.Unlock()
+	if pending.settled || pending.timedOut || (pending.kind != pendingSend && pending.kind != pendingEdit) {
+		c.pending.CompareAndDelete(eventID, pending)
 		return
 	}
-	ctx := c.Bridge.BackgroundCtx
-	if err := c.setSendStatus(ctx, pending, protocol.StatusUnknown, "", protocol.ErrTimeout); err != nil {
+	pending.timedOut = true
+	out := &store.Outgoing{
+		UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
+		Status: protocol.StatusUnknown, Error: protocol.ErrTimeout,
+	}
+	if err := c.recordSend(c.Bridge.BackgroundCtx, pending.owner, out, false); err != nil {
 		c.Log.Err(err).Msg("Failed to mark send unknown")
 	}
+	c.release(eventID, pending)
+	pending.timer = time.AfterFunc(pendingRetention, func() { c.pending.CompareAndDelete(eventID, pending) })
 }
 
 func (c *Connector) emitSendStatus(ctx context.Context, o *owner, clientMessageID, status, eventID, errMsg string) error {
@@ -442,13 +617,6 @@ func (c *Connector) emitSendStatus(ctx context.Context, o *owner, clientMessageI
 	})
 }
 
-func (c *Connector) setSendStatus(ctx context.Context, pending *pendingCommand, status, eventID, errMsg string) error {
-	if err := c.Store.SetOutgoingStatus(ctx, pending.owner.userID, pending.clientMessageID, status, errMsg); err != nil {
-		return err
-	}
-	return c.emitSendStatus(ctx, pending.owner, pending.clientMessageID, status, eventID, errMsg)
-}
-
 // SendMessageStatus is bridgev2 reporting the outcome of a Matrix-side event.
 func (c *Connector) SendMessageStatus(ctx context.Context, ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo) {
 	raw, ok := c.pending.LoadAndDelete(info.SourceEventID)
@@ -456,9 +624,15 @@ func (c *Connector) SendMessageStatus(ctx context.Context, ms *bridgev2.MessageS
 		return
 	}
 	pending := raw.(*pendingCommand)
+	pending.lock.Lock()
+	defer pending.lock.Unlock()
+	pending.settled = true
 	pending.timer.Stop()
 	if err := c.handleOutcome(ctx, pending, ms, info); err != nil {
 		c.Log.Err(err).Stringer("event_id", info.SourceEventID).Msg("Failed to record command outcome")
+	}
+	if !pending.timedOut {
+		c.release(info.SourceEventID, pending)
 	}
 }
 
@@ -467,38 +641,35 @@ func (c *Connector) handleOutcome(ctx context.Context, pending *pendingCommand, 
 	eventID := string(info.SourceEventID)
 	switch pending.kind {
 	case pendingSend, pendingEdit:
+		out := &store.Outgoing{
+			UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID, EventID: eventID,
+		}
 		if !success {
-			status := protocol.StatusUnknown
 			// Only a refusal bridgev2 is sure of is a failure; anything else may have reached
 			// the network, so it is unknown and never retried here.
+			out.Status = protocol.StatusUnknown
 			if ms.IsCertain {
-				status = protocol.StatusFailed
+				out.Status = protocol.StatusFailed
 			}
-			// The connector's error text stays in the local log; only a code leaves.
-			c.Log.Warn().Err(ms.InternalError).Stringer("event_id", info.SourceEventID).Str("status", status).Msg("Send didn't go through")
-			return c.setSendStatus(ctx, pending, status, "", sendErrorCode(ms))
+			out.Error = sendErrorCode(ms)
+			// Only the error's type is logged: a connector's error text can quote content.
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", ms.InternalError)).Str("code", out.Error).
+				Stringer("event_id", info.SourceEventID).Str("status", out.Status).Msg("Send didn't go through")
+			return c.recordSend(ctx, pending.owner, out, false)
 		}
-		if err := c.setSendStatus(ctx, pending, protocol.StatusSent, eventID, ""); err != nil {
-			return err
-		}
-		// The person's own copy, sealed now that the network accepted it.
-		sealed, err := c.seal(ctx, pending.owner, seal.KindMessage, eventID, pending.plaintext)
-		if err != nil {
-			return err
-		}
-		pending.plaintext = nil
-		evt := &protocol.Event{
+		out.Status = protocol.StatusSent
+		echo := &protocol.Event{
 			UserID: pending.owner.userID, LoginID: pending.owner.loginID, PortalID: pending.owner.portalID,
-			EventID: eventID, Sender: &protocol.SelfSender, Sealed: sealed, NetworkTS: time.Now().UnixMilli(),
+			EventID: eventID, Sender: &protocol.SelfSender, Sealed: pending.echo, NetworkTS: time.Now().UnixMilli(),
 			ClientMessageID: pending.clientMessageID,
 		}
 		if pending.kind == pendingEdit {
-			evt.Type, evt.TargetEventID = protocol.EventEdit, pending.targetEventID
+			echo.Type, echo.TargetEventID = protocol.EventEdit, pending.targetEventID
 		} else {
 			historical := false
-			evt.Type, evt.Historical, evt.ReplyTo = protocol.EventMessage, &historical, pending.replyTo
+			echo.Type, echo.Historical, echo.ReplyTo = protocol.EventMessage, &historical, pending.replyTo
 		}
-		return c.emit(ctx, evt)
+		return c.recordSend(ctx, pending.owner, out, false, echo)
 	case pendingReact:
 		if !success {
 			return nil
@@ -541,10 +712,8 @@ func (c *Connector) MarkInFlightUnknown(ctx context.Context) error {
 	}
 	for _, out := range inFlight {
 		o := &owner{userID: out.UserID, loginID: out.LoginID}
-		if err = c.Store.SetOutgoingStatus(ctx, out.UserID, out.ClientMessageID, protocol.StatusUnknown, protocol.ErrInternal); err != nil {
-			return err
-		}
-		if err = c.emitSendStatus(ctx, o, out.ClientMessageID, protocol.StatusUnknown, "", protocol.ErrInternal); err != nil {
+		out.Status, out.Error = protocol.StatusUnknown, protocol.ErrInternal
+		if err = c.recordSend(ctx, o, out, false); err != nil {
 			return err
 		}
 	}

@@ -22,6 +22,7 @@ import (
 	"go.mau.fi/util/variationselector"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
@@ -383,20 +384,20 @@ func (in *Intent) DownloadMediaToFile(ctx context.Context, uri id.ContentURIStri
 		return err
 	}
 	// The connector asked for a file. It holds plaintext, so it goes in memory-backed
-	// /dev/shm where available, lives only as long as the callback, and is removed after.
-	dir := ""
-	if info, err := os.Stat("/dev/shm"); err == nil && info.IsDir() {
-		dir = "/dev/shm"
-	}
-	tmp, err := os.CreateTemp(dir, "trioditis-media-*")
+	// storage only, lives only as long as the callback, and is removed after. Without
+	// memory-backed storage the file is refused rather than written to disk.
+	tmp, err := media.TempPlainFile()
 	if err != nil {
+		clear(data)
 		return err
 	}
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}()
-	if _, err = tmp.Write(data); err != nil {
+	_, err = tmp.Write(data)
+	clear(data)
+	if err != nil {
 		return err
 	}
 	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
@@ -409,21 +410,50 @@ func (in *Intent) UploadMedia(ctx context.Context, roomID id.RoomID, data []byte
 	return in.c.Media.Upload(data, fileName, mimeType), nil, nil
 }
 
+// UploadMediaStream gives the connector somewhere to write a file. A connector that needs
+// a real file (requireFile; WhatsApp casts the writer to *os.File for large media) gets one
+// in memory-backed storage; otherwise a buffer. Either way the plaintext ends up only in
+// the media store's memory until it is sealed.
 func (in *Intent) UploadMediaStream(ctx context.Context, roomID id.RoomID, size int64, requireFile bool, cb bridgev2.FileStreamCallback) (id.ContentURIString, *event.EncryptedFileInfo, error) {
-	var buf bytes.Buffer
-	res, err := cb(&buf)
-	if err != nil {
-		return "", nil, err
-	}
-	data := buf.Bytes()
-	if res.ReplacementFile != "" {
-		data, err = os.ReadFile(res.ReplacementFile)
+	var data []byte
+	var res *bridgev2.FileStreamResult
+	var err error
+	if requireFile {
+		tmp, err := media.TempPlainFile()
 		if err != nil {
 			return "", nil, err
 		}
-		_ = os.Remove(res.ReplacementFile)
+		defer func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}()
+		if res, err = cb(tmp); err != nil {
+			return "", nil, err
+		}
+		if _, err = tmp.Seek(0, io.SeekStart); err != nil {
+			return "", nil, err
+		}
+		if data, err = io.ReadAll(tmp); err != nil {
+			return "", nil, err
+		}
+	} else {
+		var buf bytes.Buffer
+		if res, err = cb(&buf); err != nil {
+			return "", nil, err
+		}
+		data = buf.Bytes()
 	}
-	return in.c.Media.Upload(data, res.FileName, res.MimeType), nil, nil
+	if res.ReplacementFile != "" {
+		replacement := res.ReplacementFile
+		defer func() { _ = os.Remove(replacement) }()
+		clear(data)
+		if data, err = os.ReadFile(replacement); err != nil {
+			return "", nil, err
+		}
+	}
+	uri := in.c.Media.Upload(data, res.FileName, res.MimeType)
+	clear(data)
+	return uri, nil, nil
 }
 
 func (in *Intent) SetDisplayName(ctx context.Context, name string) error {
@@ -534,7 +564,8 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	if err != nil {
 		return err
 	}
-	portal, err := c.Bridge.DB.Portal.GetByKey(ctx, o.key)
+	// By room, not key: the key changes when the network re-IDs the portal; the room doesn't.
+	portal, err := c.Bridge.DB.Portal.GetByMXID(ctx, roomID)
 	if err != nil {
 		return err
 	}
@@ -542,6 +573,7 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	var avatarURL id.ContentURIString
 	kind := override.kind
 	var parentKey networkid.PortalKey
+	var parentRoom id.RoomID
 	if portal != nil {
 		plain.Name, plain.Topic, avatarURL = portal.Name, portal.Topic, portal.AvatarMXC
 		if kind == "" {
@@ -568,8 +600,8 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	for _, evt := range override.initialState {
 		apply(evt.Type, &evt.Content)
 		if evt.Type == event.StateSpaceParent && evt.StateKey != nil {
-			if key, ok := ids.ParseRoomID(id.RoomID(*evt.StateKey)); ok {
-				parentKey = key
+			if _, ok := ids.ParseRoomID(id.RoomID(*evt.StateKey)); ok {
+				parentRoom = id.RoomID(*evt.StateKey)
 			}
 		}
 	}
@@ -582,6 +614,10 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	if avatarURL != "" {
 		if att, err := c.Media.AttachmentFor(avatarURL, o.userID); err == nil {
 			plain.Avatar = att
+		} else {
+			// The avatar exists but its upload is gone (it expired, or the host restarted).
+			// Saying so keeps clients from taking a name change as the avatar's removal.
+			plain.AvatarUnchanged = true
 		}
 	}
 	sealed, err := c.seal(ctx, o, seal.KindChat, o.portalID, plain)
@@ -591,8 +627,12 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	evt := &protocol.Event{
 		Type: protocol.EventChat, UserID: o.userID, LoginID: o.loginID, PortalID: o.portalID, Kind: kind, Sealed: sealed,
 	}
-	if parentKey.ID != "" {
-		if evt.ParentPortalID, err = c.portalOpaque(ctx, parentKey); err != nil {
+	if parentRoom != "" {
+		if evt.ParentPortalID, err = c.portalOpaqueForRoom(ctx, parentRoom); err != nil {
+			return err
+		}
+	} else if parentKey.ID != "" {
+		if evt.ParentPortalID, err = c.portalOpaqueForKey(ctx, parentKey); err != nil {
 			return err
 		}
 	}
@@ -633,6 +673,8 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	if avatarURL != "" {
 		if att, err := c.Media.AttachmentFor(avatarURL, o.userID); err == nil {
 			plain.Avatar = att
+		} else {
+			plain.AvatarUnchanged = true
 		}
 	}
 	ghostID, err := c.ghostOpaque(ctx, ghost)

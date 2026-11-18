@@ -58,6 +58,7 @@ type Network struct {
 	Bridge *bridgev2.Bridge
 
 	mode    atomic.Int32
+	delay   atomic.Int64
 	counter atomic.Int64
 
 	lock    sync.Mutex
@@ -219,7 +220,21 @@ func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *
 	}
 }
 
-func (c *Client) sendResult() error {
+// SetSendDelay makes each send wait this long before the network answers, holding the
+// chat's queue like a slow network does. A delay ends early, with an error, if the bridge
+// stops.
+func (n *Network) SetSendDelay(d time.Duration) { n.delay.Store(int64(d)) }
+
+func (c *Client) sendResult(ctx context.Context) error {
+	if d := time.Duration(c.n.delay.Load()); d > 0 {
+		timer := time.NewTimer(d)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
 	switch SendMode(c.n.mode.Load()) {
 	case SendAmbiguous:
 		return errors.New("fake network: connection dropped after the request went out")
@@ -233,7 +248,7 @@ func (c *Client) sendResult() error {
 }
 
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	if err := c.sendResult(); err != nil {
+	if err := c.sendResult(ctx); err != nil {
 		return nil, err
 	}
 	if msg.Content.URL != "" {
@@ -251,7 +266,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 }
 
 func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit) error {
-	if err := c.sendResult(); err != nil {
+	if err := c.sendResult(ctx); err != nil {
 		return err
 	}
 	c.n.lock.Lock()

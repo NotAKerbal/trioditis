@@ -252,6 +252,9 @@ type ChatPlaintext struct {
 	Name   string      `json:"name,omitempty"`
 	Topic  string      `json:"topic,omitempty"`
 	Avatar *Attachment `json:"avatar,omitempty"`
+	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
+	// this time (its upload expired). Clients keep the avatar they have.
+	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
 }
 
 // ContactPlaintext is a contact's sealed profile.
@@ -259,4 +262,7 @@ type ContactPlaintext struct {
 	Name   string      `json:"name,omitempty"`
 	Handle string      `json:"handle,omitempty"`
 	Avatar *Attachment `json:"avatar,omitempty"`
+	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
+	// this time (its upload expired). Clients keep the avatar they have.
+	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
 }

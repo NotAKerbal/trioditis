@@ -12,18 +12,18 @@ import (
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
-// Handler runs commands.
+// Handler checks and stores commands for running.
 type Handler interface {
-	HandleCommand(ctx context.Context, cmd *protocol.Command) error
+	// Submit refuses an invalid command with a *connector.CommandError, and otherwise
+	// returns once the command is stored durably, payload included.
+	Submit(ctx context.Context, cmd *protocol.Command) error
 }
 
 // Server serves the internal command API.
 type Server struct {
 	Token   string
-	Store   *store.Store
 	Handler Handler
 	Log     zerolog.Logger
 }
@@ -66,21 +66,10 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := s.Log.With().Str("command_id", cmd.CommandID).Str("command_type", cmd.Type).Logger().WithContext(r.Context())
-	isNew, err := s.Store.ClaimCommand(ctx, cmd.CommandID)
-	if err != nil {
-		s.Log.Err(err).Msg("Failed to record command")
-		writeError(w, http.StatusInternalServerError, protocol.ErrInternal)
-		return
-	} else if !isNew {
-		// Already run. The gateway is retrying a command whose 202 it missed.
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-	if err = s.Handler.HandleCommand(ctx, &cmd); err != nil {
-		// A command refused before it ran may be sent again once the problem is fixed.
-		if releaseErr := s.Store.ReleaseCommand(ctx, cmd.CommandID); releaseErr != nil {
-			s.Log.Err(releaseErr).Msg("Failed to release refused command")
-		}
+	// 202 means the command is stored, payload included, and will run (or, for a command
+	// ID seen before, already is stored). A command refused here isn't stored, so it may be
+	// sent again once the problem is fixed.
+	if err := s.Handler.Submit(ctx, &cmd); err != nil {
 		var cmdErr *connector.CommandError
 		if errors.As(err, &cmdErr) {
 			s.Log.Debug().Str("code", cmdErr.Code).Str("detail", cmdErr.Detail).Msg("Command refused")

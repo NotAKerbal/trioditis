@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 
@@ -28,7 +29,10 @@ type loginSession struct {
 	lock   sync.Mutex
 	step   *bridgev2.LoginStep
 	stepID string
-	done   bool
+	// submitted is the step whose input is being handled. One submit per step: a second,
+	// even with a different command ID, is refused.
+	submitted string
+	done      bool
 }
 
 func randomStepID() string {
@@ -37,7 +41,7 @@ func randomStepID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.LoginSessionID == "" || cmd.UserID == "" {
 		return badRequest("loginSessionId and userId are required")
 	}
@@ -53,6 +57,9 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 	} else if !has {
 		return conflict(protocol.ErrInvalidCommand, "the person has no identity key yet, so a login can't start")
 	}
+	if check {
+		return nil
+	}
 	user, err := c.Bridge.GetUserByMXID(ctx, ids.UserMXID(cmd.UserID))
 	if err != nil {
 		return err
@@ -67,7 +74,7 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 	}
 	process, err := c.Bridge.Network.CreateLogin(ctx, user, flowID)
 	if err != nil {
-		return &CommandError{Status: 409, Code: protocol.ErrLoginFailed, Detail: "can't start login: " + err.Error()}
+		return &CommandError{Status: 409, Code: protocol.ErrLoginFailed, Detail: fmt.Sprintf("can't start login: %T", err)}
 	}
 	sessionCtx, cancel := context.WithCancel(c.Bridge.BackgroundCtx)
 	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel}
@@ -79,7 +86,7 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 	return nil
 }
 
-func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command) error {
+func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command, check bool) error {
 	raw, ok := c.logins.Load(cmd.LoginSessionID)
 	if !ok {
 		return conflict(protocol.ErrInvalidCommand, "unknown login session")
@@ -94,9 +101,17 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 	}
 	s.lock.Lock()
 	step, stepID := s.step, s.stepID
+	current := step != nil && stepID == cmd.StepID && s.submitted != stepID
+	if current && !check {
+		s.submitted = stepID
+	}
 	s.lock.Unlock()
-	if step == nil || stepID != cmd.StepID {
+	if !current {
+		clear(plain.Input)
 		return conflict(protocol.ErrInvalidCommand, "that login step isn't the current one")
+	} else if check {
+		clear(plain.Input)
+		return nil
 	}
 	go func() {
 		var next *bridgev2.LoginStep
@@ -126,15 +141,19 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 	return nil
 }
 
-func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command) error {
-	raw, ok := c.logins.LoadAndDelete(cmd.LoginSessionID)
+func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command, check bool) error {
+	raw, ok := c.logins.Load(cmd.LoginSessionID)
 	if !ok {
 		return nil
 	}
 	s := raw.(*loginSession)
 	if s.userID != cmd.UserID {
-		c.logins.Store(s.id, s)
 		return conflict(protocol.ErrInvalidCommand, "login session belongs to someone else")
+	} else if check {
+		return nil
+	}
+	if !c.logins.CompareAndDelete(cmd.LoginSessionID, s) {
+		return nil
 	}
 	s.finish()
 	return s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepCancelled})
@@ -173,8 +192,9 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	if err != nil {
 		s.c.logins.Delete(s.id)
 		s.finish()
-		// The connector's error stays in the local log; the person sees a code.
-		log.Warn().Err(err).Msg("Login failed")
+		// Only the error's type is logged: a connector's error text can quote what the person
+		// typed. The person sees a code.
+		log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Login failed")
 		code := protocol.ErrLoginFailed
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = protocol.ErrTimeout
@@ -246,5 +266,23 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			next, err := proc.Wait(s.ctx)
 			s.advance(next, err)
 		}()
+	}
+}
+
+// endLoginWithError ends a login the person was promised would go ahead (its command got a
+// 202) but that can't: a restart lost it, or its command couldn't run.
+func (c *Connector) endLoginWithError(userID, loginSessionID, code string) {
+	if loginSessionID == "" {
+		return
+	}
+	if raw, ok := c.logins.LoadAndDelete(loginSessionID); ok {
+		raw.(*loginSession).finish()
+	}
+	err := c.emit(c.Bridge.BackgroundCtx, &protocol.Event{
+		Type: protocol.EventLoginStep, UserID: userID, LoginSessionID: loginSessionID,
+		Step: &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code},
+	})
+	if err != nil {
+		c.Log.Err(err).Msg("Failed to report an interrupted login")
 	}
 }

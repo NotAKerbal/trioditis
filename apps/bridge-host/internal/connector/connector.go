@@ -54,6 +54,10 @@ type Connector struct {
 	ghosts  *exsync.Map[networkid.UserID, *Intent]
 	pending sync.Map // id.EventID → *pendingCommand
 	logins  sync.Map // login session ID → *loginSession
+	// busy holds chats (by opaque portal ID) with a send in flight; the worker runs their
+	// next command once it settles.
+	busy sync.Map // portal ID → id.EventID
+	wake chan struct{}
 }
 
 var (
@@ -68,7 +72,7 @@ func New(opts Options) *Connector {
 	if opts.Notify == nil {
 		opts.Notify = func() {}
 	}
-	c := &Connector{Options: opts, ghosts: exsync.NewMap[networkid.UserID, *Intent]()}
+	c := &Connector{Options: opts, ghosts: exsync.NewMap[networkid.UserID, *Intent](), wake: make(chan struct{}, 1)}
 	c.bot = &Intent{c: c, mxid: ids.BotMXID, kind: intentBot}
 	return c
 }
@@ -224,15 +228,24 @@ func (c *Connector) BatchSend(ctx context.Context, roomID id.RoomID, req *mautri
 		return nil, err
 	}
 	resp := &mautrix.RespBeeperBatchSend{EventIDs: make([]id.EventID, len(req.Events))}
-	for i, evt := range req.Events {
-		resp.EventIDs[i] = evt.ID
-		sender, ok := c.senderForMXID(evt.Sender)
-		if !ok {
-			continue
+	// The whole batch goes into the journal in one transaction, so a failure part-way leaves
+	// none of it for bridgev2 to retry around. (Every event also has a deterministic ID, so
+	// even a replayed batch is stored once by Convex.)
+	err = c.Store.Txn(ctx, func(ctx context.Context) error {
+		for i, evt := range req.Events {
+			resp.EventIDs[i] = evt.ID
+			sender, ok := c.senderForMXID(evt.Sender)
+			if !ok {
+				continue
+			}
+			if err := c.emitContent(ctx, owner, sender, evt.Type, &evt.Content, evt.ID, time.UnixMilli(evt.Timestamp), true); err != nil {
+				return err
+			}
 		}
-		if err = c.emitContent(ctx, owner, sender, evt.Type, &evt.Content, evt.ID, time.UnixMilli(evt.Timestamp), true); err != nil {
-			return nil, err
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return resp, nil
 }
@@ -281,7 +294,7 @@ func (c *Connector) owner(ctx context.Context, roomID id.RoomID) (*owner, error)
 	if o.loginID, err = c.loginOpaque(ctx, key.Receiver); err != nil {
 		return nil, err
 	}
-	if o.portalID, err = c.portalOpaque(ctx, key); err != nil {
+	if o.portalID, err = c.portalOpaqueForRoom(ctx, roomID); err != nil {
 		return nil, err
 	}
 	return o, nil
@@ -296,8 +309,27 @@ func (c *Connector) loginOpaque(ctx context.Context, login networkid.UserLoginID
 	return c.opaque(ctx, ids.KindLogin, string(login))
 }
 
-func (c *Connector) portalOpaque(ctx context.Context, key networkid.PortalKey) (string, error) {
-	return c.opaque(ctx, ids.KindPortal, ids.PortalValue(key))
+// portalOpaqueForRoom is a portal's opaque ID: a hash of the portal key its room was
+// created with (which the room ID encodes), stored as the room ID. The room ID never
+// changes, even when the network re-IDs the portal, so neither does the opaque ID.
+func (c *Connector) portalOpaqueForRoom(ctx context.Context, roomID id.RoomID) (string, error) {
+	original, ok := ids.ParseRoomID(roomID)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", errNotPortal, roomID)
+	}
+	opaque := c.Opaque.ID(c.Network, ids.KindPortal, ids.PortalValue(original))
+	return opaque, c.Store.PutID(ctx, opaque, ids.KindPortal, string(roomID))
+}
+
+// portalOpaqueForKey finds a portal's opaque ID from its current key, through its room.
+func (c *Connector) portalOpaqueForKey(ctx context.Context, key networkid.PortalKey) (string, error) {
+	roomID := ids.RoomID(key)
+	if portal, err := c.Bridge.GetExistingPortalByKey(ctx, key); err != nil {
+		return "", err
+	} else if portal != nil && portal.MXID != "" {
+		roomID = portal.MXID
+	}
+	return c.portalOpaqueForRoom(ctx, roomID)
 }
 
 func (c *Connector) ghostOpaque(ctx context.Context, ghost networkid.UserID) (string, error) {

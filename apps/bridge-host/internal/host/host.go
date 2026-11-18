@@ -73,6 +73,7 @@ type Host struct {
 	httpServer *http.Server
 	cancel     context.CancelFunc
 	done       chan struct{}
+	workerDone chan struct{}
 }
 
 // BridgeConfig is bridgev2's configuration for Trioditis. See docs/PLAN.md, Bridge host.
@@ -152,7 +153,7 @@ func New(cfg Config) (*Host, error) {
 	}
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
-		Opaque: ids.NewOpaquer(cfg.BridgeKey.Private[:]), BridgeKey: cfg.BridgeKey,
+		BridgeKey: cfg.BridgeKey,
 		Notify: notify, SendTimeout: cfg.SendTimeout,
 	})
 	bridgeCfg := BridgeConfig()
@@ -172,15 +173,30 @@ func (h *Host) Start(ctx context.Context) error {
 	if err := h.Store.Upgrade(ctx); err != nil {
 		return fmt.Errorf("host: failed to upgrade Trioditis tables: %w", err)
 	}
-	if err := h.Connector.MarkInFlightUnknown(ctx); err != nil {
+	// Opaque IDs are hashed with a key kept in the database, so they survive a new bridge
+	// key. A database from before the key existed keeps the IDs it has.
+	idKey, err := h.Store.IDKey(ctx, ids.LegacyOpaqueKey(h.Config.BridgeKey.Private[:]))
+	if err != nil {
+		return fmt.Errorf("host: failed to load the ID key: %w", err)
+	}
+	h.Connector.Opaque = ids.NewOpaquer(idKey)
+	if err = h.Connector.MarkInFlightUnknown(ctx); err != nil {
 		return fmt.Errorf("host: failed to settle interrupted sends: %w", err)
 	}
-	if err := h.Bridge.Start(ctx); err != nil {
+	if err = h.Bridge.Start(ctx); err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
+	}
+	if err = h.Connector.RecoverCommands(ctx); err != nil {
+		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	h.done = make(chan struct{})
+	h.workerDone = make(chan struct{})
+	go func() {
+		defer close(h.workerDone)
+		h.Connector.RunWorker(runCtx)
+	}()
 	if h.Pusher != nil {
 		go func() {
 			defer close(h.done)
@@ -195,7 +211,7 @@ func (h *Host) Start(ctx context.Context) error {
 			return fmt.Errorf("host: failed to listen: %w", err)
 		}
 		h.listener = listener
-		srv := &server.Server{Token: h.Config.InternalToken, Store: h.Store, Handler: h.Connector, Log: h.Config.Log.With().Str("component", "server").Logger()}
+		srv := &server.Server{Token: h.Config.InternalToken, Handler: h.Connector, Log: h.Config.Log.With().Str("component", "server").Logger()}
 		h.httpServer = &http.Server{Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := h.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -225,6 +241,7 @@ func (h *Host) Stop() {
 	if h.cancel != nil {
 		h.cancel()
 		<-h.done
+		<-h.workerDone
 	}
 	_ = h.DB.Close()
 }

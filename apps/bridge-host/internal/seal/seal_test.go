@@ -196,9 +196,18 @@ func TestOpensTypeScriptVectors(t *testing.T) {
 	checkVectors(t, filepath.Join(testdataDir, "vectors.json"))
 }
 
-// TestWritesGoVectors writes vectors-go.json, which packages/crypto's tests open, so each
-// implementation opens what the other sealed.
+// TestOpensGoVectors checks the committed vectors-go.json, which packages/crypto's tests
+// also open, so each implementation opens what the other sealed.
+func TestOpensGoVectors(t *testing.T) {
+	checkVectors(t, filepath.Join(testdataDir, "vectors-go.json"))
+}
+
+// TestWritesGoVectors rewrites vectors-go.json. Sealing is randomized, so it only runs when
+// asked (after a format change): TRIODITIS_WRITE_VECTORS=1 go test ./internal/seal
 func TestWritesGoVectors(t *testing.T) {
+	if os.Getenv("TRIODITIS_WRITE_VECTORS") != "1" {
+		t.Skip("set TRIODITIS_WRITE_VECTORS=1 to rewrite vectors-go.json")
+	}
 	owner, agent, bridge := seededKeyPair("owner"), seededKeyPair("agent-access"), seededKeyPair("bridge")
 	message := Context{Kind: KindMessage, OwnerUserID: "user_1", ObjectID: "evt_go"}
 	outbound := Context{Kind: KindOutbound, OwnerUserID: "user_1", ObjectID: "cm_go"}
