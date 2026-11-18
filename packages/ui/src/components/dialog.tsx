@@ -9,13 +9,21 @@ const Dialog = Primitive.Root
 const DialogTrigger = Primitive.Trigger
 const DialogClose = Primitive.Close
 
-function DialogContent({ className, children, closeLabel = 'Close', ...props }: React.ComponentProps<typeof Primitive.Content> & { closeLabel?: string }) {
+function DialogContent({
+  className,
+  children,
+  closeLabel = 'Close',
+  ...props
+}: React.ComponentProps<typeof Primitive.Content> & { closeLabel?: string }) {
   return (
     <Primitive.Portal>
       <Primitive.Overlay className="fixed inset-0 z-40 bg-scrim" />
       <Primitive.Content
         data-slot="dialog-content"
-        className={cn('fixed top-1/2 left-1/2 z-50 max-h-[calc(100vh-48px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl bg-surface text-foreground shadow-dialog outline-none', className)}
+        className={cn(
+          'fixed top-1/2 left-1/2 z-50 max-h-[calc(100vh-48px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl bg-surface text-foreground shadow-dialog outline-none',
+          className,
+        )}
         {...props}
       >
         {children}

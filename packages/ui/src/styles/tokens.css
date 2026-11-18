@@ -18,6 +18,8 @@
   --fg: #0f172a;
   --fg-muted: #475569;
   --fg-subtle: #94a3b8;
+  /* Text and marks on a coloured fill: avatars, network badges, a switch's thumb. */
+  --on-color: #ffffff;
 
   /* The brand accent: the one primary action, selection, unread counts, links. */
   --accent: #0284c7;
@@ -44,6 +46,14 @@
   --net-discord: #5865f2;
   --net-agents: #0ea5e9;
   --net-fake: #64748b;
+
+  /* Label colours. A label stores one of these names, never a colour value. */
+  --label-pink: #db2777;
+  --label-blue: #2563eb;
+  --label-green: #059669;
+  --label-amber: #d97706;
+  --label-violet: #7c3aed;
+  --label-slate: #475569;
 
   --font-sans: 'DM Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -101,6 +111,13 @@
   --warning-soft: rgb(251 191 36 / 0.14);
   --warning-ink: #fde68a;
   --danger: #f87171;
+
+  --label-pink: #f472b6;
+  --label-blue: #60a5fa;
+  --label-green: #34d399;
+  --label-amber: #fbbf24;
+  --label-violet: #a78bfa;
+  --label-slate: #94a3b8;
 
   --elevation-sm: 0 1px 2px rgb(0 0 0 / 0.4);
   --elevation-md: 0 14px 36px rgb(0 0 0 / 0.5);

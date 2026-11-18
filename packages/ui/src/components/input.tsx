@@ -16,7 +16,17 @@ function Input({ className, type = 'text', ...props }: React.ComponentProps<'inp
 }
 
 /** A text field with a leading icon and an optional trailing hint, like the sidebar's search. */
-function InputGroup({ className, icon, end, children }: { className?: string; icon?: React.ReactNode; end?: React.ReactNode; children: React.ReactNode }) {
+function InputGroup({
+  className,
+  icon,
+  end,
+  children,
+}: {
+  className?: string
+  icon?: React.ReactNode
+  end?: React.ReactNode
+  children: React.ReactNode
+}) {
   return (
     <label
       data-slot="input-group"

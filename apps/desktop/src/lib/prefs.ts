@@ -1,19 +1,17 @@
 import { useSyncExternalStore } from 'react'
 
-// This device's display preferences. They live in this browser only, like the theme; nothing
-// here is message content.
+// This device's display preferences: they live in this browser only. The sidebar layout follows
+// the person across devices, so it is stored on the server instead (data/preferences.ts).
 
-export type SidebarLayout = 'simple' | 'focused'
 export type Theme = 'system' | 'light' | 'dark'
 
 export interface Prefs {
-  sidebar: SidebarLayout
   theme: Theme
   previews: boolean
   networkBadges: boolean
 }
 
-const DEFAULTS: Prefs = { sidebar: 'simple', theme: 'system', previews: true, networkBadges: true }
+const DEFAULTS: Prefs = { theme: 'system', previews: true, networkBadges: true }
 const KEY = 'trioditis.prefs'
 
 function load(): Prefs {

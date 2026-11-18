@@ -35,7 +35,17 @@ type ButtonProps = React.ComponentProps<'button'> &
     loading?: boolean
   }
 
-function Button({ className, variant, size, block, asChild = false, loading = false, disabled, children, ...props }: ButtonProps) {
+function Button({
+  className,
+  variant,
+  size,
+  block,
+  asChild = false,
+  loading = false,
+  disabled,
+  children,
+  ...props
+}: ButtonProps) {
   const Comp = asChild ? Slot.Root : 'button'
   return (
     <Comp

@@ -9,7 +9,8 @@
       // Set the theme before the first paint so the page never flashes the wrong one.
       try {
         const saved = localStorage.getItem('trioditis.theme')
-        const dark = saved === 'dark' || ((!saved || saved === 'system') && matchMedia('(prefers-color-scheme: dark)').matches)
+        const dark =
+          saved === 'dark' || ((!saved || saved === 'system') && matchMedia('(prefers-color-scheme: dark)').matches)
         if (dark) document.documentElement.dataset.theme = 'dark'
       } catch {}
     </script>

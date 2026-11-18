@@ -1,13 +1,10 @@
-import { fromBase64Url, generateKeyPair, keyId, ready, toBase64Url, type KeyPair } from '@trioditis/crypto'
+import { fromBase64Url, ready, toBase64Url, type KeyPair } from '@trioditis/crypto'
 
 /*
- * The person's identity key on this device. The private key never leaves the device: it is
- * kept in IndexedDB, encrypted with a device key that the browser holds as a non-extractable
- * WebCrypto key, so the stored bytes are useless without this browser profile.
- *
- * Restoring the key on another device needs the recovery-key backup, which needs a wrapped
- * copy stored on the server. The backend doesn't store one yet (see "Needs from backend"), so
- * for now a key lives only on the device that made it.
+ * The person's unwrapped identity key on this device, until they sign out of it. The private key
+ * is kept in IndexedDB encrypted with a device key that the browser holds as a non-extractable
+ * WebCrypto key, so the stored bytes are useless outside this browser profile. Other devices get
+ * the key from the wrapped backups on the server (api.keys), never from here.
  */
 
 const DB_NAME = 'trioditis-keys'
@@ -17,7 +14,7 @@ interface StoredIdentity {
   userId: string
   kid: string
   publicKey: string
-  iv: Uint8Array
+  iv: Uint8Array<ArrayBuffer>
   wrapped: ArrayBuffer
   deviceKey: CryptoKey
 }
@@ -44,30 +41,27 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
   }
 }
 
-/** This device's identity key for `userId`, if it has one. */
+/** This device's copy of the identity key for `userId`, if it has one. */
 export async function loadIdentity(userId: string): Promise<{ kid: string; keyPair: KeyPair } | null> {
   await ready()
   const stored = await withStore<StoredIdentity | undefined>('readonly', (s) => s.get(userId))
   if (!stored) return null
-  const privateKey = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: stored.iv }, stored.deviceKey, stored.wrapped))
+  const privateKey = new Uint8Array(
+    await crypto.subtle.decrypt({ name: 'AES-GCM', iv: stored.iv }, stored.deviceKey, stored.wrapped),
+  )
   return { kid: stored.kid, keyPair: { publicKey: fromBase64Url(stored.publicKey), privateKey } }
 }
 
-/** Makes a new identity key on this device and stores it. Returns the public key to register. */
-export async function createIdentity(userId: string): Promise<{ kid: string; publicKey: string; keyPair: KeyPair }> {
-  await ready()
-  const keyPair = generateKeyPair()
+/** Keeps an unwrapped identity key on this device. */
+export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair): Promise<void> {
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, keyPair.privateKey)
-  const publicKey = toBase64Url(keyPair.publicKey)
-  const kid = keyId(keyPair.publicKey)
-  const record: StoredIdentity = { userId, kid, publicKey, iv, wrapped, deviceKey }
+  const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
+  const record: StoredIdentity = { userId, kid, publicKey: toBase64Url(keyPair.publicKey), iv, wrapped, deviceKey }
   await withStore('readwrite', (s) => s.put(record))
-  return { kid, publicKey, keyPair }
 }
 
-/** Forgets this device's key, as signing out of the device does. */
+/** Forgets this device's key, as signing out does. */
 export async function forgetIdentity(userId: string): Promise<void> {
   await withStore('readwrite', (s) => s.delete(userId))
 }

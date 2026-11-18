@@ -15,8 +15,13 @@ function Invite() {
   const { token, email } = Route.useSearch()
   if (!token || !email) {
     return (
-      <AuthCard title="This invitation link is incomplete" description="Ask whoever invited you to send the link again.">
-        <Link to="/sign-in" className="font-semibold text-primary hover:underline">Go to sign in</Link>
+      <AuthCard
+        title="This invitation link is incomplete"
+        description="Ask whoever invited you to send the link again."
+      >
+        <Link to="/sign-in" className="font-semibold text-primary hover:underline">
+          Go to sign in
+        </Link>
       </AuthCard>
     )
   }

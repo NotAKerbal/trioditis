@@ -30,10 +30,18 @@ function Toaster() {
   }, [value])
   if (!shown) return null
   return (
-    <div role="status" aria-live="polite" className="fixed bottom-6 left-1/2 z-[60] flex h-10 -translate-x-1/2 items-center gap-3 rounded-[11px] bg-foreground px-4 text-sm font-medium whitespace-nowrap text-background shadow-popover">
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed bottom-6 left-1/2 z-[60] flex h-10 -translate-x-1/2 items-center gap-3 rounded-[11px] bg-foreground px-4 text-sm font-medium whitespace-nowrap text-background shadow-popover"
+    >
       {shown.message}
       {shown.action ? (
-        <button type="button" className="font-semibold text-primary-soft underline-offset-2 hover:underline" onClick={shown.action.onClick}>
+        <button
+          type="button"
+          className="font-semibold text-primary-soft underline-offset-2 hover:underline"
+          onClick={shown.action.onClick}
+        >
           {shown.action.label}
         </button>
       ) : null}

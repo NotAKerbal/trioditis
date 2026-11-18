@@ -22,6 +22,7 @@
   --color-muted: var(--surface-2);
   --color-muted-foreground: var(--fg-muted);
   --color-subtle-foreground: var(--fg-subtle);
+  --color-on-color: var(--on-color);
   --color-accent: var(--surface-2);
   --color-accent-foreground: var(--fg);
   --color-popover: var(--surface);
@@ -52,6 +53,13 @@
   --color-net-discord: var(--net-discord);
   --color-net-agents: var(--net-agents);
   --color-net-fake: var(--net-fake);
+
+  --color-label-pink: var(--label-pink);
+  --color-label-blue: var(--label-blue);
+  --color-label-green: var(--label-green);
+  --color-label-amber: var(--label-amber);
+  --color-label-violet: var(--label-violet);
+  --color-label-slate: var(--label-slate);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);

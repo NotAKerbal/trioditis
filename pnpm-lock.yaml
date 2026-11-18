@@ -212,6 +212,9 @@ importers:
       '@trioditis/backend':
         specifier: workspace:*
         version: link:../../packages/backend
+      '@trioditis/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@trioditis/crypto':
         specifier: workspace:*
         version: link:../../packages/crypto

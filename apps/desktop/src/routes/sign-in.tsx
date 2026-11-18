@@ -3,8 +3,10 @@ import { Input } from '@trioditis/ui/input'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { KeyRound } from 'lucide-react'
 import { useState } from 'react'
-import { AuthCard, Field, FormError, errorMessage } from '~/features/auth/auth-card.tsx'
+import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
+import { errorMessage } from '~/lib/errors.ts'
 import { authClient } from '~/lib/auth-client.ts'
+import { holdPassword } from '~/lib/pending-password.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
 
@@ -22,6 +24,8 @@ function SignIn() {
     const { error } = await authClient.signIn.email({ email, password })
     setBusy(null)
     if (error) return setError(errorMessage(error, 'That email and password didn’t match.'))
+    // The same password unlocks the identity key on the next screen.
+    holdPassword(password)
     await navigate({ to: '/' })
   }
 
@@ -30,7 +34,8 @@ function SignIn() {
     setError(null)
     const result = await authClient.signIn.passkey()
     setBusy(null)
-    if (result?.error) return setError(errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'))
+    if (result?.error)
+      return setError(errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'))
     await navigate({ to: '/' })
   }
 
@@ -40,17 +45,32 @@ function SignIn() {
       description="to your Trioditis server."
       footer={
         <>
-          Setting up a new server? <Link to="/setup" className="font-semibold text-primary hover:underline">Create the admin account</Link>
+          Setting up a new server?{' '}
+          <Link to="/setup" className="font-semibold text-primary hover:underline">
+            Create the admin account
+          </Link>
         </>
       }
     >
       <form onSubmit={withPassword}>
         <FormError message={error} />
         <Field label="Email">
-          <Input type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          <Input
+            type="email"
+            autoComplete="username"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
         </Field>
         <Field label="Password">
-          <Input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+          <Input
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </Field>
         <Button type="submit" variant="primary" size="lg" block loading={busy === 'password'} disabled={busy !== null}>
           Sign in

@@ -14,7 +14,10 @@ function DropdownMenuContent({ className, sideOffset = 6, ...props }: React.Comp
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         collisionPadding={8}
-        className={cn('z-50 min-w-[240px] rounded-lg bg-popover p-1.5 text-popover-foreground shadow-popover ring-1 ring-border outline-none', className)}
+        className={cn(
+          'z-50 min-w-[240px] rounded-lg bg-popover p-1.5 text-popover-foreground shadow-popover ring-1 ring-border outline-none',
+          className,
+        )}
         {...props}
       />
     </Primitive.Portal>
@@ -29,11 +32,19 @@ function DropdownMenuItem({ className, ...props }: React.ComponentProps<typeof P
 }
 
 /** An item that is on or off; shows the current choice. */
-function DropdownMenuCheckboxItem({ className, children, ...props }: React.ComponentProps<typeof Primitive.CheckboxItem>) {
+function DropdownMenuCheckboxItem({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof Primitive.CheckboxItem>) {
   return (
     <Primitive.CheckboxItem
       data-slot="dropdown-menu-checkbox-item"
-      className={cn(itemClass, 'data-[state=checked]:bg-primary-soft data-[state=checked]:font-semibold data-[state=checked]:text-primary-ink', className)}
+      className={cn(
+        itemClass,
+        'data-[state=checked]:bg-primary-soft data-[state=checked]:font-semibold data-[state=checked]:text-primary-ink',
+        className,
+      )}
       {...props}
     >
       {children}
@@ -42,7 +53,15 @@ function DropdownMenuCheckboxItem({ className, children, ...props }: React.Compo
 }
 
 function DropdownMenuLabel({ className, ...props }: React.ComponentProps<typeof Primitive.Label>) {
-  return <Primitive.Label className={cn('px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-[0.06em] text-subtle-foreground uppercase', className)} {...props} />
+  return (
+    <Primitive.Label
+      className={cn(
+        'px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-[0.06em] text-subtle-foreground uppercase',
+        className,
+      )}
+      {...props}
+    />
+  )
 }
 
 function DropdownMenuSeparator({ className, ...props }: React.ComponentProps<typeof Primitive.Separator>) {

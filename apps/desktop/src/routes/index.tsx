@@ -8,7 +8,9 @@ import { SETTINGS_SECTIONS, type SettingsSection } from '~/features/settings/set
 export const Route = createFileRoute('/')({
   validateSearch: (search: Record<string, unknown>): { chat?: string; settings?: SettingsSection } => ({
     ...(typeof search.chat === 'string' ? { chat: search.chat } : {}),
-    ...(SETTINGS_SECTIONS.some((s) => s.id === search.settings) ? { settings: search.settings as SettingsSection } : {}),
+    ...(SETTINGS_SECTIONS.some((s) => s.id === search.settings)
+      ? { settings: search.settings as SettingsSection }
+      : {}),
   }),
   component: () => (
     <AppGate>

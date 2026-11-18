@@ -11,7 +11,10 @@ function Setup() {
       description="Create the admin account. You can invite everyone else afterwards."
       footer={
         <>
-          Already set up? <Link to="/sign-in" className="font-semibold text-primary hover:underline">Sign in</Link>
+          Already set up?{' '}
+          <Link to="/sign-in" className="font-semibold text-primary hover:underline">
+            Sign in
+          </Link>
         </>
       }
     >

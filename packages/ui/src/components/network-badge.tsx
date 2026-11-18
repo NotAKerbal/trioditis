@@ -13,7 +13,13 @@ const NETWORK_STYLE: Record<string, { className: string; letter: string }> = {
 }
 
 /** A network's small square mark. `label` is its name, for screen readers and the tooltip. */
-function NetworkBadge({ network, label, size = 16, className, ...props }: { network: string; label: string; size?: number } & React.ComponentProps<'span'>) {
+function NetworkBadge({
+  network,
+  label,
+  size = 16,
+  className,
+  ...props
+}: { network: string; label: string; size?: number } & React.ComponentProps<'span'>) {
   const style = NETWORK_STYLE[network] ?? { className: 'bg-net-fake', letter: label.slice(0, 1).toUpperCase() }
   return (
     <span
@@ -21,7 +27,11 @@ function NetworkBadge({ network, label, size = 16, className, ...props }: { netw
       role="img"
       aria-label={label}
       title={label}
-      className={cn('inline-flex shrink-0 items-center justify-center rounded-[4px] font-bold text-white', style.className, className)}
+      className={cn(
+        'inline-flex shrink-0 items-center justify-center rounded-[4px] font-bold text-on-color',
+        style.className,
+        className,
+      )}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.6) }}
       {...props}
     >
