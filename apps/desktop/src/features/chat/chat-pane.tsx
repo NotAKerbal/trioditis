@@ -80,7 +80,7 @@ export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
 function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const session = useSession()
   const actions = useChatActions()
-  const { messages, loading, canLoadMore, loadMore } = useMessages(chat.id)
+  const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for
   // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
   const reactions = useReactions(
@@ -302,6 +302,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           group={chat.row.kind !== 'dm'}
           typing={typing.length}
           canLoadMore={canLoadMore}
+          loadingMore={loadingMore}
           onLoadMore={loadMore}
           onReply={setReplyTo}
           onSendAgain={(m) => {
@@ -323,8 +324,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
             void cancelScheduled({ scheduledId: id }).then(
               () => {
                 // Keep anything in the composer by now; add the cancelled text below it. A copy
-                // this device couldn't open has nothing to put back.
+                // this device couldn't open, or that hadn't come yet, has nothing to put back.
                 if (body === null) return toast('Cancelled. It won’t be sent.')
+                if (body === undefined) return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
                 toast(
                   appendToDraft(chat.id, body)
                     ? 'Cancelled. The message was added below your draft.'

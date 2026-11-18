@@ -223,6 +223,27 @@ function KeySetup({
   const [finished, setFinished] = useState(false)
   // Set when the server has the backups but which recovery key it kept couldn't be checked.
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
+  // Another device set up a different key for the account first: this one can't be used.
+  const [keyTaken, setKeyTaken] = useState(false)
+
+  /** The account's key as the server has it now, or undefined if that couldn't be read. */
+  async function readIdentity() {
+    try {
+      // Inside try: with a failed cached result, the client can throw before giving a promise.
+      return await convex.query(api.keys.identity, {})
+    } catch {
+      return undefined
+    }
+  }
+
+  /** After a failed step: did another device give the account a different key meanwhile? */
+  async function takenElsewhere(job: NonNullable<typeof prepared>) {
+    const identity = await readIdentity()
+    if (!identity || identity.state === 'none' || identity.publicKey === job.setup.args.publicKey) return false
+    setKeyTaken(true)
+    setBusy(false)
+    return true
+  }
 
   async function prepare(event?: React.FormEvent) {
     event?.preventDefault()
@@ -270,6 +291,7 @@ function KeySetup({
     try {
       proof = await proveKey(job.keyPair)
     } catch (e) {
+      if (await takenElsewhere(job)) return
       return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
     }
     let kid: string
@@ -277,6 +299,7 @@ function KeySetup({
     try {
       kid = (await setup({ ...job.setup.args, proof })).kid
     } catch (e) {
+      if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
@@ -293,10 +316,8 @@ function KeySetup({
     setError(null)
     let lost = false
     if (job.showRecovery) {
-      const installed = await convex
-        .query(api.keys.identity, {})
-        .then((identity) => identity?.backups.find((b) => b.kind === 'recovery') ?? null)
-        .catch(() => undefined)
+      const identity = await readIdentity()
+      const installed = identity?.backups.find((b) => b.kind === 'recovery')
       if (!installed) {
         setUncheckedKid(kid)
         setError('Your key’s backups are saved, but this device couldn’t check which recovery key the server kept.')
@@ -332,6 +353,20 @@ function KeySetup({
     setBusy(false)
   }
 
+  if (keyTaken) {
+    return (
+      <AuthCard
+        title="Another device set up your key first"
+        description="Your account’s key was made on another device a moment ago, so the key made here, and the recovery key shown with it, won’t be used. Unlock with your password to use the one from that device."
+      >
+        <Button variant="primary" size="lg" block className="mb-2" onClick={onLeave}>
+          Unlock with my password
+        </Button>
+        <SignOutButton />
+      </AuthCard>
+    )
+  }
+
   if (uncheckedKid && prepared) {
     return (
       <AuthCard
@@ -342,6 +377,9 @@ function KeySetup({
         <Button variant="primary" size="lg" block loading={busy} onClick={() => void check(uncheckedKid, prepared)}>
           Check again
         </Button>
+        <div className="mt-2">
+          <SignOutButton />
+        </div>
       </AuthCard>
     )
   }
@@ -383,9 +421,10 @@ function KeySetup({
         >
           Try again
         </Button>
-        <Button block onClick={onLeave}>
+        <Button block className="mb-2" onClick={onLeave}>
           Unlock with my password
         </Button>
+        <SignOutButton />
       </AuthCard>
     )
   }
@@ -452,6 +491,9 @@ function KeySetup({
       <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={() => void finish()}>
         Finish setup
       </Button>
+      <div className="mt-2">
+        <SignOutButton />
+      </div>
     </AuthCard>
   )
 }

@@ -22,13 +22,15 @@ interface MessageListProps {
   group: boolean
   typing: number
   canLoadMore: boolean
+  /** An earlier page is on its way. */
+  loadingMore: boolean
   onLoadMore: () => void
   onReply: (m: Message) => void
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
-  /** Cancels it; `body` is its text to put back, or null when this device couldn't open it. */
-  onCancelScheduled: (id: Id<'scheduledSends'>, body: string | null) => void
+  /** Cancels it; `body` is its text to put back: null if it can't be shown, undefined if not here yet. */
+  onCancelScheduled: (id: Id<'scheduledSends'>, body: string | null | undefined) => void
 }
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
@@ -48,7 +50,7 @@ export function MessageList(props: MessageListProps) {
   // Set while earlier messages load: the top-most message in view and how far down it sat, to
   // put it back there. Anchoring on a message, not the list's height, keeps it still even if a
   // new message arrives at the bottom meanwhile.
-  const before = useRef<{ anchorId: string; index: number; offset: number } | null>(null)
+  const before = useRef<{ anchorId: string; offset: number; seenLoading: boolean } | null>(null)
 
   const loadEarlier = () => {
     const el = scroller.current
@@ -58,11 +60,10 @@ export function MessageList(props: MessageListProps) {
         (m) => m.getBoundingClientRect().bottom > top,
       )
       if (anchor) {
-        const anchorId = anchor.dataset.messageId!
         before.current = {
-          anchorId,
-          index: messages.findIndex((m) => m.id === anchorId),
+          anchorId: anchor.dataset.messageId!,
           offset: anchor.getBoundingClientRect().top - top,
+          seenLoading: false,
         }
       }
     }
@@ -76,17 +77,22 @@ export function MessageList(props: MessageListProps) {
   useLayoutEffect(() => {
     const el = scroller.current
     if (!el) return
-    // The earlier page has come when messages appear above the anchor, not merely when the first
-    // row changes (a live update can do that too, before the page arrives).
+    // The view is put back when the page that was asked for has come (or come back empty), not
+    // when some row changes: live updates, above or below, can come first. Back at the bottom,
+    // the person isn't reading earlier messages any more, so the list pins there as ever.
     const was = before.current
-    const index = was ? messages.findIndex((m) => m.id === was.anchorId) : -1
-    if (was && index < 0) before.current = null
-    else if (was && index > was.index) {
-      const anchor = el.querySelector<HTMLElement>(`[data-message-id="${was.anchorId}"]`)
-      if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
-      before.current = null
-    } else if (atBottom.current) el.scrollTop = el.scrollHeight
-  }, [messages, scheduled.length, props.typing])
+    if (was && atBottom.current) before.current = null
+    else if (was) {
+      if (props.loadingMore) was.seenLoading = true
+      else if (was.seenLoading) {
+        const anchor = el.querySelector<HTMLElement>(`[data-message-id="${was.anchorId}"]`)
+        if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
+        before.current = null
+      }
+      return
+    }
+    if (atBottom.current) el.scrollTop = el.scrollHeight
+  }, [messages, scheduled.length, props.typing, props.loadingMore])
 
   // Earlier messages load as the top of the list scrolls near; the button stays as a fallback.
   // A page can end early under the server's byte budget, so only the cursor says it's the start.
@@ -231,14 +237,13 @@ export function MessageList(props: MessageListProps) {
             <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onSendScheduledNow(s.id)}>
               Send now
             </Button>
-            {/* Cancelling puts the text back in the composer, so it waits for the text; one that
-                can't be opened here can still be stopped, with nothing to put back. */}
+            {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
+                composer when it's here, and the person is told when it isn't. */}
             <Button
               variant="link"
               size="sm"
               className="h-auto text-xs"
-              disabled={s.body === undefined}
-              onClick={() => s.body !== undefined && props.onCancelScheduled(s.id, s.body)}
+              onClick={() => props.onCancelScheduled(s.id, s.body)}
             >
               {s.body === null ? 'Cancel send' : 'Cancel'}
             </Button>

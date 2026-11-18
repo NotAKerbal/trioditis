@@ -62,6 +62,7 @@ export function useMessages(chatId: ChatId) {
     messages,
     loading: status === 'LoadingFirstPage',
     canLoadMore: status === 'CanLoadMore',
+    loadingMore: status === 'LoadingMore',
     loadMore: () => loadMore(50),
   }
 }
