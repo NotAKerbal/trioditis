@@ -85,6 +85,8 @@ export default defineSchema({
     loginId: v.optional(v.string()),
     /** The bridge host running the login; its later steps must go there. */
     hostId: v.optional(v.string()),
+    /** The step input was last sent for: each step takes one submission, as the bridge host does. */
+    submittedStepId: v.optional(v.string()),
     updatedAt: v.number(),
   }).index('by_user', ['userId']),
 
@@ -350,8 +352,10 @@ export default defineSchema({
 
   /** Where the last command claim stopped scanning, so the next one carries on from there. */
   claimCursor: defineTable({
-    key: v.literal('queued'),
+    key: v.union(v.literal('queued'), v.literal('leases')),
     after: v.number(),
+    /** For `leases`: the creation time of the last row at `after`, so rows sharing a deadline aren't skipped. */
+    afterCreation: v.optional(v.number()),
   }).index('by_key', ['key']),
 
   /** Each bridge host's position in its event journal. */

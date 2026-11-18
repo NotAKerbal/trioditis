@@ -86,7 +86,16 @@ func BridgeConfig() *bridgeconfig.BridgeConfig {
 		// Each person gets their own copy of a shared chat. Irreversible once portals exist.
 		SplitPortals:          true,
 		PrivateChatPortalMeta: true,
-		PortalEventBuffer:     64,
+		// A chat's events are handled synchronously, in the goroutine that queues them. A send
+		// is then handed to the connector the moment the bridge host lets it go, right after
+		// its deadline is checked, and a chat stuck inside a connector holds only that chat's
+		// lane. It also makes mautrix-whatsapp keep whatsmeow's decrypted-event buffer, so a
+		// message whose handling a crash cuts off is bridged when WhatsApp redelivers it (see
+		// the README, Plaintext at rest).
+		PortalEventBuffer: 0,
+		// How long a send waits for a login that is reconnecting before it fails. Bounded, so
+		// a send checked against its deadline can't wait long after the check.
+		SendReconnectWait: connector.SendReconnectWait,
 		// A repeated Matrix-side event with the same ID is recognized instead of resent.
 		DeduplicateMatrixMessages: true,
 		BridgeNotices:             false,
@@ -113,6 +122,9 @@ func New(cfg Config) (*Host, error) {
 	}
 	if cfg.HostID == "" {
 		cfg.HostID = cfg.Network + "-1"
+	}
+	if len(cfg.HostID) > 64 {
+		return nil, errors.New("host: the host ID is at most 64 characters")
 	}
 	if cfg.DatabaseType == "" {
 		cfg.DatabaseType = "sqlite3-fk-wal"
@@ -182,6 +194,13 @@ func (h *Host) Start(ctx context.Context) error {
 	h.Connector.Opaque = ids.NewOpaquer(idKey)
 	if err = h.Connector.MarkInFlightUnknown(ctx); err != nil {
 		return fmt.Errorf("host: failed to settle interrupted sends: %w", err)
+	}
+	// A crash between an acknowledgement and its scrub, in an older version, could leave a
+	// login code behind; whatever the gateway has is scrubbed at every start.
+	if acked, err := h.Store.AckedThrough(ctx); err != nil {
+		return fmt.Errorf("host: failed to read the journal state: %w", err)
+	} else if err = h.Store.ScrubLoginDisplays(ctx, acked); err != nil {
+		return fmt.Errorf("host: failed to scrub login codes: %w", err)
 	}
 	if err = h.Bridge.Start(ctx); err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)

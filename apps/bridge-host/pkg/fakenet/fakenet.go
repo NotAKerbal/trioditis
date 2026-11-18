@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.mau.fi/util/configupgrade"
 
@@ -57,9 +60,11 @@ type HistoryMessage struct {
 type Network struct {
 	Bridge *bridgev2.Bridge
 
-	mode    atomic.Int32
-	delay   atomic.Int64
-	counter atomic.Int64
+	mode          atomic.Int32
+	incomingDelay atomic.Int64
+	delay         atomic.Int64
+	counter       atomic.Int64
+	reactions     atomic.Int64
 
 	lock    sync.Mutex
 	sent    []Sent
@@ -183,14 +188,22 @@ func (c *Client) IsThisUser(_ context.Context, userID networkid.UserID) bool {
 	return userID == c.self()
 }
 
+// GetChatInfo describes a chat from its ID. A chat whose ID is "dm-<user>" is a direct chat
+// with that user, named after them, as the dev stack's `pnpm fake` sends them; any other ID
+// is a group with one other member.
 func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	other := networkid.UserID("peer-" + string(portal.ID))
 	name := "Chat " + string(portal.ID)
 	roomType := database.RoomTypeDefault
+	if peer, ok := strings.CutPrefix(string(portal.ID), "dm-"); ok && peer != "" {
+		other = networkid.UserID(peer)
+		name = DisplayName(other)
+		roomType = database.RoomTypeDM
+	}
 	return &bridgev2.ChatInfo{
 		Name: &name,
 		Type: &roomType,
-		Members: &bridgev2.ChatMemberList{IsFull: true, Members: []bridgev2.ChatMember{
+		Members: &bridgev2.ChatMemberList{IsFull: true, OtherUserID: other, Members: []bridgev2.ChatMember{
 			{EventSender: bridgev2.EventSender{IsFromMe: true, Sender: c.self()}, Membership: event.MembershipJoin},
 			{EventSender: bridgev2.EventSender{Sender: other}, Membership: event.MembershipJoin},
 		}},
@@ -198,8 +211,18 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	}, nil
 }
 
+// DisplayName is the name the fake network gives a user: their ID with a capital letter, so
+// "alice" is Alice.
+func DisplayName(userID networkid.UserID) string {
+	first, size := utf8.DecodeRuneInString(string(userID))
+	if first == utf8.RuneError {
+		return string(userID)
+	}
+	return string(unicode.ToUpper(first)) + string(userID)[size:]
+}
+
 func (c *Client) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	name := "Fake " + string(ghost.ID)
+	name := DisplayName(ghost.ID)
 	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"fake:" + string(ghost.ID)}}, nil
 }
 
@@ -220,12 +243,17 @@ func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *
 	}
 }
 
-// SetSendDelay makes each send wait this long before the network answers, holding the
-// chat's queue like a slow network does. A delay ends early, with an error, if the bridge
+// SetIncomingDelay makes handling each incoming message take this long, inside bridgev2's
+// handling of the chat, as a connector downloading a large file does.
+func (n *Network) SetIncomingDelay(d time.Duration) { n.incomingDelay.Store(int64(d)) }
+
+// SetSendDelay makes each send (and reaction) wait this long before the network answers,
+// holding the chat's queue like a slow network does. A delay ends early, with an error, if the bridge
 // stops.
 func (n *Network) SetSendDelay(d time.Duration) { n.delay.Store(int64(d)) }
 
-func (c *Client) sendResult(ctx context.Context) error {
+// wait holds a send, reaction or removal for the send delay.
+func (c *Client) wait(ctx context.Context) error {
 	if d := time.Duration(c.n.delay.Load()); d > 0 {
 		timer := time.NewTimer(d)
 		select {
@@ -234,6 +262,13 @@ func (c *Client) sendResult(ctx context.Context) error {
 			timer.Stop()
 			return ctx.Err()
 		}
+	}
+	return nil
+}
+
+func (c *Client) sendResult(ctx context.Context) error {
+	if err := c.wait(ctx); err != nil {
+		return err
 	}
 	switch SendMode(c.n.mode.Load()) {
 	case SendAmbiguous:
@@ -281,8 +316,15 @@ func (c *Client) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.Matr
 }
 
 func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
+	if err := c.wait(ctx); err != nil {
+		return nil, err
+	}
+	c.n.reactions.Add(1)
 	return &database.Reaction{}, nil
 }
+
+// Reactions is how many reactions the fake network has taken.
+func (n *Network) Reactions() int64 { return n.reactions.Load() }
 
 func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
 	return nil
@@ -387,6 +429,9 @@ func (n *Network) Incoming(loginID networkid.UserLoginID, chatID networkid.Porta
 		Data:      text,
 		ID:        msgID,
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data string) (*bridgev2.ConvertedMessage, error) {
+			if d := time.Duration(n.incomingDelay.Load()); d > 0 {
+				time.Sleep(d)
+			}
 			return textMessage(data), nil
 		},
 	})
@@ -467,6 +512,18 @@ func (n *Network) Remove(loginID networkid.UserLoginID, chatID networkid.PortalI
 	res := ul.QueueRemoteEvent(&simplevent.MessageRemove{
 		EventMeta: meta(bridgev2.RemoteEventMessageRemove, ul, chatID, senderID, time.Time{}), TargetMessage: target,
 	})
+	return resultError(res)
+}
+
+// DeleteChat deletes a chat, as when the person deletes it on their phone.
+func (n *Network) DeleteChat(loginID networkid.UserLoginID, chatID networkid.PortalID) error {
+	ul, err := n.login(loginID)
+	if err != nil {
+		return err
+	}
+	evtMeta := meta(bridgev2.RemoteEventChatDelete, ul, chatID, networkid.UserID(ul.ID), time.Time{})
+	evtMeta.CreatePortal = false
+	res := ul.QueueRemoteEvent(&simplevent.ChatDelete{EventMeta: evtMeta, OnlyForMe: true})
 	return resultError(res)
 }
 

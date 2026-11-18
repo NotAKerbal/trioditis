@@ -19,9 +19,13 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
@@ -433,7 +437,7 @@ func TestConformance(t *testing.T) {
 		})
 		var contactPlain protocol.ContactPlaintext
 		h.open("alice", contact, &contactPlain)
-		if contactPlain.Name != "Fake peer-family" {
+		if contactPlain.Name != "Peer-family" {
 			t.Fatalf("contact name %q", contactPlain.Name)
 		}
 		// Chat and contact names never appear in the journal. (bridgev2's own portal and
@@ -444,9 +448,29 @@ func TestConformance(t *testing.T) {
 		}
 		for _, evt := range journal {
 			raw, _ := json.Marshal(evt)
-			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Fake peer-family")) {
+			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Peer-family")) {
 				t.Fatalf("journal event %d holds a plaintext name", evt.Seq)
 			}
+		}
+	})
+
+	t.Run("a dm- chat is a direct chat named after the other person", func(t *testing.T) {
+		if err := h.net.Incoming(aliceNet, "dm-carol", "carol", "d1", "hi, it's carol", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		msg := gw.waitFor(t, "direct message", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventMessage && e.UserID == "alice" && e.Sender.GhostID != "" && e.PortalID != portalID
+		})
+		chat := gw.waitFor(t, "direct chat event", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventChat && e.PortalID == msg.PortalID
+		})
+		if chat.Kind != "dm" {
+			t.Fatalf("kind %q", chat.Kind)
+		}
+		var chatPlain protocol.ChatPlaintext
+		h.open("alice", chat, &chatPlain)
+		if chatPlain.Name != "Carol" {
+			t.Fatalf("chat name %q", chatPlain.Name)
 		}
 	})
 
@@ -608,6 +632,25 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("a send or edit sealing more than a client may is refused before it runs", func(t *testing.T) {
+		before := len(h.net.Sent())
+		huge := sendCommand("cm-huge", strings.Repeat("x", 70*1024))
+		if status, body := h.command(huge); status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("expected 400 invalid_command for an oversized send, got %d %s", status, body)
+		}
+		edit := sendCommand("cm-huge-edit", strings.Repeat("x", 70*1024))
+		edit.Type, edit.TargetEventID = protocol.CommandEdit, gw.waitFor(t, "a message in this chat", isMessage("from my phone", h, "alice")).EventID
+		if status, _ := h.command(edit); status != http.StatusBadRequest {
+			t.Fatalf("expected 400 for an oversized edit, got %d", status)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if len(h.net.Sent()) != before || gw.count(func(e *protocol.Event) bool {
+			return e.Type == protocol.EventSendStatus && strings.HasPrefix(e.ClientMessageID, "cm-huge")
+		}) != 0 {
+			t.Fatal("an oversized send was run")
+		}
+	})
+
 	t.Run("a reply to a message in another chat is refused", func(t *testing.T) {
 		if err := h.net.Incoming(aliceNet, "other-chat", "peer-other", "o1", "in another chat", time.Now()); err != nil {
 			t.Fatal(err)
@@ -629,7 +672,8 @@ func TestConformance(t *testing.T) {
 		before := len(h.net.Sent())
 		send("cm-slow", "slow one")
 		late := sendCommand("cm-late", "waits behind the slow one")
-		late.NotAfter = time.Now().Add(300 * time.Millisecond).UnixMilli()
+		// In time when it arrives, too late by the time the slow send lets it go.
+		late.NotAfter = time.Now().Add(connector.HandoffMargin + 300*time.Millisecond).UnixMilli()
 		h.mustCommand(late)
 		gw.waitFor(t, "slow send", statusOf("cm-slow", protocol.StatusSent))
 		h.net.SetSendDelay(0)
@@ -650,6 +694,73 @@ func TestConformance(t *testing.T) {
 		})
 		h.net.SetSendDelay(0)
 		h.host.Connector.SendTimeout = 5 * time.Second
+	})
+
+	t.Run("a send waiting behind a slow incoming event isn't marked unknown before it starts", func(t *testing.T) {
+		h.host.Connector.SendTimeout = 200 * time.Millisecond
+		h.net.SetIncomingDelay(450 * time.Millisecond)
+		go func() {
+			_ = h.net.Incoming(aliceNet, "family", "peer-family", "slow-incoming", "a big file", time.Now())
+		}()
+		time.Sleep(50 * time.Millisecond)
+		send("cm-behind", "waits for the chat")
+		gw.waitFor(t, "sent once the chat is free", statusOf("cm-behind", protocol.StatusSent))
+		if n := gw.count(statusOf("cm-behind", protocol.StatusUnknown)); n != 0 {
+			t.Fatalf("a send still waiting to start was marked unknown")
+		}
+		h.net.SetIncomingDelay(0)
+		h.host.Connector.SendTimeout = 5 * time.Second
+	})
+
+	t.Run("an outcome reported with a cancelled context is still recorded", func(t *testing.T) {
+		h.net.SetSendDelay(800 * time.Millisecond)
+		defer h.net.SetSendDelay(0)
+		send("cm-cancelled-ctx", "its chat goes away")
+		gw.waitFor(t, "submitted", statusOf("cm-cancelled-ctx", protocol.StatusSubmitted))
+		// As bridgev2 does when the chat is deleted while the send is out: the context it
+		// reports the outcome with is already cancelled.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		h.host.Connector.SendMessageStatus(ctx, &bridgev2.MessageStatus{Status: event.MessageStatusSuccess}, &bridgev2.MessageStatusEventInfo{
+			SourceEventID: ids.OutgoingEventID("alice", "cm-cancelled-ctx"),
+		})
+		gw.waitFor(t, "sent, recorded despite the cancelled context", statusOf("cm-cancelled-ctx", protocol.StatusSent))
+	})
+
+	t.Run("a send whose attachment is read too close to its deadline expires unsent", func(t *testing.T) {
+		// The chat's lane must be free first, so the send passes its hand-off check: the send
+		// before is still running in the connector after its outcome was reported by hand.
+		send("cm-before-late-file", "clears the lane")
+		gw.waitFor(t, "the send before", statusOf("cm-before-late-file", protocol.StatusSent))
+		margin := connector.TransmitMargin
+		connector.TransmitMargin = connector.HandoffMargin
+		defer func() { connector.TransmitMargin = margin }()
+		data := []byte("late file")
+		enc, err := seal.EncryptMedia(data, "alice", "latemedia1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(dir, "media", "fake", "latemedia1"), enc.Ciphertext, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// In time at the hand-off; by the time the network reads the attachment, a second
+		// later, inside the margin.
+		h.net.SetSendDelay(time.Second)
+		defer h.net.SetSendDelay(0)
+		sentBefore := len(h.net.Sent())
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			ClientMessageID: "cm-file-late", NotAfter: time.Now().Add(connector.HandoffMargin + 300*time.Millisecond).UnixMilli(),
+			Sealed: h.sealForBridge("alice", "cm-file-late", protocol.MessagePlaintext{
+				Type: "file", Body: "late.txt",
+				Attachments: []protocol.Attachment{{MediaID: "latemedia1", Mime: "text/plain", Size: len(data), Name: "late.txt", Key: enc.Key, Nonce: enc.Nonce}},
+			}),
+		})
+		gw.waitFor(t, "submitted", statusOf("cm-file-late", protocol.StatusSubmitted))
+		expired := gw.waitFor(t, "expired at the attachment read", statusOf("cm-file-late", protocol.StatusFailed))
+		if expired.Error != protocol.ErrExpired || len(h.net.Sent()) != sentBefore {
+			t.Fatalf("expected an expired failure with nothing sent, got %q with %d sent", expired.Error, len(h.net.Sent())-sentBefore)
+		}
 	})
 
 	t.Run("a login step takes one submit", func(t *testing.T) {

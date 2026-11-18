@@ -13,6 +13,7 @@ coverage/
 
 # Go build output.
 apps/bridge-host/bin/
+apps/bridge-host/bridge-host
 
 # Worktrees live inside the repository, one per branch. See docs/CONTRIBUTING.md.
 .worktrees/

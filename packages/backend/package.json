@@ -6,7 +6,9 @@
   "type": "module",
   "exports": {
     "./api": "./convex/_generated/api.js",
-    "./dataModel": "./convex/_generated/dataModel.d.ts"
+    "./dataModel": "./convex/_generated/dataModel.d.ts",
+    "./validators": "./convex/validators.ts",
+    "./envelope": "./convex/lib/envelope.ts"
   },
   "scripts": {
     "dev": "convex dev --tail-logs disable",
