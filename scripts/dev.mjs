@@ -329,17 +329,13 @@ if (stopping) {
 
   if (web) {
     step('Starting the web app')
-    // apps/desktop's dev server takes its port from PORT and forwards sign-in (/api/auth) and
-    // the MCP server to VITE_CONVEX_SITE_URL, so the browser signs in on the page's own origin,
-    // the SITE_URL set above, as it does behind Caddy and on Vercel.
+    // apps/desktop's dev server takes its port from PORT, listens on every interface when HOST
+    // is set (passed through from your shell), and forwards sign-in (/api/auth), the MCP server
+    // and its OAuth discovery documents to VITE_CONVEX_SITE_URL. The browser signs in on the
+    // page's own origin, the SITE_URL set above, as it does behind Caddy and on Vercel.
     launch('web', 'pnpm', ['--filter', web.name, 'run', 'dev'], {
       env: {
         PORT: String(ports.web),
-        // Temporary: apps/desktop at ec949e6 reads its port from VITE_PORT and forwards only
-        // /api/auth, to AUTH_PROXY_TARGET. Remove both once it takes PORT and proxies to
-        // VITE_CONVEX_SITE_URL, as agreed.
-        VITE_PORT: String(ports.web),
-        AUTH_PROXY_TARGET: convexSiteUrl,
         VITE_CONVEX_URL: convexUrl,
         VITE_CONVEX_SITE_URL: convexSiteUrl,
         VITE_TRIODITIS_ENVIRONMENT: 'development',

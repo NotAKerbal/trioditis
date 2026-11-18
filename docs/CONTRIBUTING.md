@@ -132,12 +132,13 @@ If the gateway or the web app doesn't come up, `pnpm dev` says which.
 
 `pnpm dev` runs `pnpm --filter @trioditis/desktop dev` with:
 
-| Variable                     | Value                                                                         |
-| ---------------------------- | ----------------------------------------------------------------------------- |
-| `PORT`                       | This checkout's web port                                                      |
-| `VITE_CONVEX_URL`            | The backend's Convex API address                                              |
-| `VITE_CONVEX_SITE_URL`       | The backend's HTTP actions address, where Better Auth and the MCP server live |
-| `VITE_TRIODITIS_ENVIRONMENT` | `development`                                                                 |
+| Variable                     | Value                                                                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                       | This checkout's web port                                                                                                |
+| `VITE_CONVEX_URL`            | The backend's Convex API address                                                                                        |
+| `VITE_CONVEX_SITE_URL`       | The backend's HTTP actions address, where Better Auth and the MCP server live                                           |
+| `VITE_TRIODITIS_ENVIRONMENT` | `development`                                                                                                           |
+| `HOST`                       | Passed through from your shell. When set, the dev server listens on every interface, for another device on your network |
 
 Previews get `preview`, nightly `nightly`, and the self-hosted bundle `selfhosted`. The web app
 builds to `apps/desktop/dist`, a static single-page app.
@@ -397,8 +398,20 @@ pnpm check
 ```
 
 It runs exactly what CI runs (`.github/workflows/checks.yml`): `pnpm typecheck`, `pnpm lint`,
-`pnpm test`, and `go vet ./...` and `go test ./...` in `apps/bridge-host`, then prints each as
-Passed or Failed. Use it when CI can't run, and report its results.
+`pnpm test`, `pnpm test:scripts`, and `go vet ./...` and `go test ./...` in `apps/bridge-host`,
+then prints each as Passed or Failed. Use it when CI can't run, and report its results.
+
+`pnpm lint` also checks the design system's rules in `apps/desktop` and `packages/ui`
+(`scripts/lint/design-system.mjs`, after Flux's):
+
+| Rule                          | Where                     | What it asks                                                                                                                           |
+| ----------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `trioditis/no-literal-colour` | the app and `packages/ui` | No hex, `rgb()`, `hsl()` or other colour literals in class names or styles: use the tokens (`packages/ui/src/styles/tokens.css`)       |
+| `trioditis/no-raw-control`    | the app                   | No one-off `<button>`, `<input>`, `<select>` or `<textarea>`: use packages/ui's, or wrap one in a packages/ui component with `asChild` |
+| `trioditis/ui-imports`        | the app                   | Import packages/ui one component at a time, as `@trioditis/ui/button`: there is no index, and no reaching into its files               |
+
+Turn one off only for a line, with a reason:
+`// eslint-disable-next-line trioditis/no-raw-control -- why packages/ui has nothing that fits`.
 
 ## Contracts
 

@@ -1,6 +1,7 @@
 pnpm-lock.yaml
 **/_generated/**
 **/betterAuth/generatedSchema.ts
+apps/desktop/src/routeTree.gen.ts
 LICENSE
 apps/bridge-host/
 **/testdata/**
