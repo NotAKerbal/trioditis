@@ -582,7 +582,7 @@ void test('a reset sees a backend started with relative paths, or holding its fi
   assert.equal(await backendInUse(dir), null)
 })
 
-void test('a reset refuses a local backend it can’t inspect unless its storage is elsewhere', async () => {
+void test('a reset refuses a local backend it can’t inspect unless every path it was given is elsewhere', async () => {
   const dir = temp()
   mkdirSync(join(dir, '.convex/local/default'), { recursive: true })
   // A stand-in for /proc with another user's backend: its directory and open files can't be read.
@@ -591,19 +591,41 @@ void test('a reset refuses a local backend it can’t inspect unless its storage
     rmSync(proc, { recursive: true, force: true })
     mkdirSync(join(proc, '4242'), { recursive: true })
     writeFileSync(join(proc, '4242/comm'), 'convex-local-ba\n')
-    writeFileSync(join(proc, '4242/cmdline'), args.join('\0') + '\0')
+    writeFileSync(join(proc, '4242/cmdline'), ['convex-local-backend', ...args].join('\0') + '\0')
     writeFileSync(join(proc, '4242/cwd'), '') // Not a link: reading it fails, as EACCES would.
     writeFileSync(join(proc, '4242/fd'), '') // Not a directory: listing it fails.
   }
-  backendProcess(['convex-local-backend', '--local-storage', 'storage', 'db.sqlite3'])
+  const inUse = (args) => {
+    backendProcess(args)
+    return backendInUse(dir, { proc })
+  }
+  const options = ['--port', '4390', '--site-proxy-port', '4391', '--instance-name', 'anonymous-agent']
+  const secret = ['--instance-secret', 'not-a-path']
+  const refused = /process 4242 .*(can't be read|is using its data)/
+  // The review's case: run from .convex/local/default with a relative database and its blob
+  // storage elsewhere. Only the storage path is absolute, so it may be this checkout's database.
   assert.match(
-    await backendInUse(dir, { proc }),
-    /process 4242 is a Convex local backend whose open files can't be read/,
+    await inUse([...options, ...secret, '--local-storage', '/srv/elsewhere/storage', 'convex_local_backend.sqlite3']),
+    /process 4242 is a Convex local backend whose open files can't be read here, and not every path/,
   )
-  backendProcess(['convex-local-backend', '--port', '3210'])
-  assert.match(await backendInUse(dir, { proc }), /process 4242 is a Convex local backend/)
-  backendProcess(['convex-local-backend', '--local-storage', '/srv/convex/storage', '--db', 'sqlite'])
-  assert.equal(await backendInUse(dir, { proc }), null)
-  backendProcess(['convex-local-backend', '--local-storage', join(dir, '.convex/local/default/storage')])
-  assert.match(await backendInUse(dir, { proc }), /process 4242 \(convex-local-backend\) is using its data/)
+  for (const args of [
+    ['--local-storage', 'storage', '/srv/elsewhere/db.sqlite3'],
+    ['--port', '3210', 'relative/db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', join(dir, 'db.sqlite3')],
+    ['--local-storage', '/srv/elsewhere/storage', join(dir, '.convex/local/default/db.sqlite3')],
+    ['--local-storage', join(dir, '.convex/local/default/storage'), '/srv/elsewhere/db.sqlite3'],
+    ['--local-storage=/srv/elsewhere/storage', 'sqlite://db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', '--disable-beacon', 'db.sqlite3'],
+    ['--local-storage', '/srv/elsewhere/storage', '--something-new', '7'],
+  ]) {
+    assert.match((await inUse(args)) ?? '', refused, args.join(' '))
+  }
+  // Every path absolute and elsewhere, or a database that isn't a file: let through.
+  for (const args of [
+    [...options, ...secret, '--local-storage', '/srv/elsewhere/storage', '/srv/elsewhere/db.sqlite3'],
+    ['--db', 'postgres-v5', '--local-storage', '/srv/elsewhere/storage', 'postgres://convex@db:5432'],
+    ['--local-storage=/srv/elsewhere/storage', 'file:///srv/elsewhere/db.sqlite3', '--disable-beacon'],
+  ]) {
+    assert.equal(await inUse(args), null, args.join(' '))
+  }
 })

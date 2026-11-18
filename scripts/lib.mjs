@@ -514,7 +514,8 @@ export function assertCheckoutPaths(top = root) {
  * - something listens on the ports the backend last ran on (.convex/local/default/config.json);
  * - on Linux, a process (from `proc`) has a file there open, runs in a directory there, or names
  *   a path there in its arguments, relative ones read from its working directory. A Convex local
- *   backend whose open files or directory can't be read (another user's) counts too;
+ *   backend whose open files or directory can't be read (another user's) counts too, unless
+ *   every path it was given is absolute and outside the checkout (`localPathsElsewhere`);
  * - elsewhere, a process names the data's absolute path in its arguments (`ps`).
  *
  * Only a process's ID and program name are ever shown: the local backend's arguments include
@@ -539,7 +540,23 @@ export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
   // Compared as written, against both spellings of the data's path: /proc gives open files and
   // working directories already resolved, and arguments are as the process was given them.
   const ours = (path) => Boolean(path) && isAbsolute(path) && under(resolve(path))
-  if (proc !== '/proc' || existsSync('/proc/self')) return procUsing(proc, ours)
+  // The whole checkout, for a backend that can't be inspected (`procUsing`).
+  const tops = dir === backendDir ? [dir, root] : [dir]
+  const checkout = new Set(tops)
+  for (const top of tops) {
+    try {
+      checkout.add(realpathSync(top))
+    } catch {}
+  }
+  const outside = (path) => {
+    const lexical = resolve(path)
+    let real = lexical
+    try {
+      real = realpathSync(path)
+    } catch {}
+    return [lexical, real].every((at) => [...checkout].every((top) => at !== top && !at.startsWith(top + sep)))
+  }
+  if (proc !== '/proc' || existsSync('/proc/self')) return procUsing(proc, ours, outside)
   const listed = spawnSync('ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (listed.status !== 0) {
     console.warn("Couldn't list processes, so only the backend's ports were checked.")
@@ -556,8 +573,55 @@ export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
   return null
 }
 
+/** The local backend's options whose values are never paths. Any other value may be one. */
+const NOT_PATHS = new Set([
+  '--port',
+  '--site-proxy-port',
+  '--instance-name',
+  '--instance-secret',
+  '--sentry-identifier',
+  '--beacon-tag',
+  '--beacon-fields',
+  '--convex-origin',
+  '--convex-site',
+  '--db',
+])
+
+/**
+ * Whether every argument in `args` that could be a path is absolute and `outside` this
+ * checkout. Values of NOT_PATHS options aren't paths; a URL with a scheme other than file: or
+ * sqlite: isn't one either. Everything else is: a positional argument, the value of any other
+ * option, and the path in a file: or sqlite: URL.
+ */
+export function localPathsElsewhere(args, outside) {
+  for (let i = 0; i < args.length; i++) {
+    let value = args[i]
+    if (value.startsWith('-')) {
+      const at = value.indexOf('=')
+      if (at < 0) {
+        // `--option value`: the next argument is its value, unless it is an option itself.
+        if (NOT_PATHS.has(value) && i + 1 < args.length && !args[i + 1].startsWith('-')) i++
+        continue
+      }
+      if (NOT_PATHS.has(value.slice(0, at))) continue
+      value = value.slice(at + 1)
+    }
+    const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1].toLowerCase()
+    if (scheme && scheme.length > 1 && scheme !== 'file' && scheme !== 'sqlite') continue
+    let path = value
+    if (scheme) {
+      // Only `file:///path` and `file:/path` name a local path plainly; `file://host/...` doesn't.
+      path = value.slice(scheme.length + 1)
+      if (path.startsWith('///')) path = path.slice(2)
+      else if (path.startsWith('//')) return false
+    }
+    if (!isAbsolute(path) || !outside(path)) return false
+  }
+  return true
+}
+
 /** The Linux half of `backendInUse`: every process in `proc`, by its open files, directory and arguments. */
-function procUsing(proc, ours) {
+function procUsing(proc, ours, outside) {
   const gone = (error) => error.code === 'ENOENT' || error.code === 'ESRCH'
   for (const entry of readdirSync(proc)) {
     if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
@@ -599,15 +663,15 @@ function procUsing(proc, ours) {
       return `process ${entry} (${args[0] ? basename(args[0]) : name}) is using its data`
     }
     // A local backend whose files and directory can't be read is another user's, so it can reach
-    // this checkout's data (readable only by you) only as root. Its storage directory is then
-    // the evidence: the Convex CLI always passes it as an absolute path, checked above with the
-    // other arguments. One given no absolute storage path may be using this checkout's data.
-    const storageAt = args.findIndex((arg) => arg === '--local-storage' || arg.startsWith('--local-storage='))
-    const storage = storageAt < 0 ? null : (args[storageAt].split('=')[1] ?? args[storageAt + 1])
-    if (unreadable && name.startsWith('convex-local-ba') && !(storage && isAbsolute(storage))) {
+    // this checkout's data (readable only by you) only as root, and only through the paths it
+    // was given: its storage (`--local-storage`) and its database (the last argument), whose
+    // relative paths can't be read without its directory. It is let through only if every
+    // argument that could be a path is an absolute one outside this checkout, or a URL that
+    // isn't a file (a Postgres database, say).
+    if (unreadable && name.startsWith('convex-local-ba') && !localPathsElsewhere(args.slice(1), outside)) {
       return (
-        `process ${entry} is a Convex local backend whose open files can't be read here and whose storage ` +
-        'isn’t an absolute path, so it may be using this checkout’s data. Stop it first'
+        `process ${entry} is a Convex local backend whose open files can't be read here, and not every path ` +
+        'it was given is an absolute one outside this checkout, so it may be using this checkout’s data. Stop it first'
       )
     }
   }

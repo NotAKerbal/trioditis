@@ -147,12 +147,16 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   `packages/backend/.convex`, `packages/backend/.env.local` and `.gitignore`, and the
   generated code in `packages/backend/convex/_generated` and
   `packages/backend/convex/betterAuth/_generated`. So a database, settings or secrets
-  elsewhere are never changed through a link. Its own writes refuse links as well, even
-  one made after the check: files are written to a new file beside them and renamed into
-  place, directories are opened with `O_NOFOLLOW` before their mode is set, and locks are
-  created with `O_EXCL`. The Convex CLI's writes can't be made to refuse links, so for those
-  the check is what stands guard.
-- If any of these fails, it stops and says why.
+  elsewhere are never changed through a link. Its own writes refuse a link at the file or
+  directory itself, even one made after the check: files are written to a new file beside
+  them and renamed into place, directories are opened with `O_NOFOLLOW` before their mode is
+  set, and locks are created with `O_EXCL`. That protects only the last part of the path: a
+  directory above it replaced by a link in between would still be followed. The Convex CLI's
+  own writes are protected only by the check just before each Convex command; a link created
+  after that check isn't caught.
+- If any of these fails, it stops and says why. For a reported symlink, replace it with a
+  real file or directory in the checkout (move the data it pointed to back in, or delete it
+  and let setup make a new one), then run again.
 - Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
   a process list, and the settings already there are read without being printed.
   `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
@@ -197,11 +201,15 @@ checkout's data, on any port: something listening on the ports in
 (one you started by hand with `npx convex dev`, say). On Linux that means a process with a
 file there open, running in a directory there, or naming a path there in its arguments,
 relative paths read from its working directory. A Convex local backend whose open files
-can't be read (another user's, such as one in Docker) counts unless it was given its
-storage as an absolute path outside this checkout. On other systems only absolute paths in
-a process's arguments are checked. Only a process's ID and program are shown, never its
+and directory can't be read (another user's, such as one in Docker) counts unless every path
+it was given (its storage, its database and any other argument that could be a path) is an
+absolute one outside this checkout; a database given as a URL that isn't a file, such as
+Postgres, isn't a path. On other systems only absolute paths in a process's arguments are
+checked. Only a process's ID and program are shown, never its
 arguments, which include the backend's instance secret. A reset deletes nothing a symlink
-leads to outside the checkout. `--reset` on its own is refused.
+leads to outside the checkout. `--reset` on its own is refused. When a reset names a
+process, stop that backend (Ctrl+C where it runs, or end the process it names) and run the
+reset again.
 
 Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
 secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.
