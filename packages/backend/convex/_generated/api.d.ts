@@ -26,6 +26,7 @@ import type * as lib_commandOutcome from '../lib/commandOutcome.js'
 import type * as lib_envelope from '../lib/envelope.js'
 import type * as lib_hash from '../lib/hash.js'
 import type * as lib_ingest from '../lib/ingest.js'
+import type * as lib_lastMessage from '../lib/lastMessage.js'
 import type * as lib_networks from '../lib/networks.js'
 import type * as lib_outbox from '../lib/outbox.js'
 import type * as lib_seal from '../lib/seal.js'
@@ -63,6 +64,7 @@ declare const fullApi: ApiFromModules<{
   'lib/envelope': typeof lib_envelope
   'lib/hash': typeof lib_hash
   'lib/ingest': typeof lib_ingest
+  'lib/lastMessage': typeof lib_lastMessage
   'lib/networks': typeof lib_networks
   'lib/outbox': typeof lib_outbox
   'lib/seal': typeof lib_seal

@@ -281,6 +281,8 @@ describe('what is counted', () => {
     expect(routePattern('/multi/**').test('/multi')).toBe(true)
     for (const path of ['/multi/', '/multi/a/', '/multi/a//b']) expect(routePattern('/multi/**').test(path)).toBe(false)
     expect(routePattern('/end-session').test('/end-session/')).toBe(false)
+    expect(routePattern('/example/').test('/example/')).toBe(true)
+    expect(routePattern('/example/').test('/example')).toBe(false)
   })
 
   it('finds Better Auth’s routes however SITE_URL ends', async () => {
