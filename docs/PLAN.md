@@ -636,13 +636,16 @@ minutes.
 Found in Phase 0 reviews and accepted for a single-household, single-host spike:
 
 - **Claim byte bound:** claims bound commands, expiries and index lookups, but not bytes
-  read; bound them by bytes once login steps or host metadata can be large.
+  read; bound them by bytes once login steps or host metadata can be large. Rows written
+  before the current size caps (login steps up to the old document limit) stay readable at
+  their old size; before the first release, reset dev data instead (CONTRIBUTING.md).
 - **Echo without a client message ID:** before a login's owning host is recorded, a copy
   of a sent message without its `clientMessageId` from another host can win dedup and
   leave the pending copy unreconciled. Matters only with several hosts per network.
 - **Cancel is best effort:** a login that completes while its cancel is in flight still
   connects the account. Decide what Cancel promises, and disconnect if needed.
-- **Bridge host:** see `apps/bridge-host/README.md`, Known follow-ups.
+- **Bridge host:** see `apps/bridge-host/README.md`, Known follow-ups (on the bridge host
+  branch until it lands).
 
 ## Open questions
 

@@ -10,6 +10,7 @@
 
 import type * as auth from "../auth.js";
 import type * as chats from "../chats.js";
+import type * as cleanup from "../cleanup.js";
 import type * as gateway from "../gateway.js";
 import type * as http from "../http.js";
 import type * as keys from "../keys.js";
@@ -35,6 +36,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   chats: typeof chats;
+  cleanup: typeof cleanup;
   gateway: typeof gateway;
   http: typeof http;
   keys: typeof keys;
