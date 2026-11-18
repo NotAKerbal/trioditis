@@ -89,17 +89,21 @@ if [ "$kind" = vm ]; then
   image_url=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
   image=/var/lib/vz/template/iso/noble-server-cloudimg-amd64.img
   # Checked against Ubuntu's published checksum, fetched over HTTPS. A download goes to a
-  # temporary name first, so an interrupted one is never taken for the image.
+  # temporary name of its own first, so neither an interrupted one nor one running at the
+  # same time is ever taken for the image.
   expected=$(wget -qO- "${image_url%/*}/SHA256SUMS" | awk -v f="${image_url##*/}" '$2 == f || $2 == "*" f {print $1}')
   [ -n "$expected" ] || die "Couldn't get the cloud image's checksum from ${image_url%/*}/SHA256SUMS."
   if [ ! -f "$image" ] || [ "$(sha256sum "$image" | awk '{print $1}')" != "$expected" ]; then
     say "Downloading the Ubuntu 24.04 cloud image"
-    wget -q -O "$image.part" "$image_url"
-    if [ "$(sha256sum "$image.part" | awk '{print $1}')" != "$expected" ]; then
-      rm -f "$image.part"
+    part=$(mktemp "$image.XXXXXX.part")
+    trap 'rm -f "$part"' EXIT
+    wget -q -O "$part" "$image_url"
+    if [ "$(sha256sum "$part" | awk '{print $1}')" != "$expected" ]; then
       die "The downloaded cloud image doesn't match its checksum. Try again."
     fi
-    mv "$image.part" "$image"
+    chmod 644 "$part"
+    mv "$part" "$image"
+    trap - EXIT
   fi
 
   vendor_file="trioditis-$id-vendor.yaml"
@@ -108,11 +112,16 @@ if [ "$kind" = vm ]; then
   printf '%s\n' '#cloud-config' 'packages: [qemu-guest-agent]' 'runcmd:' \
     '  - [systemctl, enable, --now, qemu-guest-agent]' >"$vendor_path"
 
-  # From here on, a failure says what it leaves behind.
+  # A failure says what it leaves behind: the snippet, and the VM once this run has made it.
+  created=0
   left_behind() {
     [ "$1" = 0 ] && return
-    echo "VM $id ($name) is left as it is, to look into: qm terminal $id (Ctrl-O leaves)." >&2
-    echo "Remove it with: qm stop $id; qm destroy $id --purge; rm $vendor_path" >&2
+    if [ "$created" = 1 ]; then
+      echo "VM $id ($name) is left as it is, to look into: qm terminal $id (Ctrl-O leaves)." >&2
+      echo "Remove it with: qm stop $id; qm destroy $id --purge; rm $vendor_path" >&2
+    else
+      echo "No VM was created. Remove the cloud-init snippet with: rm $vendor_path" >&2
+    fi
   }
   trap 'left_behind $?' EXIT
 
@@ -120,6 +129,7 @@ if [ "$kind" = vm ]; then
   qm create "$id" --name "$name" --cores "$cores" --memory "$memory" --cpu host \
     --net0 "virtio,bridge=$bridge" --scsihw virtio-scsi-pci --agent enabled=1 \
     --serial0 socket --vga serial0 --ostype l26
+  created=1
   qm set "$id" --scsi0 "$storage:0,import-from=$image,discard=on"
   qm resize "$id" scsi0 "${disk}G"
   qm set "$id" --ide2 "$storage:cloudinit" --boot order=scsi0 \

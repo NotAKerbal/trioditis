@@ -10,7 +10,8 @@
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
 # options keeps the install as it is, and an option changes only its own setting. A rerun
 # rebuilds the images from this checkout, redeploys the functions and restarts what changed.
-# See docs/deploy.md.
+# TRIODITIS_PROJECT=<name> in the environment picks another Compose project name (and image
+# names) for a second install on one machine, such as a test one. See docs/deploy.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -37,17 +38,21 @@ Options (each one is kept for later reruns):
                        Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
   --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
+  --trusted-proxies <ranges>
+                       With --public-url: the addresses Caddy takes X-Forwarded-* headers
+                       from, as Caddy ranges (default private_ranges; set it to the proxy's
+                       address when it's on another machine)
   --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
                        or stop exposing it (default off)
 EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url domain networks e2e
+unset -v mode port host bind proxy_url trusted domain networks e2e
 local_flag=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port | --host | --bind | --public-url | --domain | --networks)
+    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
       [ $# -ge 2 ] || die "$1 needs a value."
       ;;
   esac
@@ -57,6 +62,7 @@ while [ $# -gt 0 ]; do
     --host) host=$2; shift ;;
     --bind) bind=$2; shift ;;
     --public-url) proxy_url=$2; shift ;;
+    --trusted-proxies) trusted=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
     --e2e) e2e=1 ;;
@@ -160,8 +166,14 @@ if [ -z "${host+set}" ]; then
     host=''
   fi
 fi
+trusted=${trusted-$(get INSTALL_TRUSTED_PROXIES)}
+trusted=${trusted//,/ }
 networks=${networks-$(get TRIODITIS_NETWORKS)}
 networks=${networks:-whatsapp}
+project=${TRIODITIS_PROJECT:-$(get COMPOSE_PROJECT_NAME)}
+project=${project:-trioditis}
+[[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "TRIODITIS_PROJECT must be lowercase letters, digits, '-' and '_'."
+[[ "$trusted" =~ ^[A-Za-z0-9_.:/\ ]*$ ]] || die "--trusted-proxies takes IP ranges (CIDR) or private_ranges."
 if [ -z "${e2e+set}" ]; then
   e2e=$(get INSTALL_E2E)
   [ -n "$e2e" ] || case "$(get COMPOSE_FILE)" in *compose.e2e.yml*) e2e=1 ;; *) e2e=0 ;; esac
@@ -184,9 +196,12 @@ if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
   warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
 fi
 
+# The sidecars' image, pinned as in the compose files.
+socat_image=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
 compose_files=compose.yml
 trusted_proxies=''
 hairpin=0
+loopback=0
 http_bind=0.0.0.0
 if [ "$mode" = domain ]; then
   [ -n "$domain" ] || die "Domain mode needs a name: --domain <name>."
@@ -195,34 +210,52 @@ if [ "$mode" = domain ]; then
   [ -z "$local_flags_given" ] || warn "Kept for local mode, but not used in domain mode: ${local_flags_given% }."
   public_host=$domain
   public_url="https://$domain"
+  [ -z "$trusted" ] || warn "--trusted-proxies only applies with --public-url; it's kept for that."
   caddy_site=$domain
   caddy_global=''
-  compose_files="$compose_files:compose.domain.yml"
+  compose_files="$compose_files:compose.domain.yml:compose.hostmap.yml"
 elif [ -n "$proxy_url" ]; then
   proxy_url=${proxy_url%/}
   # An origin only: the web app, auth and the Convex API live at fixed paths under it.
-  origin_pattern='^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:([0-9]{1,5}))?$'
+  [[ "$proxy_url" != https://\[* ]] ||
+    die "--public-url can't be an IPv6 address: give the proxy a host name."
+  origin_pattern='^https://([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$'
   [[ "$proxy_url" =~ $origin_pattern ]] ||
     die "--public-url must be an https:// origin with no path, such as https://box.tailnet.ts.net:8443: browsers keep keys only on secure pages."
   public_host=${BASH_REMATCH[1]}
   proxy_port=${BASH_REMATCH[3]:-443}
+  if [ "$proxy_port" -lt 1 ] || [ "$proxy_port" -gt 65535 ]; then die "--public-url's port must be between 1 and 65535."; fi
+  case "$public_host" in
+    localhost | 127.*) die "--public-url can't be a loopback address: the backend's container has its own loopback. Use this machine's name." ;;
+  esac
   public_url=$proxy_url
   http_bind=${bind:-127.0.0.1}
   # Requests arrive through the proxy, so the scheme and client address are in its
-  # X-Forwarded-* headers. It reaches Caddy from a private address (the loopback through
-  # Docker, or the LAN with --bind), and only it should be able to reach the port.
-  trusted_proxies=private_ranges
-  # The backend fetches sign-in keys from the public address. When that's a proxy on this
-  # machine, such as Tailscale Serve, it listens only where people connect, not where
-  # containers do, so compose.hairpin.yml forwards from Docker's host address.
-  proxy_ip=$(getent ahostsv4 "$public_host" 2>/dev/null | awk 'NR == 1 {print $1}')
+  # X-Forwarded-* headers. By default that's any private address: the proxy reaches Caddy
+  # through Docker from the loopback, or from the LAN with --bind.
+  trusted_proxies=${trusted:-private_ranges}
+  # The backend fetches sign-in keys from the public address. If that's served on this
+  # machine, compose.hostmap.yml points the backend at Docker's host address. A proxy that
+  # already listens there (on all interfaces) needs nothing more. One that listens only where
+  # people connect, such as Tailscale Serve on the tailnet, gets compose.hairpin.yml, which
+  # forwards from there. A proxy on another machine is reached the ordinary way.
+  proxy_ip=$( (getent ahostsv4 "$public_host" 2>/dev/null || true) | awk 'NR == 1 {print $1}')
   if [ -z "$proxy_ip" ]; then
-    warn "Couldn't resolve $public_host here. If the proxy runs on this machine, start it (and Tailscale) and run this again, or sign-in won't work."
+    warn "Couldn't resolve $public_host to an IPv4 address here. If the proxy runs on this machine, start it (and Tailscale) and run this again, or sign-in won't work."
   elif ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$proxy_ip"; then
-    hairpin=1
-    compose_files="$compose_files:compose.hairpin.yml"
-    set_var HAIRPIN_BIND "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')" \
-      HAIRPIN_PORT "$proxy_port" HAIRPIN_TARGET "$proxy_ip"
+    compose_files="$compose_files:compose.hostmap.yml"
+    # This install's own hairpin from an earlier run would answer the check, so it goes
+    # first; if it's still needed, it's started again below.
+    old_hairpin=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=hairpin)
+    for container in $old_hairpin; do docker rm -f "$container" >/dev/null; done
+    docker image inspect "$socat_image" >/dev/null 2>&1 || docker pull -q "$socat_image" >/dev/null
+    if ! docker run --rm --log-driver none --add-host "$public_host:host-gateway" --entrypoint socat "$socat_image" \
+      -u OPEN:/dev/null "TCP:$public_host:$proxy_port,connect-timeout=3" >/dev/null 2>&1; then
+      hairpin=1
+      compose_files="$compose_files:compose.hairpin.yml"
+      set_var HAIRPIN_BIND "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')" \
+        HAIRPIN_PORT "$proxy_port" HAIRPIN_TARGET "$proxy_ip"
+    fi
   fi
   caddy_site=':80'
   caddy_global='auto_https off'
@@ -237,7 +270,16 @@ else
   public_url="http://$host"
   [ "$port" = 80 ] || public_url="$public_url:$port"
   case "$host" in
-    localhost | 127.* | '[::1]') ;;
+    localhost | 127.*)
+      # Inside the backend's container, this address is the container itself:
+      # compose.loopback.yml serves the port there too.
+      loopback=1
+      compose_files="$compose_files:compose.loopback.yml"
+      case "$port" in
+        3210 | 3211) die "Ports 3210 and 3211 are the backend's own; pick another --port for a loopback address." ;;
+      esac
+      ;;
+    \[* | *:*) die "--host can't be an IPv6 address: use 127.0.0.1, localhost, or an IPv4 address or name." ;;
     *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking, and the setup form would send its token and password unencrypted. Serve it over HTTPS before anyone signs up from another device: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
   esac
   caddy_site=':80'
@@ -262,6 +304,9 @@ set_var \
   CADDY_SITE_ADDRESS "$caddy_site" \
   CADDY_GLOBAL_OPTIONS "$caddy_global" \
   CADDY_TRUSTED_PROXIES "$trusted_proxies" \
+  INSTALL_TRUSTED_PROXIES "$trusted" \
+  LOOPBACK_PORT "$port" \
+  COMPOSE_PROJECT_NAME "$project" \
   COMPOSE_FILE "$compose_files" \
   COMPOSE_PROFILES "$networks" \
   TRIODITIS_NETWORKS "$networks" \
@@ -278,13 +323,13 @@ keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 
 # Compose reads COMPOSE_FILE and COMPOSE_PROFILES from deploy/.env, relative to the compose
 # directory, so it runs from there.
-compose() { (cd "$here/compose" && docker compose --env-file "$env_file" "$@"); }
+compose() { (cd "$here/compose" && docker compose --env-file "$env_file" -p "$project" "$@"); }
 
 # --- Images -------------------------------------------------------------------------------
 
 say "Building the images from this checkout (the first build takes a few minutes)"
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
-docker build -q -f "$here/docker/node.Dockerfile" -t trioditis/node:local "$root" >/dev/null
+docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
 
 # Only a pair missing either half is generated, so a kept pair (which clients may already
 # have sealed to) never changes. The container logs nothing: its output is private keys.
@@ -296,7 +341,7 @@ for pair in BRIDGE AGENT_ACCESS; do
 done
 if [ "${#missing_pairs[@]}" -gt 0 ]; then
   say "Generating the server's key pairs"
-  keys=$(docker run --rm --log-driver none --entrypoint node trioditis/node:local deploy/scripts/gen-keys.ts)
+  keys=$(docker run --rm --log-driver none --entrypoint node "$project/node:local" deploy/scripts/gen-keys.ts)
   for pair in "${missing_pairs[@]}"; do
     public_key=$(printf '%s\n' "$keys" | grep "^${pair}_PUBLIC_KEY=" | cut -d= -f2-)
     private_key=$(printf '%s\n' "$keys" | grep "^${pair}_PRIVATE_KEY=" | cut -d= -f2-)
@@ -323,21 +368,21 @@ stale_services=()
 for service in $all_services; do
   [[ "$enabled_services" == *" $service "* ]] || stale_services+=("$service")
 done
-if [ "${#stale_services[@]}" -gt 0 ]; then
-  compose --profile '*' rm --stop --force "${stale_services[@]}" >/dev/null 2>&1 || true
+if [ "${#stale_services[@]}" -gt 0 ] && ! removed=$(compose --profile '*' rm --stop --force "${stale_services[@]}" 2>&1); then
+  warn "Couldn't remove services that are no longer enabled (${stale_services[*]}); they may still be running: $removed"
 fi
 
 # --- Database and backend -----------------------------------------------------------------
 
 wait_healthy() {
-  local service=$1 tries=${2:-60} status
+  local service=$1 tries=${2:-60} hint=${3:-} status
   for _ in $(seq "$tries"); do
     status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$(compose ps -q "$service")" 2>/dev/null || true)
     [ "$status" = healthy ] && return 0
     sleep 2
   done
   compose logs --tail 40 "$service" >&2 || true
-  die "$service didn't become healthy."
+  die "$service didn't become healthy.${hint:+ $hint}"
 }
 
 # Over TCP, like the healthcheck, and retried: Postgres can still restart once just after it
@@ -355,14 +400,14 @@ ensure_database() {
 }
 
 say "Starting the database"
-compose up -d postgres
+compose up -d --remove-orphans postgres
 wait_healthy postgres
 for database in convex_self_hosted $(printf 'bridge_%s ' "${network_list[@]}"); do
   ensure_database "$database"
 done
 
 say "Starting the Convex backend"
-compose up -d backend
+compose up -d --remove-orphans backend
 wait_healthy backend 90
 if [ -z "$(get CONVEX_ADMIN_KEY)" ]; then
   admin_key=$(compose exec -T backend ./generate_admin_key.sh | tail -1 | tr -d '\r')
@@ -378,24 +423,27 @@ compose up -d --remove-orphans
 ready_services=(gateway caddy)
 for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done
 [ "$hairpin" = 0 ] || ready_services+=(hairpin)
+[ "$loopback" = 0 ] || ready_services+=(loopback)
 for service in "${ready_services[@]}"; do
-  wait_healthy "$service" 90
+  hint=''
+  [ "$service" != hairpin ] || hint="It forwards to the proxy at $proxy_ip:$proxy_port: is the proxy running and serving that port?"
+  wait_healthy "$service" 90 "$hint"
 done
 
 # The backend checks every sign-in against keys it fetches from the public address, so check
-# it can get there. Any HTTP answer counts: this is about the route, not the keys.
-say "Checking the backend can reach $public_url"
+# it gets them there: a JSON key set, not an error page from something in between.
+say "Checking the backend can fetch sign-in keys from $public_url"
 reachable=0
 for _ in $(seq 30); do
-  code=$(compose exec -T backend curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$public_url/api/auth/convex/jwks" 2>/dev/null || true)
-  case "$code" in '' | 000) sleep 2 ;; *) reachable=1; break ;; esac
+  jwks=$(compose exec -T backend curl -fsS --max-time 5 "$public_url/api/auth/convex/jwks" 2>/dev/null || true)
+  case "$jwks" in *'"keys"'*) reachable=1; break ;; *) sleep 2 ;; esac
 done
 if [ "$reachable" = 0 ]; then
   case "$mode" in
     domain) hint="the domain's DNS must point at this machine, and the certificate may still be on its way: check deploy/trioditis logs caddy" ;;
     *) hint="if it's served by a proxy, check that the proxy is running and forwards to this server" ;;
   esac
-  warn "The backend can't reach $public_url, so sign-in won't work yet: $hint. Then run this again."
+  warn "The backend can't fetch sign-in keys from $public_url, so sign-in won't work yet: $hint. Then run this again."
 fi
 
 # --- Done ---------------------------------------------------------------------------------

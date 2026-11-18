@@ -1,13 +1,8 @@
-# Behind a proxy on this machine (install.sh --public-url, e.g. Tailscale Serve). That proxy
-# listens only where people connect (the tailnet), not where containers do, so the backend
-# couldn't fetch sign-in keys from the public address. A sidecar on the host network listens
-# on Docker's host address and forwards to the proxy, and the backend maps the public host
-# name there.
+# Behind a proxy on this machine that listens only where people connect, such as Tailscale
+# Serve on the tailnet address, and not on Docker's host address where compose.hostmap.yml
+# sends the backend. This sidecar on the host network listens there and forwards to the proxy.
+# install.sh only adds it when the proxy can't already be reached that way.
 services:
-  backend:
-    extra_hosts:
-      - ${PUBLIC_HOST:?}:host-gateway
-
   hairpin:
     image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
     restart: unless-stopped

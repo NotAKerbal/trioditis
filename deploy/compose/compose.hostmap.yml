@@ -1,0 +1,7 @@
+# The public address is served on this machine (domain mode, or a proxy here), so the backend
+# reaches it at Docker's host address rather than looping through the router, which many
+# don't do, or failing to resolve a name only the host knows.
+services:
+  backend:
+    extra_hosts:
+      - ${PUBLIC_HOST:?}:host-gateway

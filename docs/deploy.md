@@ -10,10 +10,12 @@ You need Docker Engine with the Compose plugin, git, and at least 8 GiB free whe
 keeps its data.
 
 ```sh
-git clone https://github.com/NotAKerbal/trioditis.git
+git clone --branch dev https://github.com/NotAKerbal/trioditis.git
 cd trioditis
 deploy/install/install.sh
 ```
+
+The bundle is on the `dev` branch until the first release, hence `--branch dev`.
 
 The installer:
 
@@ -59,6 +61,12 @@ is tied to one origin, so the server answers at its address and not at others. R
 installer again with `--host` to change it (`--host ''` detects it again). `--bind` picks
 the interface the port listens on (default all of them).
 
+For a server only used on this machine, `--host 127.0.0.1 --bind 127.0.0.1` (or `localhost`)
+works too; browsers treat loopback as secure, so it needs no HTTPS. Inside the backend's
+container that address is the container itself, so the installer adds a small `loopback`
+forwarder there (`compose.loopback.yml`) that serves the port by passing it on to Caddy.
+Ports 3210 and 3211 can't be used for it. IPv6 addresses aren't supported for `--host`.
+
 #### HTTPS in local mode
 
 Browsers treat a plain-HTTP page as insecure unless it's on `localhost`, and an insecure
@@ -72,19 +80,29 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8080
 deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
 ```
 
-`--public-url` makes that the server's address. It must be an `https://` origin, with no
-path. The port is bound to `127.0.0.1`, so it's only reachable through the proxy; for a
-proxy on another machine, pass `--bind` with an address that proxy can reach, and keep the
-port firewalled from everything else. Caddy trusts the `X-Forwarded-For` and
-`X-Forwarded-Proto` headers from private addresses in this mode, since requests come through
-the proxy, so anything else that can reach the port could set them.
+`--public-url` makes that the server's address. It must be an `https://` origin with a host
+name (not an IPv6 address or a loopback name) and no path. The port is bound to `127.0.0.1`,
+so it's only reachable through the proxy.
 
-The backend has to reach the public address to check sign-ins. When the proxy runs on this
-machine, as Tailscale Serve does, it only answers people on the tailnet, so the installer
-also starts a small `hairpin` forwarder (`compose.hairpin.yml`) and points the public host
-name at it inside the backend's container. A proxy on another machine is reached the
-ordinary way. Any reverse proxy that serves HTTPS works the same way. Reruns keep the
-address; `--public-url ''` goes back to plain HTTP.
+Caddy takes the client's address and scheme from the proxy's `X-Forwarded-For` and
+`X-Forwarded-Proto` headers in this mode, from the addresses in `--trusted-proxies`
+(default `private_ranges`). For a proxy on another machine, pass `--bind` with an address
+that proxy can reach, and then:
+
+- let only the proxy reach the port (a firewall rule allowing just its address), since
+  anything else that can reach it is treated as the proxy;
+- have the proxy overwrite `X-Forwarded-For` and `X-Forwarded-Proto` rather than append to
+  what the client sent (most do by default for `X-Forwarded-Proto`; check `X-Forwarded-For`);
+- pass `--trusted-proxies <its address>/32`, so headers are only taken from it.
+
+The backend has to reach the public address to check sign-ins. When the public host name
+resolves to this machine, the installer points it at Docker's host address inside the
+backend's container (`compose.hostmap.yml`). A proxy that listens on all interfaces is then
+reached directly. One that only listens where people connect, as Tailscale Serve does on
+the tailnet address, also gets a small `hairpin` forwarder (`compose.hairpin.yml`) on Docker's
+host address. The installer tries the connection first and only adds the forwarder when it's
+needed. A proxy on another machine is reached the ordinary way. Any reverse proxy that serves
+HTTPS works the same way. Reruns keep the address; `--public-url ''` goes back to plain HTTP.
 
 ### Domain mode
 
@@ -114,6 +132,7 @@ removes its bridge host; its volume and database stay, in case you add it back.
 | ------------------ | ------------------------------------------------------------- | ---------------------------- |
 | `caddy`            | The web app, and the proxy to everything below                | Yes: the only published port |
 | `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode  | On Docker's host address     |
+| `loopback`         | Only on a loopback address: see Local mode                    | No: in the backend's network |
 | `backend`          | The Convex backend, on Postgres                               | No                           |
 | `postgres`         | Postgres 17: Convex's data and each bridge host's             | No                           |
 | `functions`        | One-shot: sets Convex's environment and deploys the functions | No                           |
@@ -143,11 +162,13 @@ Everything is on one origin, so the web app's auth cookies are first-party:
 | Everything else                          | The web app's static files, falling back to `index.html`                                                                                                                     |
 
 The Convex backend also calls its own public origin: it checks sign-in tokens against the
-signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`. In domain mode the
-bundle maps the domain to this machine inside the backend's container, so that works without
-the router looping traffic back; behind a proxy on this machine it maps it to the `hairpin`
-forwarder. Otherwise the name resolves as it does anywhere else. The installer checks the
-backend can reach the address and warns if it can't.
+signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`, so the issuer in
+every token is the public origin. In domain mode and behind a proxy on this machine, the
+bundle maps the public host name to this machine inside the backend's container, so that
+works without the router looping traffic back; on a loopback address the `loopback`
+forwarder serves it inside the container. Otherwise the name resolves as it does anywhere
+else. The installer checks that the backend gets the key set from the address and warns if
+it doesn't.
 
 Caddy also listens on `127.0.0.1:8090` inside its container, for its healthcheck only: the
 site itself may only answer HTTPS for its domain.
@@ -206,9 +227,10 @@ cp deploy/.env ~/trioditis-backups/trioditis-$(date +%F).env   # the secrets
 deploy/trioditis up -d
 ```
 
-The archive takes every enabled network's bridge volume (`trioditis_bridge-whatsapp`, and
-`trioditis_bridge-fake` with the fake network); add the volume of a network you've dropped
-if you want to keep its state. Keep backups outside the checkout, as above: the image builds
+The archive takes the bridge volumes of the networks that are enabled now
+(`trioditis_bridge-whatsapp`, and `trioditis_bridge-fake` with the fake network), and only
+those: a network you've dropped keeps its volume, and its database stays in
+`trioditis_postgres`, but add its volume by name if you want to keep its state. Keep backups outside the checkout, as above: the image builds
 copy the checkout, and although the ignore files exclude `deploy/.env*`, `*.env` and
 `*.tgz`, a backup elsewhere can't end up in an image or a commit by mistake.
 
@@ -255,6 +277,16 @@ SITE_URL=http://<address>:8080 CONVEX_URL=http://<address>:8080/convex \
 ```
 
 It signs in, connects the fake network through a sealed login, receives a message, sends a
-reply, and checks that nothing readable reached Convex. `--e2e` is kept for reruns like
+reply, and checks that nothing readable reached Convex.
+
+To run a second, throwaway install on the same machine without touching the first, give it
+its own Compose project (which also names its images and volumes) and port, from a separate
+checkout so it has its own `deploy/.env`:
+
+```sh
+TRIODITIS_PROJECT=trioditis-test deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1 --port 18080
+```
+
+Remove it with `deploy/trioditis down -v` in that checkout. `--e2e` is kept for reruns like
 every option: run the installer again with `--no-e2e` afterwards to remove the test
 endpoint.
