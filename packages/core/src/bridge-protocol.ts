@@ -55,6 +55,8 @@ export interface EditEvent extends EventBase {
   networkTs: number
   sender: Sender
   sealed: Envelope
+  /** Set when the edit was made from Trioditis. */
+  clientMessageId?: string
 }
 
 export interface ReactionEvent extends EventBase {

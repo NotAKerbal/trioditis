@@ -410,4 +410,40 @@ describe('sending', () => {
     expect(payloads).toHaveLength(0)
     expect(session).toMatchObject({ state: 'error', step: { error: 'expired' } })
   })
+
+  it('only lets a reply quote a message in the same chat', async () => {
+    const { t, as } = await ready()
+    const here = await aChat(t, 'user_a', 'here')
+    const there = await aChat(t, 'user_a', 'there')
+    await t.run(async (ctx) => {
+      for (const [chatId, eventId] of [
+        [here, 'in_here'],
+        [there, 'in_there'],
+      ] as const) {
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId,
+          networkTs: 1,
+          sortKey: `1:${eventId}`,
+          sender: { ghostId: 'g' },
+          sealed: sealed(eventId),
+          sealedObjectId: eventId,
+          historical: false,
+        })
+      }
+    })
+    const reply = (n: number, replyTo: string) =>
+      as.mutation(api.messages.send, {
+        chatId: here,
+        clientMessageId: id(n),
+        forBridge: sealed(),
+        copy: sealed(),
+        replyTo,
+      })
+    await expect(reply(1, 'in_there')).rejects.toThrow(/replied to/)
+    await expect(reply(2, 'nowhere')).rejects.toThrow(/replied to/)
+    await reply(3, 'in_here')
+  })
 })

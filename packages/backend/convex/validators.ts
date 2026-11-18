@@ -90,6 +90,8 @@ export const bridgeEvent = v.union(
     networkTs: v.number(),
     sender,
     sealed: envelope,
+    /** Set when the edit was made from Trioditis, so its outcome can be matched. */
+    clientMessageId: v.optional(v.string()),
   }),
   v.object({
     ...base,
