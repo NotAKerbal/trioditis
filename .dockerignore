@@ -12,6 +12,7 @@
 !**/.env.example
 deploy/.env*
 deploy/runtime
+deploy/.operation.lock
 **/*.tgz
 **/*.tar.gz
 packages/backend/.convex

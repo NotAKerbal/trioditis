@@ -503,12 +503,23 @@ account_state() {
 printf '\n\033[1mTrioditis is running at %s\033[0m\n\n' "$public_url"
 case "$(account_state)" in
   no)
-    cat <<EOF
+    # The web app is built in only when the checkout has it (deploy/docker/web.Dockerfile);
+    # until then nothing in the browser creates accounts.
+    if [ -f "$root/apps/desktop/package.json" ]; then
+      cat <<EOF
 Create the admin account with this link. It works once, until the first account exists:
 
   $public_url/setup#token=$(get TRIODITIS_SETUP_TOKEN)
 
 EOF
+    else
+      cat <<EOF
+This checkout has no web app yet, so create the admin account here (it asks for the password):
+
+  deploy/trioditis create-admin <email>
+
+EOF
+    fi
     ;;
   yes) printf 'Setup is done: the admin account exists. Invite people from the app.\n\n' ;;
   *) printf "Couldn't check whether the admin account exists. Until it does, the setup link is\n%s/setup#token=<TRIODITIS_SETUP_TOKEN from deploy/.env>.\n\n" "$public_url" ;;

@@ -36,8 +36,19 @@ account exists, it stops working. The token itself is in `deploy/.env`
 (`TRIODITIS_SETUP_TOKEN`); running the installer again prints the link again until the
 account exists, and says setup is done after that.
 
-The setup form sends the token and the admin's password to the server over whatever the
-address uses. Over plain HTTP from another device, anyone on the path can read them, so serve
+Until the checkout has the web app (`apps/desktop`, see [The web app](#the-web-app)), there's
+no setup screen, and the installer says to create the admin account on the server instead:
+
+```sh
+deploy/trioditis create-admin you@example.com    # asks for the password, twice
+```
+
+It signs up with the setup token as the app would, sending the password derived from yours
+(Argon2id, salted by the email) rather than the password itself, so the account signs in from
+the app later. It prints no secret.
+
+The setup screen sends the token and the admin's (derived) password to the server over
+whatever the address uses. Over plain HTTP from another device, anyone on the path can read them, so serve
 the server over HTTPS ([HTTPS in local mode](#https-in-local-mode), or
 [domain mode](#domain-mode)) before the first sign-up from anywhere but this machine.
 
@@ -178,8 +189,9 @@ site itself may only answer HTTPS for its domain.
 
 Caddy serves `apps/desktop`'s static build (`pnpm --filter @trioditis/desktop build`),
 which the image builds whenever the checkout has `apps/desktop`. Until it does, it serves a
-placeholder that shows whether the server is up and turns the setup and invite links into a
-sign-up form.
+placeholder that only shows whether the server is up: it creates no accounts, since an
+account made with the raw password couldn't sign in from the app. Create the admin account
+with `deploy/trioditis create-admin` until then.
 
 ## Upgrade
 
@@ -230,14 +242,17 @@ Fuller `backup` and `restore` commands (online, encrypted, scheduled) are Phase 
 deploy/trioditis backup ~/trioditis-backups
 ```
 
+It takes a lock in `deploy/`, so only one backup or restore of the install runs at a time.
 It stops the server, archives every Docker volume of this install's Compose project (found
 by the label Compose gives them, so it never takes another install's, and it includes the
 volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
-was running. The two files are `<project>-<date>-<time>.tgz` and `.env`, yours and readable
-only by you from the start, in any directory (`/tmp` included). The archive is written under
-a temporary name and only takes its own once complete, and its last entry is a manifest of
+was running. The two files are `<project>-<date>-<time>.tgz` and `.env` (with `-2`, `-3`…
+added rather than replace earlier ones), yours and readable only by you from the start, in
+any directory (`/tmp` included). The archive is written under a unique temporary name and
+only takes its own once complete, and its last entry is a manifest of
 every volume with its number of entries and bytes. An interrupted backup (Ctrl-C), even while
-the server is still stopping, leaves no archive behind and starts again what was running.
+the server is still stopping, leaves no archive behind and starts again what was running;
+if the server doesn't start again, the backup counts as failed.
 The directory must be outside the checkout, symlinks resolved: image builds copy the
 checkout, and a backup outside it can't end up in an image or a commit by mistake.
 
@@ -249,15 +264,17 @@ deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>.tgz
 deploy/install/install.sh
 ```
 
-`restore` checks the whole archive before it changes anything, and refuses one that's
-damaged or cut short (its manifest must be its last entry), one whose volumes belong to
-another project, or one that would overwrite an existing volume Compose didn't label as this
-install's. It asks before it stops the server (`--yes` skips the question). It then
-extracts into temporary volumes, checks every volume against the manifest, and only then
-replaces the volumes' contents. Just before it writes, it checks each volume is still the one
-it checked at the start (same creation time and labels), and holds them all so none can be
-swapped while it writes. So a bad archive never costs the data you have. That needs free
-space for a second copy of the data while it runs. Archives from before the manifest can't be
+`restore` first copies the archive into a volume of its own and reads only that copy, so a
+file changed afterwards can't be the one applied. It checks the whole copy before it changes
+anything, and refuses one that's damaged or cut short (its manifest must be its last entry),
+one whose volumes belong to another project, or one that would overwrite an existing volume
+Compose didn't label as this install's. It creates any missing volume itself, labelled with a
+nonce of its own, and writes a marker with that nonce into every volume it will replace. It
+asks before it stops the server (`--yes` skips the question). Then one worker, holding every
+volume so none can be swapped, checks each is still the one marked, extracts into temporary
+volumes, checks every volume against the manifest, and only then replaces the volumes'
+contents. So a bad archive never costs the data you have. That needs free space for two more
+copies of the data while it runs (the archive's and the extracted one). Archives from before the manifest can't be
 restored this way. Keep backups
 encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
 server has.
@@ -290,7 +307,8 @@ machine's loopback (`127.0.0.1:18621`), and nowhere else.
 
 ```sh
 deploy/install/install.sh --networks whatsapp,fake --e2e
-# create the admin account with the setup link, then:
+# create the admin account with the setup link, or, before the checkout has the web app,
+# deploy/trioditis create-admin <admin email>; then:
 cd apps/gateway
 SITE_URL=http://<address>:8080 CONVEX_URL=http://<address>:8080/convex \
   BRIDGE_FAKE_CONTROL_ADDR=127.0.0.1:18621 \

@@ -6,10 +6,10 @@
     <title>Trioditis</title>
     <!--
       Stand-in for the web app until apps/desktop's build lands in the bundle (see
-      deploy/docker/web.Dockerfile). It says whether the server is up, and finishes setup:
-      the installer's link (/setup#token=…) or an invite link (/invite#token=…) opens a
-      form that creates the account. The token stays in the fragment, so it never reaches
-      the server's logs.
+      deploy/docker/web.Dockerfile). It only says whether the server is up. It creates no
+      accounts: the app derives the password it sends from the one you type (authPassword in
+      packages/crypto), and an account made with the raw password couldn't sign in from the
+      app. Until the app is here, `deploy/trioditis create-admin` makes the admin account.
     -->
     <style>
       :root {
@@ -18,7 +18,6 @@
         --card: #ffffff;
         --text: #16181d;
         --muted: #5c6370;
-        --accent: #0284c7;
         --border: #e3e6eb;
         --bad: #c0362c;
       }
@@ -62,38 +61,11 @@
         margin: 0 0 4px;
       }
       p {
-        margin: 0 0 16px;
+        margin: 16px 0 0;
         color: var(--muted);
       }
-      label {
-        display: block;
+      code {
         font-size: 13px;
-        margin: 12px 0 4px;
-      }
-      input {
-        width: 100%;
-        padding: 9px 11px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: transparent;
-        color: inherit;
-        font: inherit;
-      }
-      button {
-        margin-top: 18px;
-        width: 100%;
-        padding: 10px;
-        border: 0;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #fff;
-        font: inherit;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      button:disabled {
-        opacity: 0.6;
-        cursor: default;
       }
       .status {
         display: flex;
@@ -113,93 +85,33 @@
       .dot.down {
         background: var(--bad);
       }
-      .error {
-        color: var(--bad);
-        margin-top: 12px;
-      }
-      [hidden] {
-        display: none !important;
-      }
     </style>
   </head>
   <body>
     <main>
       <h1>Trioditis</h1>
       <div class="status"><span class="dot" id="dot"></span><span id="status">Checking the server…</span></div>
-
-      <section id="home">
-        <p style="margin-top: 16px">
-          The server is installed. The full app isn't in this build yet. To create the admin account, open the setup
-          link the installer printed.
-        </p>
-      </section>
-
-      <form id="signup" hidden>
-        <p id="intro" style="margin-top: 16px"></p>
-        <label for="name">Name</label>
-        <input id="name" autocomplete="name" required />
-        <label for="email">Email</label>
-        <input id="email" type="email" autocomplete="email" required />
-        <label for="password">Password (12 or more characters)</label>
-        <input id="password" type="password" autocomplete="new-password" minlength="12" required />
-        <button id="submit" type="submit">Create account</button>
-        <div class="error" id="error" hidden></div>
-      </form>
-
-      <section id="done" hidden>
-        <p style="margin-top: 16px" id="doneText"></p>
-      </section>
+      <p>
+        The server is installed, but the app isn't built into this install yet, so you can't sign up or sign in here.
+      </p>
+      <p>
+        On the server, <code>deploy/trioditis create-admin &lt;email&gt;</code> creates the admin account. See
+        <code>docs/deploy.md</code> in the server's checkout.
+      </p>
     </main>
 
     <script>
-      const $ = (id) => document.getElementById(id)
-      const token = new URLSearchParams(location.hash.slice(1)).get('token')
-      const setup = location.pathname.startsWith('/setup')
-      const invite = location.pathname.startsWith('/invite')
-
       fetch('/convex/version')
         .then((response) => {
-          $('dot').className = response.ok ? 'dot up' : 'dot down'
-          $('status').textContent = response.ok ? 'Server is up' : 'The backend isn’t answering yet'
+          document.getElementById('dot').className = response.ok ? 'dot up' : 'dot down'
+          document.getElementById('status').textContent = response.ok
+            ? 'Server is up'
+            : 'The backend isn’t answering yet'
         })
         .catch(() => {
-          $('dot').className = 'dot down'
-          $('status').textContent = 'The backend isn’t answering yet'
+          document.getElementById('dot').className = 'dot down'
+          document.getElementById('status').textContent = 'The backend isn’t answering yet'
         })
-
-      if ((setup || invite) && token) {
-        $('home').hidden = true
-        $('signup').hidden = false
-        $('intro').textContent = setup
-          ? 'Create the admin account for this server. This link works once.'
-          : 'You’ve been invited to this Trioditis server. Use the email address the invitation was sent to.'
-      }
-
-      $('signup').addEventListener('submit', async (event) => {
-        event.preventDefault()
-        $('submit').disabled = true
-        $('error').hidden = true
-        try {
-          const response = await fetch('/api/auth/sign-up/email', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'content-type': 'application/json', 'x-trioditis-invite': token },
-            body: JSON.stringify({ name: $('name').value, email: $('email').value, password: $('password').value }),
-          })
-          if (!response.ok) {
-            const body = await response.json().catch(() => ({}))
-            throw new Error(body.message || 'The account couldn’t be created.')
-          }
-          history.replaceState(null, '', '/')
-          $('signup').hidden = true
-          $('done').hidden = false
-          $('doneText').textContent = 'Your account is ready. The full app arrives with the next update of this server.'
-        } catch (error) {
-          $('error').textContent = error.message
-          $('error').hidden = false
-          $('submit').disabled = false
-        }
-      })
     </script>
   </body>
 </html>
