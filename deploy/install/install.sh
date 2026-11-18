@@ -114,18 +114,20 @@ fi
 
 # --- Settings -----------------------------------------------------------------------------
 
-touch "$env_file"
-chmod 600 "$env_file"
+# deploy/.env appears with the first setting saved, after the options are checked, so an
+# install exists exactly when it does.
+existing_install=0
+[ ! -e "$env_file" ] || existing_install=1
 
-get() { grep -E "^$1=" "$env_file" | tail -1 | cut -d= -f2- || true; }
-has() { grep -qE "^$1=" "$env_file"; }
+get() { grep -E "^$1=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+has() { grep -qE "^$1=" "$env_file" 2>/dev/null; }
 # Sets NAME VALUE [NAME VALUE ...] in one atomic write, so a pair (such as a key pair) is
 # never saved half.
 set_var() {
   local tmp names=''
   tmp=$(mktemp "$env_file.XXXXXX")
   for ((i = 1; i < $#; i += 2)); do names="$names|${!i}"; done
-  grep -vE "^(${names#|})=" "$env_file" >"$tmp" || true
+  grep -vE "^(${names#|})=" "$env_file" >"$tmp" 2>/dev/null || true
   while [ $# -ge 2 ]; do
     printf '%s=%s\n' "$1" "$2" >>"$tmp"
     shift 2
@@ -147,6 +149,7 @@ if [ -z "${domain+set}" ]; then
   domain=$(get INSTALL_DOMAIN)
   [ -n "$domain" ] || [ "$saved_mode" != domain ] || domain=$(get PUBLIC_HOST)
 fi
+[ "${port-x}" != '' ] || die "--port needs a value."
 port=${port-$(get HTTP_PORT)}
 port=${port:-8080}
 if [ -z "${bind+set}" ]; then
@@ -169,16 +172,17 @@ if [ -z "${host+set}" ]; then
 fi
 trusted=${trusted-$(get INSTALL_TRUSTED_PROXIES)}
 trusted=${trusted//,/ }
+[ "${networks-x}" != '' ] || die "--networks needs at least one network."
 networks=${networks-$(get TRIODITIS_NETWORKS)}
 networks=${networks:-whatsapp}
 # The Compose project names the install's volumes, so it never changes once there is one: a
 # saved name wins, and an install from before it was saved is the default, trioditis.
-# TRIODITIS_PROJECT only names a new install, and saying anything else is refused, since it
-# would start an empty server beside the real one.
+# TRIODITIS_PROJECT only names a new install (no deploy/.env yet), and saying anything else
+# is refused, since it would start an empty server beside the real one.
 saved_project=$(get COMPOSE_PROJECT_NAME)
 if [ -n "$saved_project" ]; then
   project=$saved_project
-elif has POSTGRES_PASSWORD; then
+elif [ "$existing_install" = 1 ]; then
   project=trioditis
 else
   project=${TRIODITIS_PROJECT:-trioditis}

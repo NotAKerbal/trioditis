@@ -226,8 +226,10 @@ It stops the server, archives every Docker volume of this install's Compose proj
 by the label Compose gives them, so it never takes another install's, and it includes the
 volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
 was running. The two files are `<project>-<date>-<time>.tgz` and `.env`, readable only by
-you. The directory must be outside the checkout: image builds copy the checkout, and a
-backup outside it can't end up in an image or a commit by mistake.
+you from the start; the archive is written under a temporary name and only takes its own
+once complete, and an interrupted backup (Ctrl-C) leaves nothing behind. The directory must
+be outside the checkout, symlinks resolved: image builds copy the checkout, and a backup
+outside it can't end up in an image or a commit by mistake.
 
 To restore, put the `.env` saved with the backup back as `deploy/.env` in a checkout of the
 same version, then:
@@ -237,8 +239,12 @@ deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>.tgz
 deploy/install/install.sh
 ```
 
-`restore` asks before it stops the server and replaces the volumes' contents (`--yes` skips
-the question). It refuses an archive whose volumes belong to another project. Keep backups
+`restore` checks the whole archive before it changes anything, and refuses one that's
+damaged, one whose volumes belong to another project, or one that would overwrite an
+existing volume Compose didn't label as this install's. It asks before it stops the server
+(`--yes` skips the question), extracts into temporary volumes, and only replaces the
+volumes' contents once everything has extracted, so a bad archive never costs the data you
+have. That needs free space for a second copy of the data while it runs. Keep backups
 encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
 server has.
 
