@@ -364,14 +364,19 @@ const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
 
 /**
  * How many messages from other people, and how many of those mention the person, newer than
- * `eventId` the chat holds (counted up to 100). It reads a few rows at a time, only as many as
- * can't pass `MAX_RECOUNT_BYTES` however large they are. If the newer messages are more than
- * that allows, the chat keeps at least the counts it had: a receipt only ever clears what it
- * was seen to cover.
+ * `eventId` the chat holds. It reads a few rows at a time, only as many as can't pass
+ * `MAX_RECOUNT_BYTES` however large they are, and at most 100. If it can't see them all, the
+ * chat keeps at least the counts it had: a receipt only ever clears what it was seen to cover.
  */
 async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+  const prior = { unreadCount: chat.unreadCount, mentionCount: chat.mentionCount ?? 0 }
   const read = await findMessage(ctx, userId, network, eventId)
-  if (!read) return { unreadCount: 0, mentionCount: 0 }
+  // A receipt for a message this chat doesn't have says nothing about what's been read here.
+  if (!read || read.chatId !== chat._id) return prior
+  const atLeastPrior = (unread: number, mentions: number) => ({
+    unreadCount: Math.max(unread, prior.unreadCount),
+    mentionCount: Math.max(mentions, prior.mentionCount),
+  })
   let after = read.sortKey
   let seen = 0
   let unread = 0
@@ -379,12 +384,7 @@ async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string,
   let bytes = 0
   while (seen < 100) {
     const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), 100 - seen)
-    if (room < 1) {
-      return {
-        unreadCount: Math.max(unread, chat.unreadCount),
-        mentionCount: Math.max(mentions, chat.mentionCount ?? 0),
-      }
-    }
+    if (room < 1) return atLeastPrior(unread, mentions)
     const batch = await ctx.db
       .query('messages')
       .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', after))
@@ -397,10 +397,11 @@ async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string,
       if (message.mentionsMe) mentions++
     }
     seen += batch.length
-    if (batch.length < room) break
+    if (batch.length < room) return { unreadCount: unread, mentionCount: mentions }
     after = batch.at(-1)!.sortKey
   }
-  return { unreadCount: unread, mentionCount: mentions }
+  // A hundred newer messages and maybe more: the counts can't be lowered past the prior ones.
+  return atLeastPrior(unread, mentions)
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {
