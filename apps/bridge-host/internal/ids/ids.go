@@ -1,0 +1,168 @@
+// Package ids maps bridgev2's identifiers to the ones Trioditis uses.
+//
+// Two kinds of mapping live here:
+//
+//   - Matrix-shaped IDs (user, ghost and room IDs, event IDs) that bridgev2 needs but no
+//     homeserver ever sees. They live on a fake server name and are only meaningful inside
+//     this process and its database.
+//   - Opaque protocol IDs (portalId, ghostId, loginId) that leave the bridge host. Network
+//     IDs often contain phone numbers (WhatsApp JIDs are phone numbers), so they are keyed
+//     hashes rather than the raw IDs; the reverse mapping is kept in the bridge host's
+//     database, which already holds the raw IDs.
+package ids
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"strings"
+
+	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/id"
+)
+
+// ServerName is the fake homeserver name every Matrix-shaped ID uses.
+const ServerName = "trioditis.internal"
+
+const (
+	userPrefix  = "u_"
+	ghostPrefix = "g_"
+	BotMXID     = id.UserID("@bot:" + ServerName)
+)
+
+// UserMXID is the Matrix ID bridgev2 uses for a Trioditis user.
+func UserMXID(userID string) id.UserID {
+	return id.UserID("@" + userPrefix + id.EncodeUserLocalpart(userID) + ":" + ServerName)
+}
+
+// ParseUserMXID reverses UserMXID.
+func ParseUserMXID(mxid id.UserID) (string, bool) {
+	localpart, server, err := mxid.Parse()
+	if err != nil || server != ServerName || !strings.HasPrefix(localpart, userPrefix) {
+		return "", false
+	}
+	userID, err := id.DecodeUserLocalpart(strings.TrimPrefix(localpart, userPrefix))
+	if err != nil {
+		return "", false
+	}
+	return userID, true
+}
+
+// GhostMXID is the Matrix ID for a remote user.
+func GhostMXID(userID networkid.UserID) id.UserID {
+	return id.UserID("@" + ghostPrefix + id.EncodeUserLocalpart(string(userID)) + ":" + ServerName)
+}
+
+// ParseGhostMXID reverses GhostMXID.
+func ParseGhostMXID(mxid id.UserID) (networkid.UserID, bool) {
+	localpart, server, err := mxid.Parse()
+	if err != nil || server != ServerName || !strings.HasPrefix(localpart, ghostPrefix) {
+		return "", false
+	}
+	decoded, err := id.DecodeUserLocalpart(strings.TrimPrefix(localpart, ghostPrefix))
+	if err != nil {
+		return "", false
+	}
+	return networkid.UserID(decoded), true
+}
+
+func b64(data []byte) string { return base64.RawURLEncoding.EncodeToString(data) }
+
+// RoomID is the deterministic room ID for a portal. It encodes the portal key reversibly,
+// so a room ID alone identifies its portal and, through the receiver, its owner.
+func RoomID(key networkid.PortalKey) id.RoomID {
+	return id.RoomID("!" + b64([]byte(string(key.ID)+"\x00"+string(key.Receiver))) + ":" + ServerName)
+}
+
+// ParseRoomID reverses RoomID.
+func ParseRoomID(roomID id.RoomID) (networkid.PortalKey, bool) {
+	s := string(roomID)
+	if !strings.HasPrefix(s, "!") || !strings.HasSuffix(s, ":"+ServerName) {
+		return networkid.PortalKey{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSuffix(strings.TrimPrefix(s, "!"), ":"+ServerName))
+	if err != nil {
+		return networkid.PortalKey{}, false
+	}
+	portalID, receiver, ok := strings.Cut(string(raw), "\x00")
+	if !ok {
+		return networkid.PortalKey{}, false
+	}
+	return networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: networkid.UserLoginID(receiver)}, true
+}
+
+func hashEventID(parts ...string) id.EventID {
+	h := sha256.New()
+	for _, part := range parts {
+		// Length-prefix each part so no two different tuples hash the same.
+		_, _ = fmt.Fprintf(h, "%d:%s|", len(part), part)
+	}
+	return id.EventID("$" + b64(h.Sum(nil)[:18]))
+}
+
+// MessageEventID is the deterministic event ID for a remote message part. It is the
+// dedup key Convex uses, so it must never change for the same message.
+func MessageEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID) id.EventID {
+	return hashEventID("message", string(key.ID), string(key.Receiver), string(messageID), string(partID))
+}
+
+// ReactionEventID is the deterministic event ID for a reaction.
+func ReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID, sender networkid.UserID, emojiID networkid.EmojiID) id.EventID {
+	return hashEventID("reaction", string(key.ID), string(key.Receiver), string(messageID), string(partID), string(sender), string(emojiID))
+}
+
+// OutgoingEventID is the event ID of a message the person sent from Trioditis. It is
+// derived from the client's ID, so a repeated command maps to the same event.
+func OutgoingEventID(userID, clientMessageID string) id.EventID {
+	return hashEventID("outgoing", userID, clientMessageID)
+}
+
+// CommandEventID is the event ID of another Matrix-side event a command creates, such as a
+// reaction or redaction from Trioditis.
+func CommandEventID(userID, commandID string) id.EventID {
+	return hashEventID("command", userID, commandID)
+}
+
+// LocalEventID is an event ID for something with no stable identity, such as a state
+// change. Callers pass enough context to make it unique.
+func LocalEventID(parts ...string) id.EventID {
+	return hashEventID(append([]string{"local"}, parts...)...)
+}
+
+// Kinds of opaque protocol ID.
+const (
+	KindPortal = "p"
+	KindGhost  = "g"
+	KindLogin  = "l"
+)
+
+// Opaquer turns network IDs into stable opaque protocol IDs with a keyed hash.
+type Opaquer struct {
+	key []byte
+}
+
+// NewOpaquer derives the hashing key from the bridge private key, so every bridge host
+// process on a server, and every restart, produces the same IDs.
+func NewOpaquer(bridgePrivateKey []byte) *Opaquer {
+	sum := sha256.Sum256(append([]byte("trioditis opaque ids v1\x00"), bridgePrivateKey...))
+	return &Opaquer{key: sum[:]}
+}
+
+// ID returns the opaque ID for a network ID of the given kind, e.g. `p_…`.
+func (o *Opaquer) ID(network, kind, value string) string {
+	mac := hmac.New(sha256.New, o.key)
+	_, _ = fmt.Fprintf(mac, "%s\x00%s\x00%s", network, kind, value)
+	return kind + "_" + b64(mac.Sum(nil)[:16])
+}
+
+// PortalValue is the string a portal key is hashed from.
+func PortalValue(key networkid.PortalKey) string {
+	return string(key.ID) + "\x00" + string(key.Receiver)
+}
+
+// ParsePortalValue reverses PortalValue.
+func ParsePortalValue(value string) networkid.PortalKey {
+	portalID, receiver, _ := strings.Cut(value, "\x00")
+	return networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: networkid.UserLoginID(receiver)}
+}
