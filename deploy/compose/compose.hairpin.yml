@@ -1,0 +1,29 @@
+# Behind a proxy on this machine (install.sh --public-url, e.g. Tailscale Serve). That proxy
+# listens only where people connect (the tailnet), not where containers do, so the backend
+# couldn't fetch sign-in keys from the public address. A sidecar on the host network listens
+# on Docker's host address and forwards to the proxy, and the backend maps the public host
+# name there.
+services:
+  backend:
+    extra_hosts:
+      - ${PUBLIC_HOST:?}:host-gateway
+
+  hairpin:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: { max-size: 10m, max-file: '3' }
+    network_mode: host
+    command:
+      - TCP-LISTEN:${HAIRPIN_PORT:?},bind=${HAIRPIN_BIND:?},fork,reuseaddr
+      - TCP:${HAIRPIN_TARGET:?}:${HAIRPIN_PORT}
+    # Ready once it listens and the proxy behind it accepts connections.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          socat -u OPEN:/dev/null TCP:${HAIRPIN_BIND}:${HAIRPIN_PORT},connect-timeout=2
+          && socat -u OPEN:/dev/null TCP:${HAIRPIN_TARGET}:${HAIRPIN_PORT},connect-timeout=2
+      interval: 10s
+      timeout: 5s

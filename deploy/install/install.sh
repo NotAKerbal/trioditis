@@ -7,7 +7,8 @@
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
 #   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
 #
-# It's safe to run again: secrets are generated once and kept in deploy/.env, and a rerun
+# It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
+# options keeps the install as it is, and an option changes only its own setting. A rerun
 # rebuilds the images from this checkout, redeploys the functions and restarts what changed.
 # See docs/deploy.md.
 set -euo pipefail
@@ -16,38 +17,42 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$here/.." && pwd)
 env_file="$here/.env"
 
-mode=local
-port=8080
-host=''
-domain=''
-networks=whatsapp
-bind=''
-proxy_url=unset
-hairpin=0
-e2e=0
+say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
-Options:
+Options (each one is kept for later reruns):
   --local              Serve plain HTTP on a port, with no domain (the default)
   --port <n>           Local mode's port (default 8080)
   --host <address>     The address people open, in local mode (default: this machine's
-                       Tailscale IP if Tailscale is up, else its first LAN IP)
+                       Tailscale IP if Tailscale is up, else its first LAN IP; '' detects
+                       it again)
   --bind <address>     The interface local mode listens on (default 0.0.0.0, or 127.0.0.1
-                       with --public-url)
+                       with --public-url; '' goes back to the default)
   --public-url <url>   Local mode behind something that serves HTTPS and forwards to the
-                       port, such as Tailscale Serve: the https:// address people open.
-                       Kept for reruns; pass '' to go back to plain HTTP
+                       port, such as Tailscale Serve: the https:// origin people open.
+                       Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
   --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
-  --e2e                Also expose the fake network's test endpoint on this machine's loopback
+  --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
+                       or stop exposing it (default off)
 EOF
 }
 
+# Each option stays unset unless it's passed, so the saved setting applies.
+unset -v mode port host bind proxy_url domain networks e2e
+local_flag=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --local) mode=local ;;
+    --port | --host | --bind | --public-url | --domain | --networks)
+      [ $# -ge 2 ] || die "$1 needs a value."
+      ;;
+  esac
+  case "$1" in
+    --local) mode=local; local_flag=1 ;;
     --port) port=$2; shift ;;
     --host) host=$2; shift ;;
     --bind) bind=$2; shift ;;
@@ -55,15 +60,19 @@ while [ $# -gt 0 ]; do
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
     --e2e) e2e=1 ;;
+    --no-e2e) e2e=0 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
-say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+if [ -n "${domain+set}" ] && { [ "$local_flag" = 1 ] || [ -n "${proxy_url:-}" ]; }; then
+  die "Pick one: --domain, or local mode (--local, --public-url)."
+fi
+# --public-url is a local-mode setting, so passing it switches to local mode.
+[ -z "${proxy_url+set}" ] || [ -n "${domain+set}" ] || mode=local
+local_flags_given="${port+--port }${host+--host }${bind+--bind }"
 
 # --- Prerequisites ------------------------------------------------------------------------
 
@@ -82,17 +91,10 @@ if [ -n "${free_kib:-}" ] && [ "$free_kib" -lt $((8 * 1024 * 1024)) ]; then
   die "Less than 8 GiB free where Docker keeps its data ($docker_root). Building the images needs about 4 GiB, and the server needs room to grow."
 fi
 
-IFS=',' read -r -a network_list <<<"$networks"
-for network in "${network_list[@]}"; do
-  case "$network" in
-    whatsapp | fake) ;;
-    *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
-  esac
-done
-[ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
-
 # Encryption at rest is the disk's job in Phase 0: the connectors keep some state (names,
-# phone numbers, history not yet imported) in plaintext in the bridge database.
+# phone numbers, history not yet imported) in plaintext in the bridge database. This only
+# sees dm-crypt on this machine's own block devices, so it can't vouch for encryption below
+# a VM or done some other way.
 encrypted_volume() {
   local source
   source=$(findmnt -no SOURCE -T "$1" 2>/dev/null | head -1) || return 1
@@ -100,20 +102,27 @@ encrypted_volume() {
   lsblk -s -no TYPE "$source" 2>/dev/null | grep -qx crypt
 }
 if ! encrypted_volume "$docker_root"; then
-  warn "Docker's data ($docker_root) isn't on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. See docs/deploy.md, Encryption at rest."
+  warn "Docker's data ($docker_root) doesn't look like it's on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. If it's encrypted in a way this can't see, such as on the VM host, ignore this. See docs/deploy.md, Encryption at rest."
 fi
 
-# --- Settings and secrets -----------------------------------------------------------------
+# --- Settings -----------------------------------------------------------------------------
 
 touch "$env_file"
 chmod 600 "$env_file"
 
 get() { grep -E "^$1=" "$env_file" | tail -1 | cut -d= -f2- || true; }
+has() { grep -qE "^$1=" "$env_file"; }
+# Sets NAME VALUE [NAME VALUE ...] in one atomic write, so a pair (such as a key pair) is
+# never saved half.
 set_var() {
-  local name=$1 value=$2 tmp
+  local tmp names=''
   tmp=$(mktemp "$env_file.XXXXXX")
-  grep -vE "^$name=" "$env_file" >"$tmp" || true
-  printf '%s=%s\n' "$name" "$value" >>"$tmp"
+  for ((i = 1; i < $#; i += 2)); do names="$names|${!i}"; done
+  grep -vE "^(${names#|})=" "$env_file" >"$tmp" || true
+  while [ $# -ge 2 ]; do
+    printf '%s=%s\n' "$1" "$2" >>"$tmp"
+    shift 2
+  done
   chmod 600 "$tmp"
   mv "$tmp" "$env_file"
 }
@@ -121,81 +130,144 @@ secret() { head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }
 hex_secret() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 keep_or() { local current; current=$(get "$1"); [ -n "$current" ] || set_var "$1" "$2"; }
 
-if [ "$mode" = local ]; then
-  [ "$proxy_url" != unset ] || proxy_url=$(get PROXY_URL)
-  proxy_url=${proxy_url%/}
-  case "$proxy_url" in
-    '' | https://*) ;;
-    *) die "--public-url must be an https:// address: browsers keep keys only on secure pages." ;;
-  esac
-  set_var PROXY_URL "$proxy_url"
+# What an option leaves unset comes from the last run. Installs from before these settings
+# were saved under their own names get them from what that run wrote.
+saved_mode=$(get INSTALL_MODE)
+saved_proxy_url=$(get PROXY_URL)
+mode=${mode-${saved_mode:-local}}
+proxy_url=${proxy_url-$saved_proxy_url}
+if [ -z "${domain+set}" ]; then
+  domain=$(get INSTALL_DOMAIN)
+  [ -n "$domain" ] || [ "$saved_mode" != domain ] || domain=$(get PUBLIC_HOST)
 fi
-if [ "$mode" = local ] && [ -n "$proxy_url" ]; then
-  host=${proxy_url#https://}
-  host=${host%%[:/]*}
-  public_url=$proxy_url
-  [ -n "$bind" ] || bind=127.0.0.1
-  # The backend fetches sign-in keys from the public address. When that's a proxy on this
-  # machine, such as Tailscale Serve, it listens only where people connect (the tailnet), not
-  # where containers do, so a sidecar on the host network forwards from Docker's host address.
-  proxy_port=${proxy_url#https://*:}
-  proxy_port=${proxy_port%%/*}
-  [ "$proxy_port" != "$proxy_url" ] || proxy_port=443
-  proxy_ip=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR == 1 {print $1}')
-  if [ -n "$proxy_ip" ] && ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$proxy_ip"; then
-    hairpin=1
-    set_var HAIRPIN_BIND "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')"
-    set_var HAIRPIN_PORT "$proxy_port"
-    set_var HAIRPIN_TARGET "$proxy_ip"
+port=${port-$(get HTTP_PORT)}
+port=${port:-8080}
+if [ -z "${bind+set}" ]; then
+  if has INSTALL_BIND; then
+    bind=$(get INSTALL_BIND)
+  else
+    bind=$(get HTTP_BIND)
+    if [ -n "$saved_proxy_url" ]; then default_bind=127.0.0.1; else default_bind=0.0.0.0; fi
+    [ "$bind" != "$default_bind" ] || bind=''
   fi
-  set_var CADDY_SITE_ADDRESS ':80'
-  set_var CADDY_GLOBAL_OPTIONS 'auto_https off'
-  set_var HTTP_BIND "$bind"
-  set_var HTTP_PORT "$port"
-elif [ "$mode" = local ]; then
-  [ -n "$bind" ] || bind=0.0.0.0
-  if [ -z "$host" ]; then
+fi
+if [ -z "${host+set}" ]; then
+  if has INSTALL_HOST; then
+    host=$(get INSTALL_HOST)
+  elif [ "$saved_mode" = local ] && [ -z "$saved_proxy_url" ]; then
     host=$(get PUBLIC_HOST)
-    if [ -z "$host" ] || [ "$(get INSTALL_MODE)" != local ]; then
-      host=$( (command -v tailscale >/dev/null && tailscale ip -4 2>/dev/null | head -1) || true)
-      [ -n "$host" ] || host=$(hostname -I 2>/dev/null | awk '{print $1}')
-      [ -n "$host" ] || die "Couldn't find this machine's address. Pass --host <address>."
-    fi
+  else
+    host=''
   fi
+fi
+networks=${networks-$(get TRIODITIS_NETWORKS)}
+networks=${networks:-whatsapp}
+if [ -z "${e2e+set}" ]; then
+  e2e=$(get INSTALL_E2E)
+  [ -n "$e2e" ] || case "$(get COMPOSE_FILE)" in *compose.e2e.yml*) e2e=1 ;; *) e2e=0 ;; esac
+fi
+
+case "$port" in
+  '' | *[!0-9]*) die "--port must be a number." ;;
+esac
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be between 1 and 65535."; fi
+
+IFS=',' read -r -a network_list <<<"$networks"
+[ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
+for network in "${network_list[@]}"; do
+  case "$network" in
+    whatsapp | fake) ;;
+    *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
+  esac
+done
+if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
+  warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
+fi
+
+compose_files=compose.yml
+trusted_proxies=''
+hairpin=0
+http_bind=0.0.0.0
+if [ "$mode" = domain ]; then
+  [ -n "$domain" ] || die "Domain mode needs a name: --domain <name>."
+  [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] ||
+    die "--domain must be a DNS name, such as chat.example.com."
+  [ -z "$local_flags_given" ] || warn "Kept for local mode, but not used in domain mode: ${local_flags_given% }."
+  public_host=$domain
+  public_url="https://$domain"
+  caddy_site=$domain
+  caddy_global=''
+  compose_files="$compose_files:compose.domain.yml"
+elif [ -n "$proxy_url" ]; then
+  proxy_url=${proxy_url%/}
+  # An origin only: the web app, auth and the Convex API live at fixed paths under it.
+  origin_pattern='^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:([0-9]{1,5}))?$'
+  [[ "$proxy_url" =~ $origin_pattern ]] ||
+    die "--public-url must be an https:// origin with no path, such as https://box.tailnet.ts.net:8443: browsers keep keys only on secure pages."
+  public_host=${BASH_REMATCH[1]}
+  proxy_port=${BASH_REMATCH[3]:-443}
+  public_url=$proxy_url
+  http_bind=${bind:-127.0.0.1}
+  # Requests arrive through the proxy, so the scheme and client address are in its
+  # X-Forwarded-* headers. It reaches Caddy from a private address (the loopback through
+  # Docker, or the LAN with --bind), and only it should be able to reach the port.
+  trusted_proxies=private_ranges
+  # The backend fetches sign-in keys from the public address. When that's a proxy on this
+  # machine, such as Tailscale Serve, it listens only where people connect, not where
+  # containers do, so compose.hairpin.yml forwards from Docker's host address.
+  proxy_ip=$(getent ahostsv4 "$public_host" 2>/dev/null | awk 'NR == 1 {print $1}')
+  if [ -z "$proxy_ip" ]; then
+    warn "Couldn't resolve $public_host here. If the proxy runs on this machine, start it (and Tailscale) and run this again, or sign-in won't work."
+  elif ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$proxy_ip"; then
+    hairpin=1
+    compose_files="$compose_files:compose.hairpin.yml"
+    set_var HAIRPIN_BIND "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')" \
+      HAIRPIN_PORT "$proxy_port" HAIRPIN_TARGET "$proxy_ip"
+  fi
+  caddy_site=':80'
+  caddy_global='auto_https off'
+else
+  http_bind=${bind:-0.0.0.0}
+  if [ -z "$host" ]; then
+    host=$( (command -v tailscale >/dev/null && tailscale ip -4 2>/dev/null | head -1) || true)
+    [ -n "$host" ] || host=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$host" ] || die "Couldn't find this machine's address. Pass --host <address>."
+  fi
+  public_host=$host
   public_url="http://$host"
   [ "$port" = 80 ] || public_url="$public_url:$port"
   case "$host" in
     localhost | 127.* | '[::1]') ;;
-    *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking. Serve it over HTTPS: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
+    *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking, and the setup form would send its token and password unencrypted. Serve it over HTTPS before anyone signs up from another device: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
   esac
-  set_var CADDY_SITE_ADDRESS ':80'
-  set_var CADDY_GLOBAL_OPTIONS 'auto_https off'
-  set_var HTTP_BIND "$bind"
-  set_var HTTP_PORT "$port"
-else
-  [ -n "$domain" ] || die "--domain needs a name."
-  host=$domain
-  public_url="https://$domain"
-  set_var CADDY_SITE_ADDRESS "$domain"
-  set_var CADDY_GLOBAL_OPTIONS ''
+  caddy_site=':80'
+  caddy_global='auto_https off'
 fi
-
-compose_files=compose.yml
-[ "$mode" = domain ] && compose_files="$compose_files:compose.domain.yml"
 [ "$e2e" = 1 ] && compose_files="$compose_files:compose.e2e.yml"
 
 bridge_hosts=()
 for network in "${network_list[@]}"; do bridge_hosts+=("$network-1=http://bridge-$network:8611"); done
 
-set_var INSTALL_MODE "$mode"
-set_var PUBLIC_HOST "$host"
-set_var PUBLIC_URL "$public_url"
-set_var COMPOSE_FILE "$compose_files"
-profiles=$networks
-[ "$hairpin" = 0 ] || profiles="$profiles,hairpin"
-set_var COMPOSE_PROFILES "$profiles"
-set_var TRIODITIS_NETWORKS "$networks"
-set_var BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
+set_var \
+  INSTALL_MODE "$mode" \
+  INSTALL_DOMAIN "$domain" \
+  PROXY_URL "${proxy_url%/}" \
+  INSTALL_HOST "$host" \
+  INSTALL_BIND "$bind" \
+  INSTALL_E2E "$e2e" \
+  HTTP_PORT "$port" \
+  HTTP_BIND "$http_bind" \
+  PUBLIC_HOST "$public_host" \
+  PUBLIC_URL "$public_url" \
+  CADDY_SITE_ADDRESS "$caddy_site" \
+  CADDY_GLOBAL_OPTIONS "$caddy_global" \
+  CADDY_TRUSTED_PROXIES "$trusted_proxies" \
+  COMPOSE_FILE "$compose_files" \
+  COMPOSE_PROFILES "$networks" \
+  TRIODITIS_NETWORKS "$networks" \
+  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
+
+# --- Secrets ------------------------------------------------------------------------------
 
 keep_or POSTGRES_PASSWORD "$(secret 24)"
 keep_or CONVEX_INSTANCE_SECRET "$(hex_secret 32)"
@@ -214,11 +286,24 @@ say "Building the images from this checkout (the first build takes a few minutes
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
 docker build -q -f "$here/docker/node.Dockerfile" -t trioditis/node:local "$root" >/dev/null
 
-if [ -z "$(get BRIDGE_PRIVATE_KEY)" ] || [ -z "$(get AGENT_ACCESS_PRIVATE_KEY)" ]; then
+# Only a pair missing either half is generated, so a kept pair (which clients may already
+# have sealed to) never changes. The container logs nothing: its output is private keys.
+missing_pairs=()
+for pair in BRIDGE AGENT_ACCESS; do
+  if [ -z "$(get "${pair}_PUBLIC_KEY")" ] || [ -z "$(get "${pair}_PRIVATE_KEY")" ]; then
+    missing_pairs+=("$pair")
+  fi
+done
+if [ "${#missing_pairs[@]}" -gt 0 ]; then
   say "Generating the server's key pairs"
-  while IFS='=' read -r name value; do
-    [ -n "$name" ] && set_var "$name" "$value"
-  done < <(docker run --rm --entrypoint node trioditis/node:local deploy/scripts/gen-keys.ts)
+  keys=$(docker run --rm --log-driver none --entrypoint node trioditis/node:local deploy/scripts/gen-keys.ts)
+  for pair in "${missing_pairs[@]}"; do
+    public_key=$(printf '%s\n' "$keys" | grep "^${pair}_PUBLIC_KEY=" | cut -d= -f2-)
+    private_key=$(printf '%s\n' "$keys" | grep "^${pair}_PRIVATE_KEY=" | cut -d= -f2-)
+    if [ -z "$public_key" ] || [ -z "$private_key" ]; then die "Couldn't generate the ${pair} key pair."; fi
+    set_var "${pair}_PUBLIC_KEY" "$public_key" "${pair}_PRIVATE_KEY" "$private_key"
+  done
+  unset -v keys public_key private_key
 fi
 
 mkdir -p "$here/runtime"
@@ -228,6 +313,19 @@ EOF
 chmod 644 "$here/runtime/config.json"
 
 compose build --quiet
+
+# Compose leaves a service whose profile is no longer enabled running, even with
+# --remove-orphans, so a network dropped from --networks is stopped and removed here. Its
+# volume and database stay, in case it's enabled again.
+all_services=$(compose --profile '*' config --services)
+enabled_services=" $(compose config --services | tr '\n' ' ') "
+stale_services=()
+for service in $all_services; do
+  [[ "$enabled_services" == *" $service "* ]] || stale_services+=("$service")
+done
+if [ "${#stale_services[@]}" -gt 0 ]; then
+  compose --profile '*' rm --stop --force "${stale_services[@]}" >/dev/null 2>&1 || true
+fi
 
 # --- Database and backend -----------------------------------------------------------------
 
@@ -242,13 +340,25 @@ wait_healthy() {
   die "$service didn't become healthy."
 }
 
+# Over TCP, like the healthcheck, and retried: Postgres can still restart once just after it
+# first reports ready, and a CREATE that went through before a dropped connection shows up
+# on the next check.
+psql_admin() { compose exec -T postgres psql -h 127.0.0.1 -U trioditis -d trioditis -v ON_ERROR_STOP=1 "$@"; }
+ensure_database() {
+  local database=$1
+  for _ in $(seq 20); do
+    [ "$(psql_admin -tAc "SELECT 1 FROM pg_database WHERE datname = '$database'" 2>/dev/null)" != 1 ] || return 0
+    psql_admin -qc "CREATE DATABASE $database" >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  die "Couldn't create the database $database."
+}
+
 say "Starting the database"
 compose up -d postgres
 wait_healthy postgres
 for database in convex_self_hosted $(printf 'bridge_%s ' "${network_list[@]}"); do
-  if ! compose exec -T postgres psql -U trioditis -d trioditis -tAc "SELECT 1 FROM pg_database WHERE datname = '$database'" | grep -q 1; then
-    compose exec -T postgres psql -U trioditis -d trioditis -qc "CREATE DATABASE $database" >/dev/null
-  fi
+  ensure_database "$database"
 done
 
 say "Starting the Convex backend"
@@ -258,31 +368,69 @@ if [ -z "$(get CONVEX_ADMIN_KEY)" ]; then
   admin_key=$(compose exec -T backend ./generate_admin_key.sh | tail -1 | tr -d '\r')
   [ -n "$admin_key" ] || die "Couldn't generate the Convex admin key."
   set_var CONVEX_ADMIN_KEY "$admin_key"
+  unset -v admin_key
 fi
 
 # --- Everything else ----------------------------------------------------------------------
 
 say "Deploying the functions and starting the server"
 compose up -d --remove-orphans
-for service in gateway caddy $(printf 'bridge-%s ' "${network_list[@]}"); do
+ready_services=(gateway caddy)
+for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done
+[ "$hairpin" = 0 ] || ready_services+=(hairpin)
+for service in "${ready_services[@]}"; do
   wait_healthy "$service" 90
 done
-[ "$e2e" = 1 ] && [[ " ${network_list[*]} " == *" fake "* ]] && compose up -d fake-control
+
+# The backend checks every sign-in against keys it fetches from the public address, so check
+# it can get there. Any HTTP answer counts: this is about the route, not the keys.
+say "Checking the backend can reach $public_url"
+reachable=0
+for _ in $(seq 30); do
+  code=$(compose exec -T backend curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$public_url/api/auth/convex/jwks" 2>/dev/null || true)
+  case "$code" in '' | 000) sleep 2 ;; *) reachable=1; break ;; esac
+done
+if [ "$reachable" = 0 ]; then
+  case "$mode" in
+    domain) hint="the domain's DNS must point at this machine, and the certificate may still be on its way: check deploy/trioditis logs caddy" ;;
+    *) hint="if it's served by a proxy, check that the proxy is running and forwards to this server" ;;
+  esac
+  warn "The backend can't reach $public_url, so sign-in won't work yet: $hint. Then run this again."
+fi
 
 # --- Done ---------------------------------------------------------------------------------
 
-cat <<EOF
+# Whether the admin account exists, asked through the backend with the admin key (which
+# stays in the functions container's environment). Prints yes, no, or unknown.
+account_state() {
+  local out
+  out=$(compose run --rm --no-deps -T functions \
+    sh -c 'cd packages/backend && npx convex data members --limit 1 --format jsonLines' 2>/dev/null) || {
+    echo unknown
+    return
+  }
+  case "$out" in *'{'*) echo yes ;; *) echo no ;; esac
+}
 
-$(printf '\033[1m')Trioditis is running at $public_url$(printf '\033[0m')
-
+printf '\n\033[1mTrioditis is running at %s\033[0m\n\n' "$public_url"
+case "$(account_state)" in
+  no)
+    cat <<EOF
 Create the admin account with this link. It works once, until the first account exists:
 
   $public_url/setup#token=$(get TRIODITIS_SETUP_TOKEN)
 
+EOF
+    ;;
+  yes) printf 'Setup is done: the admin account exists. Invite people from the app.\n\n' ;;
+  *) printf "Couldn't check whether the admin account exists. Until it does, the setup link is\n%s/setup#token=<TRIODITIS_SETUP_TOKEN from deploy/.env>.\n\n" "$public_url" ;;
+esac
+cat <<EOF
 Manage it with deploy/trioditis (docker compose for this install), e.g.:
   deploy/trioditis ps
   deploy/trioditis logs -f gateway
   deploy/trioditis down        # stop; data stays in Docker volumes
 
-Upgrade: update this checkout (git pull), then run deploy/install/install.sh again.
+Upgrade: update this checkout (git pull), then run deploy/install/install.sh again. It keeps
+these settings; pass an option only to change one.
 EOF

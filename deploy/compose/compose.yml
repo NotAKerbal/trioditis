@@ -46,7 +46,9 @@ services:
     volumes:
       - postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD', 'pg_isready', '-U', 'trioditis', '-d', 'trioditis']
+      # Over TCP: on first start the image initialises the database with a temporary server
+      # that only listens on the socket, and that one mustn't count as ready.
+      test: ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', 'trioditis', '-d', 'trioditis']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -71,10 +73,9 @@ services:
       REDACT_LOGS_TO_CLIENT: 'true'
       DOCUMENT_RETENTION_DELAY: '172800'
     # The backend checks sign-in tokens against the JWKS Better Auth serves at
-    # ${PUBLIC_URL}/api/auth/convex/jwks, so it must reach the public origin. For a
-    # domain, point it at this host rather than hairpinning through the router.
-    extra_hosts:
-      - ${PUBLIC_HOST:?}:host-gateway
+    # ${PUBLIC_URL}/api/auth/convex/jwks, so it must reach the public origin. Domain mode
+    # and a proxy on this machine map the public host name to this host (compose.domain.yml,
+    # compose.hairpin.yml); otherwise it resolves as it does anywhere else.
     volumes:
       - convex:/convex/data
     depends_on:
@@ -168,6 +169,7 @@ services:
     environment:
       TRIODITIS_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-:80}
       CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+      CADDY_TRUSTED_PROXIES: ${CADDY_TRUSTED_PROXIES:-}
     ports:
       - ${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:80
     volumes:
@@ -176,22 +178,12 @@ services:
       - caddy-config:/config
     depends_on:
       backend: { condition: service_healthy }
+    # Caddy's internal listener (see Caddyfile), the same in every mode: the site itself may
+    # only answer HTTPS for a domain, which a request to 127.0.0.1 can't get.
     healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:80/config.json']
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8090/healthz']
       interval: 10s
       timeout: 3s
-
-  # Only behind a proxy on this machine (install.sh --public-url, e.g. Tailscale Serve): lets
-  # the backend reach the public address, which that proxy only offers to the tailnet.
-  # Listens on Docker's host address, where the backend's extra_hosts entry points.
-  hairpin:
-    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
-    profiles: [hairpin]
-    restart: unless-stopped
-    network_mode: host
-    command:
-      - TCP-LISTEN:${HAIRPIN_PORT:-443},bind=${HAIRPIN_BIND:-172.17.0.1},fork,reuseaddr
-      - TCP:${HAIRPIN_TARGET:-127.0.0.1}:${HAIRPIN_PORT:-443}
 
 volumes:
   postgres:

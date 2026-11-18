@@ -5,3 +5,8 @@ services:
       - 80:80
       - 443:443
       - 443:443/udp
+  # The domain points at this machine, so the backend reaches it here rather than looping
+  # through the router, which many don't do.
+  backend:
+    extra_hosts:
+      - ${PUBLIC_HOST:?}:host-gateway

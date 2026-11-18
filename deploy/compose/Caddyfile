@@ -4,6 +4,23 @@
 {
 	admin off
 	{$CADDY_GLOBAL_OPTIONS}
+	# Behind a proxy (install.sh --public-url), the scheme and client address come from its
+	# X-Forwarded-* headers; otherwise Caddy is the edge and trusts no one's.
+	servers {
+		trusted_proxies static {$CADDY_TRUSTED_PROXIES}
+	}
+}
+
+# For the container's healthcheck only: plain HTTP on its loopback, the same in every mode,
+# since in domain mode the site only answers HTTPS for its name. It also checks that the
+# runtime config is mounted.
+http://127.0.0.1:8090 {
+	bind 127.0.0.1
+	handle /healthz {
+		root * /srv/runtime
+		rewrite * /config.json
+		file_server
+	}
 }
 
 {$TRIODITIS_SITE_ADDRESS::80} {

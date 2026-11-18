@@ -13,15 +13,19 @@ for name in CONVEX_SELF_HOSTED_URL CONVEX_SELF_HOSTED_ADMIN_KEY; do
 done
 
 # What the functions read. Private keys and the admin key stay out: no function needs them.
-for name in SITE_URL BETTER_AUTH_SECRET GATEWAY_SECRET TRIODITIS_SETUP_TOKEN TRIODITIS_NETWORKS \
-  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY; do
-  value=$(printenv "$name" || true)
-  if [ -z "$value" ]; then
+names='SITE_URL BETTER_AUTH_SECRET GATEWAY_SECRET TRIODITIS_SETUP_TOKEN TRIODITIS_NETWORKS
+  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY'
+for name in $names; do
+  if [ -z "$(printenv "$name" || true)" ]; then
     echo "deploy-functions: $name is not set" >&2
     exit 1
   fi
-  npx convex env set "$name" "$value" >/dev/null
 done
+# Set in one call, as NAME=value lines on stdin, so no value is ever a process argument that
+# the process list would show. printf is the shell's own, not a separate process.
+for name in $names; do
+  printf '%s=%s\n' "$name" "$(printenv "$name")"
+done | npx convex env set --force >/dev/null
 echo "deploy-functions: environment set"
 
 # Types and lint ran in CI; the bundle only ships what they checked.
