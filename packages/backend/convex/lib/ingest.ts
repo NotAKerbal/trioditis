@@ -197,10 +197,7 @@ async function settleSend(ctx: MutationCtx, send: Doc<'outbox'>, delivery: Deliv
     delivery: advance(send.delivery, delivery),
     ...(pending ? { state: 'dispatched' as const, leaseUntil: undefined } : {}),
   })
-  await deletePayload(ctx, send._id)
-  // The payload deleted above, at its largest.
-  const meter = meters.get(ctx)
-  if (meter) meter.bytes += 2 * 64 * 1024
+  charge(ctx, await deletePayload(ctx, send._id))
 }
 
 async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, origin: Origin) {
@@ -473,6 +470,11 @@ async function applySendStatus(
  * its latest edit), which must fit in Convex's 1 MiB document limit as base64 text.
  */
 export const MAX_INCOMING_SEALED_BYTES = 256 * 1024
+/**
+ * Chat and contact metadata (a name, a topic, an avatar's file reference) is small. Capping
+ * it keeps a whole inbox of rows well inside one query's read limit.
+ */
+export const MAX_METADATA_SEALED_BYTES = 8 * 1024
 /** The longest ID an event may carry: they are hashes and opaque IDs, never content. */
 export const MAX_ID_LENGTH = 256
 /** The most a login step may hold, in UTF-8 bytes. */
@@ -537,7 +539,9 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
   if (hasOversizedId(event)) throw new Unmappable('too_large')
   if ('sealed' in event) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
-    if (!isEnvelope(event.sealed, MAX_INCOMING_SEALED_BYTES)) throw new Unmappable('too_large')
+    const limit =
+      event.type === 'chat' || event.type === 'contact' ? MAX_METADATA_SEALED_BYTES : MAX_INCOMING_SEALED_BYTES
+    if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')
   }
   await assertLoginOwner(ctx, event, origin)
   switch (event.type) {
