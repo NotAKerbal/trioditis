@@ -208,21 +208,40 @@ case "${1:-}" in
     rollback_label="trioditis.restore.$nonce.rollback"
     created_label="trioditis.restore.$nonce.created"
     archive_volume="$project-$suffix-archive"
+    # Written into a rollback copy once it's complete and checked against what it copied.
+    rollback_mark=.trioditis-rollback-complete
     volumes=''
     created=''
     started=0
-    # However it ends. A worker that's running is waited for, not killed: after an interrupt
-    # it puts the previous contents back before it exits. Its exit says what happened, and so
-    # what to keep: the restored targets after a success, the copies of the previous contents
-    # if they couldn't be put back.
+    # However it ends, and with every interrupt ignored from here on (a second Ctrl-C mustn't
+    # cut a rollback short). The worker's outcome says what to keep. It's waited for in a
+    # session of its own, where the terminal's interrupts don't reach. While the outcome is
+    # unknown nothing is removed: what's kept is listed, with how to finish.
     finish_restore() {
       status=$?
       trap '' INT TERM HUP
+      state=''
+      [ "$started" = 0 ] || state=$(docker inspect -f '{{.State.Status}}' "$worker" 2>/dev/null || echo missing)
+      if [ "$state" = running ] || [ "$state" = restarting ]; then
+        setsid -w docker wait "$worker" >/dev/null 2>&1 || true
+        state=$(docker inspect -f '{{.State.Status}}' "$worker" 2>/dev/null || echo missing)
+      fi
       code=''
-      [ "$started" = 0 ] || code=$(docker wait "$worker" 2>/dev/null || echo lost)
-      docker rm -f "$worker" >/dev/null 2>&1 || true
+      case "$state" in
+        '') ;;
+        created) code=never ;;
+        exited | dead) code=$(docker inspect -f '{{.State.ExitCode}}' "$worker") ;;
+        *) code=unknown ;;
+      esac
+      # The rollback copies the worker finished and checked: only those may be restored from.
+      verified=''
+      case "$code" in
+        '' | 0 | 3 | 5 | 6 | 8 | 9 | never) ;;
+        *) verified=$(rollback_verified) ;;
+      esac
       keep_rollback=0
       keep_created=0
+      keep_worker=0
       case "$code" in
         '') ;;
         0)
@@ -234,23 +253,48 @@ case "${1:-}" in
         5) status=1 && echo "The volumes to restore changed. They weren't changed; the server is stopped." >&2 ;;
         8) status=1 && echo "Couldn't save a copy of the volumes' current contents (is the disk full?), so nothing was changed; the server is stopped." >&2 ;;
         9) status=1 && echo "Interrupted before anything was changed; the server is stopped." >&2 ;;
+        never) status=1 && echo "The restore's worker couldn't start, so the volumes were never touched; the server is stopped. Docker said why above." >&2 ;;
         6) status=1 && echo "Replacing the volumes' contents failed or was interrupted, so their previous contents were put back. The server is stopped; deploy/trioditis up -d starts it as it was." >&2 ;;
         *)
           status=1
-          keep_rollback=1
-          echo "Replacing the volumes' contents failed, and putting their previous contents back failed too (or the restore was stopped). Their previous contents are kept in these volumes; put each back with the command beside it (on a writable disk), then remove the copies:" >&2
-          # Not the targets this restore created: they had nothing before, and go below.
-          for volume in $volumes; do
-            case " $created " in *" $volume "*) continue ;; esac
-            echo "  docker run --rm -v $volume-$suffix-rollback:/from:ro -v $volume:/to --entrypoint sh $tool -c 'find /to -mindepth 1 -delete && cp -a /from/. /to/'" >&2
-          done
-          echo "  docker volume prune -af --filter label=$rollback_label" >&2
+          if [ "$(echo "$verified" | wc -w)" != "$(echo "$volumes" | wc -w)" ]; then
+            # Replacing starts only once every copy is made and checked, so with any copy
+            # unfinished, no volume was touched.
+            echo "The restore stopped before replacing anything, so the volumes were never touched; the server is stopped." >&2
+          elif [ "$code" = 7 ]; then
+            keep_rollback=1
+            echo "Replacing the volumes' contents failed, and putting their previous contents back failed too. Their previous contents are kept, checked, in these volumes. Put each back with the command beside it (on a writable disk; it refuses a copy that isn't complete), then remove the copies:" >&2
+          else
+            keep_rollback=1
+            keep_created=1
+            keep_worker=1
+            echo "The restore stopped while it may have been replacing the volumes' contents ($worker: $state). Nothing it made was removed. Their previous contents are kept, checked, in these volumes; put each back with the command beside it (it refuses a copy that isn't complete), then remove what's left:" >&2
+          fi
+          if [ "$keep_rollback" = 1 ]; then
+            # Not the targets this restore created: they had nothing before.
+            for volume in $verified; do
+              case " $created " in *" $volume "*) continue ;; esac
+              echo "  docker run --rm -v $volume-$suffix-rollback:/from:ro -v $volume:/to --entrypoint sh $tool -c '[ -f /from/$rollback_mark ] || { echo \"Not a complete copy: nothing was changed.\" >&2; exit 1; }; find /to -mindepth 1 -delete && cp -a /from/. /to/ && rm -f /to/$rollback_mark && chown \"\$(stat -c %u:%g /from)\" /to && chmod \"\$(stat -c %a /from)\" /to'" >&2
+            done
+            [ "$keep_worker" = 0 ] || echo "  docker rm -f $worker" >&2
+            echo "  docker volume prune -af --filter label=$rollback_label" >&2
+            [ "$keep_worker" = 0 ] || echo "  docker volume prune -af --filter label=$staging_label" >&2
+          fi
           ;;
       esac
-      docker volume prune -af --filter "label=$staging_label" >/dev/null 2>&1 || true
+      [ "$keep_worker" = 1 ] || docker rm -f "$worker" >/dev/null 2>&1 || true
+      [ "$keep_worker" = 1 ] || docker volume prune -af --filter "label=$staging_label" >/dev/null 2>&1 || true
       [ "$keep_rollback" = 1 ] || docker volume prune -af --filter "label=$rollback_label" >/dev/null 2>&1 || true
       [ "$keep_created" = 1 ] || docker volume prune -af --filter "label=$created_label" >/dev/null 2>&1 || true
       exit "$status"
+    }
+    # The targets whose rollback copy the worker finished and checked (it writes the mark last).
+    rollback_verified() {
+      rollback_mounts=''
+      for volume in $volumes; do rollback_mounts="$rollback_mounts -v $volume-$suffix-rollback:/rollback/$volume:ro"; done
+      # shellcheck disable=SC2086 # $rollback_mounts is a list of -v options
+      docker run --rm --log-driver none $rollback_mounts -e MARK="$rollback_mark" --entrypoint sh "$tool" -c '
+        for copy in /rollback/*; do [ ! -f "$copy/$MARK" ] || echo "${copy##*/}"; done' 2>/dev/null || true
     }
     trap finish_restore EXIT
 
@@ -309,7 +353,7 @@ case "${1:-}" in
     # anything is checked, it holds every volume, so what's checked below is what it writes.
     # shellcheck disable=SC2086 # $mounts is a list of -v options
     docker create --init --name "$worker" --log-driver none $mounts \
-      -e MANIFEST="$manifest" -e VOLUMES="$volume_list" --entrypoint sh "$tool" -c '
+      -e MANIFEST="$manifest" -e VOLUMES="$volume_list" -e MARK="$rollback_mark" --entrypoint sh "$tool" -c '
         interrupted=0
         trap "interrupted=1" INT TERM
         archive=/archive/archive.tgz
@@ -319,6 +363,14 @@ case "${1:-}" in
             cp -a "$1/." "$2/" &&
             chown "$(stat -c %u:%g "$1")" "$2" &&
             chmod "$(stat -c %a "$1")" "$2"
+        }
+        # A checksum of a tree: every entry'"'"'s name, mode, owner and type, where each link
+        # points, and every file'"'"'s contents (the rollback mark left out).
+        tree_sum() {
+          (cd "$1" && find . ! -name "$MARK" | sort | while read -r entry; do
+            stat -c "%n %a %u:%g %F" "$entry"
+            if [ -L "$entry" ]; then readlink "$entry"; elif [ -f "$entry" ]; then sha256sum "$entry"; fi
+          done | sha256sum)
         }
         [ "$(ls /target | sort | tr "\n" " ")" = "$VOLUMES" ] || { echo "The volumes to restore changed." >&2; exit 5; }
         tar -xzf "$archive" -C /staging || { echo "Extracting the archive failed." >&2; exit 3; }
@@ -336,15 +388,22 @@ case "${1:-}" in
         echo "Extracted and checked; saving the volumes'"'"' current contents."
         for volume in $VOLUMES; do
           copy "/target/$volume" "/rollback/$volume" || exit 8
+          sum=$(tree_sum "/target/$volume") || exit 8
+          [ "$(tree_sum "/rollback/$volume")" = "$sum" ] || exit 8
+          echo "$sum" >"/rollback/$volume/$MARK" || exit 8
           [ "$interrupted" = 0 ] || exit 9
         done
+        put_back() {
+          echo "Putting the previous contents back." >&2
+          for previous in $VOLUMES; do
+            { copy "/rollback/$previous" "/target/$previous" && rm -f "/target/$previous/$MARK"; } || exit 7
+          done
+          exit 6
+        }
+        # An interrupt at any point here, the last copy included, puts everything back.
         echo "Replacing the volumes'"'"' contents."
         for volume in $VOLUMES; do
-          if ! copy "/staging/$volume" "/target/$volume" || [ "$interrupted" = 1 ]; then
-            echo "Putting the previous contents back." >&2
-            for previous in $VOLUMES; do copy "/rollback/$previous" "/target/$previous" || exit 7; done
-            exit 6
-          fi
+          { copy "/staging/$volume" "/target/$volume" && [ "$interrupted" = 0 ]; } || put_back
         done' >/dev/null
     # Now held, each target must carry Compose's labels for this project and that volume; one
     # this restore created must also carry its key (another that appeared under its name
@@ -374,8 +433,14 @@ case "${1:-}" in
     fi
     compose --profile '*' down
     started=1
-    # Its outcome is reported, and acted on, by finish_restore.
-    docker start -a "$worker" || true
+    # The worker runs in a session of its own, so the terminal's interrupts don't reach it
+    # directly; this shell passes each one on (the worker stops before anything changes, or
+    # puts everything back), and waits on in an interruptible `wait`. The outcome is reported,
+    # and acted on, by finish_restore.
+    setsid docker start -a "$worker" &
+    attached=$!
+    trap 'docker kill -s INT "$worker" >/dev/null 2>&1 || true' INT TERM HUP
+    while kill -0 "$attached" 2>/dev/null; do wait "$attached" 2>/dev/null || true; done
     ;;
   keys)
     case "${2:-}" in export | import) ;; *) echo "Usage: deploy/trioditis keys export|import <file>" >&2; exit 2 ;; esac

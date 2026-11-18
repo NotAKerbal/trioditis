@@ -291,8 +291,13 @@ replace a volume a container uses), so the volumes it checks are the ones it wri
 before it stops the server (`--yes` skips the question). Then the worker extracts into
 temporary volumes, checks every volume against the manifest, saves a copy of each volume's
 current contents, and only then replaces them. If replacing any of them fails (a full or
-read-only disk) or is interrupted, it puts every volume's previous contents back. If even
-that fails, it keeps the copies and prints, for each volume, the command that puts it back.
+read-only disk) or is interrupted (Ctrl-C), it puts every volume's previous contents back,
+and further interrupts don't cut that short. Each copy is checked against what it copied
+before anything is replaced, and marked complete; if putting them back fails too, it keeps
+the marked copies and prints, for each, a command that puts it back and refuses a copy that
+isn't complete. If the restore stopped before every copy was complete, nothing was
+replaced, and it says so instead. If it can't tell how its worker ended, it removes nothing,
+and lists what's left and how to finish.
 That needs free space for three more copies of the data while it runs (the archive's, the
 extracted one, and the copy of what's there). It removes only volumes labelled with a key of
 its own (`trioditis.restore.<nonce>.…`). Archives from before the manifest can't be restored
@@ -366,15 +371,16 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
 `docker` and needs none of that.
 
-| Test                  | What it checks                                                                                                                                                                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back                                                                                                                                                 |
-| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                                                                                                    |
-| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind |
-| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                                                                                                  |
-| `lock.sh`             | While the lock is held, `start`, `up`, `create-admin` and `backup` are refused and `ps` and `config` run                                                                                                                                                                                                                |
-| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                               |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                               |
+| Test                   | What it checks                                                                                                                                                                                                                                                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `restore-failure.sh`   | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps checked copies with commands that refuse an incomplete one; one whose worker can't start prints no such command and says nothing was touched                                             |
+| `restore-interrupt.sh` | Two interrupts during a restore: the first makes it put everything back, the second doesn't cut that short, and every volume ends byte-identical                                                                                                                                                                        |
+| `restore-archive.sh`   | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                                                                                                    |
+| `backup-publish.sh`    | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind |
+| `keys.sh`              | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                                                                                                  |
+| `lock.sh`              | While the lock is held, `start`, `up`, `create-admin` and `backup` are refused and `ps` and `config` run                                                                                                                                                                                                                |
+| `env-source.sh`        | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                               |
+| `install-settings.sh`  | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                               |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).
