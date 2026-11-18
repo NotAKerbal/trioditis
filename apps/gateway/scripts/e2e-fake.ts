@@ -104,7 +104,9 @@ const bridge = await client.query(api.keys.bridge, {})
 if (!bridge) throw new Error('BRIDGE_PUBLIC_KEY is not set on Convex')
 const bridgeKey = { publicKey: fromBase64Url(bridge.publicKey) }
 
-// Connect the fake network: the login's input is sealed to the bridge key.
+// Connect the fake network: the login's input is sealed to the bridge key. Each run's login
+// is a new account, told apart from earlier runs' by its ID.
+const earlier = new Set((await client.query(api.logins.accounts, {})).map((account) => account._id))
 const loginSessionId = await client.mutation(api.logins.start, { network: 'fake' })
 const input = await until('the login’s first step', async () => {
   const session = await client.query(api.logins.session, { loginSessionId })
@@ -125,13 +127,11 @@ await until('the login to complete', async () => {
   if (session?.state === 'error') throw new Error(`Login failed: ${session.step?.error}`)
   return session?.state === 'complete'
 })
-const loginId = await until(
-  'the login ID',
-  async () => (await client.query(api.logins.session, { loginSessionId }))?.loginId,
-)
-await until('the account to connect', async () => {
+const account = await until('the account to connect', async () => {
   const accounts = await client.query(api.logins.accounts, {})
-  return accounts.find((account) => account.loginId === loginId && account.state === 'CONNECTED')
+  return accounts.find(
+    (account) => account.network === 'fake' && !earlier.has(account._id) && account.state === 'CONNECTED',
+  )
 })
 step('Fake network connected through a sealed login')
 
@@ -152,7 +152,7 @@ if (incoming.status !== 202) throw new Error(`Fake incoming failed: ${incoming.s
 // This run's chat: on this run's login.
 // The inbox is paged; this run's chat is among the most recent.
 const inbox = async () => (await client.query(api.chats.list, { paginationOpts: { numItems: 50, cursor: null } })).page
-const findChat = async () => (await inbox()).find((c) => c.network === 'fake' && c.loginId === loginId)
+const findChat = async () => (await inbox()).find((c) => c.networkAccountId === account._id)
 const chat = await until('the chat to appear', findChat)
 const received = await until('the message to arrive', async () => {
   const page = await client.query(api.messages.list, {
