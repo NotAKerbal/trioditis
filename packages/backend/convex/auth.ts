@@ -152,18 +152,20 @@ function authRouteOf(path: string) {
 }
 
 export function routePattern(path: string) {
-  const escaped = path
+  // As better-call's router: `:name` is one segment, a final `*` one segment or none, and
+  // `**` any number of segments, none included. Empty segments (`//`, a trailing `/`) match
+  // nothing.
+  const pattern = path
     .split('/')
-    .map((segment) =>
-      // As better-call's router: `:name` and `*` are one segment, `**` any number of them.
-      segment === '**'
-        ? '.*'
-        : segment.startsWith(':') || segment === '*'
-          ? '[^/]+'
-          : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-    )
-    .join('/')
-  return new RegExp(`^${escaped}$`)
+    .filter((segment) => segment !== '')
+    .map((segment, index, all) => {
+      if (segment === '**') return '(?:/[^/]+)*'
+      if (segment === '*') return index === all.length - 1 ? '(?:/[^/]+)?' : '/[^/]+'
+      if (segment.startsWith(':')) return '/[^/]+'
+      return `/${segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+    })
+    .join('')
+  return new RegExp(`^${pattern}$`)
 }
 
 /**

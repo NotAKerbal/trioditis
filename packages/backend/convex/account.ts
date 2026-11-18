@@ -3,7 +3,6 @@ import { internal } from './_generated/api'
 import { action, internalQuery } from './_generated/server'
 import { createAuth, requireSessionIfGiven, requireUserId } from './auth'
 import { credentialOf } from './keys'
-import { sha256Hex } from './lib/hash'
 
 // Changing the password, which is two things that must stay in step: the sign-in password
 // (what `authPassword` derives; Better Auth keeps a hash of it) and the key backup wrapped by
@@ -17,9 +16,6 @@ const passwordParams = v.object({
   opslimit: v.number(),
   memlimit: v.number(),
 })
-
-/** Current-password checks per account: as many as a person retyping would need. */
-const PASSWORD_CHECK_LIMIT = { window: 60, max: 5 }
 
 /** The sign-in credential's current hash, for the action to check the current password against. */
 export const credential = internalQuery({
@@ -54,17 +50,6 @@ export const changePassword = action({
     const userId = (await requireSessionIfGiven(ctx, args.sessionId)) ?? (await requireUserId(ctx))
     const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision, sessionId: args.sessionId }
     await ctx.runMutation(internal.keys.checkPasswordChange, { userId, proof: args.proof, ...wrap })
-    // The current password is checked below, and a session that holds the key could otherwise
-    // test guesses here as fast as it can get proofs. Counted per account, like sign-in.
-    const limit = await ctx.runMutation(internal.rateLimits.consume, {
-      key: await sha256Hex(`password-check|${userId}`),
-      ...PASSWORD_CHECK_LIMIT,
-    })
-    if (!limit.allowed) {
-      throw new ConvexError(
-        `Too many password attempts. Try again in ${limit.retryAfter ?? PASSWORD_CHECK_LIMIT.window} seconds.`,
-      )
-    }
     const current = await ctx.runQuery(internal.account.credential, { userId })
     if (!current) throw new ConvexError('This account has no password to change.')
     // Better Auth's own hashing, as its sign-in checks it.
