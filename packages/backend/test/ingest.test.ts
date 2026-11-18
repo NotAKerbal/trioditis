@@ -145,6 +145,23 @@ describe('ingest', () => {
     expect((await chat(t)).unreadCount).toBe(0)
   })
 
+  it('accepts an edit made from Trioditis, which carries its client message ID', async () => {
+    seq = 0
+    const t = setup()
+    const original = message('e1', { sender: { self: true } })
+    const edit = event('edit', {
+      portalId: 'portal_1',
+      eventId: 'edit1',
+      targetEventId: 'e1',
+      networkTs: 2_500,
+      sender: { self: true },
+      sealed: sealed('edit1'),
+      clientMessageId: 'client-message-0001',
+    })
+    expect(await ingest(t, [original, edit])).toEqual({ ackedThrough: 2 })
+    expect((await messages(t))[0]).toMatchObject({ editEventId: 'edit1' })
+  })
+
   it('applies edits, reactions and deletes to their message', async () => {
     seq = 0
     const t = setup()

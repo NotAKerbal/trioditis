@@ -49,6 +49,17 @@ export const send = mutation({
     const chat = await ownChat(ctx, member.userId, args.chatId)
     if (!CLIENT_MESSAGE_ID.test(args.clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
     if (!isEnvelope(args.forBridge) || !isEnvelope(args.copy)) throw new ConvexError('That message isn’t sealed.')
+    // A reply must quote a message in this chat that reached the network.
+    if (args.replyTo) {
+      const replyTo = args.replyTo
+      const quoted = await ctx.db
+        .query('messages')
+        .withIndex('by_event', (q) => q.eq('userId', member.userId).eq('network', chat.network).eq('eventId', replyTo))
+        .unique()
+      if (!quoted || quoted.chatId !== chat._id || quoted.redactedAt !== undefined) {
+        throw new ConvexError('That message can’t be replied to.')
+      }
+    }
     const existing = await ctx.db
       .query('outbox')
       .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', args.clientMessageId))
