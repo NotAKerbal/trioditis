@@ -111,6 +111,9 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start the bridge host")
 	}
 	defer h.Stop()
+	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
+		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
+	}
 	switch command {
 	case "run":
 		log.Info().Str("network", *network).Str("addr", h.Addr()).Msg("Bridge host running")

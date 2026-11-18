@@ -69,6 +69,24 @@ pnpm --filter @trioditis/gateway dev
 # 4. A bridge host: see apps/bridge-host/README.md.
 ```
 
+### End-to-end check with the fake network
+
+With the backend and gateway running, start a fake-network bridge host with its dev
+control endpoint, then run the end-to-end script as the dev admin (created with the setup
+token):
+
+```sh
+cd apps/bridge-host && go build -o bin/bridge-host ./cmd/bridge-host
+set -a; . ../../.data/dev.env; set +a
+BRIDGE_HOST_ADDR=127.0.0.1:8611 BRIDGE_FAKE_CONTROL_ADDR=127.0.0.1:8621 \
+  BRIDGE_DATA_DIR=../../.data/bridge-fake ./bin/bridge-host --network fake run
+# in another terminal
+cd apps/gateway && node --env-file=../../.data/dev.env scripts/e2e-fake.ts <email> <password>
+```
+
+It connects the fake network through a sealed login, receives and sends a message, and
+checks that nothing readable reached Convex.
+
 `.data/` holds the dev stack's secrets and runtime data. It is git-ignored; never commit
 it.
 

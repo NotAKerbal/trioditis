@@ -52,6 +52,7 @@ GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVAT
 | `GATEWAY_URL` | none | Without it, dev keys are used and nothing is pushed |
 | `TRIODITIS_INTERNAL_TOKEN` | none | Bearer token both ways |
 | `BRIDGE_PUBLIC_KEY` / `BRIDGE_PRIVATE_KEY` | generated in dev | Bridge key pair, base64url X25519. In dev it is generated once into `bridge-key.json` and kept: opaque IDs derive from it |
+| `BRIDGE_FAKE_CONTROL_ADDR` | none | `--network fake` only: a loopback endpoint (`POST /fake/incoming`, internal token) for the end-to-end script to deliver messages. Dev only |
 
 ### Try WhatsApp from the terminal
 
