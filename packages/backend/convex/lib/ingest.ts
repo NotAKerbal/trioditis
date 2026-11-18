@@ -360,14 +360,15 @@ const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
 const MAX_MESSAGE_ROW_BYTES = 768 * 1024
 
 /**
- * How many messages from other people, newer than `eventId`, the chat holds (counted up to
- * 100). It reads a few rows at a time, only as many as can't pass `MAX_RECOUNT_BYTES` however
- * large they are. If the newer messages are more than that allows, the chat keeps at least
- * the count it had: a receipt only ever clears what it was seen to cover.
+ * How many messages from other people, newer than `eventId`, the chat holds. It reads a few
+ * rows at a time, only as many as can't pass `MAX_RECOUNT_BYTES` however large they are, and
+ * at most 100. If it can't see them all, the chat keeps at least the count it had: a receipt
+ * only ever clears what it was seen to cover.
  */
 async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
   const read = await findMessage(ctx, userId, network, eventId)
-  if (!read) return 0
+  // A receipt for a message this chat doesn't have says nothing about what's been read here.
+  if (!read || read.chatId !== chat._id) return chat.unreadCount
   let after = read.sortKey
   let seen = 0
   let counted = 0
@@ -385,10 +386,11 @@ async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string,
       if (!('self' in message.sender) && !message.historical) counted++
     }
     seen += batch.length
-    if (batch.length < room) break
+    if (batch.length < room) return counted
     after = batch.at(-1)!.sortKey
   }
-  return counted
+  // A hundred newer messages and maybe more: the count can't be lowered past the prior one.
+  return Math.max(counted, chat.unreadCount)
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {

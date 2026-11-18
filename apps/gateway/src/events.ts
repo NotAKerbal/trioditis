@@ -1,6 +1,7 @@
 import type { BridgeEvent } from '@trioditis/core/bridge-protocol'
 import { NETWORKS, type Network } from '@trioditis/core'
 import { convexToJson, type Value } from 'convex/values'
+import { isEnvelope } from '@trioditis/backend/envelope'
 import { bridgeEvent } from '@trioditis/backend/validators'
 import type { Backend } from './backend.ts'
 import { conforms } from './shape.ts'
@@ -56,7 +57,8 @@ function isValidationError(error: unknown) {
 
 /**
  * Whether the event can go to the backend: the Convex client can encode it, within the size
- * any event may have, and it has exactly an event's shape. One that doesn't (a stray field
+ * any event may have, it has exactly an event's shape, and what it carries sealed is an
+ * envelope (canonical base64url, real key IDs). One that isn't (a stray field or a "ciphertext"
  * could be plaintext) is quarantined without being sent.
  */
 function sendable(event: unknown) {
@@ -65,7 +67,9 @@ function sendable(event: unknown) {
   } catch {
     return false
   }
-  return conforms(bridgeEvent, event)
+  if (!conforms(bridgeEvent, event)) return false
+  const { sealed } = event as { sealed?: Parameters<typeof isEnvelope>[0] }
+  return sealed === undefined || isEnvelope(sealed)
 }
 
 const EVENT_TYPES: ReadonlySet<string> = new Set([
