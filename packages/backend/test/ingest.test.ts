@@ -472,4 +472,26 @@ describe('ingest', () => {
       ['too_large', ''],
     ])
   })
+
+  it('counts mentions, wakes a snoozed chat on a new message, and records requests', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: sealed('c'), isRequest: true })])
+    await t.run(async (ctx) => {
+      const chat = (await ctx.db.query('chats').first())!
+      await ctx.db.patch(chat._id, { snoozedUntil: Date.now() + 60_000, woke: false })
+    })
+    await ingest(t, [message('e1', { mentionsMe: true }), message('e2')])
+    expect(await chat(t)).toMatchObject({ isRequest: true, mentionCount: 1, unreadCount: 2, woke: true })
+    // Once accepted, a later description of the chat doesn't make it a request again.
+    await t.run(async (ctx) => {
+      await ctx.db.patch((await ctx.db.query('chats').first())!._id, { isRequest: false })
+    })
+    await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: sealed('c2'), isRequest: true })])
+    expect((await chat(t)).isRequest).toBe(false)
+    await ingest(t, [
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e2', networkTs: 9_000 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 0, mentionCount: 0 })
+  })
 })

@@ -243,7 +243,14 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   const fromSomeoneElse = !('self' in event.sender)
   await ctx.db.patch(chat._id, {
     lastMessageAt: Math.max(chat.lastMessageAt, event.networkTs),
-    ...(fromSomeoneElse ? { unreadCount: chat.unreadCount + 1 } : {}),
+    ...(fromSomeoneElse
+      ? {
+          unreadCount: chat.unreadCount + 1,
+          ...(event.mentionsMe ? { mentionCount: (chat.mentionCount ?? 0) + 1 } : {}),
+          // A new message wakes a snoozed chat early.
+          ...(chat.snoozedUntil !== undefined && !chat.woke ? { woke: true } : {}),
+        }
+      : {}),
   })
 }
 
@@ -347,7 +354,7 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     })
   }
   // The person reading a chat elsewhere (on their phone) clears it here too.
-  if (key === 'self') await ctx.db.patch(chat._id, { unreadCount: 0 })
+  if (key === 'self') await ctx.db.patch(chat._id, { unreadCount: 0, mentionCount: 0 })
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {
@@ -372,6 +379,10 @@ async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type
   await ctx.db.patch(chat._id, {
     kind: event.kind,
     sealedMeta: event.sealed,
+    // A request stays accepted once the person accepts it: only a chat seen for the first
+    // time can become one. The network saying it's no longer a request always counts.
+    ...(event.isRequest === false ? { isRequest: false } : {}),
+    ...(event.isRequest === true && chat.isRequest === undefined ? { isRequest: true } : {}),
     ...(event.parentPortalId ? { parentPortalId: event.parentPortalId } : {}),
     ...(event.deleted ? { deleted: true } : {}),
   })

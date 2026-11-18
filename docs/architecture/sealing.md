@@ -57,7 +57,7 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`. The object ID
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`. The object ID
 for each:
 
 | Object                              | Kind       | Object ID                   |
@@ -70,6 +70,7 @@ for each:
 | A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
 | Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
 | A file                              | `media`    | its `mediaId`               |
+| A label (name and colour)           | `label`    | its `labelKey`              |
 
 ## Recipients
 
