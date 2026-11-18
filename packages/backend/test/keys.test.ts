@@ -17,7 +17,7 @@ import {
 import { hashPassword, verifyPassword } from 'better-auth/crypto'
 import { api, components, internal } from '../convex/_generated/api'
 import { MAX_PASSKEY_BACKUPS, MIN_MEMLIMIT, MIN_OPSLIMIT } from '../convex/keys'
-import { setup, signIn, type T } from './setup'
+import { sealed, setup, signIn, type T } from './setup'
 
 beforeAll(ready)
 
@@ -424,6 +424,92 @@ describe('changing the password', { timeout: 30_000 }, () => {
     expect(await unlocks(sam, device, 'new password!!')).toBe(true)
   })
 
+  it('changes the password with the page’s session named', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    const result = await sam.action(api.account.changePassword, {
+      currentAuthPassword: 'auth-old-password',
+      newAuthPassword: 'auth-new-password',
+      newWrap: newWrap(device, 'new password!!'),
+      proof: await proofFrom(sam, device.identity),
+      expectedRevision: 1,
+      sessionId,
+    })
+    expect(result).toEqual({ revision: 2 })
+    expect(await verifyPassword({ hash: await signInHash(t), password: 'auth-new-password' })).toBe(true)
+  })
+
+  it('checks the session again in the transactions that write, after the action’s own check', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    const before = await signInHash(t)
+    const proof = await proofFrom(sam, device.identity)
+    const wrap = { ...newWrap(device, 'new password!!'), expectedRevision: 1, sessionId }
+    // The session ends while the action runs: between its check and the mutations it calls.
+    expect(await t.mutation(internal.auth.endSessionByToken, { token: 'token-sam' })).toBe('ended')
+    const changed = { data: { code: 'sessionChanged' } }
+    await expect(
+      sam.mutation(internal.keys.checkPasswordChange, { userId: 'sam', proof, ...wrap }),
+    ).rejects.toMatchObject(changed)
+    await expect(
+      sam.mutation(internal.keys.commitPasswordChange, {
+        userId: 'sam',
+        previousHash: before,
+        newHash: await hashPassword('auth-new-password'),
+        ...wrap,
+      }),
+    ).rejects.toMatchObject(changed)
+    // Another user's ID with this session is refused too.
+    const bob = await fresh(t, 'bob')
+    const { sessionId: bobSession } = (await bob.query(api.members.me, {}))!
+    await expect(
+      bob.mutation(internal.keys.checkPasswordChange, { userId: 'sam', proof, ...wrap, sessionId: bobSession }),
+    ).rejects.toMatchObject(changed)
+    expect(await signInHash(t)).toBe(before)
+    // A refused check spends none of the account's password checks.
+    expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
+    const password = await t.run(
+      async (ctx) =>
+        await ctx.db
+          .query('keyBackups')
+          .withIndex('by_user', (q) => q.eq('userId', 'sam').eq('kind', 'password'))
+          .collect(),
+    )
+    expect(password.map((row) => row.revision)).toEqual([1])
+  })
+
+  it('counts a password check in the transaction that checks the session', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    await sam.mutation(internal.keys.checkPasswordChange, {
+      userId: 'sam',
+      proof: await proofFrom(sam, device.identity),
+      ...newWrap(device, 'new password!!'),
+      expectedRevision: 1,
+      sessionId,
+    })
+    expect(await t.run(async (ctx) => (await ctx.db.query('rateLimits').collect()).length)).toBe(1)
+  })
+
+  it('limits how often the current password can be checked', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const wrap = newWrap(device, 'new password!!')
+    const attempt = async () =>
+      await sam.action(api.account.changePassword, {
+        currentAuthPassword: 'auth-wrong-password',
+        newAuthPassword: 'auth-new-password',
+        newWrap: wrap,
+        proof: await proofFrom(sam, device.identity),
+        expectedRevision: 1,
+      })
+    for (let i = 0; i < 5; i++) await expect(attempt()).rejects.toThrow(/current password is wrong/)
+    await expect(attempt()).rejects.toThrow(/Too many password attempts/)
+  })
+
   it('changes nothing on a wrong password, a stale revision, weak settings or a reused proof', async () => {
     const t = setup()
     const { sam, device } = await withPassword(t, 'auth-old-password')
@@ -447,7 +533,14 @@ describe('changing the password', { timeout: 30_000 }, () => {
     ).rejects.toThrow(/settings/)
     await expect(attempt({ proof: toBase64Url(new Uint8Array(32)) })).rejects.toThrow(/expired/)
     expect(await signInHash(t)).toBe(before)
-    expect(await unlocks(sam, device, 'old password!!')).toBe(true)
+    const password = await t.run(
+      async (ctx) =>
+        await ctx.db
+          .query('keyBackups')
+          .withIndex('by_user', (q) => q.eq('userId', 'sam').eq('kind', 'password'))
+          .collect(),
+    )
+    expect(password.map((row) => row.revision)).toEqual([1])
   })
 
   it('lets one of two racing changes win, leaving sign-in and unlock on the same password', async () => {
@@ -516,5 +609,148 @@ describe('changing the password', { timeout: 30_000 }, () => {
       })
       expect(response.status).toBe(404)
     }
+  })
+})
+
+describe('key writes bound to a session', () => {
+  const sessionChanged = {
+    data: { code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' },
+  }
+
+  async function rows(t: T, userId: string) {
+    return await t.run(async (ctx) => ({
+      member: await ctx.db
+        .query('members')
+        .withIndex('by_userId', (q) => q.eq('userId', userId))
+        .unique(),
+      backups: await ctx.db
+        .query('keyBackups')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+      challenges: await ctx.db
+        .query('keyChallenges')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+    }))
+  }
+
+  it('writes when the call runs as the page’s session, and when no session is named', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId } = (await alice.query(api.members.me, {}))!
+    const device = firstDevice('alice', 'alice password!!')
+    const { sealed } = await alice.mutation(api.keys.challenge, {
+      publicKey: toBase64Url(device.identity.publicKey),
+      sessionId,
+    })
+    const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), device.identity))
+    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({ kid: device.kid })
+
+    const bob = await fresh(t, 'bob')
+    const bobDevice = firstDevice('bob', 'bob password!!!!')
+    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid })
+  })
+
+  it('refuses, writing nothing, when the shared client has switched to another account', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId: alicePage } = (await alice.query(api.members.me, {}))!
+    // Bob signed in from another tab, so the page's calls now run as him.
+    const bob = await fresh(t, 'bob')
+    const device = firstDevice('alice', 'alice password!!')
+    const publicKey = toBase64Url(device.identity.publicKey)
+    const before = await rows(t, 'bob')
+
+    await expect(bob.mutation(api.keys.challenge, { publicKey, sessionId: alicePage })).rejects.toMatchObject(
+      sessionChanged,
+    )
+    await expect(
+      bob.mutation(api.keys.setup, { ...device.args, proof: 'p'.repeat(43), sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.keys.putBackup, {
+        kind: 'recovery',
+        nonce: 'n'.repeat(32),
+        ct: 'c'.repeat(64),
+        proof: 'p'.repeat(43),
+        expectedRevision: 0,
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.keys.removePasskeyBackup, {
+        credentialId: credential(1),
+        proof: 'p'.repeat(43),
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.action(api.account.changePassword, {
+        currentAuthPassword: 'a'.repeat(43),
+        newAuthPassword: 'b'.repeat(43),
+        newWrap: { nonce: 'n'.repeat(32), ct: 'c'.repeat(64), params: newPasswordParams() },
+        proof: 'p'.repeat(43),
+        expectedRevision: 1,
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+
+    await expect(bob.mutation(api.logins.start, { network: 'whatsapp', sessionId: alicePage })).rejects.toMatchObject(
+      sessionChanged,
+    )
+    await expect(
+      bob.mutation(api.labels.create, {
+        labelKey: 'label-key-work-0001',
+        sealed: sealed('work'),
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.preferences.set, { sidebarLayout: 'simple', sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+    // Approving an agent from a switched consent page.
+    await expect(
+      bob.action(api.mcp.authorize, { requestId: 'request', approve: true, sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+    // An admin's page switched to another admin.
+    const admin = await signIn(t, 'admin', 'admin')
+    await expect(
+      admin.mutation(api.members.invite, { email: 'x@example.com', role: 'member', sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+
+    expect(await rows(t, 'bob')).toEqual(before)
+    expect((await rows(t, 'alice')).challenges).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('loginSessions').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('labels').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('preferences').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('invitations').collect())).toEqual([])
+  })
+
+  it('passes an agent approval with the page’s session on to the MCP component', async () => {
+    const t = setup()
+    const carol = await signIn(t, 'carol')
+    const { sessionId } = (await carol.query(api.members.me, {}))!
+    // No such request: the component's own answer, so its handler ran.
+    await expect(carol.action(api.mcp.authorize, { requestId: 'none', approve: false, sessionId })).rejects.toThrow(
+      /expired/,
+    )
+  })
+
+  it('starts a network login with the page’s session named', async () => {
+    const t = setup()
+    const carol = await signIn(t, 'carol')
+    const { sessionId } = (await carol.query(api.members.me, {}))!
+    const loginSessionId = await carol.mutation(api.logins.start, { network: 'whatsapp', sessionId })
+    expect(await carol.query(api.logins.session, { loginSessionId })).toMatchObject({ state: 'pending' })
+  })
+
+  it('refuses a page whose session has ended', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId } = (await alice.query(api.members.me, {}))!
+    expect(await t.mutation(internal.auth.endSessionByToken, { token: 'token-alice' })).toBe('ended')
+    await expect(alice.mutation(api.keys.challenge, { publicKey: LOW_ORDER, sessionId })).rejects.toMatchObject(
+      sessionChanged,
+    )
   })
 })

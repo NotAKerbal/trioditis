@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { removeAssignments } from './cleanup'
+import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
 import { envelope } from './validators'
@@ -29,9 +30,12 @@ export const list = query({
 })
 
 export const create = mutation({
-  args: { labelKey: v.string(), sealed: envelope },
+  args: { labelKey: v.string(), sealed: envelope, sessionId: v.optional(v.string()) },
   returns: v.id('labels'),
-  handler: async (ctx, { labelKey, sealed }) => {
+  handler: async (ctx, { labelKey, sealed, sessionId }) => {
+    // A label sealed on a page another tab's sign-in has switched would be stored for the
+    // other account, which can't open it.
+    await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
     if (!LABEL_KEY.test(labelKey)) throw new ConvexError('That label ID isn’t valid.')
     if (!isEnvelope(sealed, MAX_LABEL_BYTES)) throw new ConvexError('That label isn’t sealed, or is too long.')

@@ -7,9 +7,12 @@ from `@trioditis/backend/api`; shared types come from `@trioditis/core`, and sea
 
 Every function needs a signed-in member of the server unless it says otherwise, and
 refuses anyone else's data with the same error as a missing row. Errors are `ConvexError`s
-whose `data` is a sentence the UI can show as it is. Any of those functions can also throw
-`You’re signed out. Sign in again to continue.` and `Your account isn’t a member of this
-server.`; each section lists the rest, word for word.
+whose `data` is one of two shapes: a sentence the UI can show as it is, or, for an error the
+app acts on rather than only shows, `{ code, message }`, where `message` is the sentence to
+show and `code` is what to branch on. So far the only code is `sessionChanged` (Keys, Key
+writes are bound to the page's session). Any of those functions can also throw `You’re
+signed out. Sign in again to continue.` and `Your account isn’t a member of this server.`;
+each section lists the rest, word for word.
 
 Nothing readable ever goes to the server: names, message bodies, label names and drafts are
 sealed on the device (`docs/architecture/sealing.md`) and opened on the device. Not even
@@ -30,10 +33,12 @@ origin**: in the self-hosted bundle Caddy proxies that path to the Convex site, 
 development the Vite dev server does. Cookies and passkeys then belong to the app's origin,
 and no cross-origin auth is configured or supported.
 
-Better Auth trusts only `SITE_URL`, the app's origin, so every auth request's `Origin` must
-be it: per-worktree `pnpm dev` sets `SITE_URL` to that worktree's own web app address. The
-Electron shell, when it comes, loads the app from `SITE_URL` with `loadURL`, never from
-`file://` or a custom scheme, which would send another `Origin` (or `null`) and be refused.
+Better Auth trusts only `SITE_URL`, the app's origin, and refuses a request from any other
+`Origin` (`/end-session` requires one even without a cookie). Per-worktree `pnpm dev` sets
+`SITE_URL` to that worktree's own web app address, or to the backend's HTTP address when
+there is no `apps/desktop`. The Electron shell, when it comes, loads the app from
+`SITE_URL` with `loadURL`, never from `file://` or a custom scheme, which would send another
+`Origin` (or `null`) and be refused.
 
 ```ts
 import { ConvexReactClient } from 'convex/react'
@@ -95,7 +100,7 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
 | Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
 | Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                   |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
 | Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
@@ -116,14 +121,14 @@ end may no longer be the cookie's, for example after another tab signed in as so
 Better Auth's own `revokeSession` can't do this: it acts only on the cookie's account and
 answers `status: true` even when it deleted nothing.
 
-| Status | Body                                                                       | Meaning                                                                                                                                                     |
-| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                            |
-| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                         |
-| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                            |
-| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status: Better Auth's own check answers first when a cookie comes without an `Origin` |
-| 429    | Better Auth's rate limit answer                                            | Over 10 requests in 10 seconds. Registered, but not enforced on Convex today, as for every Better Auth route: see below                                     |
-| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                 |
+| Status | Body                                                                       | Meaning                                                                                                                                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                                                |
+| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                                             |
+| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                                                |
+| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status, not the message: which one comes depends on whether a cookie, an `Origin` or a `Referer` was sent |
+| 429    | The rate limit answer, with `Retry-After`                                  | This address's bucket is empty: 10 at once, then one every six seconds. Only where the proxy gives the client address: see Rate limits                                          |
+| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                                     |
 
 Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
 any other answer means nothing was changed, or that it couldn't tell. The response never
@@ -131,9 +136,59 @@ sets or expires a cookie, so a late answer can't clear a sign-in made meanwhile 
 tab: the app clears its own state for the ended session itself. The `Origin` header is
 required even without a cookie.
 
-Better Auth's rate limiting is off unless `NODE_ENV` is `production`, and its default store
-is memory, which doesn't last from one Convex HTTP action to the next. So on Convex no auth
-route answers 429 yet; shared storage for it is a follow-up. Treat a 429 like a 5xx.
+### Rate limits
+
+Better Auth's rate limiting is on in every deployment, and its counts are kept in Convex (the
+`rateLimits` table), so they last from one request to the next. Better Auth's own store is
+memory, which a Convex HTTP action starts without. Each count is a token bucket that refills
+steadily, so a client that slows down gets through at the refill rate, and one that stops
+waits seconds, with no lockout to sit out.
+
+| Routes                                                                                                                                                                              | Limit, each             | Counted by            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | --------------------- |
+| `/sign-in/email`, `/sign-up/email` (which also redeems invitations and the setup token), `/passkey/generate-authenticate-options`, `/passkey/verify-authentication`, `/end-session` | 10 a minute, 10 at once | Client address        |
+| Every other auth route                                                                                                                                                              | 300 a minute            | Client address        |
+| `/sign-in/email`, `/sign-up/email`                                                                                                                                                  | 30 a minute, 30 at once | The email, lowercased |
+
+`/sign-in/email` and `/sign-up/email` take only JSON (`Content-Type: application/json`, as
+the app sends): Better Auth would also take a form, which the per-account limit can't read,
+so anything else is refused with 415. Better Auth's `/verify-password` is turned off (404);
+the current password is checked only by `account.changePassword`, which allows five checks a
+minute per account and otherwise throws `Too many password attempts. Try again in N
+seconds.` Requests to paths that aren't auth routes aren't counted.
+
+If counting a request fails, the request fails (a 500) rather than going through uncounted:
+a broken limiter keeps people from signing in instead of turning the limits off. Each such
+failure is logged as `[rate limit] Couldn't count a request to <path>, so it was refused`,
+with the error and never the key.
+
+Over a limit, the answer is 429 with `{ "message": "Too many requests. Please try again later." }`
+and `Retry-After` (and `X-Retry-After`) in whole seconds. Wait that long before trying again.
+
+**The per-address limits are on only where a trusted proxy in front of the backend sets
+`X-Trioditis-Client-IP`**, replacing any a client sent. The self-hosted bundle's Caddy will
+set it, from the connection or, behind a proxy it trusts, from that proxy's
+`X-Forwarded-For`, once that change lands in the install bundle. Until a proxy sets it,
+replacing what clients send, only the per-account limit is reliable: a proxy that passes the
+header through lets a client name any address it likes, or none. The client address is read
+only from this header. A client can
+send `X-Forwarded-For` and the like itself, so the backend reads none of them. IPv6 addresses
+count by their /64. Convex passes request headers through as they are and adds no client
+address of its own, so the header must come from the proxy, and the backend must be reachable
+only through it: anyone who reaches it directly can name any address.
+
+Without the header (in development, on previews and nightly, or behind a proxy that doesn't
+set it), the per-address limits are off and only the per-account one applies. The other
+choice, one bucket for every client, would let anyone keep everyone out by filling it.
+
+**The per-account limit** bounds guessing at one account from many addresses. It is a
+trade-off: anyone can use it up for someone else's email and keep them from signing in with
+a password. So it is loose: it refills at 30 a minute, three times the per-address limit.
+Where a trusted proxy gives the client address, one address alone can't keep an account
+refused, but three or more together can take each token as it refills, and a real sign-in may
+then lose the race for it; without the per-address limit, one address can. A passkey sign-in
+isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
+and buckets that have refilled are deleted every ten minutes.
 
 Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
@@ -164,9 +219,10 @@ const identity = generateKeyPair()
 // unless both give back this key: the server can't check them.
 const { args, recoveryText } = makeKeySetup(identity.privateKey, pw, userId) // show recoveryText once
 // Prove the device holds the key: the challenge is sealed to the key being set up.
-const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey })
+// sessionId: members.me's, from when the page opened (Key writes are bound to the page's session).
+const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey, sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
-await convex.mutation(api.keys.setup, { ...args, proof })
+await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
 ```
 
 - `makeKeySetup` runs `passwordKey`, which takes about a second; show progress. Building
@@ -197,7 +253,7 @@ so the first key is one a device can really use, and a stolen session can't repl
 someone's backups and lock them out:
 
 ```ts
-const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, {})
+const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, { sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
 ```
 
@@ -226,11 +282,11 @@ forgives case, spaces, dashes and look-alike letters, and its checksum catches t
 ### A new recovery key, or a passkey
 
 Wrap again and call `api.keys.putBackup({ kind: 'recovery' | 'passkey', nonce, ct,
-credentialId?, prfSalt?, proof, expectedRevision })`. It replaces that backup and returns
+credentialId?, prfSalt?, proof, expectedRevision, sessionId })`. It replaces that backup and returns
 its new `revision`. `expectedRevision` is the `revision` of the backup being replaced, as
 `keys.identity` showed it (0 for a new passkey). If another device changed it meanwhile, the
 call is refused: reload and try again. `api.keys.removePasskeyBackup({ credentialId,
-proof })` removes a passkey backup. Password and recovery backups are replaced, never
+proof, sessionId })` removes a passkey backup. Password and recovery backups are replaced, never
 removed.
 
 Revisions only go up and are never reused, across all of the person's backups: a new or
@@ -238,6 +294,28 @@ replaced backup takes the next one, which needn't be the old revision plus one, 
 passkey backup removed and made again gets a new one, so a device still holding the old
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
+
+### Key writes are bound to the page's session
+
+`keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
+`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
+take an optional `sessionId`: pass the `sessionId` from
+`members.me` that the page opened with. Tabs share the Convex client, so another tab
+signing in as someone else can switch the token the page's calls run as while the page still
+shows the first account; a key or backup meant for one account would then be written to the
+other, which can never open it, or a network connected to the other account, whose key then
+seals what it brings in, or a label or demo data sealed to the wrong key, or a setting or an
+invitation made as the wrong person, or an agent given the wrong account's chats. The others act only on an ID the page already holds,
+which each checks belongs to the caller, so a switched page finds nothing to change. With `sessionId`, the call is refused before it writes
+anything unless it runs as that same Better Auth session, with `ConvexError` data
+`{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
+A session that has ended is refused the same way. The actions, `account.changePassword` and
+`demo.seedForMe`, check again inside each transaction that writes, so a session that ends
+while one runs is refused there too. Reload the page then: it reads `members.me`
+again. Without `sessionId` the call isn't bound to a session, though it still needs a
+signed-in member as usual; it will become required once every client sends it. Pass it on
+every one of these calls.
 
 ### Changing the password
 
@@ -254,6 +332,7 @@ const { revision } = await convex.action(api.account.changePassword, {
   },
   proof,
   expectedRevision, // the password backup's current revision
+  sessionId,
 })
 ```
 
@@ -286,10 +365,10 @@ password settings.` (a defensive check: the arguments of `keys.setup` and
 
 ## Preferences
 
-| Function              | Arguments            | Returns                                                                                              |
-| --------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
-| `api.preferences.get` | none                 | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
-| `api.preferences.set` | `{ sidebarLayout? }` | `null`. Changes only what it's given                                                                 |
+| Function              | Arguments                        | Returns                                                                                              |
+| --------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `api.preferences.get` | none                             | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
+| `api.preferences.set` | `{ sidebarLayout?, sessionId? }` | `null`. Changes only what it's given                                                                 |
 
 `DEFAULT_PREFERENCES` and the `Preferences` type are in `@trioditis/core`.
 
@@ -341,6 +420,51 @@ A `ChatRow` (type in `@trioditis/core`):
 | `snoozedUntil`, `woke`                       | When the snooze ends, and whether it has                                                                                                            |
 | `labelIds`                                   | The person's labels on this chat                                                                                                                    |
 | `lastMessageAt`                              | Network time of the latest message                                                                                                                  |
+| `lastMessage`                                | The newest message, for a preview: see below. `null` when the chat has no messages                                                                  |
+
+#### The last message
+
+`lastMessage` is the chat's newest message, the one `messages.list` shows first (by
+`sortKey`, imported history included), or `null` when the chat has none:
+
+```ts
+interface LastMessage {
+  messageId: Id<'messages'> // the message's `_id` in `messages.list`
+  at: number // its `networkTs`
+  self: boolean // `sender` is `{ self: true }`
+  ghostId?: string // otherwise `sender.ghostId`
+  redacted: boolean // deleted for everyone: show "Message deleted"
+  sealed: Envelope | null // `sealedEdit ?? sealed`
+  objectId: string // `editEventId` for an edit, else `sealedObjectId`
+}
+```
+
+Open it exactly as the message (see Reading): kind `message`, object ID `objectId`.
+
+```ts
+const last = row.lastMessage
+const preview = last?.sealed
+  ? openJson<MessagePlaintext>(last.sealed, identity, { kind: 'message', ownerUserId: userId, objectId: last.objectId })
+  : null
+```
+
+`sealed` is `null` when the message was deleted (`redacted: true`), and when its envelope is
+over 4 KiB as stored (its JSON in UTF-8), which a text message almost never is: show
+"Message" then, and open the chat for the rest. Everything else is there either way.
+
+It is kept live: a new message, an edit of the newest one, the network's echo of a send
+(the same `messageId`, with the network's time and content), a deletion, and a discarded send
+(the one before it takes over) all change the row, as any change to a chat does. A message
+that arrives late with an older time never replaces a newer one. Because it includes
+imported history and the person's pending sends, `lastMessage.at` can differ from
+`lastMessageAt`, which orders the inbox.
+
+The server keeps it as a small pointer on the chat, so the list reads no messages. A row is
+at most about 18 KiB with the largest sealed metadata (8 KiB) and preview (4 KiB), so a full
+page of 50 is under 1 MiB, far inside its 8 MiB. A backend upgraded from before it gives
+each chat its pointer in `migrations:runAll`, after the deploy. Until then an older chat's
+`lastMessage` is `null`, unless a message arrives in it, is echoed, edited, redacted or
+discarded; other changes (pinning the chat, a send's delivery status) don't fill it in.
 
 `api.chats.get({ chatId })` returns one row. `api.chats.counts` returns
 `{ inbox, requests, woke }`, each `{ count, more }`: unread unmuted inbox chats, message
@@ -503,12 +627,12 @@ sent: its chat is gone.` (`sendNow` on a failed one)
 Seal a label's plaintext, `{ name, color }`, to the person: kind `label`, object ID a
 `labelKey` the client picks (16 to 64 letters, digits, `-`, `_`).
 
-| Function        | Arguments            | Returns                                                       |
-| --------------- | -------------------- | ------------------------------------------------------------- |
-| `labels.list`   | none                 | `[{ _id, labelKey, sealed, createdAt }]`                      |
-| `labels.create` | `labelKey`, `sealed` | The label's ID (the same one again for a repeated `labelKey`) |
-| `labels.update` | `labelId`, `sealed`  | `null`. Seal with the same `labelKey`                         |
-| `labels.remove` | `labelId`            | `null`. Also takes it off every chat                          |
+| Function        | Arguments                          | Returns                                                       |
+| --------------- | ---------------------------------- | ------------------------------------------------------------- |
+| `labels.list`   | none                               | `[{ _id, labelKey, sealed, createdAt }]`                      |
+| `labels.create` | `labelKey`, `sealed`, `sessionId?` | The label's ID (the same one again for a repeated `labelKey`) |
+| `labels.update` | `labelId`, `sealed`                | `null`. Seal with the same `labelKey`                         |
+| `labels.remove` | `labelId`                          | `null`. Also takes it off every chat                          |
 
 At most 100 labels of up to 4 KiB each. `labels.remove` takes the label off its first 1,000
 chats at once and the rest in batches straight after; until then a chat may still list the
@@ -531,7 +655,7 @@ network with `termsRisk` (cookie or token logins can get an account banned).
 
 ### The login stepper
 
-1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId? })`.
+1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId?, sessionId })`.
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
@@ -600,7 +724,7 @@ when data changes, not when time passes, so recheck on focus.
 
 ## Demo data
 
-For previews and the nightly. `api.demo.seedForMe` (an action, no arguments) gives the
+For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
 signed-in person a connected fake-network account with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
@@ -611,7 +735,8 @@ that fails partway leaves no half-written chat, and calling again finishes the r
 everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
 available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
 
-- **Previews** create a known test account by script: sign up with
+- **Previews** create a known test account by script, on one account in one process, so it
+  can leave out `sessionId` (a page always passes it): sign up with
   `authPassword(password, email)` and the setup token, call `keys.challenge({ publicKey })`
   and open it with `keyPairFromPrivateKey(privateKey)`, call `keys.setup` with
   `{ ...makeKeySetup(privateKey, password, userId).args, proof }` (the same password backup
@@ -659,12 +784,9 @@ here.
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
    needs a new `members` event from the bridge host, so it comes later. Fallback: the
    sender shows as "Someone".
-3. **Last-message preview.** Chat rows gain `sealedPreview`: the newest message's body cut
-   to 200 characters plus its sender (`ghostId` or self), sealed with a new kind `preview`
-   and object ID `portalId`, at most 2 KiB. The bridge host seals it with each `message`
-   event; the person's own sends seal one alongside `copy`. Deleting or editing the newest
-   message replaces it. It stays small so a page of 50 rows stays well inside the read
-   limit. Fallback: no preview line.
+3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
+   envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
+   replaced the `sealedPreview` planned here, so nothing new is sealed for it.
 4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
    email, sealed to the bridge key) and `startChat`, following bridgev2's
    `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls

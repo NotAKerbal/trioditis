@@ -11,6 +11,7 @@ import {
   network,
   sender,
   storedChatView,
+  storedLastMessage,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -55,6 +56,20 @@ export default defineSchema({
     reservedUntil: v.number(),
     reservedEmail: v.string(),
   }).index('by_key', ['key']),
+
+  /**
+   * Better Auth's rate limits, one token bucket per key (see rateLimits.ts). `key` is a
+   * SHA-256, never the client address or email it was made from. A row whose bucket has
+   * refilled (`fullAt` passed) means the same as no row, and is pruned.
+   */
+  rateLimits: defineTable({
+    key: v.string(),
+    tokens: v.number(),
+    updatedAt: v.number(),
+    fullAt: v.number(),
+  })
+    .index('by_key', ['key'])
+    .index('by_fullAt', ['fullAt']),
 
   /** One connected account on one network, e.g. Isaac's WhatsApp. */
   networkAccounts: defineTable({
@@ -108,6 +123,13 @@ export default defineSchema({
     sealedMeta: v.optional(envelope),
     parentPortalId: v.optional(v.string()),
     lastMessageAt: v.number(),
+    /**
+     * The newest message, as `messages.list` orders them, so the chat list can show it
+     * without reading any message. Kept by lib/lastMessage.ts on every write that changes
+     * which message that is, or what it says. `null` when the chat has no messages; missing on
+     * a chat from before it was kept, until `migrations.backfillChatLast` reaches it.
+     */
+    last: v.optional(v.union(v.null(), storedLastMessage)),
     unreadCount: v.number(),
     pinned: v.boolean(),
     archived: v.boolean(),

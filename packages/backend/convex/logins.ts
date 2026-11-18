@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { NETWORK_INFO } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
+import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
 import { audit } from './lib/audit'
@@ -86,9 +87,12 @@ export const session = query({
 })
 
 export const start = mutation({
-  args: { network, flowId: v.optional(v.string()) },
+  args: { network, flowId: v.optional(v.string()), sessionId: v.optional(v.string()) },
   returns: v.id('loginSessions'),
   handler: async (ctx, args) => {
+    // A login started from a page another tab's sign-in has switched would connect the
+    // network to the other account, whose key then seals what it brings in.
+    await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
     if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
     // Only the flows `networks.list` offers for this network. Without one, the bridge host
