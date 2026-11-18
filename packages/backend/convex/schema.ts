@@ -25,6 +25,12 @@ export default defineSchema({
     /** The person's identity public key, base64url, set by their first device. */
     identityPublicKey: v.optional(v.string()),
     identityKid: v.optional(v.string()),
+    /**
+     * The highest revision any of the person's key backups has had. Each new or replaced
+     * backup takes the next one, so a revision is never reused, even for a passkey backup
+     * removed and made again.
+     */
+    backupRevision: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -170,7 +176,10 @@ export default defineSchema({
     /** For `passkey`: which credential, and its PRF salt. */
     credentialId: v.optional(v.string()),
     prfSalt: v.optional(v.string()),
-    /** Increases each time this backup is replaced; a replacement names the one it replaces. */
+    /**
+     * Changes each time this backup is replaced, never to a value it had before (see
+     * `members.backupRevision`); a replacement names the one it replaces.
+     */
     revision: v.number(),
     createdAt: v.number(),
   }).index('by_user', ['userId', 'kind']),
@@ -183,6 +192,8 @@ export default defineSchema({
   keyChallenges: defineTable({
     userId: v.string(),
     hash: v.string(),
+    /** The public key it was sealed to: a proof counts only for that key. */
+    publicKey: v.string(),
     expiresAt: v.number(),
   }).index('by_user', ['userId']),
 
