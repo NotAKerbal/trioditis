@@ -47,7 +47,7 @@ function Avatar({ name, src, size = 40, shape = 'circle', badge, className }: Av
         !src && colorFor(name),
         className,
       )}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.38) }}
+      style={{ width: size, height: size, fontSize: Math.round(size * (badge ? 0.33 : 0.38)) }}
     >
       {src ? (
         <img
@@ -55,11 +55,15 @@ function Avatar({ name, src, size = 40, shape = 'circle', badge, className }: Av
           alt=""
           className={cn('size-full object-cover', shape === 'circle' ? 'rounded-full' : 'rounded-[30%]')}
         />
+      ) : badge ? (
+        // The badge takes the bottom right corner, so the initials sit a little smaller and up and
+        // to the left of centre, clear of its ring.
+        <span style={{ translate: `${-size * 0.04}px ${-size * 0.04}px` }}>{initials(name)}</span>
       ) : (
         initials(name)
       )}
       {badge ? (
-        <span className="absolute -right-[3px] -bottom-[3px] rounded-[5px] ring-2 ring-[var(--avatar-ring,var(--rail))]">
+        <span className="absolute -right-[4px] -bottom-[4px] rounded-[5px] ring-2 ring-[var(--avatar-ring,var(--rail))]">
           {badge}
         </span>
       ) : null}
