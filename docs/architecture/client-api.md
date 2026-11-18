@@ -165,8 +165,10 @@ and `Retry-After` (and `X-Retry-After`) in whole seconds. Wait that long before 
 **The per-address limits are on only where a trusted proxy in front of the backend sets
 `X-Trioditis-Client-IP`**, replacing any a client sent. The self-hosted bundle's Caddy will
 set it, from the connection or, behind a proxy it trusts, from that proxy's
-`X-Forwarded-For`, once that change lands in the install bundle; until then a bundle has
-only the per-account limit. The client address is read only from this header. A client can
+`X-Forwarded-For`, once that change lands in the install bundle. Until a proxy sets it,
+replacing what clients send, only the per-account limit is reliable: a proxy that passes the
+header through lets a client name any address it likes, or none. The client address is read
+only from this header. A client can
 send `X-Forwarded-For` and the like itself, so the backend reads none of them. IPv6 addresses
 count by their /64. Convex passes request headers through as they are and adds no client
 address of its own, so the header must come from the proxy, and the backend must be reachable

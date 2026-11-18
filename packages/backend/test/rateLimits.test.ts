@@ -244,6 +244,24 @@ describe('what is counted', () => {
     expect(response.status).toBe(404)
   })
 
+  it('counts a route with a parameter as one route, whatever the parameter', async () => {
+    const t = setup()
+    for (const id of ['a', 'b', 'c']) await post(t, `callback/${id}`, {}, '203.0.113.1')
+    expect(await t.run(async (ctx) => (await ctx.db.query('rateLimits').collect()).length)).toBe(1)
+  })
+
+  it('keeps no bucket for a route Better Auth serves only to the server', async () => {
+    const t = setup()
+    expect((await post(t, 'convex/latest-jwks', {}, '203.0.113.1')).status).toBe(404)
+    expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
+  })
+
+  it('finds Better Auth’s routes however SITE_URL ends', async () => {
+    const { authBaseUrl } = await import('../convex/auth')
+    expect(authBaseUrl('https://trioditis.example/')).toBe('https://trioditis.example/api/auth')
+    expect(authBaseUrl('https://trioditis.example')).toBe('https://trioditis.example/api/auth')
+  })
+
   it('keeps no bucket for a path that isn’t an auth route', async () => {
     const t = setup()
     for (let i = 0; i < 5; i++) expect((await post(t, `made-up-${i}`, {}, '203.0.113.1')).status).toBe(404)

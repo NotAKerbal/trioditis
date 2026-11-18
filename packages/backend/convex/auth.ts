@@ -142,10 +142,12 @@ const AUTH_BASE_PATH = '/api/auth'
  * Better Auth's routes, as patterns (a `:name` segment matches any one segment), filled in by
  * `createAuth`. Until then every path counts as one.
  */
-let authRoutes: RegExp[] | null = null
+let authRoutes: { template: string; pattern: RegExp }[] | null = null
 
-function isAuthRoute(path: string) {
-  return !authRoutes || authRoutes.some((route) => route.test(path))
+/** The route `path` is a request to, as Better Auth declares it (`/callback/:id`), or null. */
+function authRouteOf(path: string) {
+  if (!authRoutes) return path
+  return authRoutes.find((route) => route.pattern.test(path))?.template ?? null
 }
 
 function routePattern(path: string) {
@@ -154,6 +156,11 @@ function routePattern(path: string) {
     .map((segment) => (segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     .join('/')
   return new RegExp(`^${escaped}$`)
+}
+
+/** Better Auth's base URL, however `SITE_URL` ends. */
+export function authBaseUrl(site = siteUrl) {
+  return new URL(AUTH_BASE_PATH, site).toString()
 }
 
 /** The path under Better Auth's base path, as its rate limiter matches it. */
@@ -273,16 +280,20 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
         // Only Better Auth's own routes: a request to any other path would otherwise leave a
         // bucket behind for each path made up.
         '/**': (request: Request) =>
-          isAuthRoute(authPath(request, `${siteUrl}${AUTH_BASE_PATH}`)) ? perClient(DEFAULT_LIMIT)(request) : false,
+          authRouteOf(authPath(request, authBaseUrl())) !== null ? perClient(DEFAULT_LIMIT)(request) : false,
       },
       customStorage: {
         consume: async (key, rule) => {
           // Only HTTP requests are rate limited, and HTTP actions can run mutations. In a
           // query nothing can be written, so nothing could be counted either.
           if (!('runMutation' in ctx)) return { allowed: true, retryAfter: null }
-          // Better Auth's key is `<address>|<path>`; only the path is logged.
-          const path = key.slice(key.lastIndexOf('|') + 1)
-          return await consumeOrLog(ctx, path, { key: await sha256Hex(`client|${key}`), ...rule })
+          // Better Auth's key is `<address>|<path>`. Counted, and logged, by the route the path
+          // is to, so `/callback/a` and `/callback/b` share one bucket and a path's own
+          // segments (which a client chooses) never reach the log.
+          const split = key.indexOf('|')
+          const address = key.slice(0, split)
+          const route = authRouteOf(key.slice(split + 1)) ?? 'an unknown route'
+          return await consumeOrLog(ctx, route, { key: await sha256Hex(`client|${address}|${route}`), ...rule })
         },
       },
     },
@@ -374,10 +385,11 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
 
 export const createAuth = (ctx: GenericCtx<DataModel>) => {
   const auth = betterAuth(createAuthOptions(ctx))
-  authRoutes ??= Object.values(auth.api as Record<string, { path?: unknown }>)
-    .map((endpoint) => endpoint.path)
-    .filter((path): path is string => typeof path === 'string')
-    .map(routePattern)
+  // Only routes served over HTTP: Better Auth leaves out those marked server-only.
+  type Endpoint = { path?: unknown; options?: { metadata?: { SERVER_ONLY?: boolean } } }
+  authRoutes ??= Object.values(auth.api as Record<string, Endpoint>)
+    .filter((endpoint) => typeof endpoint.path === 'string' && !endpoint.options?.metadata?.SERVER_ONLY)
+    .map((endpoint) => ({ template: endpoint.path as string, pattern: routePattern(endpoint.path as string) }))
   return { ...auth, handler: async (request: Request) => withRetryAfter(await auth.handler(request)) }
 }
 
