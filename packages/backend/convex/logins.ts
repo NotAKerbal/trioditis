@@ -18,7 +18,7 @@ export const accounts = query({
     return await ctx.db
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
-      .collect()
+      .take(100)
   },
 })
 
