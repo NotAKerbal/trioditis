@@ -223,9 +223,23 @@ export type BridgeCommand = CommandBase &
     | { type: 'redact'; portalId: string; targetEventId: string }
     | { type: 'markRead'; portalId: string; upToEventId: string }
     | { type: 'typing'; portalId: string; typing: boolean }
-    | { type: 'loginStart'; loginSessionId: string; network: Network; flowId?: string }
-    | { type: 'loginSubmit'; loginSessionId: string; stepId: string; sealed: Envelope }
-    | { type: 'loginCancel'; loginSessionId: string }
+    | {
+        type: 'loginStart'
+        loginSessionId: string
+        network: Network
+        flowId?: string
+        loginId?: never
+        notAfter: number
+      }
+    | {
+        type: 'loginSubmit'
+        loginSessionId: string
+        stepId: string
+        sealed: Envelope
+        loginId?: never
+        notAfter: number
+      }
+    | { type: 'loginCancel'; loginSessionId: string; loginId?: never; notAfter: number }
     | { type: 'logout' }
     | { type: 'backfill'; portalId: string; beforeEventId?: string; limit: number }
   )
