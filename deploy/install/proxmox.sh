@@ -7,6 +7,9 @@
 #   bash proxmox.sh --lxc --id 9101       # an unprivileged LXC with nesting, instead
 #   bash proxmox.sh --storage local-zfs --bridge vmbr1 --networks whatsapp,fake
 #
+# A VM's cloud-init setup goes in a snippet on --snippets storage (default local), which
+# must allow the snippets content type.
+#
 # A VM is the default because Docker inside an LXC depends on the host's kernel and storage
 # driver, and an encrypted disk is simpler to give a VM. See docs/deploy.md, Proxmox.
 #
@@ -20,6 +23,7 @@ cores=2
 memory=8192
 disk=64
 storage=local-lvm
+snippets=local
 bridge=vmbr0
 networks=whatsapp
 repo=https://github.com/NotAKerbal/trioditis.git
@@ -36,12 +40,13 @@ while [ $# -gt 0 ]; do
     --memory) memory=$2; shift ;;
     --disk) disk=$2; shift ;;
     --storage) storage=$2; shift ;;
+    --snippets) snippets=$2; shift ;;
     --bridge) bridge=$2; shift ;;
     --networks) networks=$2; shift ;;
     --repo) repo=$2; shift ;;
     --ref) ref=$2; shift ;;
     --ssh-key) ssh_key=$2; shift ;;
-    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -56,11 +61,13 @@ if qm status "$id" >/dev/null 2>&1 || pct status "$id" >/dev/null 2>&1; then
   die "ID $id is already in use. Pass --id."
 fi
 
-# What runs inside the guest once it's up: Docker, then Trioditis from the chosen ref.
+# What runs inside the guest once it's up: Docker, then Trioditis from the chosen ref. In a
+# VM, cloud-init may still be installing packages and holding apt's lock, so it waits first.
 guest_setup_script() {
   cat <<EOF
 set -eu
 export DEBIAN_FRONTEND=noninteractive
+if command -v cloud-init >/dev/null; then cloud-init status --wait >/dev/null || true; fi
 apt-get update -q
 apt-get install -y -q docker.io docker-compose-v2 docker-buildx git ca-certificates
 systemctl enable --now docker
@@ -72,12 +79,42 @@ EOF
 guest_setup=$(guest_setup_script)
 
 if [ "$kind" = vm ]; then
-  image=/var/lib/vz/template/iso/noble-server-cloudimg-amd64.img
-  if [ ! -f "$image" ]; then
-    say "Downloading the Ubuntu 24.04 cloud image"
-    wget -q -O "$image" https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-  fi
   [ -f "$ssh_key" ] || die "No SSH public key at $ssh_key. Pass --ssh-key."
+  # The script drives the VM through the QEMU guest agent, which the cloud image doesn't
+  # include. Cloud-init installs and starts it from vendor data in a snippet, which leaves the
+  # user and SSH key that Proxmox generates in place.
+  pvesm status --content snippets 2>/dev/null | awk 'NR > 1 {print $1}' | grep -qx "$snippets" ||
+    die "Storage '$snippets' can't hold snippets, which the VM's cloud-init setup needs. Add snippets to its content types (pvesm set $snippets --content <its current types>,snippets) or pass --snippets <storage>."
+
+  image_url=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+  image=/var/lib/vz/template/iso/noble-server-cloudimg-amd64.img
+  # Checked against Ubuntu's published checksum, fetched over HTTPS. A download goes to a
+  # temporary name first, so an interrupted one is never taken for the image.
+  expected=$(wget -qO- "${image_url%/*}/SHA256SUMS" | awk -v f="${image_url##*/}" '$2 == f || $2 == "*" f {print $1}')
+  [ -n "$expected" ] || die "Couldn't get the cloud image's checksum from ${image_url%/*}/SHA256SUMS."
+  if [ ! -f "$image" ] || [ "$(sha256sum "$image" | awk '{print $1}')" != "$expected" ]; then
+    say "Downloading the Ubuntu 24.04 cloud image"
+    wget -q -O "$image.part" "$image_url"
+    if [ "$(sha256sum "$image.part" | awk '{print $1}')" != "$expected" ]; then
+      rm -f "$image.part"
+      die "The downloaded cloud image doesn't match its checksum. Try again."
+    fi
+    mv "$image.part" "$image"
+  fi
+
+  vendor_file="trioditis-$id-vendor.yaml"
+  vendor_path=$(pvesm path "$snippets:snippets/$vendor_file")
+  mkdir -p "$(dirname "$vendor_path")"
+  printf '%s\n' '#cloud-config' 'packages: [qemu-guest-agent]' 'runcmd:' \
+    '  - [systemctl, enable, --now, qemu-guest-agent]' >"$vendor_path"
+
+  # From here on, a failure says what it leaves behind.
+  left_behind() {
+    [ "$1" = 0 ] && return
+    echo "VM $id ($name) is left as it is, to look into: qm terminal $id (Ctrl-O leaves)." >&2
+    echo "Remove it with: qm stop $id; qm destroy $id --purge; rm $vendor_path" >&2
+  }
+  trap 'left_behind $?' EXIT
 
   say "Creating VM $id ($name)"
   qm create "$id" --name "$name" --cores "$cores" --memory "$memory" --cpu host \
@@ -86,16 +123,29 @@ if [ "$kind" = vm ]; then
   qm set "$id" --scsi0 "$storage:0,import-from=$image,discard=on"
   qm resize "$id" scsi0 "${disk}G"
   qm set "$id" --ide2 "$storage:cloudinit" --boot order=scsi0 \
-    --ipconfig0 ip=dhcp --ciuser trioditis --sshkeys "$ssh_key"
+    --ipconfig0 ip=dhcp --ciuser trioditis --sshkeys "$ssh_key" \
+    --cicustom "vendor=$snippets:snippets/$vendor_file"
   qm start "$id"
 
-  say "Waiting for the guest agent"
+  say "Waiting for the guest agent (cloud-init installs it on first boot)"
   for _ in $(seq 120); do qm agent "$id" ping >/dev/null 2>&1 && break; sleep 5; done
-  qm agent "$id" ping >/dev/null 2>&1 || die "The VM's guest agent didn't come up. Check its console."
+  qm agent "$id" ping >/dev/null 2>&1 ||
+    die "The VM's guest agent didn't come up in 10 minutes. Check cloud-init on its console: it needs network access to install qemu-guest-agent."
 
   say "Installing Docker and Trioditis in the VM (this takes several minutes)"
-  qm guest exec "$id" --timeout 3600 -- bash -c "$guest_setup"
+  # qm guest exec reports the command's result as JSON and exits 0 whatever it was, so this
+  # prints the command's output and exits with its status (124 if it was still running).
+  result=$(qm guest exec "$id" --timeout 3600 -- bash -c "$guest_setup")
+  setup_status=0
+  printf '%s' "$result" | perl -MJSON::PP -e '
+    my $r = decode_json(do { local $/; <STDIN> });
+    print $r->{"out-data"} // "";
+    print STDERR $r->{"err-data"} // "";
+    exit($r->{exited} ? ($r->{exitcode} // 1) : 124);
+  ' || setup_status=$?
+  [ "$setup_status" = 0 ] || die "Installing in the VM failed (exit status $setup_status; 124 means it was still running after an hour)."
   address=$(qm guest cmd "$id" network-get-interfaces | grep -oE '"ip-address" *: *"[0-9.]+"' | grep -v 127.0.0.1 | head -1 | grep -oE '[0-9.]+$')
+  trap - EXIT
 else
   template=$(pveam list local 2>/dev/null | awk '/ubuntu-24.04-standard/ {print $1}' | tail -1)
   if [ -z "$template" ]; then
@@ -119,5 +169,6 @@ else
 fi
 
 say "Done. Trioditis is at http://${address:-GUEST-ADDRESS}:8080"
-echo "The admin setup link is in the install output above; it's also rebuilt by running"
-echo "deploy/install/install.sh again inside the guest (/opt/trioditis)."
+echo "The admin setup link is in the install output above. Until the admin account exists,"
+echo "running deploy/install/install.sh again inside the guest (/opt/trioditis) prints it too."
+echo "Serve it over HTTPS before signing up from another device: see docs/deploy.md."
