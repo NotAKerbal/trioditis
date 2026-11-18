@@ -168,7 +168,10 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
     // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
     // none is, but saves still under way in any tab are stopped all the same.
-    const failure = await signOut(userId, { onlyKid: backedUp ? keyKid : null })
+    const failure = await signOut(userId, {
+      onlyKid: backedUp ? keyKid : null,
+      backedUpKid: backedUp ? undefined : backedUpNow,
+    })
     if (failure === null) return
     leavingFailure.current = failure
     setLeaving('failed')
@@ -299,6 +302,15 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
 
 /** How long signing out from setup waits for a step under way before going on without it. */
 const LEAVE_WAIT_MS = 10_000
+
+/** The key the server has both backups of now, if any (see signOut's backedUpKid). */
+async function backedUpNow(): Promise<string | null> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('the server didn’t answer in time')), LEAVE_WAIT_MS),
+  )
+  const identity = await Promise.race([convex.query(api.keys.identity, {}), timeout])
+  return identity.state === 'ready' ? identity.kid : null
+}
 
 /** What key setup is for: a new key, or the missing backups of one this device holds. */
 interface SetupFor {

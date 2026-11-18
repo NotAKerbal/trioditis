@@ -84,6 +84,8 @@ const server = vi.hoisted(() => {
     status: null as number | null,
     /** Runs as each revokeSession request goes, before the server acts on it. */
     onRequest: async () => {},
+    /** The server acts on revokeSession, but its answer never reaches the browser. */
+    loseResponse: false,
     revoked: [] as string[],
     signIn(userId: string) {
       const token = `token-${++n}`
@@ -113,6 +115,7 @@ vi.mock('../src/lib/auth-client.ts', () => ({
       if (!me) return { data: null, error: { status: 401 } }
       if (server.sessions.get(token)?.userId === me.userId) server.sessions.delete(token)
       if (token === server.cookie) server.cookie = null
+      if (server.loseResponse) throw new TypeError('Failed to fetch')
       return { data: { status: true }, error: null }
     },
     signOut: () => Promise.reject(new Error('signing out ends the session it noted, not the cookie’s')),
@@ -244,7 +247,13 @@ describe('signing out, as the key on this device sees it', () => {
   beforeAll(ready)
 
   beforeEach(() => {
-    Object.assign(server, { reachable: true, status: null, onRequest: async () => {}, revoked: [] })
+    Object.assign(server, {
+      reachable: true,
+      status: null,
+      onRequest: async () => {},
+      loseResponse: false,
+      revoked: [],
+    })
     db.failing = 0
   })
 
@@ -345,11 +354,11 @@ describe('signing out, as the key on this device sees it', () => {
     expect(server.revoked).toEqual([])
   })
 
-  it('ends no one else’s session when someone else is signed in here now, and just forgets the key', async () => {
+  it('ends no one else’s session when someone else is signed in here now, and says it can’t confirm', async () => {
     // A stale screen for v7, while another tab has signed in as someone else.
     await keptHere('v7')
     const other = server.signIn('someone-else')
-    expect(await signOut('v7')).toBeNull()
+    expect(await signOut('v7')).toMatch(/Someone else has signed in/)
     expect(server.revoked).toEqual([])
     expect(server.sessions.has(other.token)).toBe(true)
     expect(await loadIdentity('v7')).toBeNull()
@@ -386,6 +395,65 @@ describe('signing out, as the key on this device sees it', () => {
     db.failing = 3
     expect(await signOut('v10')).toBeNull()
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in?key=unconfirmed')
+  })
+
+  it('says it can’t confirm when someone else signed in as the request went', async () => {
+    // The server answers yes, but the cookie was someone else's, so it ended nothing.
+    const kept = await keptHere('v11')
+    server.onRequest = async () => void server.signIn('someone-else')
+    expect(await signOut('v11')).toMatch(/Someone else has signed in/)
+    expect(server.sessions.has(kept.session.token)).toBe(true)
+    expect(await loadIdentity('v11')).toBeNull()
+    await expect(saveIn(otherTab, 'v11', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+  })
+
+  it('goes through when the session ended though its answer was lost', async () => {
+    const kept = await keptHere('v12')
+    server.loseResponse = true
+    expect(await signOut('v12')).toBeNull()
+    expect(server.sessions.has(kept.session.token)).toBe(false)
+  })
+
+  it('forgets a key kept for want of backups, if they turned up and it was saved before the fence', async () => {
+    // Signing out from "finish setting up": no key here as it starts, so it keeps whatever is.
+    const kept = await keptHere('v13')
+    const asked: string[] = []
+    const failure = await signOut('v13', {
+      onlyKid: null,
+      backedUpKid: async () => {
+        // Asked only once the fence is in: a save from now on can't land.
+        await expect(saveIn(otherTab, 'v13', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+        asked.push('asked')
+        return kept.kid
+      },
+    })
+    expect(failure).toBeNull()
+    expect(asked).toEqual(['asked'])
+    expect(await loadIdentity('v13')).toBeNull()
+  })
+
+  it('keeps a key whose backups still don’t exist, and says so when that can’t be told', async () => {
+    const first = await keptHere('v14')
+    expect(await signOut('v14', { onlyKid: null, backedUpKid: async () => null })).toBeNull()
+    expect((await loadIdentity('v14'))?.kid).toBe(first.kid)
+    expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
+    server.signIn('v14')
+    const unsure = () => Promise.reject(new Error('offline'))
+    expect(await signOut('v14', { onlyKid: null, backedUpKid: unsure })).toBeNull()
+    expect((await loadIdentity('v14'))?.kid).toBe(first.kid)
+    expect(location.assign).toHaveBeenLastCalledWith('/sign-in?key=unconfirmed')
+  })
+
+  it('holds a save across a later fence, and refuses it when it gets to storage', async () => {
+    const kept = await keptHere('v15')
+    const token = await otherTab.saveToken('v15')
+    const checked = later<string>()
+    const save = otherTab.storeIdentity('v15', kept.kid, kept.keyPair, token, () => checked.promise)
+    // The save waits on its session check while a sign-out of another session fences.
+    await forgetIdentity('v15', { endingSession: 'elsewhere' })
+    checked.settle(kept.session.id)
+    await expect(save).rejects.toEqual(refusal('fenced'))
+    expect(await loadIdentity('v15')).toBeNull()
   })
 
   it('turns saves away with a reason that says what to do', () => {
