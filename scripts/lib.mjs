@@ -21,6 +21,7 @@ import {
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -761,19 +762,35 @@ export const convex = (...args) => ['exec', 'convex', ...args]
  * The backend's migrations: the internal functions in packages/backend/convex/migrations.ts,
  * which fix rows an older version wrote. Each is safe to run any number of times, so a backend
  * that keeps its data runs them all after its functions are pushed. Empty on a branch without
- * the file.
+ * the file. Comments are ignored, so a commented-out migration doesn't run.
  */
 export function migrationNames() {
   const file = resolve(backendDir, 'convex/migrations.ts')
   if (!existsSync(file)) return []
-  const source = readFileSync(file, 'utf8')
-  return [...source.matchAll(/^export const (\w+) = internal(?:Mutation|Action)\(/gm)].map((match) => match[1])
+  return parseMigrationNames(readFileSync(file, 'utf8'))
 }
 
-/** Runs every migration on a backend (`options` points the Convex CLI at it). */
-export function runMigrations(options) {
+/** The exported internal mutations and actions declared in `source`, ignoring comments. */
+export function parseMigrationNames(source) {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const declaration = /^export const (\w+)\s*(?::[^=]+)?=\s*internal(?:Mutation|Action)\s*(?:<[^>]*>)?\(/gm
+  return [...code.matchAll(declaration)].map((match) => match[1])
+}
+
+/**
+ * Runs every migration on this checkout's local backend, called directly over HTTP with the
+ * admin key from its own `.convex/local/default/config.json`. It doesn't go through the Convex
+ * CLI, which would read the dotenv files again and could be pointed somewhere else by then.
+ */
+export async function runMigrations(url) {
+  const config = JSON.parse(readFileSync(resolve(backendDir, '.convex/local/default/config.json'), 'utf8'))
+  const backendRequire = createRequire(resolve(backendDir, 'package.json'))
+  const { ConvexHttpClient } = backendRequire('convex/browser')
+  const { makeFunctionReference } = backendRequire('convex/server')
+  const client = new ConvexHttpClient(url)
+  client.setAdminAuth(config.adminKey)
   for (const name of migrationNames()) {
-    capture('pnpm', convex('run', `migrations:${name}`), { ...options, quiet: true })
+    await client.mutation(makeFunctionReference(`migrations:${name}`), {})
     console.log(`Ran ${name}.`)
   }
 }

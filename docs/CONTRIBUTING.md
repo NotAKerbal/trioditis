@@ -245,8 +245,9 @@ before it takes this schema.
 One-off fixes for rows an older version wrote are internal functions in
 `packages/backend/convex/migrations.ts`, each safe to run any number of times. `pnpm dev`
 (and `--setup`) runs every one once its functions are pushed, so a backend that keeps its
-data is always caught up; after adding a migration while `pnpm dev` runs, restart it. The
-self-hosted installer runs them after each deploy too.
+data is always caught up; after adding a migration while `pnpm dev` runs, restart it. It
+calls them on this checkout's backend directly, with its own admin key. The self-hosted
+installer (`deploy/`) runs them after each deploy too.
 
 ### End-to-end check
 

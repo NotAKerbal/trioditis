@@ -710,6 +710,16 @@ void test('--reset-ignoring takes a whole process ID, and only with --setup --re
 })
 
 void test('lists the backend’s migrations from migrations.ts', async () => {
-  const { migrationNames } = await import('../lib.mjs')
+  const { migrationNames, parseMigrationNames } = await import('../lib.mjs')
   assert.deepEqual(migrationNames(), ['scheduleCommandDeadlines'])
+  const source = [
+    'export const one = internalMutation({',
+    'export const typed: RegisteredMutation<"internal", {}, null> = internalMutation({',
+    'export const generic = internalAction<{}>({',
+    '/* export const commented = internalMutation({ */',
+    '// export const lineCommented = internalMutation({',
+    'export const notAMigration = query({',
+    'const helper = internalMutation({',
+  ].join('\n')
+  assert.deepEqual(parseMigrationNames(source), ['one', 'typed', 'generic'])
 })

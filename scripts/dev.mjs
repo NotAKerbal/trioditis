@@ -288,7 +288,7 @@ try {
   ])
   if (migrationNames().length > 0) {
     step('Running migrations')
-    runMigrations(localConvex)
+    await runMigrations(convexUrl)
   }
   step('Creating the test account')
   await ensureTester({
