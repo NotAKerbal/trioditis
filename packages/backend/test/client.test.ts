@@ -365,13 +365,15 @@ describe('reads that many large rows could push past the read limit', () => {
     const a = await signIn(t, 'user_a')
     const chatId = await aChat(t, 'user_a', 'p')
     const ids: Id<'messages'>[] = []
-    for (let m = 0; m < 80; m++) {
+    // About 140 KB of reactions each, so 70 come to about 9.5 MiB: past the 8 MiB the query
+    // reads, and no more, since the rows are slow to write.
+    for (let m = 0; m < 70; m++) {
       await aMessage(t, chatId, `m${m}`, m + 1)
     }
     await t.run(async (ctx) => {
       for (const message of await ctx.db.query('messages').collect()) ids.push(message._id)
     })
-    // A hundred reactions on each, every one as large as ingest lets it be: about 17 MiB.
+    // A hundred reactions on each, every one as large as ingest lets it be.
     for (const messageId of ids) {
       await t.run(async (ctx) => {
         for (let r = 0; r < 100; r++) {
