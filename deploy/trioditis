@@ -1,12 +1,106 @@
 #!/bin/sh
 # `docker compose` for this install, with its settings. Usage: deploy/trioditis <compose args>
 # e.g. `deploy/trioditis ps`, `deploy/trioditis logs -f gateway`, `deploy/trioditis down`.
+# Also `deploy/trioditis backup <dir>` and `deploy/trioditis restore <archive>`: see
+# docs/deploy.md, Backup and restore.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
-if [ ! -f "$here/.env" ]; then
+env_file="$here/.env"
+if [ ! -f "$env_file" ]; then
   echo "No install here yet. Run deploy/install/install.sh first." >&2
   exit 1
 fi
-# Compose reads COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs.
+# The project is the one this install saved (installs from before it was saved use the
+# default), whatever COMPOSE_PROJECT_NAME says: it names the volumes that hold the data.
+project=$(grep -E '^COMPOSE_PROJECT_NAME=' "$env_file" | tail -1 | cut -d= -f2-)
+project=${project:-trioditis}
+# Exported COMPOSE_* variables would override .env, so they're dropped. Compose reads
+# COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs.
+unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
 cd "$here/compose"
-exec docker compose --env-file "$here/.env" "$@"
+compose() { docker compose --env-file "$env_file" -p "$project" "$@"; }
+
+# The archive tool: the bundle's pinned Alpine-based image, which has tar and gzip.
+tool=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+
+# Every volume of this project, found by the label Compose gives them, so a dropped network's
+# volume is included and another install's never is.
+project_volumes() {
+  docker volume ls -q --filter "label=com.docker.compose.project=$project" | sort
+}
+
+case "${1:-}" in
+  backup)
+    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
+    mkdir -p "$2"
+    dir=$(cd "$2" && pwd)
+    case "$dir/" in
+      "$(cd "$here/.." && pwd)"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;;
+    esac
+    volumes=$(project_volumes)
+    [ -n "$volumes" ] || { echo "No volumes for project $project." >&2; exit 1; }
+    name="$project-$(date +%Y%m%d-%H%M%S)"
+    mounts=''
+    for volume in $volumes; do mounts="$mounts -v $volume:/volumes/$volume:ro"; done
+    # Stopped, so the databases are consistent; what was running starts again however it ends.
+    running=$(compose ps --services --status running | tr '\n' ' ')
+    compose stop
+    # shellcheck disable=SC2086 # $running is a list of services
+    trap '[ -z "$running" ] || compose start $running' EXIT
+    # Root in the container reads every volume's files; the archive is then handed to the
+    # caller, readable only by them.
+    # shellcheck disable=SC2086 # $mounts is a list of -v options
+    docker run --rm --log-driver none $mounts -v "$dir:/backup" --entrypoint sh "$tool" \
+      -c "tar -czf /backup/$name.tgz -C /volumes . && chown $(id -u):$(id -g) /backup/$name.tgz && chmod 600 /backup/$name.tgz"
+    (umask 077 && cp "$env_file" "$dir/$name.env")
+    echo "Backed up $(echo "$volumes" | wc -l | tr -d ' ') volumes of project $project to $dir/$name.tgz, and the secrets to $dir/$name.env."
+    echo "Both hold private data: keep them encrypted."
+    ;;
+  restore)
+    yes=0
+    [ "${2:-}" != --yes ] || { yes=1; shift; }
+    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis restore [--yes] <archive.tgz>" >&2; exit 2; }
+    [ -f "$2" ] || { echo "No archive at $2." >&2; exit 1; }
+    archive_dir=$(cd "$(dirname "$2")" && pwd)
+    archive=$(basename "$2")
+    # The archive's top-level directories are volume names; each must belong to this project.
+    volumes=$(docker run --rm --log-driver none -v "$archive_dir:/backup:ro" --entrypoint sh "$tool" \
+      -c "tar -tzf '/backup/$archive' | sed -n 's#^\./\([^/][^/]*\)/.*#\1#p' | sort -u")
+    [ -n "$volumes" ] || { echo "$2 doesn't look like a backup from deploy/trioditis backup." >&2; exit 1; }
+    # The name past the project must be one of the bundle's volumes, so project "a" never takes
+    # project "a_b"'s.
+    for volume in $volumes; do
+      case "$volume" in
+        "${project}_"*) key=${volume#"${project}"_} ;;
+        *) key='' ;;
+      esac
+      case "$key" in
+        postgres | convex | caddy-data | caddy-config | bridge-*) ;;
+        *) echo "$2 holds volume $volume, which isn't project $project's. Restore it from the checkout of the install it came from." >&2; exit 1 ;;
+      esac
+    done
+    echo "This replaces the contents of: $(echo "$volumes" | tr '\n' ' ')"
+    if [ "$yes" = 0 ]; then
+      [ -t 0 ] || { echo "Pass --yes to restore without a prompt." >&2; exit 2; }
+      printf 'Stop project %s and restore? [y/N] ' "$project"
+      read -r answer
+      [ "$answer" = y ] || [ "$answer" = Y ] || exit 1
+    fi
+    compose --profile '*' down
+    mounts=''
+    for volume in $volumes; do
+      # Labelled as Compose labels its own, so it adopts them on the next start.
+      docker volume inspect "$volume" >/dev/null 2>&1 ||
+        docker volume create --label "com.docker.compose.project=$project" \
+          --label "com.docker.compose.volume=${volume#"${project}"_}" "$volume" >/dev/null
+      mounts="$mounts -v $volume:/volumes/$volume"
+    done
+    # shellcheck disable=SC2086 # $mounts is a list of -v options
+    docker run --rm --log-driver none $mounts -v "$archive_dir:/backup:ro" --entrypoint sh "$tool" \
+      -c "for v in /volumes/*; do find \"\$v\" -mindepth 1 -delete; done && tar -xzf '/backup/$archive' -C /volumes"
+    echo "Restored. Check deploy/.env is the one saved with this backup, then run deploy/install/install.sh to start the server."
+    ;;
+  *)
+    exec docker compose --env-file "$env_file" -p "$project" "$@"
+    ;;
+esac

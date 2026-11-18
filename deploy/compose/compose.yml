@@ -12,10 +12,10 @@ x-service: &service
 
 x-bridge-host: &bridge-host
   <<: *service
-  build:
-    context: ../..
-    dockerfile: deploy/docker/bridge-host.Dockerfile
+  # Built once by install.sh (deploy/docker/bridge-host.Dockerfile), not by each network's
+  # service, whose builds would collide on the shared tag. Never pulled: it only exists here.
   image: ${COMPOSE_PROJECT_NAME:-trioditis}/bridge-host:local
+  pull_policy: never
   # Large media is handed to some connectors as a file, which must never touch disk in
   # plaintext; the bridge host only writes it to memory-backed /dev/shm.
   shm_size: 256m

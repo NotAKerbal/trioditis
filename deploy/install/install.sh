@@ -11,7 +11,8 @@
 # options keeps the install as it is, and an option changes only its own setting. A rerun
 # rebuilds the images from this checkout, redeploys the functions and restarts what changed.
 # TRIODITIS_PROJECT=<name> in the environment picks another Compose project name (and image
-# names) for a second install on one machine, such as a test one. See docs/deploy.md.
+# and volume names) for a new install, such as a second, test one on this machine. An
+# install keeps its project for good. See docs/deploy.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -170,8 +171,21 @@ trusted=${trusted-$(get INSTALL_TRUSTED_PROXIES)}
 trusted=${trusted//,/ }
 networks=${networks-$(get TRIODITIS_NETWORKS)}
 networks=${networks:-whatsapp}
-project=${TRIODITIS_PROJECT:-$(get COMPOSE_PROJECT_NAME)}
-project=${project:-trioditis}
+# The Compose project names the install's volumes, so it never changes once there is one: a
+# saved name wins, and an install from before it was saved is the default, trioditis.
+# TRIODITIS_PROJECT only names a new install, and saying anything else is refused, since it
+# would start an empty server beside the real one.
+saved_project=$(get COMPOSE_PROJECT_NAME)
+if [ -n "$saved_project" ]; then
+  project=$saved_project
+elif has POSTGRES_PASSWORD; then
+  project=trioditis
+else
+  project=${TRIODITIS_PROJECT:-trioditis}
+fi
+if [ -n "${TRIODITIS_PROJECT:-}" ] && [ "$TRIODITIS_PROJECT" != "$project" ]; then
+  die "This install's Compose project is $project, and TRIODITIS_PROJECT=$TRIODITIS_PROJECT would start another, empty one. Unset TRIODITIS_PROJECT, or use a separate checkout for a second install."
+fi
 [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "TRIODITIS_PROJECT must be lowercase letters, digits, '-' and '_'."
 [[ "$trusted" =~ ^[A-Za-z0-9_.:/\ ]*$ ]] || die "--trusted-proxies takes IP ranges (CIDR) or private_ranges."
 if [ -z "${e2e+set}" ]; then
@@ -179,10 +193,11 @@ if [ -z "${e2e+set}" ]; then
   [ -n "$e2e" ] || case "$(get COMPOSE_FILE)" in *compose.e2e.yml*) e2e=1 ;; *) e2e=0 ;; esac
 fi
 
-case "$port" in
-  '' | *[!0-9]*) die "--port must be a number." ;;
-esac
-if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be between 1 and 65535."; fi
+# Checked as text first, so a huge number never reaches the shell's arithmetic.
+if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
+  die "--port must be a whole number from 1 to 65535."
+fi
+port=$((10#$port))
 
 IFS=',' read -r -a network_list <<<"$networks"
 [ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
@@ -224,7 +239,8 @@ elif [ -n "$proxy_url" ]; then
     die "--public-url must be an https:// origin with no path, such as https://box.tailnet.ts.net:8443: browsers keep keys only on secure pages."
   public_host=${BASH_REMATCH[1]}
   proxy_port=${BASH_REMATCH[3]:-443}
-  if [ "$proxy_port" -lt 1 ] || [ "$proxy_port" -gt 65535 ]; then die "--public-url's port must be between 1 and 65535."; fi
+  if [ "$((10#$proxy_port))" -lt 1 ] || [ "$((10#$proxy_port))" -gt 65535 ]; then die "--public-url's port must be from 1 to 65535."; fi
+  proxy_port=$((10#$proxy_port))
   case "$public_host" in
     localhost | 127.*) die "--public-url can't be a loopback address: the backend's container has its own loopback. Use this machine's name." ;;
   esac
@@ -270,15 +286,16 @@ else
   public_url="http://$host"
   [ "$port" = 80 ] || public_url="$public_url:$port"
   case "$host" in
-    localhost | 127.*)
+    127.0.0.1 | localhost)
       # Inside the backend's container, this address is the container itself:
-      # compose.loopback.yml serves the port there too.
+      # compose.loopback.yml serves the port there too, on 127.0.0.1.
       loopback=1
       compose_files="$compose_files:compose.loopback.yml"
       case "$port" in
         3210 | 3211) die "Ports 3210 and 3211 are the backend's own; pick another --port for a loopback address." ;;
       esac
       ;;
+    127.*) die "For a loopback address, use 127.0.0.1 or localhost." ;;
     \[* | *:*) die "--host can't be an IPv6 address: use 127.0.0.1, localhost, or an IPv4 address or name." ;;
     *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking, and the setup form would send its token and password unencrypted. Serve it over HTTPS before anyone signs up from another device: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
   esac
@@ -323,7 +340,13 @@ keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 
 # Compose reads COMPOSE_FILE and COMPOSE_PROFILES from deploy/.env, relative to the compose
 # directory, so it runs from there.
-compose() { (cd "$here/compose" && docker compose --env-file "$env_file" -p "$project" "$@"); }
+# Exported COMPOSE_* variables would override deploy/.env (and name the images), so they're
+# dropped: this install's settings are the ones it saved.
+compose() {
+  (cd "$here/compose" &&
+    env -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE -u COMPOSE_PROFILES \
+      docker compose --env-file "$env_file" -p "$project" "$@")
+}
 
 # --- Images -------------------------------------------------------------------------------
 
@@ -357,6 +380,9 @@ cat >"$here/runtime/config.json" <<EOF
 EOF
 chmod 644 "$here/runtime/config.json"
 
+# Every bridge host runs one image, built here once: Compose would build it for each
+# network's service at the same time, and the builds collide on the shared tag.
+docker build -q -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
 # Compose leaves a service whose profile is no longer enabled running, even with
@@ -435,8 +461,10 @@ done
 say "Checking the backend can fetch sign-in keys from $public_url"
 reachable=0
 for _ in $(seq 30); do
-  jwks=$(compose exec -T backend curl -fsS --max-time 5 "$public_url/api/auth/convex/jwks" 2>/dev/null || true)
-  case "$jwks" in *'"keys"'*) reachable=1; break ;; *) sleep 2 ;; esac
+  # The status goes on a line of its own after the body; only a 2xx counts, not a redirect.
+  jwks=$(compose exec -T backend curl -sS --max-time 5 -w '\n%{http_code}' "$public_url/api/auth/convex/jwks" 2>/dev/null || true)
+  http_status=${jwks##*$'\n'}
+  case "$http_status:${jwks%$'\n'*}" in 2??:*'"keys"'*) reachable=1; break ;; *) sleep 2 ;; esac
 done
 if [ "$reachable" = 0 ]; then
   case "$mode" in

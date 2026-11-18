@@ -106,13 +106,15 @@ if [ "$kind" = vm ]; then
     trap - EXIT
   fi
 
-  vendor_file="trioditis-$id-vendor.yaml"
+  # Named for this run, so two runs racing for one ID never share (or remove) each other's.
+  vendor_file="trioditis-$id-$(date +%s)-$$.yaml"
   vendor_path=$(pvesm path "$snippets:snippets/$vendor_file")
   mkdir -p "$(dirname "$vendor_path")"
   printf '%s\n' '#cloud-config' 'packages: [qemu-guest-agent]' 'runcmd:' \
     '  - [systemctl, enable, --now, qemu-guest-agent]' >"$vendor_path"
 
-  # A failure says what it leaves behind: the snippet, and the VM once this run has made it.
+  # On a failure before this run has created the VM, its snippet goes and nothing else is
+  # touched (the ID may be another run's). After, the VM and its snippet stay to look into.
   created=0
   left_behind() {
     [ "$1" = 0 ] && return
@@ -120,7 +122,7 @@ if [ "$kind" = vm ]; then
       echo "VM $id ($name) is left as it is, to look into: qm terminal $id (Ctrl-O leaves)." >&2
       echo "Remove it with: qm stop $id; qm destroy $id --purge; rm $vendor_path" >&2
     else
-      echo "No VM was created. Remove the cloud-init snippet with: rm $vendor_path" >&2
+      rm -f "$vendor_path"
     fi
   }
   trap 'left_behind $?' EXIT

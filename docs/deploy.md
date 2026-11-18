@@ -61,8 +61,9 @@ is tied to one origin, so the server answers at its address and not at others. R
 installer again with `--host` to change it (`--host ''` detects it again). `--bind` picks
 the interface the port listens on (default all of them).
 
-For a server only used on this machine, `--host 127.0.0.1 --bind 127.0.0.1` (or `localhost`)
-works too; browsers treat loopback as secure, so it needs no HTTPS. Inside the backend's
+For a server only used on this machine, `--host 127.0.0.1 --bind 127.0.0.1` (or
+`localhost`; other `127.*` addresses aren't supported) works too; browsers treat loopback as
+secure, so it needs no HTTPS. Inside the backend's
 container that address is the container itself, so the installer adds a small `loopback`
 forwarder there (`compose.loopback.yml`) that serves the port by passing it on to Caddy.
 Ports 3210 and 3211 can't be used for it. IPv6 addresses aren't supported for `--host`.
@@ -214,30 +215,32 @@ Proxmox, use encrypted storage for the VM. Encrypting those connector tables wit
 
 ## Backup and restore
 
-Built-in `backup` and `restore` commands are Phase 1. Until then, back up while the server
-is stopped, so the databases are consistent:
+Fuller `backup` and `restore` commands (online, encrypted, scheduled) are Phase 1. For now,
+`deploy/trioditis` takes a consistent archive while the server is stopped:
 
 ```sh
-mkdir -p ~/trioditis-backups && chmod 700 ~/trioditis-backups
-deploy/trioditis down
-sudo tar -C /var/lib/docker/volumes -czf ~/trioditis-backups/trioditis-$(date +%F).tgz \
-  trioditis_postgres trioditis_convex trioditis_caddy-data \
-  $(deploy/trioditis config --volumes | grep '^bridge-' | sed 's/^/trioditis_/')
-cp deploy/.env ~/trioditis-backups/trioditis-$(date +%F).env   # the secrets
-deploy/trioditis up -d
+deploy/trioditis backup ~/trioditis-backups
 ```
 
-The archive takes the bridge volumes of the networks that are enabled now
-(`trioditis_bridge-whatsapp`, and `trioditis_bridge-fake` with the fake network), and only
-those: a network you've dropped keeps its volume, and its database stays in
-`trioditis_postgres`, but add its volume by name if you want to keep its state. Keep backups outside the checkout, as above: the image builds
-copy the checkout, and although the ignore files exclude `deploy/.env*`, `*.env` and
-`*.tgz`, a backup elsewhere can't end up in an image or a commit by mistake.
+It stops the server, archives every Docker volume of this install's Compose project (found
+by the label Compose gives them, so it never takes another install's, and it includes the
+volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
+was running. The two files are `<project>-<date>-<time>.tgz` and `.env`, readable only by
+you. The directory must be outside the checkout: image builds copy the checkout, and a
+backup outside it can't end up in an image or a commit by mistake.
 
-Restore by stopping the server, extracting the archive back into
-`/var/lib/docker/volumes`, putting `deploy/.env` back, and running the installer. Keep
-backups encrypted: they contain the connector state above, and `deploy/.env` holds every
-secret the server has.
+To restore, put the `.env` saved with the backup back as `deploy/.env` in a checkout of the
+same version, then:
+
+```sh
+deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>.tgz
+deploy/install/install.sh
+```
+
+`restore` asks before it stops the server and replaces the volumes' contents (`--yes` skips
+the question). It refuses an archive whose volumes belong to another project. Keep backups
+encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
+server has.
 
 ## Proxmox
 
@@ -281,7 +284,11 @@ reply, and checks that nothing readable reached Convex.
 
 To run a second, throwaway install on the same machine without touching the first, give it
 its own Compose project (which also names its images and volumes) and port, from a separate
-checkout so it has its own `deploy/.env`:
+checkout so it has its own `deploy/.env`. `TRIODITIS_PROJECT` only names a new install: an
+existing one keeps the project it was installed with (`trioditis` for one from before the
+name was saved), and the installer refuses a different one, which would start an empty
+server beside it. `deploy/trioditis` always uses the saved project, whatever
+`COMPOSE_PROJECT_NAME` says.
 
 ```sh
 TRIODITIS_PROJECT=trioditis-test deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1 --port 18080
