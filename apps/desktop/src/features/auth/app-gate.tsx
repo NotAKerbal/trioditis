@@ -252,20 +252,31 @@ function KeySetup({
   const backupsSaved = useRef(false)
   const leavingRef = useRef(false)
   const [leaving, setLeaving] = useState(false)
+  const [signOutFailed, setSignOutFailed] = useState(false)
   const leave = async () => {
     leavingRef.current = true
     setLeaving(true)
-    // Whether the backups exist is known only once a keys.setup on its way has answered.
+    setSignOutFailed(false)
+    // Whether the backups exist is known only once a keys.setup on its way has answered. None
+    // starts after this point (finish checks leavingRef before it calls keys.setup).
     await backingUp.current?.catch(() => undefined)
     if (await signOut(backupsSaved.current ? userId : undefined, { waitFor: saving.current })) return
     leavingRef.current = false
     setLeaving(false)
-    setError(SIGN_OUT_FAILED)
+    setSignOutFailed(true)
   }
+  // Says itself when signing out didn't work, on whichever screen it's on.
   const signOutButton = (label = 'Sign out') => (
-    <Button block loading={leaving} disabled={leaving} onClick={() => void leave()}>
-      {label}
-    </Button>
+    <>
+      {signOutFailed ? (
+        <p role="alert" className="mb-2 text-sm text-danger">
+          {SIGN_OUT_FAILED}
+        </p>
+      ) : null}
+      <Button block loading={leaving} disabled={leaving} onClick={() => void leave()}>
+        {label}
+      </Button>
+    </>
   )
 
   /**
@@ -346,6 +357,12 @@ function KeySetup({
     } catch (e) {
       if (await takenElsewhere(job)) return
       return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
+    }
+    // Signing out began while the proof was on its way: no backups start now, so the key's
+    // fate is decided by what's already done.
+    if (leavingRef.current) {
+      setBusy(false)
+      return
     }
     let kid: string
     onSaving()
