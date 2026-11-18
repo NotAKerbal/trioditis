@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values'
+import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
 import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
@@ -306,15 +307,49 @@ async function settleOverdue(ctx: MutationCtx, now: number) {
         .lte('expiresAt', now - OVERDUE_GRACE_MS),
     )
     .take(MAX_EXPIRIES)
-  for (const command of overdue) {
-    const unsettled =
-      command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
-    await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
-    if (unsettled) await markCopy(ctx, command, 'unknown')
-    await expireLogin(ctx, command)
-    await onCommandOverdue(ctx, command)
-  }
+  for (const command of overdue) await settle(ctx, command)
 }
+
+/** Settles one overdue command; it then has no `expiresAt`, so nothing settles it twice. */
+async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
+  const unsettled =
+    command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
+  await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
+  if (unsettled) await markCopy(ctx, command, 'unknown')
+  await expireLogin(ctx, command)
+  await onCommandOverdue(ctx, command)
+}
+
+/**
+ * Runs at a command's deadline, scheduled when it was queued, so a command ends on time even
+ * when no gateway is claiming: one still queued or claimed expires (and its bridge-readable
+ * payload is deleted), and one the bridge host accepted is settled an hour later if it never
+ * reported back. The gateway's own sweep does the same; whichever runs first wins, and the
+ * other finds nothing left to do.
+ */
+export const commandDeadline = internalMutation({
+  args: { commandId: v.id('outbox') },
+  returns: v.null(),
+  handler: async (ctx, { commandId }) => {
+    const command = await ctx.db.get(commandId)
+    if (!command) return null
+    // Whatever state it's in, nothing bridge-readable stays past the deadline.
+    await deletePayload(ctx, commandId)
+    if (command.expiresAt === undefined) return null
+    const now = Date.now()
+    if (command.state === 'queued' || command.state === 'claimed') {
+      if (command.expiresAt <= now) await expire(ctx, command)
+      else await ctx.scheduler.runAt(command.expiresAt, internal.gateway.commandDeadline, { commandId })
+      return null
+    }
+    if (command.state === 'dispatched') {
+      const overdueAt = command.expiresAt + OVERDUE_GRACE_MS
+      if (overdueAt <= now) await settle(ctx, command)
+      else await ctx.scheduler.runAt(overdueAt, internal.gateway.commandDeadline, { commandId })
+    }
+    return null
+  },
+})
 
 /** A login command the bridge host refused ends that login with its error. */
 async function failLogin(ctx: MutationCtx, command: Doc<'outbox'>, error: Doc<'outbox'>['lastError']) {

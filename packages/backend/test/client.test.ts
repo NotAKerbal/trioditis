@@ -340,14 +340,88 @@ describe('reads that large messages could push past the read limit', () => {
       await ctx.db.insert('reactionCleanups', { messageId: ids[0]! })
     })
     const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
-    expect(Object.keys(result)).toHaveLength(29)
-    expect(result[ids[0]!]).toBeUndefined()
+    expect(Object.keys(result)).toHaveLength(30)
+    expect(result[ids[0]!]).toEqual([])
     expect(result[ids[1]!]).toEqual([{ key: '👍', senderKey: 'self' }])
     // Someone else asking about these IDs, from their own chat, sees nothing of them.
     const b = await signIn(t, 'user_c')
     const theirs = await aChat(t, 'user_c', 'q')
     const seen = await b.query(api.messages.reactions, { chatId: theirs, messageIds: ids.slice(1, 3) })
     expect(Object.values(seen).flat()).toEqual([])
+  })
+})
+
+describe('reads that many large rows could push past the read limit', () => {
+  it('reads reactions up to a byte budget, leaving out the messages it didn’t get to', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const ids: Id<'messages'>[] = []
+    for (let m = 0; m < 80; m++) {
+      await aMessage(t, chatId, `m${m}`, m + 1)
+    }
+    await t.run(async (ctx) => {
+      for (const message of await ctx.db.query('messages').collect()) ids.push(message._id)
+    })
+    // A hundred reactions on each, every one as large as ingest lets it be: about 17 MiB.
+    for (const messageId of ids) {
+      await t.run(async (ctx) => {
+        for (let r = 0; r < 100; r++) {
+          await ctx.db.insert('reactions', {
+            userId: 'user_a',
+            messageId,
+            senderKey: `ghost:${String(r).padStart(256, 'g')}`,
+            key: `${r}`.padStart(256, '€'),
+            eventId: `${r}`.padStart(256, 'e'),
+            addedAt: 1,
+            networkTs: 1,
+          })
+        }
+      })
+    }
+    const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
+    const answered = Object.keys(result)
+    expect(answered.length).toBeGreaterThan(0)
+    expect(answered.length).toBeLessThan(ids.length)
+    // It answers in order, each in full, and the rest can be asked for again.
+    expect(answered).toEqual(ids.slice(0, answered.length))
+    expect(result[ids[0]!]).toHaveLength(100)
+    const rest = await a.query(api.messages.reactions, { chatId, messageIds: ids.slice(answered.length, 100) })
+    expect(Object.keys(rest).length).toBeGreaterThan(0)
+  })
+
+  it('bounds a label page by items and bytes, even when a cursor range asks for more', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const work = await a.mutation(api.labels.create, { labelKey: 'label-key-work-0001', sealed: sealed('work') })
+    const meta = { ...sealed('meta'), ct: 'A'.repeat(Math.floor((8 * 1024 * 4) / 3)) }
+    for (let n = 0; n < 120; n++) {
+      const chatId = await aChat(t, 'user_a', `c${n}`, { lastMessageAt: n, sealedMeta: meta })
+      await t.run(async (ctx) => await ctx.db.insert('chatLabels', { userId: 'user_a', chatId, labelId: work }))
+    }
+    const all: string[] = []
+    let cursor: string | null = null
+    let end = ''
+    for (;;) {
+      const next: { page: { portalId: string }[]; isDone: boolean; continueCursor: string } = await a.query(
+        api.chats.list,
+        { labelId: work, paginationOpts: { numItems: 50, cursor } },
+      )
+      expect(next.page.length).toBeLessThanOrEqual(50)
+      all.push(...next.page.map((row) => row.portalId))
+      end = next.continueCursor
+      if (next.isDone) break
+      cursor = next.continueCursor
+    }
+    expect(new Set(all).size).toBe(120)
+    // A reactive client reloading one page with an end cursor at the very end still gets a
+    // bounded page, and is told to split it.
+    const wide = await a.query(api.chats.list, {
+      labelId: work,
+      paginationOpts: { numItems: 50, cursor: null, endCursor: end },
+    })
+    expect(wide.page.length).toBeLessThanOrEqual(51)
+    expect(wide.pageStatus).toBe('SplitRequired')
   })
 })
 

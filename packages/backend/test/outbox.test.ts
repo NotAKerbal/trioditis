@@ -503,10 +503,25 @@ describe('sending', () => {
   })
 
   it('expires a bounded number of commands per claim', async () => {
-    vi.useFakeTimers()
-    const { t, as } = await ready()
-    for (let n = 1; n <= 60; n++) await send(as, await aChat(t, 'user_a', `p${n}`), n)
-    vi.advanceTimersByTime(25 * 60 * 60 * 1000)
+    const { t } = await ready()
+    // Past their deadline with their deadline jobs not yet run (written directly, so none was
+    // scheduled): the gateway's own sweep ends them, a bounded number at a time.
+    for (let n = 1; n <= 60; n++) {
+      const chatId = await aChat(t, 'user_a', `p${n}`)
+      await t.run(async (ctx) => {
+        await ctx.db.insert('outbox', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          loginId: 'login_a',
+          chatId,
+          payload: { type: 'markRead', portalId: `p${n}`, upToEventId: 'e' },
+          state: 'queued',
+          attempts: 0,
+          createdAt: Date.now(),
+          expiresAt: Date.now() - 1,
+        })
+      })
+    }
     await loginOn(t, 'whatsapp-1')
     await claim(t)
     const expired = async () =>
@@ -516,6 +531,67 @@ describe('sending', () => {
     await claim(t)
     await claim(t)
     expect(await expired()).toBe(60)
+  })
+
+  it('ends a send at its deadline with no gateway running, deleting its payload', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await send(as, chatId, 1)
+    const payloads = async () => await t.run(async (ctx) => await ctx.db.query('outboxPayloads').collect())
+    expect(await payloads()).toHaveLength(1)
+    // No claims at all: the deadline job alone ends it.
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 1)
+    await t.finishInProgressScheduledFunctions()
+    expect(await payloads()).toHaveLength(0)
+    const [command] = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(command).toMatchObject({ state: 'expired', delivery: 'failed' })
+    vi.advanceTimersByTime(48 * 60 * 60 * 1000)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await payloads()).toHaveLength(0)
+  })
+
+  it('moves a scheduled send to the outbox and still deletes its payload on time without a gateway', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await as.mutation(api.scheduled.create, {
+      chatId,
+      clientMessageId: id(7),
+      forBridge: sealed('b7'),
+      copy: sealed('c7'),
+      sendAt: Date.now() + 60_000,
+    })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    const payloads = async () => await t.run(async (ctx) => await ctx.db.query('outboxPayloads').collect())
+    expect(await payloads()).toHaveLength(1)
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await payloads()).toHaveLength(0)
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toHaveLength(0)
+  })
+
+  it('settles an accepted send an hour past its deadline with no gateway sweep', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await send(as, chatId, 1)
+    await loginOn(t, 'whatsapp-1')
+    const [command] = await claim(t)
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: command!.commandId,
+      lease: command!.lease,
+      accepted: true,
+    })
+    vi.advanceTimersByTime(25 * 60 * 60 * 1000 + 1)
+    await t.finishInProgressScheduledFunctions()
+    vi.advanceTimersByTime(1)
+    await t.finishInProgressScheduledFunctions()
+    const [row] = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(row).toMatchObject({ state: 'dispatched', delivery: 'unknown' })
+    expect(row!.expiresAt).toBeUndefined()
   })
 
   it('keeps a login with the host that last reported it connected', async () => {

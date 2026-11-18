@@ -344,6 +344,10 @@ export const removePasskeyBackup = mutation({
   handler: async (ctx, { credentialId, proof }) => {
     const member = await requireMember(ctx)
     await consumeKeyProof(ctx, member, proof)
+    // Before a backup goes, the counter holds at least its revision, even for an account
+    // whose backups were written before the counter existed.
+    const seen = (await backupsOf(ctx, member.userId)).reduce((n, row) => Math.max(n, row.revision), 0)
+    if ((member.backupRevision ?? 0) < seen) await ctx.db.patch(member._id, { backupRevision: seen })
     const rows = await ctx.db
       .query('keyBackups')
       .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('kind', 'passkey'))

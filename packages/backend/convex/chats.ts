@@ -82,10 +82,18 @@ async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, I
   }
 }
 
+/**
+ * The page options the client asked for, within the server's bounds. `maximumRowsRead` keeps
+ * a page to about `MAX_PAGE_ITEMS` rows even when a reactive client reloads it with an
+ * `endCursor` range (which `numItems` doesn't limit): past that, the page ends early and says
+ * it needs splitting, which `usePaginatedQuery` does. One more than a page, so an ordinary
+ * full page doesn't ask to be split.
+ */
 function pageOptions(opts: Infer<typeof paginationOptsValidator>) {
   return {
     ...opts,
     numItems: Math.min(Math.max(1, opts.numItems), MAX_PAGE_ITEMS),
+    maximumRowsRead: Math.min(opts.maximumRowsRead ?? MAX_PAGE_ITEMS + 1, MAX_PAGE_ITEMS + 1),
     maximumBytesRead: Math.min(opts.maximumBytesRead ?? MAX_PAGE_BYTES, MAX_PAGE_BYTES),
   }
 }
@@ -114,6 +122,9 @@ export const list = query({
       const label = await ctx.db.get(args.labelId)
       if (!label || label.userId !== userId) throw new ConvexError('That label doesn’t exist.')
       const labelId = args.labelId
+      // The page reads `chatLabels` rows, then each one's chat. A chat row is small (its
+      // sealed metadata is capped at 8 KiB), so at most a page's worth of them, which
+      // `maximumRowsRead` ensures, stays far inside the read limit.
       const result = await ctx.db
         .query('chatLabels')
         .withIndex('by_label', (q) => q.eq('labelId', labelId))

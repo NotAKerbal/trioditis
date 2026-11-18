@@ -258,6 +258,43 @@ describe('replacing backups', () => {
     await expect(put(credentialId, first)).rejects.toThrow(/another device/)
   })
 
+  it('keeps the highest revision seen when a backup goes from an account without the counter', async () => {
+    const t = setup()
+    const { sam, device } = await ready_(t)
+    const credentialId = credential(5)
+    // A passkey backup at revision 7, written before the counter existed.
+    await t.run(async (ctx) => {
+      const member = (await ctx.db.query('members').first())!
+      await ctx.db.patch(member._id, { backupRevision: undefined })
+      await ctx.db.insert('keyBackups', {
+        userId: 'sam',
+        kid: device.kid,
+        kind: 'passkey',
+        nonce: 'n'.repeat(32),
+        ct: 'c'.repeat(64),
+        credentialId,
+        prfSalt: toBase64Url(new Uint8Array(32)),
+        revision: 7,
+        createdAt: Date.now(),
+      })
+    })
+    await sam.mutation(api.keys.removePasskeyBackup, { credentialId, proof: await proofFrom(sam, device.identity) })
+    const wrap = wrapIdentityKey(device.identity.privateKey, new Uint8Array(32).fill(9), {
+      userId: 'sam',
+      kid: device.kid,
+      kind: 'passkey',
+    })
+    const { revision } = await sam.mutation(api.keys.putBackup, {
+      kind: 'passkey',
+      ...wrap,
+      credentialId,
+      prfSalt: toBase64Url(new Uint8Array(32)),
+      proof: await proofFrom(sam, device.identity),
+      expectedRevision: 0,
+    })
+    expect(revision).toBe(8)
+  })
+
   it('caps passkey backups and their PRF salts', async () => {
     const t = setup()
     const { sam, device } = await ready_(t)
