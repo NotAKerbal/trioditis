@@ -583,13 +583,20 @@ void test('a reset sees a backend started with relative paths, or holding its fi
 })
 
 /** A stand-in for /proc in `dir`, with one process, 4242, whose files are laid out as given. */
-function fakeProc(dir, { comm = 'convex-local-ba', args = ['convex-local-backend'], cgroup, cwd = null, fds = null }) {
+function fakeProc(
+  dir,
+  { comm = 'convex-local-ba', args = ['convex-local-backend'], cgroup, cgroupNamespace, cwd = null, fds = null },
+) {
   const proc = join(dir, 'proc')
   rmSync(proc, { recursive: true, force: true })
   mkdirSync(join(proc, '4242'), { recursive: true })
   writeFileSync(join(proc, '4242/comm'), `${comm}\n`)
   writeFileSync(join(proc, '4242/cmdline'), args.join('\0') + '\0')
   if (cgroup !== undefined) writeFileSync(join(proc, '4242/cgroup'), `${cgroup}\n`)
+  if (cgroupNamespace !== undefined) {
+    mkdirSync(join(proc, '4242/ns'))
+    symlinkSync(cgroupNamespace, join(proc, '4242/ns/cgroup'))
+  }
   // Another user's process: a cwd that isn't a link and an fd that isn't a directory make
   // reading them fail, as EACCES would. A readable one gets a real link and directory.
   if (cwd === null) writeFileSync(join(proc, '4242/cwd'), '')
@@ -638,6 +645,13 @@ void test('a reset refuses a backend it can’t inspect, unless it runs in a con
     const inContainer = fakeProc(dir, { args: ['convex-local-backend', 'convex_local_backend.sqlite3'], cgroup })
     assert.equal(await backendInUse(dir, { proc: inContainer }), null, cgroup)
   }
+  // A cgroup namespace other than ours says nothing about which files it shares: refused.
+  const otherNamespace = fakeProc(dir, {
+    args: ['convex-local-backend', 'convex_local_backend.sqlite3'],
+    cgroup: host,
+    cgroupNamespace: 'cgroup:[4026530000]',
+  })
+  assert.match((await backendInUse(dir, { proc: otherNamespace })) ?? '', refused)
   // Not a local backend at all: another user's process is none of this check's business.
   assert.equal(await backendInUse(dir, { proc: fakeProc(dir, { comm: 'sshd', cgroup: host }) }), null)
 })
@@ -663,7 +677,7 @@ void test('a reset refuses a backend it can inspect that runs anywhere in this c
   assert.equal(await backendInUse(dir, { proc: nested }), null)
 })
 
-void test('--reset-ignoring takes a process ID, and only with --setup --reset', () => {
+void test('--reset-ignoring takes a whole process ID, and only with --setup --reset', () => {
   const run = (args) =>
     spawnSync(process.execPath, ['scripts/dev.mjs', ...args], {
       cwd: new URL('../..', import.meta.url),
@@ -671,6 +685,26 @@ void test('--reset-ignoring takes a process ID, and only with --setup --reset', 
       encoding: 'utf8',
     })
   assert.match(run(['--setup', '--reset-ignoring', '42']).stderr, /only goes with `--setup --reset`/)
-  assert.match(run(['--setup', '--reset', '--reset-ignoring', 'x']).stderr, /takes a process ID/)
-  assert.match(run(['--setup', '--reset', '--reset-ignoring']).stderr, /takes a process ID/)
+  for (const option of [
+    ['--reset-ignoring', 'x'],
+    ['--reset-ignoring'],
+    ['--reset-ignoring=42=typo'],
+    ['--reset-ignoring=42abc'],
+    ['--reset-ignoring=+42'],
+    ['--reset-ignoring=042'],
+    ['--reset-ignoring=4 2'],
+    ['--reset-ignoring='],
+    ['--reset-ignoring', '42', '--reset-ignoring=0'],
+    ['--reset-ignoring=99999999999999999999'],
+  ]) {
+    assert.match(run(['--setup', '--reset', ...option]).stderr, /takes a process ID/, option.join(' '))
+  }
+  // A whole one gets past the check: in a throwaway checkout, which then stops for want of the
+  // Convex CLI, before touching anything of this one.
+  const { run: runThrowaway } = throwawayCheckout()
+  for (const option of [['--reset-ignoring=42'], ['--reset-ignoring', '42', '--reset-ignoring', '7']]) {
+    const result = runThrowaway(['--setup', '--reset', ...option])
+    assert.doesNotMatch(result.stderr, /--reset-ignoring/, option.join(' '))
+    assert.match(result.stdout, /Throwing this checkout’s backend data away/, option.join(' '))
+  }
 })

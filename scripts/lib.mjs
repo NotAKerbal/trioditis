@@ -582,16 +582,14 @@ const CONTAINER_CGROUP = /(?:^|[/.-])(?:docker|containerd|cri-containerd|crio|po
 
 /**
  * Whether process `base` (a /proc entry) runs in a container: its cgroup is a container
- * runtime's, or (where it can be read) its cgroup namespace isn't ours. Its cgroup file is
- * readable by everyone, even when its files and directory aren't.
+ * runtime's. Its cgroup file is readable by everyone, even when its files and directory aren't.
+ * A cgroup namespace other than ours isn't taken as one: that says nothing about which files
+ * it shares with this machine.
  */
 function inContainer(base) {
   try {
     const lines = readFileSync(join(base, 'cgroup'), 'utf8').split('\n')
-    if (lines.some((line) => CONTAINER_CGROUP.test(line.split(':').slice(2).join(':')))) return true
-  } catch {}
-  try {
-    return readlinkSync(join(base, 'ns/cgroup')) !== readlinkSync('/proc/self/ns/cgroup')
+    return lines.some((line) => CONTAINER_CGROUP.test(line.split(':').slice(2).join(':')))
   } catch {
     return false
   }

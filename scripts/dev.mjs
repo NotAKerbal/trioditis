@@ -61,7 +61,11 @@ const setupOnly = args.includes('--setup')
 const reset = args.includes('--reset')
 // PIDs of backends a reset may ignore, from `--reset-ignoring <pid>` (or `=<pid>`), repeatable.
 const resetIgnoring = args.flatMap((arg, i) =>
-  arg === '--reset-ignoring' ? [args[i + 1]] : arg.startsWith('--reset-ignoring=') ? [arg.split('=')[1]] : [],
+  arg === '--reset-ignoring'
+    ? [args[i + 1]]
+    : arg.startsWith('--reset-ignoring=')
+      ? [arg.slice('--reset-ignoring='.length)]
+      : [],
 )
 const networkArg =
   args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
@@ -83,7 +87,10 @@ const fail = (message) => {
 
 if (reset && !setupOnly) fail('`--reset` only goes with `--setup`: run `pnpm dev --setup --reset`.')
 if (resetIgnoring.length > 0 && !reset) fail('`--reset-ignoring` only goes with `--setup --reset`.')
-if (!resetIgnoring.every((pid) => /^[1-9]\d*$/.test(pid ?? ''))) fail('`--reset-ignoring` takes a process ID.')
+// A whole decimal process ID, nothing else: `=42=typo` must not become 42.
+if (!resetIgnoring.every((pid) => /^[1-9]\d*$/.test(pid ?? '') && Number.isSafeInteger(Number(pid)))) {
+  fail('`--reset-ignoring` takes a process ID.')
+}
 
 // Before anything is written: this checkout's data must really be in this checkout.
 try {

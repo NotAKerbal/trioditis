@@ -207,9 +207,13 @@ checkout's data, on any port: something listening on the ports in
 - a Convex local backend whose open files and directory can't be read (another user's), unless
   it runs in a container. What such a backend opens can't be told from its arguments, so it
   counts as using this checkout's data. A container's backend is ignored, recognised by its
-  cgroup (Docker, containerd, Podman, Kubernetes, LXC) or a cgroup namespace other than yours:
-  its paths are the container's own, and the self-hosted bundle keeps its data in named
-  volumes, not in a checkout.
+  cgroup (Docker, containerd, Podman, Kubernetes, LXC).
+
+The reset can't see into containers. A container whose Convex backend uses this checkout's
+files through a bind mount, such as a dev container with the checkout mounted, isn't
+detected, and a reset would delete the database from under it: stop such containers before
+`pnpm dev --setup --reset`. The self-hosted bundle (`deploy/`) is safe to leave running: it
+keeps its data in named Docker volumes and mounts no checkout.
 
 On other systems only absolute paths in a process's arguments are checked, so a backend
 started there with relative paths isn't seen. Only a process's ID and program are shown,
