@@ -20,11 +20,12 @@ import { Navigate } from '@tanstack/react-router'
 import { ConvexHttpClient } from 'convex/browser'
 import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
-import { canKeepKeys, forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
+import { canKeepKeys, loadIdentity, storeIdentity } from '~/lib/keys.ts'
+import { signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -103,9 +104,11 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       onSaving={() => setHeld(setupFor)}
       onLeave={() => setHeld(null)}
       onDone={async (doneKid) => {
-        const { data } = await local.refetch()
-        // Until the key reads back from this device, setup stays on screen, with Try again.
-        if (data?.kid !== doneKid) throw new Error('the key couldn’t be read back from this device')
+        // Read straight from the device: a failed refetch would still offer the data it had.
+        // Until the key reads back, setup stays on screen, with Try again.
+        const kept = await loadIdentity(userId)
+        if (kept?.kid !== doneKid) throw new Error('the key couldn’t be read back from this device')
+        await local.refetch()
         setSetUpKid(doneKid)
         setHeld(null)
         void remote.refetch()
@@ -241,6 +244,23 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
+  // Signing out from setup waits for a save still under way, and forgets the key once the
+  // server holds its backups (before that, this device's copy may be the only one). While it
+  // runs, nothing else on these screens starts.
+  const saving = useRef<Promise<unknown> | null>(null)
+  const backupsSaved = useRef(false)
+  const leavingRef = useRef(false)
+  const [leaving, setLeaving] = useState(false)
+  const leave = () => {
+    leavingRef.current = true
+    setLeaving(true)
+    void signOut(backupsSaved.current ? userId : undefined, { waitFor: saving.current })
+  }
+  const signOutButton = (label = 'Sign out') => (
+    <Button block loading={leaving} disabled={leaving} onClick={leave}>
+      {label}
+    </Button>
+  )
 
   /**
    * The account's key as the server has it now, or undefined if that couldn't be read. The app's
@@ -325,6 +345,7 @@ function KeySetup({
     onSaving()
     try {
       kid = (await setup({ ...job.setup.args, proof })).kid
+      backupsSaved.current = true
     } catch (e) {
       if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
@@ -360,10 +381,13 @@ function KeySetup({
 
   /** Keeps the key on this device, once the server has its backups. */
   async function keep(kid: string, keyPair: KeyPair, lost: boolean) {
+    if (leavingRef.current) return
     setBusy(true)
     setError(null)
     try {
-      await storeIdentity(userId, kid, keyPair)
+      const save = storeIdentity(userId, kid, keyPair)
+      saving.current = save
+      await save
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
@@ -395,10 +419,10 @@ function KeySetup({
         title="Another device set up your key first"
         description="Your account’s key was made on another device a moment ago, so the key made here, and the recovery key shown with it, won’t be used. Unlock with your password to use the one from that device."
       >
-        <Button variant="primary" size="lg" block className="mb-2" onClick={onLeave}>
+        <Button variant="primary" size="lg" block className="mb-2" disabled={leaving} onClick={onLeave}>
           Unlock with my password
         </Button>
-        <SignOutButton />
+        {signOutButton()}
       </AuthCard>
     )
   }
@@ -415,17 +439,13 @@ function KeySetup({
           size="lg"
           block
           loading={busy}
+          disabled={leaving}
           onClick={() => void check(uncheckedKid, prepared, true)}
         >
           Check again
         </Button>
-        {/* keys.setup succeeded, so both backups exist: signing out forgets this device's copy.
-            Not while a step is running, which could keep it again afterwards. */}
-        {busy ? null : (
-          <div className="mt-2">
-            <SignOutButton userId={userId} />
-          </div>
-        )}
+        {/* keys.setup succeeded, so signing out forgets this device's copy (see `leave`). */}
+        <div className="mt-2">{signOutButton()}</div>
       </AuthCard>
     )
   }
@@ -436,11 +456,18 @@ function KeySetup({
         title="Your recovery key is the other one"
         description="Your key is set up, but another device finished saving its recovery key a moment earlier. The recovery key shown here won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
       >
-        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void complete(finished)}>
+        <Button
+          variant="primary"
+          size="lg"
+          block
+          className="mb-2"
+          disabled={leaving}
+          onClick={() => void complete(finished)}
+        >
           Continue
         </Button>
         {/* The backups are complete and the key is kept here, so signing out forgets it, as ever. */}
-        <SignOutButton userId={userId} />
+        {signOutButton()}
       </AuthCard>
     )
   }
@@ -465,15 +492,15 @@ function KeySetup({
           block
           className="mb-2"
           loading={busy}
+          disabled={leaving}
           onClick={() => void keep(keptKid, prepared.keyPair, recoveryLost)}
         >
           Try again
         </Button>
-        <Button block className="mb-2" onClick={onLeave}>
+        <Button block className="mb-2" disabled={leaving} onClick={onLeave}>
           Unlock with my password
         </Button>
-        {/* As above: the backups exist, and a save in progress could put the key back. */}
-        {busy ? null : <SignOutButton userId={userId} />}
+        {signOutButton()}
       </AuthCard>
     )
   }
@@ -485,7 +512,7 @@ function KeySetup({
           title={existing ? 'Finish setting up your key' : 'Set up your key'}
           description="Your key’s backup is protected by the password you sign in with. Sign in again, and setup carries on from there."
         >
-          <SignOutButton label="Sign in again" />
+          {signOutButton('Sign in again')}
         </AuthCard>
       )
     }
@@ -537,12 +564,17 @@ function KeySetup({
         <Checkbox className="mt-0.5" checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
         I’ve saved my recovery key somewhere safe.
       </label>
-      <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={() => void finish()}>
+      <Button
+        variant="primary"
+        size="lg"
+        block
+        disabled={!saved || leaving}
+        loading={busy}
+        onClick={() => void finish()}
+      >
         Finish setup
       </Button>
-      <div className="mt-2">
-        <SignOutButton />
-      </div>
+      <div className="mt-2">{signOutButton()}</div>
     </AuthCard>
   )
 }
@@ -676,14 +708,7 @@ function Unlock({
 
 export function SignOutButton({ userId, label = 'Sign out' }: { userId?: string; label?: string }) {
   return (
-    <Button
-      block
-      onClick={async () => {
-        if (userId) await forgetIdentity(userId)
-        await authClient.signOut()
-        window.location.assign('/sign-in')
-      }}
-    >
+    <Button block onClick={() => void signOut(userId)}>
       {label}
     </Button>
   )

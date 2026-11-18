@@ -13,8 +13,7 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { KeyRound, LogOut, Plus, Settings, Users } from 'lucide-react'
 import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
-import { authClient } from '~/lib/auth-client.ts'
-import { forgetIdentity } from '~/lib/keys.ts'
+import { signOut } from '~/lib/sign-out.ts'
 import { useSession } from '~/lib/session.tsx'
 
 const STATUS_TEXT = {
@@ -82,13 +81,7 @@ export function BottomBar({
             <KeyRound /> Keys and devices
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onSelect={async () => {
-              await forgetIdentity(session.userId)
-              await authClient.signOut()
-              window.location.assign('/sign-in')
-            }}
-          >
+          <DropdownMenuItem onSelect={() => void signOut(session.userId)}>
             <LogOut /> Sign out of this device
           </DropdownMenuItem>
         </DropdownMenuContent>

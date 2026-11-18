@@ -24,6 +24,8 @@ interface ComposerProps {
   onSend: () => void
   onSchedule: (sendAt: number) => void
   disabled: string | null
+  /** The draft is being scheduled: until that answers, it can't be sent or scheduled again. */
+  holding?: boolean
 }
 
 export function Composer({
@@ -35,6 +37,7 @@ export function Composer({
   onSend,
   onSchedule,
   disabled,
+  holding = false,
 }: ComposerProps) {
   const input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -78,7 +81,7 @@ export function Composer({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
-              if (!empty) onSend()
+              if (!empty && !holding) onSend()
             }
             if (e.key === 'Escape' && replyTo) onCancelReply()
           }}
@@ -91,7 +94,7 @@ export function Composer({
               size="icon"
               aria-label="Schedule for later"
               title="Schedule for later"
-              disabled={empty || !!disabled}
+              disabled={empty || !!disabled || holding}
             >
               <Clock className="size-[18px]" />
             </Button>
@@ -110,8 +113,8 @@ export function Composer({
           variant="primary"
           size="icon"
           aria-label="Send"
-          title="Send (Enter)"
-          disabled={empty || !!disabled}
+          title={holding ? 'Scheduling this message…' : 'Send (Enter)'}
+          disabled={empty || !!disabled || holding}
           onClick={onSend}
         >
           <SendHorizontal className="size-[17px]" />

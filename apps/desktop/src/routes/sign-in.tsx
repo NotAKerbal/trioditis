@@ -16,6 +16,8 @@ function SignIn() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<'password' | 'passkey' | null>(null)
+  // After a sign-out that couldn't confirm removing the key from this device (lib/sign-out.ts).
+  const [keyUnconfirmed] = useState(() => new URLSearchParams(window.location.search).get('key') === 'unconfirmed')
 
   async function withPassword(event: React.FormEvent) {
     event.preventDefault()
@@ -53,6 +55,12 @@ function SignIn() {
       }
     >
       <form onSubmit={withPassword}>
+        {keyUnconfirmed ? (
+          <p className="mb-4 rounded-md bg-warning-soft p-3 text-sm text-warning-ink">
+            You’re signed out, but this device couldn’t confirm it removed your key. To be sure it’s gone, clear this
+            site’s data in your browser’s settings.
+          </p>
+        ) : null}
         <FormError message={error} />
         <Field label="Email">
           <Input

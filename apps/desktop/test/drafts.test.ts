@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   appendToDraft,
+  claimDraft,
   clearDraftIf,
   getDraft,
+  releaseDraft,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -70,5 +72,29 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '')
     setDraftText(a, 'x')
     expect(getDraft(a).rev).toBeGreaterThan(before)
+  })
+})
+
+describe('a draft being scheduled', () => {
+  it('can’t be sent or scheduled again until the schedule answers', () => {
+    const a = `chat-claim-${Date.now()}`
+    setDraftText(a, 'see you tomorrow')
+    const rev = claimDraft(a)
+    expect(rev).not.toBeNull()
+    expect(claimDraft(a)).toBeNull()
+    expect(takeDraft(a)).toBeNull()
+    expect(getDraft(a).text).toBe('see you tomorrow')
+    releaseDraft(a, rev!)
+    expect(takeDraft(a)).toEqual({ text: 'see you tomorrow', reply: null })
+  })
+
+  it('keeps its revision while claimed, so a schedule still clears it on success', () => {
+    const a = `chat-claim-rev-${Date.now()}`
+    setDraftText(a, 'happy birthday')
+    const rev = claimDraft(a)!
+    expect(getDraft(a).rev).toBe(rev)
+    clearDraftIf(a, rev)
+    releaseDraft(a, rev)
+    expect(getDraft(a)).toMatchObject({ text: '', scheduling: null })
   })
 })

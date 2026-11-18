@@ -10,11 +10,13 @@ export interface Draft<Reply> {
   reply: Reply | null
   /** Counts every change, so an action that finishes later can tell if the person typed since. */
   rev: number
+  /** The revision being scheduled now, if any: until that answers, it's not sent or scheduled again. */
+  scheduling: number | null
 }
 
 const store = new Map<string, Draft<unknown>>()
 const listeners = new Set<() => void>()
-const EMPTY: Draft<never> = { text: '', reply: null, rev: 0 }
+const EMPTY: Draft<never> = { text: '', reply: null, rev: 0, scheduling: null }
 
 export function getDraft<Reply>(chatId: string): Draft<Reply> {
   return (store.get(chatId) as Draft<Reply> | undefined) ?? EMPTY
@@ -24,16 +26,40 @@ function change<Reply>(chatId: string, next: Partial<Pick<Draft<Reply>, 'text' |
   const draft = getDraft<Reply>(chatId)
   // Kept even when empty, so the revision only ever goes up.
   store.set(chatId, { ...draft, ...next, rev: draft.rev + 1 })
+  notify()
+}
+
+function notify() {
   for (const listener of listeners) listener()
+}
+
+/**
+ * Claims the draft for scheduling, returning its revision, or null if a schedule for it is
+ * already on its way. While claimed it isn't sent or scheduled again, so the same message can't
+ * go out now and at its time too. Release it with `releaseDraft` when the schedule answers.
+ */
+export function claimDraft(chatId: string): number | null {
+  const draft = getDraft(chatId)
+  if (draft.scheduling !== null) return null
+  store.set(chatId, { ...draft, scheduling: draft.rev })
+  notify()
+  return draft.rev
+}
+
+export function releaseDraft(chatId: string, rev: number) {
+  const draft = getDraft(chatId)
+  if (draft.scheduling !== rev) return
+  store.set(chatId, { ...draft, scheduling: null })
+  notify()
 }
 
 export const setDraftText = (chatId: string, text: string) => change(chatId, { text })
 export const setDraftReply = <Reply>(chatId: string, reply: Reply | null) => change(chatId, { reply })
 
-/** Takes the draft for sending, leaving the composer empty. Null when there's nothing to send. */
+/** Takes the draft for sending, leaving the composer empty. Null when there's nothing to send, or it's being scheduled. */
 export function takeDraft<Reply>(chatId: string): { text: string; reply: Reply | null } | null {
-  const { text, reply } = getDraft<Reply>(chatId)
-  if (!text.trim()) return null
+  const { text, reply, scheduling } = getDraft<Reply>(chatId)
+  if (!text.trim() || scheduling !== null) return null
   change<Reply>(chatId, { text: '', reply: null })
   return { text: text.trim(), reply }
 }

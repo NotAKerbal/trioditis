@@ -38,8 +38,9 @@ import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
 import {
   appendToDraft,
+  claimDraft,
   clearDraftIf,
-  getDraft,
+  releaseDraft,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -61,9 +62,6 @@ interface ChatPaneProps {
   /** Runs an action that may take the chat off the list; the shell opens the next one if so. */
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
 }
-
-// Each chat's draft revision being scheduled now, outside any pane, like the drafts themselves.
-const scheduling = new Map<string, number>()
 
 export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
   const chat = useChat(chatId)
@@ -97,7 +95,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const { send, discard, schedule, cancelScheduled, sendScheduledNow } = useSendMutations()
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen.
-  const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
+  const { text: draft, reply: replyTo, scheduling } = useDraft<Message>(chat.id)
   const setDraft = (text: string) => setDraftText(chat.id, text)
   const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
   const [details, setDetails] = useState(true)
@@ -138,10 +136,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     if (!text) return
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
     const chatId = chat.id
-    const rev = getDraft(chatId).rev
-    // This draft is already being scheduled: a second pick would schedule it twice.
-    if (scheduling.get(chatId) === rev) return
-    scheduling.set(chatId, rev)
+    // Claimed until it answers: a second pick, or Send, would put the same message out twice.
+    const rev = claimDraft(chatId)
+    if (rev === null) return
     const reply = replyTo
     try {
       // Inside try, so a sealing failure is said and lets the draft be scheduled again.
@@ -161,7 +158,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     } catch (e) {
       toast(errorMessage(e, 'That message couldn’t be scheduled.'))
     } finally {
-      if (scheduling.get(chatId) === rev) scheduling.delete(chatId)
+      releaseDraft(chatId, rev)
     }
   }
 
@@ -352,6 +349,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onDraft={setDraft}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
+          holding={scheduling !== null}
           onSend={() => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
           disabled={composerBlocked(chat.row, bridge.status)}
