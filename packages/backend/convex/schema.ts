@@ -2,7 +2,6 @@ import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 import {
   chatKind,
-  chatView,
   commandPayload,
   deliveryState,
   envelope,
@@ -11,6 +10,7 @@ import {
   loginStep,
   network,
   sender,
+  storedChatView,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -116,13 +116,15 @@ export default defineSchema({
     blocked: v.optional(v.boolean()),
     /**
      * Which list the chat is in, kept by `lib/chatView.ts` on every write so the lists are
-     * index ranges. Missing for a deleted chat, which is in none.
+     * index ranges; `deleted` for a deleted chat, which is in none. Required, so a backend
+     * holding chats from before views existed refuses this schema rather than hide them.
      */
-    view: v.optional(chatView),
+    view: storedChatView,
   })
     .index('by_user_lastMessage', ['userId', 'lastMessageAt'])
+    // Descending, `pinned: true` sorts before `false`: one range gives the pins, then the rest.
     .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
-    .index('by_user_view_network_last', ['userId', 'view', 'network', 'lastMessageAt'])
+    .index('by_user_view_network_pinned_last', ['userId', 'view', 'network', 'pinned', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
 
   /**

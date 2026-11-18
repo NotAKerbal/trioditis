@@ -59,7 +59,7 @@ describe('chat views', () => {
     expect(chatViewOf({ snoozedUntil: soon, woke: true, archived: true })).toBe('archived')
     expect(chatViewOf({ snoozedUntil: soon, woke: true })).toBe('inbox')
     expect(chatViewOf({ archived: true })).toBe('archived')
-    expect(chatViewOf({ deleted: true, archived: true })).toBeUndefined()
+    expect(chatViewOf({ deleted: true, archived: true })).toBe('deleted')
   })
 
   it('lists pinned chats first, then by recency, a page at a time', async () => {
@@ -69,9 +69,9 @@ describe('chat views', () => {
     await aChat(t, 'user_a', 'pinned', { lastMessageAt: 0, pinned: true })
     await aChat(t, 'user_a', 'archived', { lastMessageAt: 9, archived: true })
     const page1 = await a.query(api.chats.list, { paginationOpts: { numItems: 3, cursor: null } })
-    expect(page1.page.map((row) => row.portalId)).toEqual(['pinned', 'c7', 'c6', 'c5'])
+    expect(page1.page.map((row) => row.portalId)).toEqual(['pinned', 'c7', 'c6'])
     const page2 = await a.query(api.chats.list, { paginationOpts: { numItems: 3, cursor: page1.continueCursor } })
-    expect(page2.page.map((row) => row.portalId)).toEqual(['c4', 'c3', 'c2'])
+    expect(page2.page.map((row) => row.portalId)).toEqual(['c5', 'c4', 'c3'])
     expect(
       (await a.query(api.chats.list, { view: 'archived', paginationOpts: first })).page.map((row) => row.portalId),
     ).toEqual(['archived'])
@@ -84,6 +84,29 @@ describe('chat views', () => {
       labelIds: [],
       networkAccountId: null,
     })
+  })
+
+  it('carries pins past a page on to the next, and filters by network from one range', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    for (let n = 0; n < 55; n++) await aChat(t, 'user_a', `pin${n}`, { lastMessageAt: n, pinned: true })
+    await aChat(t, 'user_a', 'plain', { lastMessageAt: 100 })
+    await aChat(t, 'user_a', 'fake-pin', { lastMessageAt: 200, pinned: true, network: 'fake' })
+    await aChat(t, 'user_a', 'fake-plain', { lastMessageAt: 300, network: 'fake' })
+    const seen: string[] = []
+    let cursor: string | null = null
+    for (;;) {
+      const result: { page: { portalId: string }[]; isDone: boolean; continueCursor: string } = await a.query(
+        api.chats.list,
+        { network: 'whatsapp', paginationOpts: { numItems: 50, cursor } },
+      )
+      seen.push(...result.page.map((row) => row.portalId))
+      if (result.isDone) break
+      cursor = result.continueCursor
+    }
+    expect(seen).toEqual([...Array.from({ length: 55 }, (_, n) => `pin${54 - n}`), 'plain'])
+    const fake = await a.query(api.chats.list, { network: 'fake', paginationOpts: first })
+    expect(fake.page.map((row) => row.portalId)).toEqual(['fake-pin', 'fake-plain'])
   })
 
   it('moves a chat between views as its flags change, including combined ones', async () => {

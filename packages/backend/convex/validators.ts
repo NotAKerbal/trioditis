@@ -33,6 +33,9 @@ export const chatView = v.union(
   v.literal('blocked'),
 )
 
+/** What a chat stores as its `view`: one of the lists, or `deleted`, which is in none. */
+export const storedChatView = v.union(chatView, v.literal('deleted'))
+
 export const chatKind = v.union(v.literal('dm'), v.literal('group'), v.literal('channel'), v.literal('space'))
 
 export const loginStep = v.object({

@@ -7,6 +7,7 @@ import { deletePayload } from './outbox'
 import { patchChat } from './chatView'
 import { onLoggedOut } from './commandOutcome'
 import { internal } from '../_generated/api'
+import { MAX_MESSAGE_ROW_BYTES, byteSize } from './bounded'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -56,12 +57,6 @@ export function startMeter(ctx: MutationCtx) {
   const meter = { bytes: 0 }
   meters.set(ctx, meter)
   return meter
-}
-
-const encoder = new TextEncoder()
-
-export function byteSize(value: unknown) {
-  return encoder.encode(JSON.stringify(value) ?? '').length
 }
 
 /** Counts a row read and, as most are, rewritten. */
@@ -366,8 +361,6 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
  * recount by count alone could pass a transaction's read limit and stall the host's journal.
  */
 const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
-/** The largest a message row can be: two sealed objects at the cap, their keys and IDs. */
-export const MAX_MESSAGE_ROW_BYTES = 768 * 1024
 
 /**
  * How many messages from other people, and how many of those mention the person, newer than

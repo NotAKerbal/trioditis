@@ -22,6 +22,7 @@ async function aChat(t: T, userId: string, portalId = 'portal_1') {
         unreadCount: 0,
         pinned: false,
         archived: false,
+        view: 'inbox',
       }),
   )
 }

@@ -5,6 +5,7 @@ import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
+import { newestMessageWhere } from './lib/bounded'
 import { patchChat } from './lib/chatView'
 import { queueCommand } from './lib/outbox'
 import { chatKind, chatView, envelope, network } from './validators'
@@ -15,8 +16,6 @@ import { chatKind, chatView, envelope, network } from './validators'
 
 /** The longest a chat can be snoozed or muted for, short of "until I unmute". */
 const MAX_UNTIL_MS = 400 * 24 * 60 * 60 * 1000
-/** Pinned chats come first, on the first page; at most this many are shown. */
-const MAX_PINS = 50
 /** The most chats one page holds, and the most it reads, well under a query's limits. */
 const MAX_PAGE_ITEMS = 50
 const MAX_PAGE_BYTES = 8 * 1024 * 1024
@@ -24,6 +23,7 @@ const MAX_PAGE_BYTES = 8 * 1024 * 1024
 const COUNT_CAP = 99
 /** How far mark-read looks back for the latest message that reached the network. */
 const READ_SCAN = 50
+const READ_SCAN_BYTES = 4 * 1024 * 1024
 
 // Matches `ChatRow` in @trioditis/core; the check at the end of this file keeps them in step.
 const chatRow = v.object({
@@ -91,8 +91,8 @@ function pageOptions(opts: Infer<typeof paginationOptsValidator>) {
 }
 
 /**
- * One list of chats, a page at a time: on the first page the pinned chats (at most 50), then
- * the rest, most recent first. With `network`, only that network's chats. With `labelId`, the
+ * One list of chats, a page at a time: the pinned chats, most recent first, then the rest,
+ * most recent first. With `network`, only that network's chats. With `labelId`, the
  * chats with that label, in the order they were labelled, pinned or not.
  */
 export const list = query({
@@ -128,39 +128,25 @@ export const list = query({
       return { ...result, page: chats }
     }
 
+    // One range, newest first: `pinned: true` sorts after `false`, so descending gives every
+    // pinned chat first and then the rest, and pins past one page carry on to the next.
     const network = args.network
-    const pinned =
-      args.paginationOpts.cursor === null
-        ? network
-          ? await ctx.db
-              .query('chats')
-              .withIndex('by_user_view_network_last', (q) =>
-                q.eq('userId', userId).eq('view', view).eq('network', network),
-              )
-              .order('desc')
-              .filter((q) => q.eq(q.field('pinned'), true))
-              .take(MAX_PINS)
-          : await ctx.db
-              .query('chats')
-              .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view).eq('pinned', true))
-              .order('desc')
-              .take(MAX_PINS)
-        : []
-    const rest = network
+    const result = network
       ? await ctx.db
           .query('chats')
-          .withIndex('by_user_view_network_last', (q) => q.eq('userId', userId).eq('view', view).eq('network', network))
+          .withIndex('by_user_view_network_pinned_last', (q) =>
+            q.eq('userId', userId).eq('view', view).eq('network', network),
+          )
           .order('desc')
-          .filter((q) => q.eq(q.field('pinned'), false))
           .paginate(opts)
       : await ctx.db
           .query('chats')
-          .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view).eq('pinned', false))
+          .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
           .order('desc')
           .paginate(opts)
     const page = []
-    for (const chat of [...pinned, ...rest.page]) page.push(await rowFor(ctx, chat, accounts))
-    return { ...rest, page }
+    for (const chat of result.page) page.push(await rowFor(ctx, chat, accounts))
+    return { ...result, page }
   },
 })
 
@@ -224,8 +210,8 @@ function checkUntil(until: number) {
 
 /**
  * Marks a chat read: clears unread, mentions and "marked unread", and ends a woken snooze.
- * If one of the 50 newest messages reached the network and isn't deleted, the network is told
- * the person read up to it; otherwise only Trioditis changes.
+ * If one of the newest messages (at most 50, and 4 MiB of them) reached the network and isn't
+ * deleted, the network is told the person read up to it; otherwise only Trioditis changes.
  */
 export const markRead = mutation({
   args: { chatId: v.id('chats') },
@@ -238,12 +224,12 @@ export const markRead = mutation({
       markedUnread: false,
       ...(chat.woke ? { woke: false, snoozedUntil: undefined } : {}),
     })
-    const recent = await ctx.db
-      .query('messages')
-      .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id))
-      .order('desc')
-      .take(READ_SCAN)
-    const latest = recent.find((message) => !message.eventId.startsWith('pending:') && message.redactedAt === undefined)
+    const latest = await newestMessageWhere(
+      ctx,
+      chat._id,
+      (message) => !message.eventId.startsWith('pending:') && message.redactedAt === undefined,
+      { maxRows: READ_SCAN, maxBytes: READ_SCAN_BYTES },
+    )
     if (!latest) return null
     await queueCommand(ctx, {
       userId: chat.userId,
