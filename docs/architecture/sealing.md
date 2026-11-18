@@ -139,6 +139,15 @@ database, so a database backup or snapshot is one source of it. The key is not i
 database: it is in the bridge host's environment, which is the server's `deploy/.env` in the
 self-hosted bundle and `.data/dev.env` in development.
 
+The bundle keeps the two apart in its backups too. `deploy/trioditis backup` saves
+`deploy/.env` as `secrets.env` without `BRIDGE_PRIVATE_KEY` or `AGENT_ACCESS_PRIVATE_KEY`
+(which opens granted chats the same way), and no volume holds either: the bridge host reads
+its key from the environment (it writes a key file only in development, when none is set),
+and the backend is given only the public halves. The private keys are kept apart with
+`deploy/trioditis keys export`, and brought back after a lost server with `keys import`
+(docs/deploy.md, The server's keys). Backups made before this (by the bundle at 15f1f45 or
+earlier) do hold them.
+
 So those payloads (`outboxPayloads`) are kept only until the bridge host has them. The
 backend deletes one as soon as the bridge host accepts or rejects its command, and otherwise
 at the command's deadline: 24 hours after a send is queued (its `notAfter`), 10 minutes for

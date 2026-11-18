@@ -250,8 +250,9 @@ deploy/trioditis backup ~/trioditis-backups
 A backup is a directory, `<project>-<date>-<time>` (with `-2`, `-3`… added rather than
 replace an earlier one), readable only by you, holding `archive.tgz` (every Docker volume of
 this install's Compose project, found by the label Compose gives them, so never another
-install's, and including the volume of a network you've dropped) and `secrets.env` (a copy
-of `deploy/.env`). The archive's last entry is a manifest of every volume with its number of
+install's, and including the volume of a network you've dropped) and `secrets.env`
+(`deploy/.env` without the server's private keys: see [The server's keys](#the-servers-keys)).
+The archive's last entry is a manifest of every volume with its number of
 entries and bytes. The backup stops the server, writes both files in a private directory
 beside the destination, publishes it with one rename that fails rather than replace anything
 at the name, and starts again what was running. So there's either a whole backup at the
@@ -259,13 +260,25 @@ name or none: an interrupted backup (Ctrl-C), even while the server is still sto
 leaves nothing behind, and if the server doesn't start again the backup counts as failed. The
 destination must be outside the checkout (symlinks resolved): image builds copy the checkout.
 
-To restore, put the backup's `secrets.env` back as `deploy/.env` in a checkout of the same
-version, then:
+To restore on the same server, keep its `deploy/.env` (its private keys are still there),
+and run:
 
 ```sh
 deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>
 deploy/install/install.sh
 ```
+
+To restore after losing the server, in a checkout of the same version, put the backup's
+`secrets.env` back as `deploy/.env`, then bring back the keys you exported, then restore:
+
+```sh
+cp ~/trioditis-backups/<project>-<date>-<time>/secrets.env deploy/.env
+deploy/trioditis keys import <key file>
+deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>
+deploy/install/install.sh
+```
+
+Until the keys are imported, the installer stops and says so.
 
 `restore` (which also takes an `archive.tgz` directly) reads the archive once and streams it
 into a volume of its own, and works only from that copy. It checks the whole copy before
@@ -283,10 +296,48 @@ That needs free space for three more copies of the data while it runs (the archi
 extracted one, and the copy of what's there). It removes only volumes labelled with a key of
 its own (`trioditis.restore.<nonce>.…`). Archives from before the manifest can't be restored
 this way. Keep backups encrypted: they contain the connector state above, and `secrets.env`
-holds every secret the server has.
+holds every other secret the server has.
 
 Backup, restore and the installer take a lock in `deploy/`, so only one of them runs at a
 time for an install.
+
+### The server's keys
+
+The server has two private keys, in `deploy/.env`: `BRIDGE_PRIVATE_KEY`, which opens what
+clients seal to the bridge host (sends, including scheduled ones waiting for their time, and
+login input), and `AGENT_ACCESS_PRIVATE_KEY`, which opens the chats people grant to agents.
+A backup holds that sealed content, so a backup that also held the keys could be read by
+anyone who got it. Backups leave both keys out (and nothing in the volumes holds them: the
+bridge host reads its key from the environment, and the Convex backend only gets the public
+halves). Keep a copy of the keys apart from the backups instead:
+
+```sh
+deploy/trioditis keys export ~/trioditis-server-keys.env
+```
+
+It writes the two pairs to a new file, readable only by you, and never over an existing one
+or inside the checkout. Keep that file somewhere the backups aren't, such as a password
+manager or offline media, and delete the copy on the server. `keys import <file>` puts the
+private keys back into a `deploy/.env` that has only the public ones, and refuses a pair whose
+public key isn't the one there. Neither command prints a key.
+
+**If the keys are lost**, run the installer with `--new-server-keys`. It makes a new pair for
+each key whose private half is missing, and is the only way it ever replaces a key. What it
+costs:
+
+- Sends sealed to the old bridge key can't be opened: scheduled messages waiting for their
+  time, and sends and login input still in flight. The bridge host refuses each such command
+  (`invalid_command`), and the backend marks it failed and the person's copy of the message
+  failed, so they see it didn't go and can send it again. Nothing is dropped silently.
+- Chats granted to agents were sealed to the old agent-access key, so they must be granted
+  again.
+
+Clients seal to the new public key once the functions are deployed with it, which the
+installer does.
+
+**Older backups hold the keys.** Backups made before this change (by 88eed87 or earlier, in
+their `.env`, and by 15f1f45, in `secrets.env`) contain both private keys. Keep them as
+carefully as the server itself, or replace them with new backups and delete them.
 
 ### What backup and restore guard against
 
@@ -312,13 +363,14 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
 `docker` and needs none of that.
 
-| Test                  | What it checks                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back |
-| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                    |
-| `backup-publish.sh`   | A cold backup works and starts nothing; a taken name moves the backup to the next one; Ctrl-C while it streams leaves nothing behind                                    |
-| `env-source.sh`       | Exported variables don't override `deploy/.env` for Compose                                                                                                             |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value                  |
+| Test                  | What it checks                                                                                                                                                                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back                                                                   |
+| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                      |
+| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a taken name moves the backup to the next one; Ctrl-C while it streams leaves nothing behind |
+| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                    |
+| `env-source.sh`       | Exported variables don't override `deploy/.env` for Compose                                                                                                                                                                               |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).

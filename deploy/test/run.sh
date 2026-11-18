@@ -3,7 +3,7 @@
 # Each makes and removes its own throwaway project; none touches an install.
 cd "$(dirname "$0")" || exit 1
 failed=''
-for test in restore-failure.sh restore-archive.sh backup-publish.sh env-source.sh install-settings.sh; do
+for test in restore-failure.sh restore-archive.sh backup-publish.sh keys.sh env-source.sh install-settings.sh; do
   sh "./$test" || failed="$failed $test"
 done
 if [ -n "$failed" ]; then

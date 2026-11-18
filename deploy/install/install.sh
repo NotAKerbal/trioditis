@@ -43,6 +43,9 @@ Options (each one is kept for later reruns):
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
                        from, as Caddy ranges (default private_ranges; set it to the proxy's
                        address when it's on another machine)
+  --new-server-keys    Only when the server's private keys are lost: make new key pairs.
+                       Sends sealed to the old bridge key then fail, and agent access must
+                       be granted again (docs/deploy.md, Keys lost). Not kept for reruns
   --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
                        or stop exposing it (default off)
 EOF
@@ -51,6 +54,7 @@ EOF
 # Each option stays unset unless it's passed, so the saved setting applies.
 unset -v mode port host bind proxy_url trusted domain networks e2e
 local_flag=0
+new_server_keys=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
@@ -66,6 +70,7 @@ while [ $# -gt 0 ]; do
     --trusted-proxies) trusted=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
+    --new-server-keys) new_server_keys=1 ;;
     --e2e) e2e=1 ;;
     --no-e2e) e2e=0 ;;
     -h | --help) usage; exit 0 ;;
@@ -360,6 +365,29 @@ set_var \
 
 # --- Secrets ------------------------------------------------------------------------------
 
+# The server's key pairs. A pair that never existed is made below. Half a pair, a public key
+# without its private one, is what restoring a backup's secrets.env leaves (backups keep the
+# private keys out), so the install stops for `keys import`: a new pair would make what's
+# sealed to the old one unreadable, so it's made only when asked for with --new-server-keys.
+new_pairs=()
+for pair in BRIDGE AGENT_ACCESS; do
+  public=$(get "${pair}_PUBLIC_KEY")
+  private=$(get "${pair}_PRIVATE_KEY")
+  if [ -n "$public" ] && [ -n "$private" ]; then
+    continue
+  elif [ -z "$public" ] && [ -z "$private" ]; then
+    new_pairs+=("$pair")
+  elif [ "$new_server_keys" = 1 ]; then
+    new_pairs+=("$pair")
+  else
+    die "deploy/.env has only half of the server's ${pair} key pair (as after restoring a backup's secrets.env, which leaves the private keys out). Import the keys you exported: deploy/trioditis keys import <file>, then run this again. Only if they're lost, run this again with --new-server-keys: sends sealed to the old key then fail, and agent access must be granted again (docs/deploy.md, Keys lost)."
+  fi
+done
+if [ "$new_server_keys" = 1 ] && [ "${#new_pairs[@]}" -eq 0 ]; then
+  warn "--new-server-keys does nothing: deploy/.env has both of the server's key pairs, and they're kept."
+fi
+unset -v public private
+
 keep_or POSTGRES_PASSWORD "$(secret 24)"
 keep_or CONVEX_INSTANCE_SECRET "$(hex_secret 32)"
 keep_or BETTER_AUTH_SECRET "$(secret 32)"
@@ -393,18 +421,12 @@ say "Building the images from this checkout (the first build takes a few minutes
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
 docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
 
-# Only a pair missing either half is generated, so a kept pair (which clients may already
-# have sealed to) never changes. The container logs nothing: its output is private keys.
-missing_pairs=()
-for pair in BRIDGE AGENT_ACCESS; do
-  if [ -z "$(get "${pair}_PUBLIC_KEY")" ] || [ -z "$(get "${pair}_PRIVATE_KEY")" ]; then
-    missing_pairs+=("$pair")
-  fi
-done
-if [ "${#missing_pairs[@]}" -gt 0 ]; then
+# Only the pairs chosen above are generated, so a kept pair (which clients may already have
+# sealed to) never changes. The container logs nothing: its output is private keys.
+if [ "${#new_pairs[@]}" -gt 0 ]; then
   say "Generating the server's key pairs"
   keys=$(docker run --rm --log-driver none --entrypoint node "$project/node:local" deploy/scripts/gen-keys.ts)
-  for pair in "${missing_pairs[@]}"; do
+  for pair in "${new_pairs[@]}"; do
     public_key=$(printf '%s\n' "$keys" | grep "^${pair}_PUBLIC_KEY=" | cut -d= -f2-)
     private_key=$(printf '%s\n' "$keys" | grep "^${pair}_PRIVATE_KEY=" | cut -d= -f2-)
     if [ -z "$public_key" ] || [ -z "$private_key" ]; then die "Couldn't generate the ${pair} key pair."; fi

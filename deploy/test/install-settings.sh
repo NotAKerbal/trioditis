@@ -2,8 +2,10 @@
 # How install.sh writes its files, against a stub docker that stops it at `compose build`
 # (just after the runtime config is written), so nothing is built or started: an existing
 # deploy/.env it can't read stops the install and stays as it was; a symlink at
-# deploy/runtime/config.json is replaced, not followed; and the values Compose gets come from
-# deploy/.env only, not from exported variables. TRIODITIS_INSTALLER=<path> tests another
+# deploy/runtime/config.json is replaced, not followed; the values Compose gets come from
+# deploy/.env only, not from exported variables; and half a key pair (a public key without
+# its private one, as a backup's secrets.env leaves) stops the install, unless
+# --new-server-keys asks for a new pair. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 set -eu
@@ -45,7 +47,8 @@ case "$1" in
 esac
 EOF
 chmod +x "$work/bin/docker"
-install() { PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 >"$work/out" 2>&1; }
+install() { PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; }
+value() { sed -n "s/^$1=//p" "$work/checkout/deploy/.env" | tail -1; }
 
 # An existing .env it can't read.
 checkout
@@ -74,6 +77,20 @@ config="$work/checkout/deploy/runtime/config.json"
 [ "$(stat -c %a "$work/checkout/deploy/.env")" = 600 ] && check ok ".env is 0600" || check fail ".env is 0600"
 [ -s "$work/compose.log" ] && ! grep -qv 'TRIODITIS_SETUP_TOKEN=unset COMPOSE_FILE=unset' "$work/compose.log" &&
   check ok "Compose gets no exported value" || check fail "Compose gets no exported value ($(cat "$work/compose.log" 2>/dev/null))"
+
+# Half the bridge key pair, as after restoring a backup's secrets.env.
+checkout
+printf '%s\n' POSTGRES_PASSWORD=keep-me COMPOSE_PROJECT_NAME=trioditis-test BRIDGE_PUBLIC_KEY=old-public \
+  AGENT_ACCESS_PUBLIC_KEY=agent-public AGENT_ACCESS_PRIVATE_KEY=agent-private >"$work/checkout/deploy/.env"
+chmod 600 "$work/checkout/deploy/.env"
+if install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "keys import" "$work/out" && [ "$(value BRIDGE_PUBLIC_KEY)" = old-public ] &&
+  [ -z "$(value BRIDGE_PRIVATE_KEY)" ] && check ok "half a key pair stops the install, pointing to keys import" ||
+  check fail "half a key pair stops the install, pointing to keys import"
+install --new-server-keys || true
+[ "$(value BRIDGE_PUBLIC_KEY)" = stub-public ] && [ "$(value BRIDGE_PRIVATE_KEY)" = stub-private ] &&
+  [ "$(value AGENT_ACCESS_PUBLIC_KEY)" = agent-public ] && [ "$(value AGENT_ACCESS_PRIVATE_KEY)" = agent-private ] &&
+  check ok "--new-server-keys makes a new pair for that half only" || check fail "--new-server-keys makes a new pair for that half only"
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

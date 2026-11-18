@@ -1,8 +1,9 @@
 #!/bin/sh
-# A backup is published whole or not at all: a cold backup (nothing running) works and starts
-# nothing; one whose name is taken (here by a directory) goes to the next free name and leaves
-# what was there alone; and one interrupted (SIGINT to its process group, as Ctrl-C sends)
-# while the archive is streaming publishes nothing and leaves nothing behind.
+# A backup is published whole or not at all, and without the server's private keys: a cold
+# backup (nothing running) works and starts nothing, and its secrets.env and archive hold
+# neither private key; one whose name is taken (here by a directory) goes to the next free
+# name and leaves what was there alone; and one interrupted (SIGINT to its process group, as
+# Ctrl-C sends) while the archive is streaming publishes nothing and leaves nothing behind.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 # shellcheck source=deploy/test/lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -22,9 +23,15 @@ if trioditis backup "$backups" >"$root/out" 2>&1; then status=0; else status=$?;
   check ok "it starts nothing" || check fail "it starts nothing"
 backup=$(find "$backups" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | head -1)
 [ -n "$backup" ] && [ "$(stat -c %a "$backup")" = 700 ] && [ "$(stat -c %a "$backup/archive.tgz")" = 600 ] &&
-  [ "$(stat -c %a "$backup/secrets.env")" = 600 ] && cmp -s "$backup/secrets.env" "$root/deploy/.env" &&
-  check ok "it's one private directory holding archive.tgz and secrets.env" ||
-  check fail "it's one private directory holding archive.tgz and secrets.env"
+  [ "$(stat -c %a "$backup/secrets.env")" = 600 ] &&
+  check ok "it's one 0700 directory holding archive.tgz and secrets.env, both 0600" ||
+  check fail "it's one 0700 directory holding archive.tgz and secrets.env, both 0600"
+[ "$(cat "$backup/secrets.env")" = "$(grep -vE '^(BRIDGE|AGENT_ACCESS)_PRIVATE_KEY=' "$root/deploy/.env")" ] &&
+  grep -q '^BRIDGE_PUBLIC_KEY=test-BRIDGE_PUBLIC_KEY$' "$backup/secrets.env" &&
+  check ok "secrets.env is deploy/.env without the private keys" || check fail "secrets.env is deploy/.env without the private keys"
+docker run --rm --log-driver none -i --entrypoint sh "$tool" -c '
+  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e test-BRIDGE_PRIVATE_KEY -e test-AGENT_ACCESS_PRIVATE_KEY /x' <"$backup/archive.tgz" &&
+  check ok "the archive holds neither private key" || check fail "the archive holds neither private key"
 [ "$(entries | wc -l)" = 1 ] && check ok "nothing else is left in the directory" || check fail "nothing else is left in the directory"
 
 # Every name it could take for the next two minutes is a directory already.

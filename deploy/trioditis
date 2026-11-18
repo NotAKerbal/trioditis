@@ -1,8 +1,9 @@
 #!/bin/sh
 # `docker compose` for this install, with its settings. Usage: deploy/trioditis <compose args>
 # e.g. `deploy/trioditis ps`, `deploy/trioditis logs -f gateway`, `deploy/trioditis down`.
-# Also `deploy/trioditis backup <dir>`, `deploy/trioditis restore <backup>` and
-# `deploy/trioditis create-admin <email>`: see docs/deploy.md.
+# Also `deploy/trioditis backup <dir>`, `deploy/trioditis restore <backup>`,
+# `deploy/trioditis keys export|import <file>` and `deploy/trioditis create-admin <email>`:
+# see docs/deploy.md.
 #
 # What backup and restore guard against (docs/deploy.md, Backup and restore): the operator's
 # mistakes, a second trioditis command at the same time, other Compose projects on the same
@@ -66,6 +67,13 @@ take_lock() {
 
 random_hex() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
+# The server's private keys, which open what's sealed to it: the bridge key (sends and login
+# input) and the agent-access key (granted chats). Backups leave them out; `keys` moves them.
+private_keys='BRIDGE_PRIVATE_KEY|AGENT_ACCESS_PRIVATE_KEY'
+key_names='BRIDGE_PUBLIC_KEY BRIDGE_PRIVATE_KEY AGENT_ACCESS_PUBLIC_KEY AGENT_ACCESS_PRIVATE_KEY'
+# The last value of $1 in text $2.
+value_in() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | tail -1; }
+
 case "${1:-}" in
   backup)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
@@ -107,6 +115,8 @@ case "${1:-}" in
       if [ "$status" = 0 ]; then
         echo "Backed up project $project to $published (archive.tgz, and the secrets in secrets.env)."
         echo "It holds private data: keep it encrypted."
+        echo "The server's private keys aren't in it: with a backup they'd open what's sealed to the server."
+        echo "Keep them apart from your backups (a password manager, or offline media): deploy/trioditis keys export <file>."
       else
         echo "The backup failed." >&2
       fi
@@ -144,7 +154,11 @@ case "${1:-}" in
         } >"$MANIFEST"
         tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
         wait "$tar_pid"' >"$work/archive.tgz"
-    cat "$env_file" >"$work/secrets.env"
+    # deploy/.env without the private keys, read in one pass: a backup holds sealed content, and
+    # those keys open it (docs/architecture/sealing.md, Bridge key exposure).
+    read_status=0
+    grep -vE "^($private_keys)=" "$env_file" >"$work/secrets.env" || read_status=$?
+    [ "$read_status" -le 1 ] || { echo "Couldn't read deploy/.env." >&2; exit 1; }
 
     stamp="$dir/$project-$(date +%Y%m%d-%H%M%S)"
     n=1
@@ -205,7 +219,7 @@ case "${1:-}" in
         0)
           status=0
           keep_created=1
-          echo "Restored. Check deploy/.env is the secrets.env saved with this backup, then run deploy/install/install.sh to start the server."
+          echo "Restored. Run deploy/install/install.sh to start the server, with this server's deploy/.env (after a lost server, the backup's secrets.env with the keys imported: docs/deploy.md, Backup and restore)."
           ;;
         3) status=1 && echo "The archive didn't extract as its manifest says. The volumes weren't changed; the server is stopped." >&2 ;;
         5) status=1 && echo "The volumes to restore changed. They weren't changed; the server is stopped." >&2 ;;
@@ -353,6 +367,66 @@ case "${1:-}" in
     started=1
     # Its outcome is reported, and acted on, by finish_restore.
     docker start -a "$worker" || true
+    ;;
+  keys)
+    case "${2:-}" in export | import) ;; *) echo "Usage: deploy/trioditis keys export|import <file>" >&2; exit 2 ;; esac
+    [ $# -eq 3 ] || { echo "Usage: deploy/trioditis keys $2 <file>" >&2; exit 2; }
+    # deploy/.env, read once (after taking the lock, for an import, which writes it). No key is
+    # ever printed.
+    [ "$2" != import ] || take_lock
+    { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
+    env_text=$(cat "$env_file")
+    if [ "$2" = export ]; then
+      # A new file, readable only by you, published with a rename that fails if anything is
+      # at the name, so nothing is ever overwritten; never inside the checkout.
+      dir=$(cd "$(dirname "$3")" && pwd -P) || { echo "No directory for $3." >&2; exit 1; }
+      case "$dir/" in
+        "$(cd "$here/.." && pwd -P)"/*) echo "Keep the keys outside the checkout: image builds copy it." >&2; exit 2 ;;
+      esac
+      file="$dir/$(basename "$3")"
+      umask 077
+      text="# Trioditis server keys for project $project. Keep this apart from the backups."
+      for name in $key_names; do
+        value=$(value_in "$name" "$env_text")
+        [ -n "$value" ] || { echo "deploy/.env has no $name, so there's no complete set of keys to export." >&2; exit 1; }
+        text="$text
+$name=$value"
+      done
+      tmp=$(mktemp "$dir/.trioditis-keys-XXXXXX")
+      trap 'rm -f "$tmp"' EXIT
+      printf '%s\n' "$text" >"$tmp"
+      if ! mv -T --no-clobber "$tmp" "$file" 2>/dev/null; then
+        if [ -e "$file" ] || [ -L "$file" ]; then echo "$file already exists and was left as it is; pick another name." >&2; else echo "Couldn't write $file." >&2; fi
+        exit 1
+      fi
+      echo "Wrote the server's keys to $file, readable only by you. Keep it apart from the backups (a password manager, or offline media)."
+    else
+      # Each pair must be this server's: its public half must be the public key deploy/.env
+      # already has (from the backup's secrets.env, after a lost server). The private keys are
+      # added through a temp file and a rename onto deploy/.env.
+      { [ -r "$3" ] && [ ! -d "$3" ]; } || { echo "No key file at $3." >&2; exit 1; }
+      file_text=$(cat "$3")
+      new_text=$(printf '%s\n' "$env_text" | grep -vE "^($private_keys)=" || true)
+      for pair in BRIDGE AGENT_ACCESS; do
+        public=$(value_in "${pair}_PUBLIC_KEY" "$file_text")
+        private=$(value_in "${pair}_PRIVATE_KEY" "$file_text")
+        { [ -n "$public" ] && [ -n "$private" ]; } || { echo "$3 has no complete ${pair} key pair. Nothing was changed." >&2; exit 1; }
+        current=$(value_in "${pair}_PUBLIC_KEY" "$env_text")
+        [ -n "$current" ] || { echo "deploy/.env has no ${pair}_PUBLIC_KEY: put the backup's secrets.env back as deploy/.env first. Nothing was changed." >&2; exit 1; }
+        [ "$public" = "$current" ] || { echo "$3's ${pair} keys aren't this server's: the public key doesn't match deploy/.env's. Nothing was changed." >&2; exit 1; }
+        existing=$(value_in "${pair}_PRIVATE_KEY" "$env_text")
+        [ -z "$existing" ] || [ "$existing" = "$private" ] ||
+          { echo "deploy/.env already has a different ${pair}_PRIVATE_KEY. Nothing was changed." >&2; exit 1; }
+        new_text="$new_text
+${pair}_PRIVATE_KEY=$private"
+      done
+      umask 077
+      tmp=$(mktemp "$env_file.XXXXXX")
+      trap 'rm -f "$tmp"' EXIT
+      printf '%s\n' "$new_text" | sed '/^$/d' >"$tmp"
+      mv -T "$tmp" "$env_file"
+      echo "Imported the server's private keys into deploy/.env. Run deploy/install/install.sh to start the server."
+    fi
     ;;
   create-admin)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis create-admin <email>" >&2; exit 2; }
