@@ -18,12 +18,30 @@ import { chatKind, chatView, envelope, network } from './validators'
 const MAX_UNTIL_MS = 365 * 24 * 60 * 60 * 1000
 /** The most chats one page holds, and the most it reads, well under a query's limits. */
 const MAX_PAGE_ITEMS = 50
+/**
+ * What a page may read of chat rows. A row is under 20 KiB: sealed metadata capped at 8 KiB
+ * (about 12 KiB stored, as base64 with up to eight keys), the preview at 4 KiB stored, and IDs
+ * of at most 256 characters. So 51 rows come to about 1 MiB, and a full page never reaches
+ * this: it only bounds the page if rows ever grow.
+ */
 const MAX_PAGE_BYTES = 8 * 1024 * 1024
 /** Badge counts stop here and say there may be more. */
 const COUNT_CAP = 99
 /** How far mark-read looks back for the latest message that reached the network. */
 const READ_SCAN = 50
 const READ_SCAN_BYTES = 4 * 1024 * 1024
+
+// Matches `LastMessage` in @trioditis/core. `sealed` and `objectId` open as a message does in
+// `messages.list`: `sealedEdit ?? sealed`, with `editEventId` or `sealedObjectId`.
+const lastMessage = v.object({
+  messageId: v.id('messages'),
+  at: v.number(),
+  self: v.boolean(),
+  ghostId: v.optional(v.string()),
+  redacted: v.boolean(),
+  sealed: v.union(v.null(), envelope),
+  objectId: v.string(),
+})
 
 // Matches `ChatRow` in @trioditis/core; the check at the end of this file keeps them in step.
 const chatRow = v.object({
@@ -45,7 +63,23 @@ const chatRow = v.object({
   blocked: v.boolean(),
   labelIds: v.array(v.id('labels')),
   lastMessageAt: v.number(),
+  lastMessage: v.union(v.null(), lastMessage),
 })
+
+/** The chat's preview, from the pointer kept on it (lib/lastMessage.ts): no message is read. */
+function lastMessageOf(chat: Doc<'chats'>): Infer<typeof lastMessage> | null {
+  const last = chat.last
+  if (!last) return null
+  return {
+    messageId: last.messageId,
+    at: last.at,
+    self: last.self,
+    ...(last.ghostId !== undefined ? { ghostId: last.ghostId } : {}),
+    redacted: last.redacted,
+    sealed: last.sealed ?? null,
+    objectId: last.objectId,
+  }
+}
 
 async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
   const accountKey = `${chat.network}:${chat.loginId}`
@@ -79,6 +113,7 @@ async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, I
     blocked: chat.blocked ?? false,
     labelIds: labels.map((label) => label.labelId),
     lastMessageAt: chat.lastMessageAt,
+    lastMessage: lastMessageOf(chat),
   }
 }
 
@@ -123,8 +158,8 @@ export const list = query({
       if (!label || label.userId !== userId) throw new ConvexError('That label doesn’t exist.')
       const labelId = args.labelId
       // The page reads `chatLabels` rows, then each one's chat. A chat row is small (its
-      // sealed metadata is capped at 8 KiB), so at most a page's worth of them, which
-      // `maximumRowsRead` ensures, stays far inside the read limit.
+      // sealed metadata is capped at 8 KiB and its preview at 4 KiB), so at most a page's
+      // worth of them, which `maximumRowsRead` ensures, stays far inside the read limit.
       const result = await ctx.db
         .query('chatLabels')
         .withIndex('by_label', (q) => q.eq('labelId', labelId))

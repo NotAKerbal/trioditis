@@ -8,6 +8,7 @@ import { patchChat } from './chatView'
 import { onLoggedOut } from './commandOutcome'
 import { internal } from '../_generated/api'
 import { MAX_MESSAGE_ROW_BYTES, byteSize } from './bounded'
+import { noteMessage } from './lastMessage'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -107,6 +108,7 @@ async function chatFor(
     portalId: event.portalId,
     kind: 'dm',
     lastMessageAt: 0,
+    last: null,
     unreadCount: 0,
     pinned: false,
     archived: false,
@@ -228,11 +230,15 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   // pending, of their own message, in this chat, echoed by the host the send went to.
   // Anything else is stored as a new message.
   const pending = clientMessageId ? await findPersonsCopy(ctx, event.userId, clientMessageId) : null
+  // Either way the chat's pointer to its newest message is kept: an echo keeps the pending
+  // copy's ID but can change its time, and so its place.
   if (pending && send && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
     await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, 'sent') })
     await settleSend(ctx, send, 'sent')
+    charge(ctx, await noteMessage(ctx, chat, { ...pending, ...fields }))
   } else {
-    await ctx.db.insert('messages', { userId: event.userId, chatId: chat._id, network, ...fields })
+    const messageId = await ctx.db.insert('messages', { userId: event.userId, chatId: chat._id, network, ...fields })
+    charge(ctx, await noteMessage(ctx, chat, { _id: messageId, ...fields }))
   }
 
   // Imported history neither notifies, counts as unread, nor reorders the inbox.
@@ -256,7 +262,15 @@ async function applyEdit(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type
   // A deleted message stays deleted, whatever edit arrives after.
   if (message.redactedAt !== undefined) return
   if (message.editedAt !== undefined && message.editedAt >= event.networkTs) return
-  await ctx.db.patch(message._id, { sealedEdit: event.sealed, editEventId: event.eventId, editedAt: event.networkTs })
+  const edit = { sealedEdit: event.sealed, editEventId: event.eventId, editedAt: event.networkTs }
+  await ctx.db.patch(message._id, edit)
+  await noteChanged(ctx, { ...message, ...edit })
+}
+
+/** Keeps the pointer of a changed message's chat, which the change may be the newest of. */
+async function noteChanged(ctx: MutationCtx, message: Doc<'messages'>) {
+  const chat = charge(ctx, await ctx.db.get(message.chatId))
+  if (chat) charge(ctx, await noteMessage(ctx, chat, message))
 }
 
 async function findReaction(ctx: MutationCtx, messageId: Id<'messages'>, sender: Sender, key: string) {
@@ -321,12 +335,9 @@ async function applyRedaction(
 ) {
   const message = await targetMessage(ctx, event.userId, network, event.targetEventId)
   if (message.redactedAt !== undefined) return
-  await ctx.db.patch(message._id, {
-    redactedAt: event.networkTs,
-    sealed: undefined,
-    sealedEdit: undefined,
-    editEventId: undefined,
-  })
+  const redaction = { redactedAt: event.networkTs, sealed: undefined, sealedEdit: undefined, editEventId: undefined }
+  await ctx.db.patch(message._id, redaction)
+  await noteChanged(ctx, { ...message, ...redaction })
   // A message can have any number of reactions, so they're deleted in bounded batches after
   // this transaction, rather than all inside it. Until they're gone, the marker hides them.
   await ctx.db.insert('reactionCleanups', { messageId: message._id, chatId: message.chatId })

@@ -17,6 +17,21 @@ export const envelope = v.object({
 
 export const sender = v.union(v.object({ self: v.literal(true) }), v.object({ ghostId: v.string() }))
 
+/**
+ * A chat's pointer to its newest message, kept by lib/lastMessage.ts. `sealed` is that
+ * message's latest content, kept only when it's small enough for the chat list.
+ */
+export const storedLastMessage = v.object({
+  messageId: v.id('messages'),
+  sortKey: v.string(),
+  at: v.number(),
+  self: v.boolean(),
+  ghostId: v.optional(v.string()),
+  redacted: v.boolean(),
+  sealed: v.optional(envelope),
+  objectId: v.string(),
+})
+
 export const deliveryState = v.union(...DELIVERY_STATES.map((state) => v.literal(state)))
 
 export const loginState = v.union(...LOGIN_STATES.map((state) => v.literal(state)))

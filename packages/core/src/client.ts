@@ -95,6 +95,25 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
 /** Which inbox view a chat list shows. */
 export type ChatView = 'inbox' | 'archived' | 'snoozed' | 'requests' | 'blocked'
 
+/**
+ * A chat's newest message, for its row in the list. Open `sealed` as a message: kind
+ * `message`, object ID `objectId`. It's the latest edit when there is one, as in
+ * `messages.list`. `null` when the message was deleted (`redacted`) or is too big to carry
+ * here (over 4 KiB sealed): show "Message deleted" or "Message".
+ */
+export interface LastMessage {
+  messageId: string
+  /** Its network time. */
+  at: number
+  /** Sent by the person. */
+  self: boolean
+  /** Who sent it, when it wasn't the person. */
+  ghostId?: string
+  redacted: boolean
+  sealed: Envelope | null
+  objectId: string
+}
+
 /** One row of the chat list, as `chats.list` returns it. Everything readable is sealed. */
 export interface ChatRow {
   _id: string
@@ -120,6 +139,8 @@ export interface ChatRow {
   blocked: boolean
   labelIds: string[]
   lastMessageAt: number
+  /** The newest message, as `messages.list` orders them. `null` when the chat has none. */
+  lastMessage: LastMessage | null
 }
 
 export type SidebarLayout = 'focused' | 'simple'
