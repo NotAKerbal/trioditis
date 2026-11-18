@@ -154,7 +154,7 @@ func New(cfg Config) (*Host, error) {
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
 		BridgeKey: cfg.BridgeKey,
-		Notify: notify, SendTimeout: cfg.SendTimeout,
+		Notify:    notify, SendTimeout: cfg.SendTimeout,
 	})
 	bridgeCfg := BridgeConfig()
 	if cfg.AdjustBridgeConfig != nil {

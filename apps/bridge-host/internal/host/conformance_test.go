@@ -645,7 +645,9 @@ func TestConformance(t *testing.T) {
 		send("cm-latecomer", "slow network")
 		gw.waitFor(t, "unknown after the timeout", statusOf("cm-latecomer", protocol.StatusUnknown))
 		gw.waitFor(t, "sent once the network answers", statusOf("cm-latecomer", protocol.StatusSent))
-		gw.waitFor(t, "own copy", func(e *protocol.Event) bool { return e.Type == protocol.EventMessage && e.ClientMessageID == "cm-latecomer" })
+		gw.waitFor(t, "own copy", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventMessage && e.ClientMessageID == "cm-latecomer"
+		})
 		h.net.SetSendDelay(0)
 		h.host.Connector.SendTimeout = 5 * time.Second
 	})

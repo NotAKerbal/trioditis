@@ -40,6 +40,9 @@ GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVAT
 
 # The fake network, for the dev stack without a real account:
 ./bin/bridge-host --network fake run
+
+# Without a gateway at all, sealing to dev keys kept in the data directory:
+./bin/bridge-host --network fake --dev-keys run
 ```
 
 | Variable | Default | Meaning |
@@ -49,9 +52,9 @@ GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVAT
 | `BRIDGE_HOST_ADDR` | `127.0.0.1:8611` | Command server address |
 | `BRIDGE_DATA_DIR` | `.data/bridge-host` | Database, media and dev files |
 | `BRIDGE_DATABASE_TYPE` / `_URI` | SQLite in the data dir | `postgres` and a URI for production |
-| `GATEWAY_URL` | none | Without it, dev keys are used and nothing is pushed |
+| `GATEWAY_URL` | none | Required, unless `--dev-keys` is given (then nothing is pushed) |
 | `TRIODITIS_INTERNAL_TOKEN` | none | Bearer token both ways |
-| `BRIDGE_PUBLIC_KEY` / `BRIDGE_PRIVATE_KEY` | generated in dev | Bridge key pair, base64url X25519. In dev it is generated once into `bridge-key.json` and kept: opaque IDs derive from it |
+| `BRIDGE_PUBLIC_KEY` / `BRIDGE_PRIVATE_KEY` | generated in dev | Bridge key pair, base64url X25519. In dev it is generated once into `bridge-key.json` and kept. Opaque IDs don't depend on it (see Design), so it can be rotated |
 | `BRIDGE_FAKE_CONTROL_ADDR` | none | `--network fake` only: a loopback endpoint (`POST /fake/incoming`, internal token) for the end-to-end script to deliver messages. Dev only |
 
 ### Try WhatsApp from the terminal
@@ -60,8 +63,8 @@ This needs your phone. It runs the same login commands the gateway would send, w
 identity keys kept in the data directory (never do that in production):
 
 ```sh
-./bin/bridge-host --network whatsapp --user isaac --flow qr login      # scan the QR
-./bin/bridge-host --network whatsapp --user isaac --flow phone login   # or a pairing code
+./bin/bridge-host --network whatsapp --dev-keys --user isaac --flow qr login      # scan the QR
+./bin/bridge-host --network whatsapp --dev-keys --user isaac --flow phone login   # or a pairing code
 # in another terminal, follow the journal, decrypted with the dev key:
 ./bin/bridge-host --network whatsapp --user isaac inspect
 ```
@@ -82,29 +85,53 @@ identity keys kept in the data directory (never do that in production):
   Convex uses. Our own sends use a hash of the user and `clientMessageId`.
 - **Opaque protocol IDs.** `portalId`, `ghostId` and `loginId` are keyed hashes (`p_…`,
   `g_…`, `l_…`) because network IDs contain phone numbers. The reverse map is in
-  `trioditis_id`.
+  `trioditis_id`. The hashing key is created once per database (`trioditis_secret`) and
+  kept, so a new bridge key changes no ID; a database from before it existed keeps the key
+  its IDs were made with. A portal's ID is hashed from the key its room was created with and
+  stands for the room, so it survives the network re-IDing the portal (WhatsApp moving a
+  chat from a phone number to a LID): commands find the current portal by room.
 - **Sealing at the earliest point.** Content is sealed to the owner's identity key (plus
   the agent-access key for granted portals) before it reaches the journal. Keys come from
   the gateway, cached a minute in memory and indefinitely in the database, so sealing
   continues while the gateway is down: bridgev2 never retries a message the Matrix side
   failed to take.
-- **Journal.** Append-only, sequence-numbered, in the same database as bridgev2. The
-  pusher sends batches in order and advances only on the gateway's acknowledgement. It
+- **Journal.** Append-only, sequence-numbered, in the same database as bridgev2. Sequence
+  numbers come from a counter in the appending transaction, never a database sequence, so
+  a rolled-back append leaves no gap for the gateway to wait on. A batch from `BatchSend`
+  is appended in one transaction. The pusher sends batches in order and advances only on
+  the gateway's acknowledgement; a `409` asking for a sequence the journal can't have is
+  reported rather than resent, and a repeated one backs off. A login's QR or pairing code
+  is scrubbed from the journal once acknowledged. It
   heartbeats with an empty batch on startup and every 30 seconds, and adopts the gateway's
   `ackedThrough` (resending if the gateway is behind).
-- **Sends.** A `send` inserts a durable outgoing row and emits `submitted` before bridgev2
-  sees it. bridgev2's message status becomes `sent` (then the person's own sealed copy),
-  `failed` (only if bridgev2 is certain) or `unknown`. No outcome within the send timeout
-  is `unknown`; a send in flight at a restart becomes `unknown`. Nothing is ever retried.
-  A repeated `clientMessageId` repeats the last status. `notAfter` in the past gives
-  `failed` / `expired`. Plaintext of a send is held in memory only until its outcome.
+- **Commands are stored before they are acknowledged.** The server checks a command and
+  stores it, payload included, in `trioditis_command`, and only then answers `202`; a
+  worker runs stored commands in arrival order. A command acknowledged is never lost: one
+  interrupted before its send was recorded runs after a restart, and one whose send was
+  recorded is settled as `unknown`. Logins interrupted by a restart end with an error. A
+  command's payload (sealed to the bridge key) is deleted once it has run.
+- **Sends, one at a time per chat.** The next command for a chat waits until a send in it
+  has an outcome, so `notAfter` (required on every send) is checked right before the send is
+  handed to bridgev2, not when it was queued. The hand-off records `submitted`; bridgev2's
+  message status then records `sent` with the person's own copy (sealed at hand-off),
+  `failed` (only if bridgev2 is certain) or `unknown`, each status committed together with
+  the events reporting it. No outcome within the send timeout is `unknown`, and the send is
+  remembered for an hour, so an outcome that arrives later is still recorded. A send in
+  flight at a restart becomes `unknown`. Nothing is ever retried. A repeated
+  `clientMessageId` repeats the last status. Relations (replies, edit, reaction and read
+  targets) must belong to the command's chat.
 - **Errors are codes.** Events and 4xx bodies carry only protocol error codes. Details are
   logged locally.
 - **Logins** follow bridgev2's login process API, emitting `loginStep` events; input
   arrives sealed to the bridge key and is cleared after use.
 - **Media.** Connector uploads stay in memory (10 minutes) until a sealed object
   references them, then an encrypted copy per person is written to disk with its key in
-  the sealed plaintext. Outbound attachments are registered from the sealed send.
+  the sealed plaintext. Outbound attachments are registered from the sealed send. A
+  connector that needs a real file (WhatsApp, for media over 5 MiB) gets one only on tmpfs
+  (`/dev/shm`), removed straight after; without tmpfs the media is refused rather than
+  written to disk. Media files are opened without following symlinks.
+- **Agent grants** from the gateway are honoured for 10 minutes while it is unreachable;
+  after that only the person's identity key is used.
 
 ## Checks
 
@@ -118,8 +145,9 @@ pnpm --filter @trioditis/crypto test  # TypeScript opens vectors-go.json
 The conformance suite (`internal/host/conformance_test.go`) runs a real bridge host with
 `fakenet` against a fake gateway and checks:
 
+- every event against the backend's field validators
 - registration heartbeat
-- login through commands
+- login through commands, and one submit per login step
 - incoming messages sealed to their owner only
 - sealed chat and contact metadata
 - history through `BatchSend`
@@ -127,6 +155,10 @@ The conformance suite (`internal/host/conformance_test.go`) runs a real bridge h
 - network resend deduplication
 - edits, reactions, reaction removal, redactions, receipts and typing
 - the send states (`sent`, `unknown`, `failed`, expired), repeated sends and idempotent command IDs
+- `notAfter` required, and checked at hand-off behind a slow send in the same chat
+- a late outcome after a timeout still recorded as `sent`
+- replies refused into another chat
+- a send in flight at a restart ends `unknown` and is never sent
 - logins scoped to their owner
 - two people in one chat
 - sealed attachments in both directions
@@ -134,6 +166,13 @@ The conformance suite (`internal/host/conformance_test.go`) runs a real bridge h
 - ordering and exactly-once delivery across a restart
 - error codes and well-formed events
 - a grep of every file on disk for plaintext content
+
+`internal/host/recovery_test.go` adds: a stored command running after a restart, a
+handed-off send settled as `unknown`, IDs surviving a new bridge key, a portal keeping its
+ID through a re-ID, and login codes scrubbed once acknowledged. `TestPostgres` runs the
+core flow on PostgreSQL when `TRIODITIS_TEST_POSTGRES_URI` names a scratch database.
+`internal/store` tests the portal-value migration, the gap-free journal and the ID key.
+`vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
 
@@ -171,10 +210,10 @@ suite. WhatsApp additionally uses:
   synced from networks yet), and `SetExtraProfileMeta` and `SetProfile`.
 - These are dropped: polls, call notices and other unsupported event types.
 - A send carries at most one attachment.
-- The `backfill` command runs bridgev2's next backfill task for the portal; `beforeEventId`
-  and `limit` are ignored.
-- `notAfter` is checked when the command arrives. Time spent queued inside bridgev2's
-  portal loop isn't covered.
+- The `backfill` command fetches `limit` messages before `beforeEventId` (or the oldest
+  bridged message) through the connector and imports them; `more` is the network's answer.
+- `notAfter` is checked at hand-off to bridgev2. A remote event ahead of the send in
+  bridgev2's own portal queue can still delay it a little after that.
 - Outbound attachments expect the client's ciphertext already at
   `<data>/media/<network>/<mediaId>`. Nothing puts it there yet; that is the gateway's
   media path.
@@ -192,9 +231,14 @@ suite). But the connectors' own storage, in the same database, does:
   names and identifiers (phone numbers), and **`user_login`** stores the remote name.
   bridgev2 needs them for change detection.
 - **WhatsApp's `whatsapp_history_sync_message`** stores raw history-sync message protobufs
-  (`data bytea`, plaintext content) until they are backfilled, then deletes them.
-- whatsmeow's store holds the session keys. This is expected; it is what makes the bridge
-  work.
+  (`data bytea`, plaintext content) until they are backfilled. The connector already deletes
+  each batch once imported (its `CompleteCallback`), so rows only remain for history not yet
+  imported. Deleting them earlier would lose that history, so the host doesn't.
+- whatsmeow's store holds the session keys (expected; it is what makes the bridge work)
+  and its contacts table, which has push names and phone numbers.
+- A connector's media conversion can write a replacement file (for example a converted
+  voice note) wherever the connector chooses; the host reads and removes it, but doesn't
+  choose where it was written.
 
 Options:
 
@@ -208,7 +252,8 @@ Options:
   Matrix message" with the error). The host can't change them; keep its log level at warn
   or above in production and treat its logs as sensitive.
 - Large media is buffered fully in memory.
-- Avatars older than the 10-minute upload window are left out of later `chat` and
-  `contact` events. The client keeps the one it already has.
+- Avatars older than the 10-minute upload window can't be attached to later `chat` and
+  `contact` events; those carry `avatarUnchanged: true` instead, and clients keep the avatar
+  they have. A client with no copy (a new device) shows none until the avatar changes.
 - The connector is pinned to `mautrix v0.33.0`. Every bump needs this suite plus the live
   checklist, since mautrix isn't tested against a non-homeserver Matrix side.
