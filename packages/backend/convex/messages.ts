@@ -48,11 +48,19 @@ export const send = mutation({
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, args.chatId)
     if (!CLIENT_MESSAGE_ID.test(args.clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
+    // Sending the same message again does nothing, whatever has changed since.
+    const already = await ctx.db
+      .query('outbox')
+      .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', args.clientMessageId))
+      .first()
+    if (already) return null
     if (!isEnvelope(args.forBridge, MAX_CLIENT_SEALED_BYTES) || !isEnvelope(args.copy, MAX_CLIENT_SEALED_BYTES)) {
       throw new ConvexError('That message isn’t sealed, or is too long.')
     }
     // A reply must quote a message in this chat that reached the network.
-    if (args.replyTo) {
+    if (args.replyTo !== undefined) {
+      if (args.replyTo.length > 256 || args.replyTo.startsWith('pending:'))
+        throw new ConvexError('That message can’t be replied to.')
       const replyTo = args.replyTo
       const quoted = await ctx.db
         .query('messages')
@@ -62,12 +70,6 @@ export const send = mutation({
         throw new ConvexError('That message can’t be replied to.')
       }
     }
-    const existing = await ctx.db
-      .query('outbox')
-      .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', args.clientMessageId))
-      .first()
-    if (existing) return null
-
     const now = Date.now()
     await ctx.db.insert('messages', {
       userId: member.userId,

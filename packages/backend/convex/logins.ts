@@ -37,6 +37,10 @@ export const start = mutation({
   returns: v.id('loginSessions'),
   handler: async (ctx, args) => {
     const member = await requireMember(ctx)
+    // Login flow IDs are short names like `qr` or `phone`; anything else isn't one.
+    if (args.flowId !== undefined && !/^[A-Za-z0-9_.-]{1,64}$/.test(args.flowId)) {
+      throw new ConvexError('That isn’t a login method this network offers.')
+    }
     if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
     // Nothing can be sealed to someone without an identity key, so no network can be
     // connected until their first device has set one.

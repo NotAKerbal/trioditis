@@ -22,11 +22,19 @@ export const MAX_BATCH = 100
  */
 const SCAN = 2_000
 const SCAN_EXPIRED_LEASES = 200
+/** The most commands one claim hands out: each reads a payload of up to 64 KiB. */
+const MAX_CLAIMS = 20
 /**
- * How many commands one claim may expire. Expiring reads and deletes a payload, so it is
- * bounded like claiming; the rest expire on the next sweep.
+ * How many commands one claim may expire. Expiring reads a payload and the person's copy
+ * (each up to 64 KiB) and a login session, so it is bounded like claiming; the rest expire on
+ * the next sweep.
  */
-const MAX_EXPIRIES = 50
+const MAX_EXPIRIES = 20
+/**
+ * The index lookups one claim may make beyond its two scans, kept well under Convex's
+ * 4,096 ranges per transaction. A claim that runs out stops early; the next sweep goes on.
+ */
+const MAX_LOOKUPS = 3_000
 
 const EVENT_TYPES = new Set([
   'message',
@@ -59,7 +67,7 @@ async function hostRow(ctx: QueryCtx, hostId: string) {
 async function registerHost(ctx: MutationCtx, hostId: string, hostNetwork: Doc<'bridgeHosts'>['network'], now: number) {
   const existing = await hostRow(ctx, hostId)
   if (existing) {
-    if (existing.network !== hostNetwork) throw new ConvexError(`Host ${hostId} is a ${existing.network} host`)
+    if (existing.network !== hostNetwork) throw new ConvexError('Host network mismatch')
     return existing
   }
   const id = await ctx.db.insert('bridgeHosts', { hostId, network: hostNetwork, lastSeq: 0, lastSeenAt: now })
@@ -82,7 +90,7 @@ export const ingest = mutation({
   returns: v.union(v.object({ ackedThrough: v.number() }), v.object({ expectedSeq: v.number() })),
   handler: async (ctx, args) => {
     assertGateway(args.secret)
-    if (args.events.length > MAX_BATCH) throw new ConvexError(`At most ${MAX_BATCH} events per batch`)
+    if (args.events.length > MAX_BATCH) throw new ConvexError('Batch too large')
     const now = Date.now()
     const host = await registerHost(ctx, args.hostId, args.network, now)
 
@@ -281,7 +289,8 @@ export const claimCommands = mutation({
   handler: async (ctx, { secret, limit, hostIds }) => {
     assertGateway(secret)
     const now = Date.now()
-    const take = Math.min(Math.max(1, Math.floor(limit)), MAX_BATCH)
+    const take = Math.min(Math.max(1, Math.floor(limit)), MAX_CLAIMS)
+    let lookups = 0
     const reachable = new Set(hostIds)
 
     const liveHosts = new Map<string, Doc<'bridgeHosts'>>()
@@ -298,6 +307,7 @@ export const claimCommands = mutation({
       if (!command.loginId) return liveByNetwork.get(command.network)
       const key = `${command.network}:${command.loginId}`
       if (!loginHosts.has(key)) {
+        lookups += 1
         const loginId = command.loginId
         const account = await ctx.db
           .query('networkAccounts')
@@ -324,9 +334,10 @@ export const claimCommands = mutation({
     const heldChats = new Set<Id<'chats'>>()
     let expired = 0
     for (const command of candidates) {
-      if (claimed.length >= take) break
+      if (claimed.length >= take || lookups >= MAX_LOOKUPS) break
       if (command.expiresAt !== undefined && command.expiresAt <= now) {
         if (expired < MAX_EXPIRIES) {
+          lookups += 3
           await expire(ctx, command)
           expired++
         }
@@ -337,8 +348,10 @@ export const claimCommands = mutation({
       if (command.chatId) {
         if (heldChats.has(command.chatId)) continue
         heldChats.add(command.chatId)
+        lookups += 2
         if (!(await isNextForChat(ctx, command))) continue
       }
+      lookups += 2
       const lease = command.attempts + 1
       await ctx.db.patch(command._id, {
         state: 'claimed',

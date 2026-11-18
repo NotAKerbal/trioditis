@@ -24,6 +24,7 @@ export type UnmappableReason =
   | 'unknown_login_session'
   | 'unknown_send'
   | 'malformed_envelope'
+  | 'too_large'
 
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
 export class Unmappable extends Error {
@@ -386,10 +387,13 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
   const sessionId = ctx.db.normalizeId('loginSessions', event.loginSessionId)
   const session = sessionId ? await ctx.db.get(sessionId) : null
   if (!session || session.userId !== event.userId) throw new Unmappable('unknown_login_session')
-  // Once a host is running the login, only it speaks for it.
-  if (session.network !== origin.network || (session.hostId && session.hostId !== origin.hostId)) {
+  // Only the host the login was handed to speaks for it (it is pinned when the start command
+  // is handed out, before any host can have a step to report).
+  if (session.network !== origin.network || !session.hostId || session.hostId !== origin.hostId) {
     throw new Unmappable('foreign_host')
   }
+  // A login that has ended stays ended, whatever step arrives late.
+  if (session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
   const state =
     event.step.type === 'complete'
       ? 'complete'
@@ -423,9 +427,31 @@ async function applySendStatus(
   if (message) await ctx.db.patch(message._id, { delivery: advance(message.delivery, event.status) })
 }
 
+/** The most an incoming sealed object may hold, well under Convex's 1 MiB document limit. */
+const MAX_INCOMING_SEALED_BYTES = 512 * 1024
+
+/**
+ * Whether `origin` may speak for the event's login: once a host is running a login, events
+ * for it from any other host are refused. (A login moves hosts only through a newer
+ * `CONNECTED` report, which `applyLoginState` decides.)
+ */
+async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
+  if (event.type === 'loginState' || event.type === 'loginStep' || !event.loginId) return
+  const loginId = event.loginId
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', origin.network).eq('loginId', loginId))
+    .unique()
+  if (account?.hostId && account.hostId !== origin.hostId) throw new Unmappable('foreign_host')
+}
+
 export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
   const { network } = origin
-  if ('sealed' in event && !isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
+  if ('sealed' in event) {
+    if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
+    if (!isEnvelope(event.sealed, MAX_INCOMING_SEALED_BYTES)) throw new Unmappable('too_large')
+  }
+  await assertLoginOwner(ctx, event, origin)
   switch (event.type) {
     case 'message':
       return await applyMessage(ctx, event, origin)

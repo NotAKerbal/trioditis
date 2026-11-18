@@ -511,7 +511,8 @@ describe('sending', () => {
     const expired = async () =>
       (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter((row) => row.state === 'expired')
         .length
-    expect(await expired()).toBe(50)
+    expect(await expired()).toBe(20)
+    await claim(t)
     await claim(t)
     expect(await expired()).toBe(60)
   })
@@ -578,5 +579,92 @@ describe('sending', () => {
       state: 'active',
       step: { stepId: 's2' },
     })
+  })
+
+  it('ignores a late step for a login that has ended, and steps before the login was handed out', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    const step = (n: number, stepId: string) =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId: 'whatsapp-1',
+        network: 'whatsapp',
+        events: [
+          {
+            seq: n,
+            type: 'loginStep',
+            userId: 'user_a',
+            loginId: '',
+            at: Date.now(),
+            loginSessionId,
+            step: { stepId, type: 'userInput' },
+          },
+        ],
+      })
+    await step(1, 'early')
+    expect((await as.query(api.logins.session, { loginSessionId }))!.state).toBe('pending')
+    await claim(t)
+    await step(2, 's1')
+    await as.mutation(api.logins.cancel, { loginSessionId })
+    vi.advanceTimersByTime(11 * 60 * 1000)
+    await heartbeat(t)
+    await claim(t, 10, [])
+    expect((await as.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
+    await step(3, 's2')
+    expect((await as.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
+  })
+
+  it('refuses a login flow ID that isn’t one', async () => {
+    const { as } = await ready()
+    await expect(as.mutation(api.logins.start, { network: 'whatsapp', flowId: 'x'.repeat(1000) })).rejects.toThrow(
+      /login method/,
+    )
+  })
+
+  it('keeps a retried send idempotent even if what it replied to was deleted since', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await t.run(async (ctx) => {
+      await ctx.db.insert('messages', {
+        userId: 'user_a',
+        chatId,
+        network: 'whatsapp',
+        eventId: 'quoted',
+        networkTs: 1,
+        sortKey: '1:quoted',
+        sender: { ghostId: 'g' },
+        sealed: sealed('q'),
+        sealedObjectId: 'quoted',
+        historical: false,
+      })
+    })
+    const reply = () =>
+      as.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(1),
+        forBridge: sealed(),
+        copy: sealed(),
+        replyTo: 'quoted',
+      })
+    await reply()
+    await t.run(async (ctx) => {
+      const quoted = (await ctx.db.query('messages').collect()).find((m) => m.eventId === 'quoted')!
+      await ctx.db.patch(quoted._id, { redactedAt: 2 })
+    })
+    await reply()
+    await send(as, chatId, 2)
+    await expect(
+      as.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(3),
+        forBridge: sealed(),
+        copy: sealed(),
+        replyTo: `pending:${id(2)}`,
+      }),
+    ).rejects.toThrow(/replied to/)
   })
 })
