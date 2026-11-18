@@ -431,11 +431,12 @@ describe('ingest', () => {
     seq = 0
     const t = setup()
     await ingest(t, [message('e1')])
-    const messageId = (await messages(t))[0]!._id
+    const { _id: messageId, chatId } = (await messages(t))[0]!
     await t.run(async (ctx) => {
       for (let i = 0; i < 500; i++) {
         await ctx.db.insert('reactions', {
           userId: 'user_a',
+          chatId,
           messageId,
           senderKey: `ghost:g${i}`,
           key: '👍',
@@ -453,8 +454,12 @@ describe('ingest', () => {
     })
     expect(await ingest(t, [redaction])).toEqual({ ackedThrough: 2 })
     expect((await messages(t))[0]!.redactedAt).toBe(3_000)
+    // Until they're gone, a marker hides them from `messages.reactions`.
+    const markers = async () => await t.run(async (ctx) => await ctx.db.query('reactionCleanups').collect())
+    expect(await markers()).toHaveLength(1)
     await t.finishAllScheduledFunctions(vi.runAllTimers)
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+    expect(await markers()).toHaveLength(0)
     vi.useRealTimers()
   })
 

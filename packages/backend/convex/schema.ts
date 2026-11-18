@@ -2,7 +2,6 @@ import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 import {
   chatKind,
-  chatView,
   commandPayload,
   deliveryState,
   envelope,
@@ -11,6 +10,7 @@ import {
   loginStep,
   network,
   sender,
+  storedChatView,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -25,6 +25,12 @@ export default defineSchema({
     /** The person's identity public key, base64url, set by their first device. */
     identityPublicKey: v.optional(v.string()),
     identityKid: v.optional(v.string()),
+    /**
+     * The highest revision any of the person's key backups has had. Each new or replaced
+     * backup takes the next one, so a revision is never reused, even for a passkey backup
+     * removed and made again.
+     */
+    backupRevision: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -65,6 +71,8 @@ export default defineSchema({
     updatedAt: v.number(),
     /** A logout was asked for and hasn't been confirmed yet. */
     logoutPending: v.optional(v.boolean()),
+    /** The command of that pending logout: only its own outcome or timeout ends it. */
+    logoutCommandId: v.optional(v.id('outbox')),
     /** Why the last logout didn't happen. */
     logoutError: v.optional(errorCode),
   })
@@ -118,13 +126,15 @@ export default defineSchema({
     blocked: v.optional(v.boolean()),
     /**
      * Which list the chat is in, kept by `lib/chatView.ts` on every write so the lists are
-     * index ranges. Missing for a deleted chat, which is in none.
+     * index ranges; `deleted` for a deleted chat, which is in none. Required, so a backend
+     * holding chats from before views existed refuses this schema rather than hide them.
      */
-    view: v.optional(chatView),
+    view: storedChatView,
   })
     .index('by_user_lastMessage', ['userId', 'lastMessageAt'])
+    // Descending, `pinned: true` sorts before `false`: one range gives the pins, then the rest.
     .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
-    .index('by_user_view_network_last', ['userId', 'view', 'network', 'lastMessageAt'])
+    .index('by_user_view_network_pinned_last', ['userId', 'view', 'network', 'pinned', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
 
   /**
@@ -168,7 +178,10 @@ export default defineSchema({
     /** For `passkey`: which credential, and its PRF salt. */
     credentialId: v.optional(v.string()),
     prfSalt: v.optional(v.string()),
-    /** Increases each time this backup is replaced; a replacement names the one it replaces. */
+    /**
+     * Changes each time this backup is replaced, never to a value it had before (see
+     * `members.backupRevision`); a replacement names the one it replaces.
+     */
     revision: v.number(),
     createdAt: v.number(),
   }).index('by_user', ['userId', 'kind']),
@@ -181,6 +194,8 @@ export default defineSchema({
   keyChallenges: defineTable({
     userId: v.string(),
     hash: v.string(),
+    /** The public key it was sealed to: a proof counts only for that key. */
+    publicKey: v.string(),
     expiresAt: v.number(),
   }).index('by_user', ['userId']),
 
@@ -193,7 +208,8 @@ export default defineSchema({
     chatId: v.id('chats'),
     clientMessageId: v.string(),
     sendAt: v.number(),
-    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled')),
+    /** `failed` when its time came and its chat was gone: it was never sent. */
+    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled'), v.literal('failed')),
     replyTo: v.optional(v.string()),
     createdAt: v.number(),
   })
@@ -253,6 +269,8 @@ export default defineSchema({
 
   reactions: defineTable({
     userId: v.string(),
+    /** The message's chat, so a lookup by chat needn't read the (large) message row. */
+    chatId: v.id('chats'),
     messageId: v.id('messages'),
     /** `self`, or the ghost ID. */
     senderKey: v.string(),
@@ -267,6 +285,15 @@ export default defineSchema({
     .index('by_message', ['messageId', 'senderKey', 'key'])
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
     .index('by_message_active', ['messageId', 'removedAt']),
+
+  /**
+   * A deleted message whose reactions are still being removed (in batches, by
+   * `cleanup.reactionsOfMessage`). `messages.reactions` shows none for it meanwhile, without
+   * reading the message row, which can be large.
+   */
+  reactionCleanups: defineTable({
+    messageId: v.id('messages'),
+  }).index('by_message', ['messageId']),
 
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
@@ -329,6 +356,11 @@ export default defineSchema({
     createdAt: v.number(),
     /** A send can't go out after this; it asks the person instead. */
     expiresAt: v.optional(v.number()),
+    /**
+     * `gateway.commandDeadline` is scheduled for it. Set when it is queued;
+     * `migrations.scheduleCommandDeadlines` schedules one for rows from before that.
+     */
+    deadlineScheduled: v.optional(v.boolean()),
   })
     // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
     // ones by deadline. Both orders are needed.

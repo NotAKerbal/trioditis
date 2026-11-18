@@ -181,9 +181,13 @@ describe('server info', () => {
     expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true })
     process.env.TRIODITIS_DEMO = '1'
     try {
+      // Demo data needs the fake network alone too; without it, only invitations are off.
+      expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false })
+      process.env.TRIODITIS_NETWORKS = 'fake'
       expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false })
     } finally {
       delete process.env.TRIODITIS_DEMO
+      process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
     }
   })
 })

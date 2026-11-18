@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../convex/_generated/api'
+import { api, components } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { chatViewOf } from '../convex/lib/chatView'
 import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
@@ -59,7 +59,7 @@ describe('chat views', () => {
     expect(chatViewOf({ snoozedUntil: soon, woke: true, archived: true })).toBe('archived')
     expect(chatViewOf({ snoozedUntil: soon, woke: true })).toBe('inbox')
     expect(chatViewOf({ archived: true })).toBe('archived')
-    expect(chatViewOf({ deleted: true, archived: true })).toBeUndefined()
+    expect(chatViewOf({ deleted: true, archived: true })).toBe('deleted')
   })
 
   it('lists pinned chats first, then by recency, a page at a time', async () => {
@@ -69,9 +69,9 @@ describe('chat views', () => {
     await aChat(t, 'user_a', 'pinned', { lastMessageAt: 0, pinned: true })
     await aChat(t, 'user_a', 'archived', { lastMessageAt: 9, archived: true })
     const page1 = await a.query(api.chats.list, { paginationOpts: { numItems: 3, cursor: null } })
-    expect(page1.page.map((row) => row.portalId)).toEqual(['pinned', 'c7', 'c6', 'c5'])
+    expect(page1.page.map((row) => row.portalId)).toEqual(['pinned', 'c7', 'c6'])
     const page2 = await a.query(api.chats.list, { paginationOpts: { numItems: 3, cursor: page1.continueCursor } })
-    expect(page2.page.map((row) => row.portalId)).toEqual(['c4', 'c3', 'c2'])
+    expect(page2.page.map((row) => row.portalId)).toEqual(['c5', 'c4', 'c3'])
     expect(
       (await a.query(api.chats.list, { view: 'archived', paginationOpts: first })).page.map((row) => row.portalId),
     ).toEqual(['archived'])
@@ -84,6 +84,29 @@ describe('chat views', () => {
       labelIds: [],
       networkAccountId: null,
     })
+  })
+
+  it('carries pins past a page on to the next, and filters by network from one range', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    for (let n = 0; n < 55; n++) await aChat(t, 'user_a', `pin${n}`, { lastMessageAt: n, pinned: true })
+    await aChat(t, 'user_a', 'plain', { lastMessageAt: 100 })
+    await aChat(t, 'user_a', 'fake-pin', { lastMessageAt: 200, pinned: true, network: 'fake' })
+    await aChat(t, 'user_a', 'fake-plain', { lastMessageAt: 300, network: 'fake' })
+    const seen: string[] = []
+    let cursor: string | null = null
+    for (;;) {
+      const result: { page: { portalId: string }[]; isDone: boolean; continueCursor: string } = await a.query(
+        api.chats.list,
+        { network: 'whatsapp', paginationOpts: { numItems: 50, cursor } },
+      )
+      seen.push(...result.page.map((row) => row.portalId))
+      if (result.isDone) break
+      cursor = result.continueCursor
+    }
+    expect(seen).toEqual([...Array.from({ length: 55 }, (_, n) => `pin${54 - n}`), 'plain'])
+    const fake = await a.query(api.chats.list, { network: 'fake', paginationOpts: first })
+    expect(fake.page.map((row) => row.portalId)).toEqual(['fake-pin', 'fake-plain'])
   })
 
   it('moves a chat between views as its flags change, including combined ones', async () => {
@@ -191,6 +214,13 @@ describe('chat actions', () => {
     await a.mutation(api.chats.setMuted, { chatId, muted: false })
     expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBeNull()
     await expect(a.mutation(api.chats.snooze, { chatId, until: Date.now() - 1 })).rejects.toThrow(/future/)
+    // Within a year, as for scheduled sends.
+    const day = 24 * 60 * 60 * 1000
+    await a.mutation(api.chats.snooze, { chatId, until: Date.now() + 364 * day })
+    await expect(a.mutation(api.chats.snooze, { chatId, until: Date.now() + 366 * day })).rejects.toThrow(/year/)
+    await expect(
+      a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day }),
+    ).rejects.toThrow(/year/)
   })
 })
 
@@ -204,6 +234,7 @@ describe('messages alongside the page', () => {
     await t.run(async (ctx) => {
       await ctx.db.insert('reactions', {
         userId: 'user_a',
+        chatId,
         messageId,
         senderKey: 'self',
         key: '👍',
@@ -213,6 +244,7 @@ describe('messages alongside the page', () => {
       })
       await ctx.db.insert('reactions', {
         userId: 'user_a',
+        chatId,
         messageId,
         senderKey: 'ghost:g',
         key: '❤️',
@@ -228,6 +260,176 @@ describe('messages alongside the page', () => {
       [messageId]: [{ key: '👍', senderKey: 'self' }],
     })
     expect((await a.query(api.messages.typing, { chatId })).map((row) => row.senderKey)).toEqual(['ghost:h'])
+  })
+})
+
+describe('reads that large messages could push past the read limit', () => {
+  const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+
+  /** Messages at the size cap, each with an edit at the cap too: about 700 KiB a row. */
+  async function bigMessages(t: T, chatId: Id<'chats'>, count: number, fields: Record<string, unknown> = {}) {
+    const ids: Id<'messages'>[] = []
+    // One transaction per row: a few of them together would pass the limit being tested.
+    for (let i = 0; i < count; i++) {
+      const ts = i + 1
+      ids.push(
+        await t.run(
+          async (ctx) =>
+            await ctx.db.insert('messages', {
+              userId: 'user_a',
+              chatId,
+              network: 'whatsapp',
+              eventId: `m${i}`,
+              networkTs: ts,
+              sortKey: `${String(ts).padStart(16, '0')}:m${i}`,
+              sender: { ghostId: 'g' },
+              sealed: big(`m${i}`),
+              sealedObjectId: `m${i}`,
+              sealedEdit: big(`e${i}`),
+              editEventId: `e${i}`,
+              historical: false,
+              ...fields,
+            }),
+        ),
+      )
+    }
+    return ids
+  }
+
+  it('marks read over many large messages, telling the network the newest it can see', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 30 })
+    await bigMessages(t, chatId, 30)
+    await a.mutation(api.chats.markRead, { chatId })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((row) => row.payload)).toEqual([{ type: 'markRead', portalId: 'p', upToEventId: 'm29' }])
+    expect((await a.query(api.chats.get, { chatId })).unreadCount).toBe(0)
+  })
+
+  it('marks read locally when the newest it can afford to read never reached the network', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 1 })
+    await aMessage(t, chatId, 'bridged', 0)
+    // Pending copies are never this large; the point is only that the scan stops at its budget.
+    for (let i = 0; i < 30; i++) {
+      await aMessage(t, chatId, `pending:m${i}`, i + 1, { sealed: big(`m${i}`), sealedEdit: big(`e${i}`) })
+    }
+    await a.mutation(api.chats.markRead, { chatId })
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+  })
+
+  it('returns reactions for a page of large messages without reading the messages', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await signIn(t, 'user_b')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const ids = await bigMessages(t, chatId, 30)
+    await t.run(async (ctx) => {
+      for (const messageId of ids) {
+        await ctx.db.insert('reactions', {
+          userId: 'user_a',
+          chatId,
+          messageId,
+          senderKey: 'self',
+          key: '👍',
+          eventId: `r${messageId}`,
+          addedAt: 1,
+          networkTs: 1,
+        })
+      }
+      // A deleted message's reactions are hidden while its clean-up runs.
+      await ctx.db.insert('reactionCleanups', { messageId: ids[0]! })
+    })
+    const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
+    expect(Object.keys(result)).toHaveLength(29)
+    expect(result[ids[0]!]).toBeUndefined()
+    expect(result[ids[1]!]).toEqual([{ key: '👍', senderKey: 'self' }])
+    // Someone else asking about these IDs, from their own chat, sees nothing of them.
+    const b = await signIn(t, 'user_c')
+    const theirs = await aChat(t, 'user_c', 'q')
+    const seen = await b.query(api.messages.reactions, { chatId: theirs, messageIds: ids.slice(1, 3) })
+    expect(Object.values(seen).flat()).toEqual([])
+    // Nor does the same person asking from another of their chats.
+    const other = await aChat(t, 'user_a', 'other')
+    const elsewhere = await a.query(api.messages.reactions, { chatId: other, messageIds: ids.slice(1, 3) })
+    expect(elsewhere).toEqual({ [ids[1]!]: [], [ids[2]!]: [] })
+  })
+})
+
+describe('reads that many large rows could push past the read limit', () => {
+  it('reads reactions up to a byte budget, leaving out the messages it didn’t get to', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const ids: Id<'messages'>[] = []
+    for (let m = 0; m < 80; m++) {
+      await aMessage(t, chatId, `m${m}`, m + 1)
+    }
+    await t.run(async (ctx) => {
+      for (const message of await ctx.db.query('messages').collect()) ids.push(message._id)
+    })
+    // A hundred reactions on each, every one as large as ingest lets it be: about 17 MiB.
+    for (const messageId of ids) {
+      await t.run(async (ctx) => {
+        for (let r = 0; r < 100; r++) {
+          await ctx.db.insert('reactions', {
+            userId: 'user_a',
+            chatId,
+            messageId,
+            senderKey: `ghost:${String(r).padStart(256, 'g')}`,
+            key: `${r}`.padStart(256, '€'),
+            eventId: `${r}`.padStart(256, 'e'),
+            addedAt: 1,
+            networkTs: 1,
+          })
+        }
+      })
+    }
+    const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
+    const answered = Object.keys(result)
+    expect(answered.length).toBeGreaterThan(0)
+    expect(answered.length).toBeLessThan(ids.length)
+    // It answers in order, each in full, and the rest can be asked for again.
+    expect(answered).toEqual(ids.slice(0, answered.length))
+    expect(result[ids[0]!]).toHaveLength(100)
+    const rest = await a.query(api.messages.reactions, { chatId, messageIds: ids.slice(answered.length, 100) })
+    expect(Object.keys(rest).length).toBeGreaterThan(0)
+  })
+
+  it('bounds a label page by items and bytes, even when a cursor range asks for more', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const work = await a.mutation(api.labels.create, { labelKey: 'label-key-work-0001', sealed: sealed('work') })
+    const meta = { ...sealed('meta'), ct: 'A'.repeat(Math.floor((8 * 1024 * 4) / 3)) }
+    for (let n = 0; n < 120; n++) {
+      const chatId = await aChat(t, 'user_a', `c${n}`, { lastMessageAt: n, sealedMeta: meta })
+      await t.run(async (ctx) => await ctx.db.insert('chatLabels', { userId: 'user_a', chatId, labelId: work }))
+    }
+    const all: string[] = []
+    let cursor: string | null = null
+    let end = ''
+    for (;;) {
+      const next: { page: { portalId: string }[]; isDone: boolean; continueCursor: string } = await a.query(
+        api.chats.list,
+        { labelId: work, paginationOpts: { numItems: 50, cursor } },
+      )
+      expect(next.page.length).toBeLessThanOrEqual(50)
+      all.push(...next.page.map((row) => row.portalId))
+      end = next.continueCursor
+      if (next.isDone) break
+      cursor = next.continueCursor
+    }
+    expect(new Set(all).size).toBe(120)
+    // A reactive client reloading one page with an end cursor at the very end still gets a
+    // bounded page, and is told to split it.
+    const wide = await a.query(api.chats.list, {
+      labelId: work,
+      paginationOpts: { numItems: 50, cursor: null, endCursor: end },
+    })
+    expect(wide.page.length).toBeLessThanOrEqual(51)
+    expect(wide.pageStatus).toBe('SplitRequired')
   })
 })
 
@@ -252,6 +454,23 @@ describe('labels', () => {
     await a.mutation(api.labels.remove, { labelId: work })
     expect((await a.query(api.chats.get, { chatId: tagged })).labelIds).toEqual([])
     await expect(a.mutation(api.labels.create, { labelKey: 'short', sealed: sealed() })).rejects.toThrow(/label ID/)
+  })
+})
+
+describe('removing a label from many chats', () => {
+  it('takes it off every chat, in batches after the first thousand', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const work = await a.mutation(api.labels.create, { labelKey: 'label-key-work-0001', sealed: sealed('work') })
+    const chatId = await aChat(t, 'user_a', 'p')
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 2500; i++) await ctx.db.insert('chatLabels', { userId: 'user_a', chatId, labelId: work })
+    })
+    await a.mutation(api.labels.remove, { labelId: work })
+    expect(await a.query(api.labels.list, {})).toHaveLength(0)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.query('chatLabels').collect())).toHaveLength(0)
   })
 })
 
@@ -304,6 +523,24 @@ describe('scheduled sends', () => {
     const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
     expect(commands.map((c) => c.clientMessageId)).toEqual([id(2)])
     expect(await scheduleOne(a, chatId, 2, 60_000)).toBeNull()
+  })
+
+  it('fails, and says so, when its chat is gone by the time it’s due', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000))!
+    await t.run(async (ctx) => await ctx.db.patch(chatId, { deleted: true, view: 'deleted' }))
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toHaveLength(0)
+    expect(await a.query(api.scheduled.list, {})).toMatchObject([{ _id: scheduledId, state: 'failed' }])
+    await expect(a.mutation(api.scheduled.sendNow, { scheduledId })).rejects.toThrow(/chat is gone/)
+    // Dismissing it takes it off the list.
+    await a.mutation(api.scheduled.cancel, { scheduledId })
+    expect(await a.query(api.scheduled.list, {})).toHaveLength(0)
   })
 
   it('refuses a time in the past and someone else’s chat', async () => {
@@ -406,6 +643,91 @@ describe('accounts, logins and logout', () => {
       logoutPending: false,
       logoutError: 'not_connected',
     })
+  })
+
+  it('stops a logout being pending when the bridge host took it and never said how it ended', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await connected(t)
+    const [account] = await a.query(api.logins.accounts, {})
+    await a.mutation(api.logins.logout, { networkAccountId: account!._id })
+    const [command] = await t.mutation(api.gateway.claimCommands, {
+      secret: GATEWAY_SECRET,
+      limit: 5,
+      hostIds: ['whatsapp-1'],
+    })
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: command!.commandId,
+      lease: command!.lease,
+      accepted: true,
+    })
+    expect((await a.query(api.logins.accounts, {}))[0]).toMatchObject({ logoutPending: true })
+    // Past its 10-minute deadline and the hour's grace, with no `LOGGED_OUT` from the host.
+    vi.advanceTimersByTime(71 * 60 * 1000)
+    await t.mutation(api.gateway.claimCommands, { secret: GATEWAY_SECRET, limit: 5, hostIds: [] })
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!).toMatchObject({
+      logoutPending: false,
+      logoutError: 'timeout',
+    })
+  })
+
+  it('lets only a logout’s own command end it, not an earlier one’s timeout', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await connected(t)
+    const [account] = await a.query(api.logins.accounts, {})
+    // Logout A is taken and confirmed.
+    await a.mutation(api.logins.logout, { networkAccountId: account!._id })
+    const [first] = await t.mutation(api.gateway.claimCommands, {
+      secret: GATEWAY_SECRET,
+      limit: 5,
+      hostIds: ['whatsapp-1'],
+    })
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: first!.commandId,
+      lease: first!.lease,
+      accepted: true,
+    })
+    const report = async (seq: number, state: 'LOGGED_OUT' | 'CONNECTED') =>
+      await t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId: 'whatsapp-1',
+        network: 'whatsapp',
+        events: [{ seq, type: 'loginState', userId: 'user_a', loginId: 'login_a', at: Date.now(), state }],
+      })
+    await report(2, 'LOGGED_OUT')
+    await report(3, 'CONNECTED')
+    // Logout B, a minute before A's old deadline job would time it out.
+    vi.advanceTimersByTime(70 * 60 * 1000 - 60_000)
+    await t.finishInProgressScheduledFunctions()
+    // Signed in again: the first session has run out by now.
+    const session = await t.run(
+      async (ctx) =>
+        (await ctx.runMutation(components.betterAuth.adapter.create, {
+          input: {
+            model: 'session',
+            data: {
+              token: 'token-again',
+              userId: 'user_a',
+              expiresAt: Date.now() + 60 * 60 * 1000,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          },
+        })) as { _id: string },
+    )
+    const again = t.withIdentity({ subject: 'user_a', sessionId: session._id })
+    await again.mutation(api.logins.logout, { networkAccountId: account!._id })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!).toMatchObject({
+      logoutPending: true,
+    })
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!.logoutError).toBeUndefined()
   })
 
   it('records an expired logout', async () => {

@@ -1,4 +1,5 @@
 import type { Infer } from 'convex/values'
+import { internal } from '../_generated/api'
 import type { Doc, Id } from '../_generated/dataModel'
 import type { MutationCtx, QueryCtx } from '../_generated/server'
 import type { envelope } from '../validators'
@@ -11,10 +12,17 @@ export const LOGIN_COMMAND_TTL_MS = 10 * 60 * 1000
 
 type Command = Omit<Doc<'outbox'>, '_id' | '_creationTime'>
 
-/** Queues a command, with its bridge-readable payload if it has one. */
+/**
+ * Queues a command, with its bridge-readable payload if it has one. A command with a deadline
+ * is ended at that deadline by the scheduler (`gateway.commandDeadline`), not only by the
+ * gateway's next claim: so its payload never outlives `expiresAt`, even with no gateway
+ * running.
+ */
 export async function queueCommand(ctx: MutationCtx, command: Command, sealed?: Infer<typeof envelope>) {
-  const commandId = await ctx.db.insert('outbox', command)
+  const deadline = command.expiresAt !== undefined
+  const commandId = await ctx.db.insert('outbox', { ...command, ...(deadline ? { deadlineScheduled: true } : {}) })
   if (sealed) await ctx.db.insert('outboxPayloads', { commandId, sealed })
+  if (deadline) await ctx.scheduler.runAt(command.expiresAt!, internal.gateway.commandDeadline, { commandId })
   return commandId
 }
 

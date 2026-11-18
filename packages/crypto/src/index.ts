@@ -341,30 +341,34 @@ export function unwrapIdentityKey(
 /**
  * A password backup of the identity key, exactly as `keys.setup` stores it: fresh Argon2id
  * settings and the wrap. For scripts that seed an account (previews, the nightly) as well as
- * the first-device flow.
+ * the first-device flow. It opens the wrap again before returning and throws if that doesn't
+ * give back this key: the server can't check a wrap, and a bad one would lock the person out.
  */
 export function makeKeyBackup(privateKey: Uint8Array, password: string, userId: string) {
   const { publicKey } = keyPairFromPrivateKey(privateKey)
   const kid = keyId(publicKey)
   const params = newPasswordParams()
-  const wrap = wrapIdentityKey(privateKey, passwordKey(password, params), { userId, kid, kind: 'password' })
+  const wrappingKey = passwordKey(password, params)
+  const wrap = wrapIdentityKey(privateKey, wrappingKey, { userId, kid, kind: 'password' })
+  unwrapIdentityKey(wrap, wrappingKey, { userId, kid, kind: 'password' }, publicKey)
   return { publicKey: toBase64Url(publicKey), kid, password: { ...wrap, params } }
 }
 
 /**
- * Everything `keys.setup` takes for an identity key, from a password: the public key, the
- * password backup and a recovery-key backup, plus the recovery key's text. For scripts that
- * set up a known account (previews); a browser does the same through the first-device flow.
+ * Everything `keys.setup` takes for an identity key, from a password, except the proof: the
+ * public key, the password backup and a recovery-key backup, plus the recovery key's text.
+ * Both wraps are opened again before it returns, and it throws unless both give back this
+ * same key. The first-device flow and scripts that set up a known account (previews) use it.
  */
 export function makeKeySetup(privateKey: Uint8Array, password: string, userId: string) {
   const backup = makeKeyBackup(privateKey, password, userId)
+  const publicKey = fromBase64Url(backup.publicKey)
   const recovery = generateRecoveryKey()
+  const context = { userId, kid: backup.kid, kind: 'recovery' } as const
+  const recoveryWrap = wrapIdentityKey(privateKey, recovery.bytes, context)
+  unwrapIdentityKey(recoveryWrap, decodeRecoveryKey(recovery.text), context, publicKey)
   return {
-    args: {
-      publicKey: backup.publicKey,
-      password: backup.password,
-      recovery: wrapIdentityKey(privateKey, recovery.bytes, { userId, kid: backup.kid, kind: 'recovery' }),
-    },
+    args: { publicKey: backup.publicKey, password: backup.password, recovery: recoveryWrap },
     recoveryText: recovery.text,
   }
 }

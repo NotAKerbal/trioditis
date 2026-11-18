@@ -1,4 +1,5 @@
 import { ConvexError, v } from 'convex/values'
+import { NETWORK_INFO } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
@@ -89,11 +90,12 @@ export const start = mutation({
   returns: v.id('loginSessions'),
   handler: async (ctx, args) => {
     const member = await requireMember(ctx)
-    // Login flow IDs are short names like `qr` or `phone`; anything else isn't one.
-    if (args.flowId !== undefined && !/^[A-Za-z0-9_.-]{1,64}$/.test(args.flowId)) {
+    if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
+    // Only the flows `networks.list` offers for this network. Without one, the bridge host
+    // uses the network's first.
+    if (args.flowId !== undefined && !NETWORK_INFO[args.network].flows.some((flow) => flow.id === args.flowId)) {
       throw new ConvexError('That isn’t a login method this network offers.')
     }
-    if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
     // Nothing can be sealed to someone without an identity key, and a key without both backups
     // could be lost with the device, so no network can be connected until both exist.
     if (keyState(member, await backupsOf(ctx, member.userId)) !== 'ready') {
@@ -202,8 +204,7 @@ export const logout = mutation({
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
     if (account.state === 'LOGGED_OUT' || account.logoutPending) return null
     const now = Date.now()
-    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined })
-    await queueCommand(ctx, {
+    const logoutCommandId = await queueCommand(ctx, {
       userId: member.userId,
       network: account.network,
       loginId: account.loginId,
@@ -213,6 +214,7 @@ export const logout = mutation({
       createdAt: now,
       expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
+    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return null
   },

@@ -1,10 +1,11 @@
 import type { ChatView } from '@trioditis/core'
-import type { Doc, Id } from '../_generated/dataModel'
+import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
 
 // Which list a chat is in. Every chat is in exactly one, stored on the chat (`view`) so each
-// list is an index range. Anything that changes a chat's flags goes through `patchChat`, here
-// and in ingest, so `view` can't fall out of step.
+// list is an index range; a deleted chat is in none, and stores `deleted`. Anything that
+// changes a chat's flags goes through `patchChat`, here and in ingest, so `view` can't fall
+// out of step. A new chat is written with `chatViewOf` of its fields.
 //
 // Precedence, strongest first:
 //   blocked   always, whatever else is set
@@ -18,8 +19,8 @@ type ViewFields = Partial<
   Pick<Doc<'chats'>, 'blocked' | 'isRequest' | 'snoozedUntil' | 'woke' | 'archived' | 'deleted'>
 >
 
-export function chatViewOf(chat: ViewFields): ChatView | undefined {
-  if (chat.deleted) return undefined
+export function chatViewOf(chat: ViewFields): ChatView | 'deleted' {
+  if (chat.deleted) return 'deleted'
   if (chat.blocked) return 'blocked'
   if (chat.isRequest) return 'requests'
   if (chat.snoozedUntil !== undefined && !chat.woke) return 'snoozed'
@@ -37,10 +38,4 @@ export async function patchChat(ctx: MutationCtx, chat: Doc<'chats'>, changes: C
   const waking = changes.woke === true && chat.woke !== true
   const next = { ...chat, ...changes, ...(waking ? { archived: false } : {}) }
   await ctx.db.patch(chat._id, { ...changes, ...(waking ? { archived: false } : {}), view: chatViewOf(next) })
-}
-
-/** Sets `view` on a chat written without it (a new chat), from its current fields. */
-export async function refreshChatView(ctx: MutationCtx, chatId: Id<'chats'>) {
-  const chat = await ctx.db.get(chatId)
-  if (chat && chat.view !== chatViewOf(chat)) await ctx.db.patch(chatId, { view: chatViewOf(chat) })
 }

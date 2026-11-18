@@ -120,7 +120,8 @@ const CHATS: Fixture[] = [
 /** How many messages each demo chat gets. */
 const MESSAGES_PER_CHAT = 20
 
-function demoEnabled() {
+/** Whether `demo.seedForMe` works here: a demo deployment with the fake network alone. */
+export function demoEnabled() {
   return process.env.TRIODITIS_DEMO === '1' && process.env.TRIODITIS_NETWORKS === 'fake'
 }
 
@@ -132,10 +133,16 @@ function loginIdFor(userId: string) {
   return `l_demo_${userId}`
 }
 
-/** Starts seeding: the fake account. Null if this person was seeded already. */
+/**
+ * Starts seeding, or carries on with one that stopped partway: makes the fake account if it
+ * isn't there, and says which contacts and chats are still missing. Null if nothing is.
+ */
 export const begin = internalMutation({
   args: { userId: v.string() },
-  returns: v.union(v.null(), v.object({ publicKey: v.string() })),
+  returns: v.union(
+    v.null(),
+    v.object({ publicKey: v.string(), contactsMissing: v.boolean(), chatsMissing: v.array(v.string()) }),
+  ),
   handler: async (ctx, { userId }) => {
     assertDemo()
     const member = await ctx.db
@@ -149,26 +156,49 @@ export const begin = internalMutation({
       .query('networkAccounts')
       .withIndex('by_login', (q) => q.eq('network', 'fake').eq('loginId', loginId))
       .unique()
-    if (existing) return null
-    const now = Date.now()
-    await ctx.db.insert('networkAccounts', {
-      userId,
-      network: 'fake',
-      loginId,
-      state: 'CONNECTED',
-      lastHealthyAt: now,
-      updatedAt: now,
-    })
-    return { publicKey: member.identityPublicKey }
+    if (!existing) {
+      const now = Date.now()
+      await ctx.db.insert('networkAccounts', {
+        userId,
+        network: 'fake',
+        loginId,
+        state: 'CONNECTED',
+        lastHealthyAt: now,
+        updatedAt: now,
+      })
+    }
+    const contactsMissing = !(await hasContact(ctx, userId, CONTACTS.at(-1)!.ghostId))
+    const chatsMissing = []
+    for (const chat of CHATS) if (!(await hasChat(ctx, userId, chat.portalId))) chatsMissing.push(chat.portalId)
+    if (existing && !contactsMissing && chatsMissing.length === 0) return null
+    return { publicKey: member.identityPublicKey, contactsMissing, chatsMissing }
   },
 })
+
+async function hasContact(ctx: MutationCtx, userId: string, ghostId: string) {
+  const row = await ctx.db
+    .query('contacts')
+    .withIndex('by_ghost', (q) => q.eq('userId', userId).eq('network', 'fake').eq('ghostId', ghostId))
+    .first()
+  return row !== null
+}
+
+async function hasChat(ctx: MutationCtx, userId: string, portalId: string) {
+  const row = await ctx.db
+    .query('chats')
+    .withIndex('by_portal', (q) => q.eq('userId', userId).eq('network', 'fake').eq('portalId', portalId))
+    .first()
+  return row !== null
+}
 
 export const writeContacts = internalMutation({
   args: { userId: v.string(), contacts: v.array(v.object({ ghostId: v.string(), sealed: envelope })) },
   returns: v.null(),
   handler: async (ctx, { userId, contacts }) => {
     assertDemo()
+    // All of them in one transaction, so a seed that stopped partway has all or none.
     for (const contact of contacts.slice(0, 50)) {
+      if (await hasContact(ctx, userId, contact.ghostId)) continue
       await ctx.db.insert('contacts', {
         userId,
         network: 'fake',
@@ -228,6 +258,9 @@ export const writeChat = internalMutation({
   returns: v.null(),
   handler: async (ctx, { userId, messages, ...chat }) => {
     assertDemo()
+    // A chat and its messages are one transaction: a retry after a failure finds either the
+    // whole chat or none of it.
+    if (await hasChat(ctx, userId, chat.portalId)) return null
     const bounded = messages.slice(0, 50)
     const lastMessageAt = bounded.reduce((at, message) => Math.max(at, message.networkTs), 0)
     const chatId = await insertChat(ctx, userId, { ...chat, lastMessageAt })
@@ -252,8 +285,9 @@ export const writeChat = internalMutation({
 /**
  * Loads the demo data for the signed-in person, once: a connected fake-network account, six
  * contacts and eight chats (two groups, a pinned chat, a message request, a snoozed chat and an
- * archived one) of 20 messages each. It needs `keys.setup` done first. Calling it again does
- * nothing (`seeded: false`).
+ * archived one) of 20 messages each. It needs `keys.setup` done first. Each contact batch and
+ * each chat is written whole, so if it stops partway, calling it again finishes the rest;
+ * once everything is there, calling it does nothing (`seeded: false`).
  */
 export const seedForMe = action({
   args: {},
@@ -266,15 +300,19 @@ export const seedForMe = action({
     const recipients = [start.publicKey]
     const seal = (value: unknown, kind: string, objectId: string) =>
       sealJson(value, recipients, { kind, ownerUserId: userId, objectId })
-    await ctx.runMutation(internal.demo.writeContacts, {
-      userId,
-      contacts: CONTACTS.map(({ ghostId, name, handle }) => ({
-        ghostId,
-        sealed: seal({ name, handle }, 'contact', ghostId),
-      })),
-    })
+    if (start.contactsMissing) {
+      await ctx.runMutation(internal.demo.writeContacts, {
+        userId,
+        contacts: CONTACTS.map(({ ghostId, name, handle }) => ({
+          ghostId,
+          sealed: seal({ name, handle }, 'contact', ghostId),
+        })),
+      })
+    }
     const now = Date.now()
+    const missing = new Set(start.chatsMissing)
     for (const [index, chat] of CHATS.entries()) {
+      if (!missing.has(chat.portalId)) continue
       // Each chat's latest message is a little older than the one before it, so the inbox has an order.
       const newest = now - index * 37 * 60 * 1000
       const messages = Array.from({ length: MESSAGES_PER_CHAT }, (_, n) => {
