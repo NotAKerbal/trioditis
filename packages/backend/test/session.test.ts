@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { api, components } from '../convex/_generated/api'
-import { setup, signIn, type T } from './setup'
+import { SETUP_TOKEN, setup, signIn, type T } from './setup'
 
 const ORIGIN = 'https://trioditis.test'
 
@@ -109,5 +109,66 @@ describe('end-session', () => {
       expect((await endSession(t, body)).status).toBe(400)
     }
     expect(await sessionIds(t)).toEqual(['token-alex'])
+  })
+})
+
+describe('end-session with real sign-ins', () => {
+  // Better Auth's own sign-up, session cookie, getSession and Convex token, so the IDs and the
+  // cookie handling are the real ones, not seeded rows.
+  async function signUp(t: T, email: string, invite: string) {
+    const response = await t.fetch('/api/auth/sign-up/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: ORIGIN, 'x-trioditis-invite': invite },
+      body: JSON.stringify({ email, password: 'a-long-test-password', name: email }),
+    })
+    expect(response.status).toBe(200)
+    const cookie = response.headers
+      .getSetCookie()
+      .map((value) => value.split(';')[0])
+      .join('; ')
+    const session = (await (
+      await t.fetch('/api/auth/get-session', { headers: { cookie, origin: ORIGIN } })
+    ).json()) as {
+      session: { id: string; token: string }
+    }
+    const { token: jwt } = (await (
+      await t.fetch('/api/auth/convex/token', { headers: { cookie, origin: ORIGIN } })
+    ).json()) as { token: string }
+    const claims = JSON.parse(atob(jwt.split('.')[1]!.replaceAll('-', '+').replaceAll('_', '/'))) as {
+      sub: string
+      sessionId: string
+    }
+    return {
+      cookie,
+      session: session.session,
+      client: t.withIdentity({ subject: claims.sub, sessionId: claims.sessionId }),
+    }
+  }
+
+  it('ends one account’s session from a tab now signed in as another', async () => {
+    const t = setup()
+    const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
+    const { token: invite } = await alex.client.mutation(api.members.invite, {
+      email: 'bea@example.com',
+      role: 'member',
+    })
+    const bea = await signUp(t, 'bea@example.com', invite)
+
+    // The Convex token names the same session getSession gives.
+    expect((await alex.client.query(api.members.me, {}))?.sessionId).toBe(alex.session.id)
+    expect((await bea.client.query(api.members.me, {}))?.sessionId).toBe(bea.session.id)
+
+    // This tab read Alex's session, then another tab signed in as Bea: the cookie is hers.
+    const response = await endSession(t, { token: alex.session.token }, { origin: ORIGIN, cookie: bea.cookie })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ result: 'ended' })
+    expect(response.headers.get('set-cookie')).toBeNull()
+
+    expect(await alex.client.query(api.members.me, {})).toBeNull()
+    expect(await bea.client.query(api.members.me, {})).toMatchObject({ sessionId: bea.session.id })
+    const stillBea = (await (
+      await t.fetch('/api/auth/get-session', { headers: { cookie: bea.cookie, origin: ORIGIN } })
+    ).json()) as { session: { id: string } } | null
+    expect(stillBea?.session.id).toBe(bea.session.id)
   })
 })

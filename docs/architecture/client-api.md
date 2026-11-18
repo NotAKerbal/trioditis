@@ -30,6 +30,11 @@ origin**: in the self-hosted bundle Caddy proxies that path to the Convex site, 
 development the Vite dev server does. Cookies and passkeys then belong to the app's origin,
 and no cross-origin auth is configured or supported.
 
+Better Auth trusts only `SITE_URL`, the app's origin, so every auth request's `Origin` must
+be it: per-worktree `pnpm dev` sets `SITE_URL` to that worktree's own web app address. The
+Electron shell, when it comes, loads the app from `SITE_URL` with `loadURL`, never from
+`file://` or a custom scheme, which would send another `Origin` (or `null`) and be refused.
+
 ```ts
 import { ConvexReactClient } from 'convex/react'
 import { ConvexQueryClient } from '@convex-dev/react-query'
@@ -111,20 +116,24 @@ end may no longer be the cookie's, for example after another tab signed in as so
 Better Auth's own `revokeSession` can't do this: it acts only on the cookie's account and
 answers `status: true` even when it deleted nothing.
 
-| Status | Body                                                       | Meaning                                                                                          |
-| ------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 200    | `{ "result": "ended" }`                                    | This request deleted the session                                                                 |
-| 200    | `{ "result": "absent" }`                                   | There is no session with that token (already ended)                                              |
-| 400    | Better Auth's error body, `"A session token is required."` | No token, or not a string of 1 to 256 characters                                                 |
-| 403    | Better Auth's error body, `"Invalid origin"`               | No `Origin` header, `null`, or not the server's own origin                                       |
-| 429    | Better Auth's rate limit answer                            | Over 10 requests in 10 seconds, where Better Auth's rate limiting is on, as for its other routes |
-| 5xx    | Any                                                        | It couldn't tell: try again                                                                      |
+| Status | Body                                                                       | Meaning                                                                                                                                                     |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                            |
+| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                         |
+| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                            |
+| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status: Better Auth's own check answers first when a cookie comes without an `Origin` |
+| 429    | Better Auth's rate limit answer                                            | Over 10 requests in 10 seconds. Registered, but not enforced on Convex today, as for every Better Auth route: see below                                     |
+| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                 |
 
 Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
 any other answer means nothing was changed, or that it couldn't tell. The response never
 sets or expires a cookie, so a late answer can't clear a sign-in made meanwhile in another
 tab: the app clears its own state for the ended session itself. The `Origin` header is
 required even without a cookie.
+
+Better Auth's rate limiting is off unless `NODE_ENV` is `production`, and its default store
+is memory, which doesn't last from one Convex HTTP action to the next. So on Convex no auth
+route answers 429 yet; shared storage for it is a follow-up. Treat a 429 like a 5xx.
 
 Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
