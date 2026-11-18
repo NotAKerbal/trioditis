@@ -7,7 +7,16 @@ export type Network = (typeof NETWORKS)[number]
 export type Maturity = 'stable' | 'beta' | 'experimental'
 
 /** Where a message the person sent is. See docs/PLAN.md, Reliability. */
-export const DELIVERY_STATES = ['queued', 'claimed', 'submitted', 'sent', 'delivered', 'read', 'failed', 'unknown'] as const
+export const DELIVERY_STATES = [
+  'queued',
+  'claimed',
+  'submitted',
+  'sent',
+  'delivered',
+  'read',
+  'failed',
+  'unknown',
+] as const
 export type DeliveryState = (typeof DELIVERY_STATES)[number]
 
 /** States a send can't leave on its own. `unknown` waits for the person to choose. */

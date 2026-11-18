@@ -17,15 +17,15 @@ network) and tells the gateway its address in every event batch.
 
 ## Identifiers
 
-| Name | Meaning |
-|---|---|
-| `network` | Network slug: `whatsapp`, `signal`, `gmessages`, `telegram`, `meta`, `instagram`, `discord`, `fake` |
-| `userId` | Trioditis user ID (the Convex `members` row's `userId`) |
-| `loginId` | bridgev2 `UserLoginID`, unique per network |
-| `portalId` | bridgev2 portal key, `"<id>"` or `"<id>/<receiver>"`, unique per network |
-| `eventId` | The deterministic event ID the bridge host generates per remote message part. The dedup key |
-| `ghostId` | bridgev2 ghost (remote user) ID, unique per network |
-| `clientMessageId` | Client-generated ID for a send, carried end to end |
+| Name              | Meaning                                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `network`         | Network slug: `whatsapp`, `signal`, `gmessages`, `telegram`, `meta`, `instagram`, `discord`, `fake` |
+| `userId`          | Trioditis user ID (the Convex `members` row's `userId`)                                             |
+| `loginId`         | bridgev2 `UserLoginID`, unique per network                                                          |
+| `portalId`        | bridgev2 portal key, `"<id>"` or `"<id>/<receiver>"`, unique per network                            |
+| `eventId`         | The deterministic event ID the bridge host generates per remote message part. The dedup key         |
+| `ghostId`         | bridgev2 ghost (remote user) ID, unique per network                                                 |
+| `clientMessageId` | Client-generated ID for a send, carried end to end                                                  |
 
 ## Events: bridge host → gateway
 
@@ -53,21 +53,21 @@ network) and tells the gateway its address in every event batch.
 
 Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host time, ms).
 
-| Type | Fields | Notes |
-|---|---|---|
-| `message` | `portalId`, `eventId`, `networkTs`, `sender`, `sealed`, `historical`, `replyTo?`, `threadRoot?`, `clientMessageId?` | `sender` is `{"self": true}` or `{"ghostId": "…"}`. `sealed` is an envelope (see `sealing.md`) with kind `message` and object ID `eventId` |
-| `edit` | `portalId`, `eventId`, `targetEventId`, `networkTs`, `sender`, `sealed` | New content for `targetEventId` |
-| `reaction` | `portalId`, `eventId`, `targetEventId`, `sender`, `key`, `networkTs` | `key` is the emoji, unsealed (reactions are metadata) |
-| `reactionRemove` | `portalId`, `targetEventId`, `sender`, `key` | |
-| `redaction` | `portalId`, `targetEventId`, `sender`, `networkTs` | Content deleted for everyone |
-| `receipt` | `portalId`, `sender`, `upToEventId`, `networkTs` | Read receipt |
-| `typing` | `portalId`, `sender`, `typing`, `timeoutMs` | Ephemeral |
-| `chat` | `portalId`, `kind`, `sealed`, `parentPortalId?`, `deleted?` | `kind`: `dm`, `group`, `channel`, `space`. Upsert; `sealed` holds name, topic, avatar media |
-| `contact` | `ghostId`, `sealed` | Upsert; `sealed` holds name, handle, avatar media |
-| `loginState` | `state`, `error?`, `message?` | bridgev2 bridge states: `CONNECTING`, `CONNECTED`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS`, `UNKNOWN_ERROR`, `LOGGED_OUT` |
-| `loginStep` | `loginSessionId`, `step` | A step of a login flow, see Logins |
-| `sendStatus` | `clientMessageId`, `status`, `eventId?`, `error?` | `status`: `submitted`, `sent`, `delivered`, `read`, `failed`, `unknown` |
-| `backfillDone` | `portalId`, `direction`, `more` | History import progress |
+| Type             | Fields                                                                                                              | Notes                                                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `message`        | `portalId`, `eventId`, `networkTs`, `sender`, `sealed`, `historical`, `replyTo?`, `threadRoot?`, `clientMessageId?` | `sender` is `{"self": true}` or `{"ghostId": "…"}`. `sealed` is an envelope (see `sealing.md`) with kind `message` and object ID `eventId` |
+| `edit`           | `portalId`, `eventId`, `targetEventId`, `networkTs`, `sender`, `sealed`                                             | New content for `targetEventId`                                                                                                            |
+| `reaction`       | `portalId`, `eventId`, `targetEventId`, `sender`, `key`, `networkTs`                                                | `key` is the emoji, unsealed (reactions are metadata)                                                                                      |
+| `reactionRemove` | `portalId`, `targetEventId`, `sender`, `key`                                                                        |                                                                                                                                            |
+| `redaction`      | `portalId`, `targetEventId`, `sender`, `networkTs`                                                                  | Content deleted for everyone                                                                                                               |
+| `receipt`        | `portalId`, `sender`, `upToEventId`, `networkTs`                                                                    | Read receipt                                                                                                                               |
+| `typing`         | `portalId`, `sender`, `typing`, `timeoutMs`                                                                         | Ephemeral                                                                                                                                  |
+| `chat`           | `portalId`, `kind`, `sealed`, `parentPortalId?`, `deleted?`                                                         | `kind`: `dm`, `group`, `channel`, `space`. Upsert; `sealed` holds name, topic, avatar media                                                |
+| `contact`        | `ghostId`, `sealed`                                                                                                 | Upsert; `sealed` holds name, handle, avatar media                                                                                          |
+| `loginState`     | `state`, `error?`, `message?`                                                                                       | bridgev2 bridge states: `CONNECTING`, `CONNECTED`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS`, `UNKNOWN_ERROR`, `LOGGED_OUT`                |
+| `loginStep`      | `loginSessionId`, `step`                                                                                            | A step of a login flow, see Logins                                                                                                         |
+| `sendStatus`     | `clientMessageId`, `status`, `eventId?`, `error?`                                                                   | `status`: `submitted`, `sent`, `delivered`, `read`, `failed`, `unknown`                                                                    |
+| `backfillDone`   | `portalId`, `direction`, `more`                                                                                     | History import progress                                                                                                                    |
 
 ## Commands: gateway → bridge host
 
@@ -82,19 +82,19 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 - `commandId` is idempotent: repeating a command ID returns `202` without running it
   again.
 
-| Type | Fields | Outcome event |
-|---|---|---|
-| `send` | `portalId`, `clientMessageId`, `sealed` (kind `outbound`, object ID `clientMessageId`), `replyTo?` | `sendStatus`, then `message` with the same `clientMessageId` |
-| `edit` | `portalId`, `targetEventId`, `clientMessageId`, `sealed` | `sendStatus`, then `edit` |
-| `react` / `unreact` | `portalId`, `targetEventId`, `key` | `reaction` / `reactionRemove` |
-| `redact` | `portalId`, `targetEventId` | `redaction` |
-| `markRead` | `portalId`, `upToEventId` | none |
-| `typing` | `portalId`, `typing` | none |
-| `loginStart` | `loginSessionId`, `network`, `flowId?` | `loginStep` |
-| `loginSubmit` | `loginSessionId`, `stepId`, `input` | `loginStep` |
-| `loginCancel` | `loginSessionId` | `loginStep` (cancelled) |
-| `logout` | | `loginState` (`LOGGED_OUT`) |
-| `backfill` | `portalId`, `beforeEventId?`, `limit` | `message` events with `historical: true`, then `backfillDone` |
+| Type                | Fields                                                                                                                                 | Outcome event                                                 |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `send`              | `portalId`, `clientMessageId`, `sealed` (kind `outbound`, object ID `clientMessageId`), `replyTo?`                                     | `sendStatus`, then `message` with the same `clientMessageId`  |
+| `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed`                                                                               | `sendStatus`, then `edit`                                     |
+| `react` / `unreact` | `portalId`, `targetEventId`, `key`                                                                                                     | `reaction` / `reactionRemove`                                 |
+| `redact`            | `portalId`, `targetEventId`                                                                                                            | `redaction`                                                   |
+| `markRead`          | `portalId`, `upToEventId`                                                                                                              | none                                                          |
+| `typing`            | `portalId`, `typing`                                                                                                                   | none                                                          |
+| `loginStart`        | `loginSessionId`, `network`, `flowId?`                                                                                                 | `loginStep`                                                   |
+| `loginSubmit`       | `loginSessionId`, `stepId`, `sealed` (kind `outbound`, object ID `<loginSessionId>/<stepId>`, plaintext `{"input": {fieldId: value}}`) | `loginStep`                                                   |
+| `loginCancel`       | `loginSessionId`                                                                                                                       | `loginStep` (cancelled)                                       |
+| `logout`            |                                                                                                                                        | `loginState` (`LOGGED_OUT`)                                   |
+| `backfill`          | `portalId`, `beforeEventId?`, `limit`                                                                                                  | `message` events with `historical: true`, then `backfillDone` |
 
 ### Delivery rules for `send`
 
@@ -126,12 +126,26 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
 The app renders every network's login from these steps; there is no per-network login
 UI.
 
+What a person types or pastes into a login step (phone numbers, codes, cookies) is a
+credential. The client seals it to the bridge key, so the outbox never holds it in
+plaintext; the bridge host opens it, uses it and discards it.
+
+## Bridge key
+
+The bridge host's X25519 key pair, `BRIDGE_PRIVATE_KEY` and `BRIDGE_PUBLIC_KEY`
+(base64url). Clients seal outbound sends and login input to the public key, which the
+backend serves to signed-in clients. Every bridge host process on a server shares it.
+
 ## Recipient keys: bridge host → gateway
 
 `GET /v1/keys/:userId` returns the public keys to seal a person's objects to:
 
 ```json
-{ "identity": { "kid": "…", "publicKey": "…" }, "agentAccess": { "kid": "…", "publicKey": "…" }, "agentGrantedPortals": ["…"] }
+{
+  "identity": { "kid": "…", "publicKey": "…" },
+  "agentAccess": { "kid": "…", "publicKey": "…" },
+  "agentGrantedPortals": ["…"]
+}
 ```
 
 The bridge host caches the response for 60 seconds. A person with no identity key yet

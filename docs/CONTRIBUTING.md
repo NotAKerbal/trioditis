@@ -2,10 +2,10 @@
 
 ## Branches
 
-| Branch | Purpose |
-|---|---|
-| `main` | Released code. Only release merges from `dev` land here. |
-| `dev` | Integration. Every feature branch merges here through a pull request. |
+| Branch           | Purpose                                                                                             |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
+| `main`           | Released code. Only release merges from `dev` land here.                                            |
+| `dev`            | Integration. Every feature branch merges here through a pull request.                               |
 | `<area>/<topic>` | One branch per piece of work, from `dev`, e.g. `phase0/bridge-host`, `networks/signal`, `ui/inbox`. |
 
 - Branch from `dev`, open the pull request against `dev`.
@@ -55,6 +55,22 @@ The desktop and mobile apps (`apps/desktop`, `apps/mobile`) are added by the UI 
 - Node 24 and pnpm 12 (`corepack enable` picks the pinned pnpm).
 - Go 1.27 for `apps/bridge-host`.
 - No Docker needed for development: the backend runs on Convex's local backend.
+
+## Run the stack locally
+
+```sh
+pnpm install
+# 1. The backend, on Convex's local backend (no account, no Docker). Leave it running.
+CONVEX_AGENT_MODE=anonymous pnpm --filter @trioditis/backend dev
+# 2. Once, in another terminal: secrets and key pairs into .data/dev.env, and onto Convex.
+CONVEX_AGENT_MODE=anonymous pnpm dev:setup
+# 3. The gateway.
+pnpm --filter @trioditis/gateway dev
+# 4. A bridge host: see apps/bridge-host/README.md.
+```
+
+`.data/` holds the dev stack's secrets and runtime data. It is git-ignored; never commit
+it.
 
 ## Checks
 

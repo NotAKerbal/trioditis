@@ -14,14 +14,19 @@
     "test": "turbo run test",
     "lint": "oxlint",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "dev:setup": "node scripts/dev-setup.ts"
   },
   "devDependencies": {
     "@convex-dev/eslint-plugin": "5.0.1",
     "oxlint": "1.93.0",
     "oxlint-tsgolint": "7.0.2007",
     "prettier": "3.10.1",
-    "turbo": "2.11.12",
+    "turbo": "2.11.11",
     "typescript": "7.0.2"
-  }
+  },
+  "dependencies": {
+    "@trioditis/crypto": "workspace:*"
+  },
+  "type": "module"
 }

@@ -2,7 +2,7 @@
 
 # Trioditis
 
-*"Of the three roads": a crossroads for all of your conversations.*
+_"Of the three roads": a crossroads for all of your conversations._
 
 Trioditis is an open-source, self-hostable alternative to Beeper: one polished app for
 WhatsApp, Signal, Google Messages, Telegram, Discord, Instagram, and more, running on

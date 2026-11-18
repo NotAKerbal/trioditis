@@ -1,16 +1,7 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - 'apps/*'
+  - 'packages/*'
 
 # Packages allowed to run install scripts. Anything else is refused.
 allowBuilds:
   esbuild: true
-
-minimumReleaseAgeExclude:
-  - "@turbo/darwin-64@2.11.12"
-  - "@turbo/darwin-arm64@2.11.12"
-  - "@turbo/linux-64@2.11.12"
-  - "@turbo/linux-arm64@2.11.12"
-  - "@turbo/windows-64@2.11.12"
-  - "@turbo/windows-arm64@2.11.12"
-  - turbo@2.11.12

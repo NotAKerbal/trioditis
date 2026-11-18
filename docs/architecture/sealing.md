@@ -26,12 +26,12 @@ public key. The server forgets the content key as soon as it has sealed it.
 
 ## Keys
 
-| Key | Type | Held by |
-|---|---|---|
-| Identity key pair | X25519 | Each person. Private key only on their devices, wrapped by a passkey- or password-derived key and a recovery key |
-| Agent-access key pair | X25519 | The server (the MCP server decrypts granted chats for agents) |
-| Bridge key pair | X25519 | The bridge host (clients encrypt outgoing messages to it) |
-| Content key | 32 random bytes | Nobody, after sealing |
+| Key                   | Type            | Held by                                                                                                          |
+| --------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Identity key pair     | X25519          | Each person. Private key only on their devices, wrapped by a passkey- or password-derived key and a recovery key |
+| Agent-access key pair | X25519          | The server (the MCP server decrypts granted chats for agents)                                                    |
+| Bridge key pair       | X25519          | The bridge host (clients encrypt outgoing messages to it)                                                        |
+| Content key           | 32 random bytes | Nobody, after sealing                                                                                            |
 
 A **key ID** (`kid`) is the first 16 bytes of `BLAKE2b-256(publicKey)`, base64url
 without padding.
@@ -61,12 +61,12 @@ without padding.
 
 ## Recipients
 
-| Object | Recipients |
-|---|---|
-| Incoming message, chat or contact metadata | The owner's identity key, plus the agent-access key if the chat is granted to an agent |
-| Message the person sent from Trioditis (their stored copy) | Same as above |
-| Outbound send (`outbound`) | The bridge key only |
-| Draft | The owner's identity key only |
+| Object                                                     | Recipients                                                                             |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Incoming message, chat or contact metadata                 | The owner's identity key, plus the agent-access key if the chat is granted to an agent |
+| Message the person sent from Trioditis (their stored copy) | Same as above                                                                          |
+| Outbound send (`outbound`)                                 | The bridge key only                                                                    |
+| Draft                                                      | The owner's identity key only                                                          |
 
 **Granting** an agent access to a chat's history: the person's device unseals each
 message's content key and re-seals it to the agent-access key, adding a `keys` entry.

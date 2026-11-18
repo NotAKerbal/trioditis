@@ -28,10 +28,7 @@
         "ownerUserId": "user_1",
         "objectId": "evt_abc"
       },
-      "recipients": [
-        "owner",
-        "agent-access"
-      ],
+      "recipients": ["owner", "agent-access"],
       "plaintext": {
         "type": "text",
         "body": "Hello from Trioditis 👋",
@@ -60,9 +57,7 @@
         "ownerUserId": "user_1",
         "objectId": "cm_123"
       },
-      "recipients": [
-        "bridge"
-      ],
+      "recipients": ["bridge"],
       "plaintext": {
         "type": "text",
         "body": "Sent from the desktop app"
@@ -86,9 +81,7 @@
         "ownerUserId": "user_1",
         "objectId": "whatsapp:123@s.whatsapp.net"
       },
-      "recipients": [
-        "owner"
-      ],
+      "recipients": ["owner"],
       "plaintext": {
         "name": "Family",
         "topic": ""

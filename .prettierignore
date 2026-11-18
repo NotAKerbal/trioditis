@@ -3,3 +3,4 @@ pnpm-lock.yaml
 **/betterAuth/generatedSchema.ts
 LICENSE
 apps/bridge-host/
+**/testdata/**

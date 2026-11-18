@@ -89,7 +89,13 @@ export function seal(plaintext: Uint8Array, recipients: Recipient[], context: Se
   const contentKey = sodium.randombytes_buf(CONTENT_KEY_BYTES)
   const nonce = sodium.randombytes_buf(NONCE_BYTES)
   try {
-    const ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, associatedData(context), null, nonce, contentKey)
+    const ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+      plaintext,
+      associatedData(context),
+      null,
+      nonce,
+      contentKey,
+    )
     return {
       v: ENVELOPE_VERSION,
       nonce: toBase64Url(nonce),
@@ -164,7 +170,12 @@ export function openJson<T = unknown>(envelope: Envelope, keyPair: KeyPair, cont
  * does. `keyPair` must already be a recipient. Checks the content key against the ciphertext
  * first, so a corrupt envelope is never re-shared.
  */
-export function addRecipient(envelope: Envelope, keyPair: KeyPair, recipient: Recipient, context: SealContext): Envelope {
+export function addRecipient(
+  envelope: Envelope,
+  keyPair: KeyPair,
+  recipient: Recipient,
+  context: SealContext,
+): Envelope {
   const contentKey = openContentKey(envelope, keyPair)
   try {
     decryptContent(envelope, contentKey, context)
@@ -200,10 +211,22 @@ export function encryptMedia(bytes: Uint8Array, ownerUserId: string, mediaId: st
   return { ciphertext, key: toBase64Url(key), nonce: toBase64Url(nonce) }
 }
 
-export function decryptMedia(ciphertext: Uint8Array, key: string, nonce: string, ownerUserId: string, mediaId: string): Uint8Array {
+export function decryptMedia(
+  ciphertext: Uint8Array,
+  key: string,
+  nonce: string,
+  ownerUserId: string,
+  mediaId: string,
+): Uint8Array {
   const ad = associatedData({ kind: 'media', ownerUserId, objectId: mediaId })
   try {
-    return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, ad, fromBase64Url(nonce), fromBase64Url(key))
+    return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+      null,
+      ciphertext,
+      ad,
+      fromBase64Url(nonce),
+      fromBase64Url(key),
+    )
   } catch {
     throw new SealError('The file could not be decrypted')
   }

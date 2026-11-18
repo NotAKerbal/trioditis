@@ -140,7 +140,13 @@ function checkVectors(file: URL) {
     }
   }
   for (const media of vectors.media) {
-    const plaintext = decryptMedia(fromBase64Url(media.ciphertext), media.key, media.nonce, media.ownerUserId, media.mediaId)
+    const plaintext = decryptMedia(
+      fromBase64Url(media.ciphertext),
+      media.key,
+      media.nonce,
+      media.ownerUserId,
+      media.mediaId,
+    )
     expect(plaintext).toEqual(fromBase64Url(media.plaintext))
   }
 }

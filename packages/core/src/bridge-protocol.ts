@@ -188,7 +188,7 @@ export type BridgeCommand = CommandBase &
     | { type: 'markRead'; portalId: string; upToEventId: string }
     | { type: 'typing'; portalId: string; typing: boolean }
     | { type: 'loginStart'; loginSessionId: string; network: Network; flowId?: string }
-    | { type: 'loginSubmit'; loginSessionId: string; stepId: string; input: Record<string, string> }
+    | { type: 'loginSubmit'; loginSessionId: string; stepId: string; sealed: Envelope }
     | { type: 'loginCancel'; loginSessionId: string }
     | { type: 'logout' }
     | { type: 'backfill'; portalId: string; beforeEventId?: string; limit: number }
