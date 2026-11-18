@@ -26,7 +26,15 @@ import { authClient, convexTokenFor } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { currentSessionId, fenceSession, rememberSession, SIGN_OUT_UNSTORED, signOut } from '~/lib/sign-out.ts'
+import {
+  currentSessionId,
+  fenceSession,
+  leaveForSignIn,
+  rememberSession,
+  SIGN_OUT_UNSTORED,
+  signingOut,
+  signOut,
+} from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -96,8 +104,9 @@ function MemberGate({ children }: { children: ReactNode }) {
   if (me.isPending) return <Splash />
   // The session Convex was given has ended. Loaded afresh, the page asks for a token again and
   // finds none, rather than going on with the one it holds until it expires.
+  // A sign-out under way here goes on to the sign-in page itself, with what it must say.
   if (!me.data) {
-    window.location.assign('/sign-in')
+    void leaveForSignIn()
     return <Splash />
   }
   if (!me.data.member) {
@@ -195,21 +204,27 @@ function KeyGate({
   remoteNow.current = remote.data
   // The key the first attempt was for; a retry is for the same one (null: keep whatever's here).
   const leavingFor = useRef<string | null>(null)
-  const signOutHere = async (keyKid: string | null) => {
+  const signOutHere = (keyKid: string | null) => signingOut(leave(keyKid))
+  const backedUpNowHere = (keyKid: string | null) => {
+    const server = remoteNow.current
+    return (
+      keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
+    )
+  }
+  const leave = async (keyKid: string | null) => {
     leavingRef.current = true
     leavingFor.current = keyKid
     setLeaving('running')
     // Saves for this session stop first, in every tab, before anything is waited on: if this page
     // goes away meanwhile (another tab's sign-in reloads it), no key lands after the sign-out began.
-    if (!(await fenceSession(userId, sessionId))) {
+    // A key already known to be backed up goes in the same step, saved here just before or not.
+    if (!(await fenceSession(userId, sessionId, backedUpNowHere(keyKid) ? keyKid : null))) {
       leavingFailure.current = SIGN_OUT_UNSTORED
       setLeaving('failed')
       return
     }
     await settled(backup.current.call)
-    const server = remoteNow.current
-    const backedUp =
-      keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
+    const backedUp = backedUpNowHere(keyKid)
     // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
     // none is, but saves still under way in any tab are stopped all the same.
     const failure = await signOut(userId, sessionId, {

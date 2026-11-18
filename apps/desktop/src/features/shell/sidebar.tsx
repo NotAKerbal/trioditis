@@ -438,12 +438,15 @@ export function Sidebar({
                       s.chat,
                       <>
                         <Clock className="mr-1 inline size-3 align-[-1px]" />
-                        {formatWhen(s.sendAt)} · {s.body}
+                        {/* With previews off, when it goes, not what it says. */}
+                        {formatWhen(s.sendAt)}
+                        {prefs.previews ? ` · ${s.body}` : null}
                       </>,
                     )
                   ) : (
                     <p key={s._id} className="px-2.5 py-2 text-sm text-muted-foreground">
-                      {formatWhen(s.sendAt)} · {prefs.previews ? s.body : 'Scheduled message'}
+                      {formatWhen(s.sendAt)}
+                      {prefs.previews ? ` · ${s.body}` : ' · Scheduled message'}
                     </p>
                   ),
                 )}

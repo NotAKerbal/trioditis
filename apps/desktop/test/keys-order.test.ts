@@ -129,7 +129,7 @@ const location = { assign: vi.fn() }
 Object.assign(globalThis, { indexedDB: db, window: { isSecureContext: true, location } })
 const keys = await import('../src/lib/keys.ts')
 const { forgetIdentity, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } = keys
-const { rememberSession, signOut } = await import('../src/lib/sign-out.ts')
+const { fenceSession, rememberSession, signOut } = await import('../src/lib/sign-out.ts')
 // Another tab: the same modules loaded afresh, sharing only the database (and BroadcastChannel).
 vi.resetModules()
 const otherTab = await import('../src/lib/keys.ts')
@@ -509,6 +509,25 @@ describe('signing out, as the key on this device sees it', () => {
     checked.settle(kept.session.id)
     await expect(save).rejects.toEqual(refusal('fenced'))
     expect(await loadIdentity('v15')).toBeNull()
+  })
+
+  it('removes a backed-up key in the fence itself, though a save landed just before it', async () => {
+    // Two tabs in one session at Unlock; one's save is already on its way when the other signs out.
+    const kept = await keptHere('v20')
+    const token = await otherTab.saveToken('v20')
+    await otherTab.storeIdentity('v20', kept.kid, kept.keyPair, token, inSession(kept.session.id))
+    // The fence, knowing the key's backups exist, takes the key with it in the one transaction,
+    // so a reload right after (another tab signing in) leaves nothing behind.
+    expect(await fenceSession('v20', kept.session.id, kept.kid)).toBe(true)
+    expect(await loadIdentity('v20')).toBeNull()
+    await expect(saveIn(otherTab, 'v20', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+  })
+
+  it('keeps a key in the fence while its backups aren’t known to exist', async () => {
+    const kept = await keptHere('v21')
+    expect(await fenceSession('v21', kept.session.id)).toBe(true)
+    expect((await loadIdentity('v21'))?.kid).toBe(kept.kid)
+    await expect(saveIn(otherTab, 'v21', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
   })
 
   it('turns saves away with a reason that says what to do', () => {

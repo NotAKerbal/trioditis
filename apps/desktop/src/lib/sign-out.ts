@@ -99,15 +99,41 @@ async function endSession(token: string): Promise<boolean> {
 }
 
 /**
- * Stops saves of `userId`'s key for `sessionId`, in every tab, removing nothing: the first step
- * of signing out from setup, taken before anything is waited on (see KeyGate). False if it
+ * Stops saves of `userId`'s key for `sessionId`, in every tab: the first step of signing out from
+ * setup or unlock, taken before anything is waited on (see KeyGate). With `onlyKid`, a key whose
+ * backups are known to exist, that key goes in the same transaction, so a save that landed just
+ * before doesn't outlive a reload meanwhile; otherwise nothing is removed yet. False if it
  * couldn't be recorded.
  */
-export const fenceSession = (userId: string, sessionId: string) =>
-  forgetFirmly(userId, { onlyKid: null, endingSession: sessionId }).then(
+export const fenceSession = (userId: string, sessionId: string, onlyKid: string | null = null) =>
+  forgetFirmly(userId, { onlyKid, endingSession: sessionId }).then(
     () => true,
     () => false,
   )
+
+// Sign-outs under way on this page. Until they're over, the page is theirs to leave: they go to
+// the sign-in page saying what they must (KEY_UNCONFIRMED) and tell the other tabs.
+const underWay = new Set<Promise<unknown>>()
+let leaving = false
+
+/** Counts `work` as a sign-out under way on this page until it settles. */
+export function signingOut<T>(work: Promise<T>): Promise<T> {
+  underWay.add(work)
+  void work.finally(() => underWay.delete(work)).catch(() => undefined)
+  return work
+}
+
+/**
+ * Goes to the sign-in page once any sign-out under way here is over, unless one has already
+ * left for it: for a page that saw its session end (members.me), maybe by its own sign-out.
+ */
+export async function leaveForSignIn() {
+  while (underWay.size) await Promise.allSettled(underWay)
+  if (!leaving) {
+    leaving = true
+    window.location.assign('/sign-in')
+  }
+}
 
 /** Forgets the key, trying a few times: storage that fails once may not the next time. */
 async function forgetFirmly(userId: string, options: Parameters<typeof forgetIdentity>[1]) {
@@ -143,7 +169,11 @@ interface SignOutOptions {
  *
  * Returns null when it went through; otherwise, what to tell the person, who can try again.
  */
-export async function signOut(
+export function signOut(userId: string, sessionId: string, options: SignOutOptions = {}): Promise<string | null> {
+  return signingOut(endThisSession(userId, sessionId, options))
+}
+
+async function endThisSession(
   userId: string,
   sessionId: string,
   { onlyKid, backedUpKid }: SignOutOptions = {},
@@ -174,6 +204,7 @@ export async function signOut(
   if (!(await endSession(token))) return SIGN_OUT_FAILED
   tokens.delete(sessionId)
   announceAccountChange()
+  leaving = true
   window.location.assign(unconfirmed ? KEY_UNCONFIRMED : '/sign-in')
   return null
 }
