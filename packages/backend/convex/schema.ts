@@ -56,6 +56,20 @@ export default defineSchema({
     reservedEmail: v.string(),
   }).index('by_key', ['key']),
 
+  /**
+   * Better Auth's rate limits, one token bucket per key (see rateLimits.ts). `key` is a
+   * SHA-256, never the client address or email it was made from. A row whose bucket has
+   * refilled (`fullAt` passed) means the same as no row, and is pruned.
+   */
+  rateLimits: defineTable({
+    key: v.string(),
+    tokens: v.number(),
+    updatedAt: v.number(),
+    fullAt: v.number(),
+  })
+    .index('by_key', ['key'])
+    .index('by_fullAt', ['fullAt']),
+
   /** One connected account on one network, e.g. Isaac's WhatsApp. */
   networkAccounts: defineTable({
     userId: v.string(),

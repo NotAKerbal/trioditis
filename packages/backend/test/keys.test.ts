@@ -478,6 +478,22 @@ describe('changing the password', { timeout: 30_000 }, () => {
     expect(password.map((row) => row.revision)).toEqual([1])
   })
 
+  it('limits how often the current password can be checked', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const wrap = newWrap(device, 'new password!!')
+    const attempt = async () =>
+      await sam.action(api.account.changePassword, {
+        currentAuthPassword: 'auth-wrong-password',
+        newAuthPassword: 'auth-new-password',
+        newWrap: wrap,
+        proof: await proofFrom(sam, device.identity),
+        expectedRevision: 1,
+      })
+    for (let i = 0; i < 5; i++) await expect(attempt()).rejects.toThrow(/current password is wrong/)
+    await expect(attempt()).rejects.toThrow(/Too many password attempts/)
+  })
+
   it('changes nothing on a wrong password, a stale revision, weak settings or a reused proof', async () => {
     const t = setup()
     const { sam, device } = await withPassword(t, 'auth-old-password')
