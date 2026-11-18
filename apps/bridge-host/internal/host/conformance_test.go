@@ -22,6 +22,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
@@ -629,7 +630,8 @@ func TestConformance(t *testing.T) {
 		before := len(h.net.Sent())
 		send("cm-slow", "slow one")
 		late := sendCommand("cm-late", "waits behind the slow one")
-		late.NotAfter = time.Now().Add(300 * time.Millisecond).UnixMilli()
+		// In time when it arrives, too late by the time the slow send lets it go.
+		late.NotAfter = time.Now().Add(connector.HandoffMargin + 300*time.Millisecond).UnixMilli()
 		h.mustCommand(late)
 		gw.waitFor(t, "slow send", statusOf("cm-slow", protocol.StatusSent))
 		h.net.SetSendDelay(0)
@@ -649,6 +651,22 @@ func TestConformance(t *testing.T) {
 			return e.Type == protocol.EventMessage && e.ClientMessageID == "cm-latecomer"
 		})
 		h.net.SetSendDelay(0)
+		h.host.Connector.SendTimeout = 5 * time.Second
+	})
+
+	t.Run("a send waiting behind a slow incoming event isn't marked unknown before it starts", func(t *testing.T) {
+		h.host.Connector.SendTimeout = 200 * time.Millisecond
+		h.net.SetIncomingDelay(450 * time.Millisecond)
+		go func() {
+			_ = h.net.Incoming(aliceNet, "family", "peer-family", "slow-incoming", "a big file", time.Now())
+		}()
+		time.Sleep(50 * time.Millisecond)
+		send("cm-behind", "waits for the chat")
+		gw.waitFor(t, "sent once the chat is free", statusOf("cm-behind", protocol.StatusSent))
+		if n := gw.count(statusOf("cm-behind", protocol.StatusUnknown)); n != 0 {
+			t.Fatalf("a send still waiting to start was marked unknown")
+		}
+		h.net.SetIncomingDelay(0)
 		h.host.Connector.SendTimeout = 5 * time.Second
 	})
 

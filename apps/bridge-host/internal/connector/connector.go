@@ -57,7 +57,10 @@ type Connector struct {
 	// busy holds chats (by opaque portal ID) with a send in flight; the worker runs their
 	// next command once it settles.
 	busy sync.Map // portal ID → id.EventID
-	wake chan struct{}
+	// lanes holds chats (by opaque portal ID) whose command is running on its own goroutine.
+	lanes        sync.Map // portal ID → struct{}
+	lanesRunning sync.WaitGroup
+	wake         chan struct{}
 }
 
 var (

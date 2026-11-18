@@ -98,3 +98,43 @@ func TestIDKeyIsKept(t *testing.T) {
 		t.Fatal("a new database must get its own ID key, and keep it")
 	}
 }
+
+// Recording an acknowledgement scrubs login codes from what it acknowledged in the same
+// transaction, so the two can't diverge.
+func TestAcknowledgementScrubsLoginCodes(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	step := &protocol.Event{Type: protocol.EventLoginStep, UserID: "alice", LoginSessionID: "s1", At: 1,
+		Step: &protocol.LoginStep{StepID: "qr", Type: protocol.StepDisplayAndWait, Display: &protocol.LoginDisplay{Type: "qr", Data: "2@secret-pairing-data"}}}
+	later := &protocol.Event{Type: protocol.EventLoginStep, UserID: "alice", LoginSessionID: "s2", At: 1,
+		Step: &protocol.LoginStep{StepID: "qr2", Type: protocol.StepDisplayAndWait, Display: &protocol.LoginDisplay{Type: "qr", Data: "2@not-acked-yet"}}}
+	if err := s.Append(ctx, step, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAckedThrough(ctx, step.Seq); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.After(ctx, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Step.Display.Data != "" || events[1].Step.Display.Data == "" {
+		t.Fatalf("expected only the acknowledged step scrubbed, got %q and %q", events[0].Step.Display.Data, events[1].Step.Display.Data)
+	}
+}
+
+// A transaction opened inside another joins it instead of waiting on the write lock its
+// caller holds.
+func TestNestedTransactionsJoin(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	err := s.Txn(ctx, func(ctx context.Context) error {
+		return s.Append(ctx, &protocol.Event{Type: protocol.EventLoginState, UserID: "alice", LoginID: "l", State: "CONNECTED", At: 1})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last, _ := s.LastSeq(ctx); last != 1 {
+		t.Fatalf("expected one event, got %d", last)
+	}
+}

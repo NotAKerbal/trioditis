@@ -66,8 +66,21 @@ type pendingCommand struct {
 	// is kept for a while after, so a late outcome is still reported.
 	timedOut bool
 	settled  bool
-	timer    *time.Timer
+	// timer runs from when the event is handed to bridgev2. The chat's lane stays held until
+	// bridgev2 returns, so a timeout can mark a send unknown but never lets the chat's next
+	// command start while this one is still inside bridgev2 or the network.
+	timer *time.Timer
+	// handoffAt is when the event was handed to bridgev2, and returned whether bridgev2 has
+	// finished with it. Until it has, the send may still be waiting for the chat's lock (an
+	// incoming event holding it) rather than out on the network, so it isn't marked unknown
+	// until it has been stuck for stuckLimit.
+	handoffAt time.Time
+	returned  bool
 }
+
+// stuckLimit is how long, in send timeouts, a send may sit inside bridgev2 before it is
+// marked unknown anyway.
+const stuckLimit = 3
 
 // target is a command's resolved user, login and portal.
 type target struct {
@@ -275,6 +288,16 @@ func (c *Connector) recordSend(ctx context.Context, o *owner, out *store.Outgoin
 
 var errAlreadyRecorded = errors.New("send already recorded")
 
+// HandoffMargin is how far before its deadline a send must be handed to bridgev2. bridgev2
+// gives the connector no later point to check at, and before the connector transmits it may
+// still wait for the chat's lock and for a reconnecting login (SendReconnectWait), which this
+// covers.
+const HandoffMargin = 2 * time.Minute
+
+func pastDeadline(notAfter int64) bool {
+	return notAfter > 0 && time.Now().Add(HandoffMargin).UnixMilli() > notAfter
+}
+
 func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.ClientMessageID == "" {
 		return badRequest("clientMessageId is required")
@@ -316,9 +339,9 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 	}
 	eventID := ids.OutgoingEventID(cmd.UserID, cmd.ClientMessageID)
 	out := &store.Outgoing{UserID: cmd.UserID, LoginID: t.owner.loginID, ClientMessageID: cmd.ClientMessageID, EventID: string(eventID)}
-	// The deadline is checked here, right before the hand-off: a send that waited too long
-	// (for example behind an earlier send in the chat) doesn't go out, and the person decides.
-	if cmd.NotAfter > 0 && time.Now().UnixMilli() > cmd.NotAfter {
+	// A send that waited too long (behind an earlier send in the chat, say) doesn't go out,
+	// and the person decides. Checked again right before the hand-off, below.
+	if pastDeadline(cmd.NotAfter) {
 		out.Status, out.Error = protocol.StatusFailed, protocol.ErrExpired
 		if err = c.recordSend(ctx, t.owner, out, true); errors.Is(err, errAlreadyRecorded) {
 			return nil
@@ -352,7 +375,15 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 		return err
 	}
 	c.trackPending(eventID, pending)
-	c.queue(ctx, t, &event.Event{Type: evtType, ID: eventID, Content: event.Content{Parsed: content}})
+	// The last point before bridgev2 has it: sealing and recording took time (a key fetch, a
+	// database write), so the deadline is checked again.
+	if pastDeadline(cmd.NotAfter) {
+		c.settle(ctx, eventID, pending, protocol.StatusFailed, protocol.ErrExpired)
+		return nil
+	}
+	c.startTimeout(eventID, pending)
+	res := c.queue(ctx, t, &event.Event{Type: evtType, ID: eventID, Content: event.Content{Parsed: content}})
+	c.handedOff(ctx, eventID, pending, res)
 	return nil
 }
 
@@ -368,13 +399,16 @@ func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command, chec
 		return err
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)
-	c.trackPending(eventID, &pendingCommand{kind: pendingReact, owner: t.owner, targetEventID: cmd.TargetEventID, key: reactionKey(cmd.Key)})
-	c.queue(ctx, t, &event.Event{
+	pending := &pendingCommand{kind: pendingReact, owner: t.owner, targetEventID: cmd.TargetEventID, key: reactionKey(cmd.Key)}
+	c.trackPending(eventID, pending)
+	c.startTimeout(eventID, pending)
+	res := c.queue(ctx, t, &event.Event{
 		Type: event.EventReaction, ID: eventID,
 		Content: event.Content{Parsed: &event.ReactionEventContent{RelatesTo: event.RelatesTo{
 			Type: event.RelAnnotation, EventID: id.EventID(cmd.TargetEventID), Key: cmd.Key,
 		}}},
 	})
+	c.handedOff(ctx, eventID, pending, res)
 	return nil
 }
 
@@ -406,10 +440,12 @@ func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command, che
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)
 	c.trackPending(eventID, pending)
-	c.queue(ctx, t, &event.Event{
+	c.startTimeout(eventID, pending)
+	res := c.queue(ctx, t, &event.Event{
 		Type: event.EventRedaction, ID: eventID, Redacts: redacts,
 		Content: event.Content{Parsed: &event.RedactionEventContent{Redacts: redacts}},
 	})
+	c.handedOff(ctx, eventID, pending, res)
 	return nil
 }
 
@@ -494,11 +530,22 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 // maxBackfillLimit bounds one backfill command.
 const maxBackfillLimit = 500
 
+// prunesOnBackfill are networks whose connector deletes stored history outside the range an
+// explicit backfill asked for (mautrix-whatsapp backfill.go, FetchMessages).
+var prunesOnBackfill = map[string]bool{"whatsapp": true}
+
 // handleBackfill fetches up to limit messages before beforeEventId (or before the oldest
 // bridged message) and imports them, then reports whether the network has more.
 func (c *Connector) handleBackfill(ctx context.Context, cmd *protocol.Command, check bool) error {
 	if cmd.Limit <= 0 || cmd.Limit > maxBackfillLimit {
 		return badRequest("limit must be between 1 and %d", maxBackfillLimit)
+	}
+	// Some connectors prune their stored history on any backward fetch: WhatsApp treats an
+	// empty result for the requested range as the end of history and deletes every cached
+	// history row for the chat, including newer ones not imported yet. Their history comes
+	// in through bridgev2's own backfill instead, and an explicit fetch isn't offered.
+	if prunesOnBackfill[c.Network] {
+		return conflict(protocol.ErrUnsupported, "this network can't fetch a range of history on request")
 	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
@@ -527,7 +574,8 @@ func (c *Connector) handleBackfill(ctx context.Context, cmd *protocol.Command, c
 		bgCtx := c.Bridge.BackgroundCtx
 		more := false
 		resp, err := api.FetchMessages(bgCtx, bridgev2.FetchMessagesParams{
-			Portal: t.portal, AnchorMessage: anchor, Count: cmd.Limit, Forward: false,
+			// A slow fetch (asking the phone for more) is what lets `more: true` be followed.
+			Portal: t.portal, AnchorMessage: anchor, Count: cmd.Limit, Forward: false, AllowSlowFetch: true,
 		})
 		done := func(err error) {
 			if err != nil {
@@ -550,16 +598,80 @@ func (c *Connector) handleBackfill(ctx context.Context, cmd *protocol.Command, c
 	return nil
 }
 
-// queue hands a Matrix-side event to bridgev2 as if a homeserver had delivered it.
-func (c *Connector) queue(ctx context.Context, t *target, evt *event.Event) {
+// queue hands a Matrix-side event to bridgev2 as if a homeserver had delivered it. bridgev2
+// handles a chat's events synchronously (PortalEventBuffer 0), so this returns once the
+// connector has handled it: it runs on the chat's lane, never on the worker.
+func (c *Connector) queue(ctx context.Context, t *target, evt *event.Event) bridgev2.EventHandlingResult {
 	evt.Sender = t.userMXID
 	evt.RoomID = t.portal.MXID
 	evt.Timestamp = time.Now().UnixMilli()
 	evt.Mautrix.EventSource = event.SourceTimeline
 	res := c.Bridge.QueueMatrixEvent(c.Bridge.BackgroundCtx, evt)
 	if !res.Success && !res.Queued {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", res.Error)).Stringer("event_id", evt.ID).Msg("bridgev2 refused a command's event")
+		c.Log.Warn().Str("error_type", errorType(res.Error)).Stringer("event_id", evt.ID).Msg("bridgev2 refused a command's event")
 	}
+	return res
+}
+
+func errorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+// startTimeout starts the wait for a command's outcome, as it is handed to bridgev2.
+func (c *Connector) startTimeout(eventID id.EventID, pending *pendingCommand) {
+	pending.lock.Lock()
+	defer pending.lock.Unlock()
+	pending.handoffAt = time.Now()
+	pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
+}
+
+// handedOff runs once bridgev2 has finished with a command's event. If it reported no
+// outcome and didn't take the event, nothing reached the network: a send fails.
+func (c *Connector) handedOff(ctx context.Context, eventID id.EventID, pending *pendingCommand, res bridgev2.EventHandlingResult) {
+	pending.lock.Lock()
+	pending.returned = true
+	open := !pending.settled && !pending.timedOut
+	if open && pending.timer != nil && (res.Success || res.Queued) {
+		// The connector has it now; the wait for an outcome it reports later (a remote echo)
+		// starts afresh.
+		pending.timer.Stop()
+		pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
+	}
+	pending.lock.Unlock()
+	if open && !res.Success && !res.Queued {
+		pending.lock.Lock()
+		if pending.timer != nil {
+			pending.timer.Stop()
+		}
+		pending.lock.Unlock()
+		c.settle(ctx, eventID, pending, protocol.StatusFailed, protocol.ErrInternal)
+	}
+}
+
+// settle ends a command's wait with an outcome decided here (it expired, or bridgev2 didn't
+// take it), records it and lets the chat go on.
+func (c *Connector) settle(ctx context.Context, eventID id.EventID, pending *pendingCommand, status, code string) {
+	pending.lock.Lock()
+	defer pending.lock.Unlock()
+	if pending.settled {
+		return
+	}
+	if pending.kind == pendingSend || pending.kind == pendingEdit {
+		out := &store.Outgoing{
+			UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
+			Status: status, Error: code,
+		}
+		if err := c.recordUntilCommitted(func() error { return c.recordSend(c.Bridge.BackgroundCtx, pending.owner, out, false) }); err != nil {
+			c.Log.Err(err).Stringer("event_id", eventID).Msg("Failed to record a send's outcome")
+			return
+		}
+	}
+	pending.settled = true
+	c.pending.CompareAndDelete(eventID, pending)
+	c.release(eventID, pending)
 }
 
 // pendingRetention is how long a send reported unknown is remembered, so an outcome that
@@ -570,10 +682,7 @@ func (c *Connector) trackPending(eventID id.EventID, pending *pendingCommand) {
 	if pending.kind == pendingSend || pending.kind == pendingEdit {
 		c.busy.Store(pending.owner.portalID, eventID)
 	}
-	pending.lock.Lock()
-	defer pending.lock.Unlock()
 	c.pending.Store(eventID, pending)
-	pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
 }
 
 // release lets the next command for a chat go once a send in it has settled.
@@ -598,14 +707,21 @@ func (c *Connector) expirePending(eventID id.EventID) {
 		c.pending.CompareAndDelete(eventID, pending)
 		return
 	}
-	pending.timedOut = true
+	// Still inside bridgev2: possibly not started yet, so not unknown yet either. The chat's
+	// lane is held meanwhile, so nothing else in the chat goes out.
+	if !pending.returned && time.Since(pending.handoffAt) < stuckLimit*c.SendTimeout {
+		pending.timer = time.AfterFunc(c.SendTimeout, func() { c.expirePending(eventID) })
+		return
+	}
 	out := &store.Outgoing{
 		UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
 		Status: protocol.StatusUnknown, Error: protocol.ErrTimeout,
 	}
-	if err := c.recordSend(c.Bridge.BackgroundCtx, pending.owner, out, false); err != nil {
+	if err := c.recordUntilCommitted(func() error { return c.recordSend(c.Bridge.BackgroundCtx, pending.owner, out, false) }); err != nil {
 		c.Log.Err(err).Msg("Failed to mark send unknown")
+		return
 	}
+	pending.timedOut = true
 	c.release(eventID, pending)
 	pending.timer = time.AfterFunc(pendingRetention, func() { c.pending.CompareAndDelete(eventID, pending) })
 }
@@ -618,21 +734,49 @@ func (c *Connector) emitSendStatus(ctx context.Context, o *owner, clientMessageI
 }
 
 // SendMessageStatus is bridgev2 reporting the outcome of a Matrix-side event.
+// The command stays pending (its timer stopped, the chat held) until its outcome is
+// committed: a database that is briefly unavailable doesn't lose a send the network confirmed.
 func (c *Connector) SendMessageStatus(ctx context.Context, ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo) {
-	raw, ok := c.pending.LoadAndDelete(info.SourceEventID)
+	raw, ok := c.pending.Load(info.SourceEventID)
 	if !ok {
 		return
 	}
 	pending := raw.(*pendingCommand)
 	pending.lock.Lock()
 	defer pending.lock.Unlock()
-	pending.settled = true
-	pending.timer.Stop()
-	if err := c.handleOutcome(ctx, pending, ms, info); err != nil {
-		c.Log.Err(err).Stringer("event_id", info.SourceEventID).Msg("Failed to record command outcome")
+	if pending.settled {
+		return
 	}
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+	if err := c.recordUntilCommitted(func() error { return c.handleOutcome(ctx, pending, ms, info) }); err != nil {
+		c.Log.Err(err).Stringer("event_id", info.SourceEventID).Msg("Failed to record command outcome; it is settled at the next start")
+		return
+	}
+	pending.settled = true
+	c.pending.CompareAndDelete(info.SourceEventID, pending)
 	if !pending.timedOut {
 		c.release(info.SourceEventID, pending)
+	}
+}
+
+// recordUntilCommitted retries writing an outcome until it commits or the bridge stops. A
+// send left unrecorded is settled as unknown at the next start.
+func (c *Connector) recordUntilCommitted(write func() error) error {
+	delay := 200 * time.Millisecond
+	for {
+		err := write()
+		if err == nil || errors.Is(err, errAlreadyRecorded) {
+			return nil
+		}
+		c.Log.Warn().Str("error_type", errorType(err)).Dur("retry_in", delay).Msg("Recording an outcome failed; retrying")
+		select {
+		case <-c.Bridge.BackgroundCtx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, 30*time.Second)
 	}
 }
 

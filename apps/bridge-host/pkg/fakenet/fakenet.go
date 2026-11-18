@@ -57,9 +57,10 @@ type HistoryMessage struct {
 type Network struct {
 	Bridge *bridgev2.Bridge
 
-	mode    atomic.Int32
-	delay   atomic.Int64
-	counter atomic.Int64
+	mode          atomic.Int32
+	incomingDelay atomic.Int64
+	delay         atomic.Int64
+	counter       atomic.Int64
 
 	lock    sync.Mutex
 	sent    []Sent
@@ -219,6 +220,10 @@ func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *
 		},
 	}
 }
+
+// SetIncomingDelay makes handling each incoming message take this long, inside bridgev2's
+// handling of the chat, as a connector downloading a large file does.
+func (n *Network) SetIncomingDelay(d time.Duration) { n.incomingDelay.Store(int64(d)) }
 
 // SetSendDelay makes each send wait this long before the network answers, holding the
 // chat's queue like a slow network does. A delay ends early, with an error, if the bridge
@@ -387,6 +392,9 @@ func (n *Network) Incoming(loginID networkid.UserLoginID, chatID networkid.Porta
 		Data:      text,
 		ID:        msgID,
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data string) (*bridgev2.ConvertedMessage, error) {
+			if d := time.Duration(n.incomingDelay.Load()); d > 0 {
+				time.Sleep(d)
+			}
 			return textMessage(data), nil
 		},
 	})

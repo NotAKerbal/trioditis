@@ -108,16 +108,35 @@ identity keys kept in the data directory (never do that in production):
   stores it, payload included, in `trioditis_command`, and only then answers `202`; a
   worker runs stored commands in arrival order. A command acknowledged is never lost: one
   interrupted before its send was recorded runs after a restart, and one whose send was
-  recorded is settled as `unknown`. Logins interrupted by a restart end with an error. A
-  command's payload (sealed to the bridge key) is deleted once it has run.
+  recorded is settled as `unknown`. A login in progress is recorded in
+  `trioditis_login_session` until its last step is reported, so one interrupted by a
+  restart ends with an error, and input sent to it afterwards ends it too. A command's
+  payload (sealed to the bridge key) is deleted once it has run and any failure it had is
+  recorded; a failure that can't be recorded leaves the command for the next start.
+- **One lane per chat.** A chat's commands run on their own goroutine, one at a time, so a
+  chat stuck inside a connector holds up only itself; commands without a chat (logins) run
+  on the worker. Stopping waits up to 10 seconds for lanes, and anything still running is
+  settled at the next start.
+- **Synchronous chats.** bridgev2 runs with `PortalEventBuffer: 0`: a chat's events are
+  handled in the goroutine that queues them, so a send reaches the connector as soon as its
+  lane lets it go, with no queue in between.
+- **One writer.** The bridge host's own write transactions run one at a time in the
+  process (a transaction inside another joins it), so they can't take the journal counter and
+  ID rows in opposite orders and deadlock on PostgreSQL.
 - **Sends, one at a time per chat.** The next command for a chat waits until a send in it
-  has an outcome, so `notAfter` (required on every send) is checked right before the send is
-  handed to bridgev2, not when it was queued. The hand-off records `submitted`; bridgev2's
+  has an outcome. `notAfter` (required on every send) is checked when the send starts and
+  again right before it is handed to bridgev2, after sealing and recording, with a margin
+  (`HandoffMargin`, 2 minutes) for what bridgev2 may still wait on before the connector
+  transmits: the chat's lock and a reconnecting login (`SendReconnectWait`, 30 seconds).
+  bridgev2 gives no later point to check at. The hand-off records `submitted`; bridgev2's
   message status then records `sent` with the person's own copy (sealed at hand-off),
   `failed` (only if bridgev2 is certain) or `unknown`, each status committed together with
-  the events reporting it. No outcome within the send timeout is `unknown`, and the send is
-  remembered for an hour, so an outcome that arrives later is still recorded. A send in
-  flight at a restart becomes `unknown`. Nothing is ever retried. A repeated
+  the events reporting it, retried until it commits. No outcome within the send timeout is
+  `unknown`, except that while bridgev2 still holds the send (it may be waiting for the
+  chat's lock behind a slow incoming event, so may not have started) it is only marked
+  unknown after three timeouts; the chat's next command never starts before bridgev2 has
+  returned. The send is remembered for an hour, so an outcome that arrives later is still
+  recorded. A send in flight at a restart becomes `unknown`. Nothing is ever retried. A repeated
   `clientMessageId` repeats the last status. Relations (replies, edit, reaction and read
   targets) must belong to the command's chat.
 - **Errors are codes.** Events and 4xx bodies carry only protocol error codes. Details are
@@ -211,9 +230,13 @@ suite. WhatsApp additionally uses:
 - These are dropped: polls, call notices and other unsupported event types.
 - A send carries at most one attachment.
 - The `backfill` command fetches `limit` messages before `beforeEventId` (or the oldest
-  bridged message) through the connector and imports them; `more` is the network's answer.
-- `notAfter` is checked at hand-off to bridgev2. A remote event ahead of the send in
-  bridgev2's own portal queue can still delay it a little after that.
+  bridged message) through the connector and imports them; `more` is the network's answer,
+  and slow fetches (asking the phone) are allowed so it can be followed. It is refused
+  (`unsupported`) for WhatsApp: its connector treats an empty result for the requested range
+  as the end of history and deletes every cached history row for the chat, including newer
+  ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
+- A send can still reach the network after `notAfter` only if bridgev2 holds it past the
+  2-minute margin (a chat's incoming event holding its lock that long).
 - Outbound attachments expect the client's ciphertext already at
   `<data>/media/<network>/<mediaId>`. Nothing puts it there yet; that is the gateway's
   media path.
@@ -245,6 +268,26 @@ Options:
 - an encrypted volume for the bridge host database (assumed by the plan)
 - pruning or minimizing those columns where bridgev2 allows
 - configuring WhatsApp's history sync to keep the window short
+
+### Known follow-ups
+
+Accepted for the Phase 0 spike, to do in Phase 1:
+
+- **Connector logs.** bridgev2's own log lines include connector error text, which can
+  quote content (see Other risks). Redact or filter them, and set log retention.
+- **Journal pruning.** Acknowledged journal rows are kept indefinitely. Prune them after a
+  retention window (they are sealed, but they grow).
+- **Legacy journal gaps.** A v1 database migrated to v2 keeps any sequence gaps the old
+  identity column left. Detect and repair them on upgrade, or document an operator reset.
+- **Avatar rehydration.** A device that first sees a chat after its avatar upload expired
+  has no avatar until it changes. Keep a durable sealed avatar reference to resend.
+- **Media buffering.** Large media is buffered fully in memory; stream it.
+- **Plaintext at rest** in connector storage (above): decide between an encrypted volume
+  only, sealing those columns with a server key, or patching connectors.
+- **Explicit WhatsApp backfill.** Re-enable "load older" for WhatsApp once fetching a range
+  can't prune outside it (an upstream change, or a guard around its history store).
+- **Live checks.** WhatsApp pairing, messaging and history, and the conformance suite on
+  PostgreSQL (`TRIODITIS_TEST_POSTGRES_URI`), haven't been run.
 
 ### Other risks
 
