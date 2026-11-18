@@ -102,9 +102,9 @@ const MAX_REACTION_ROW_BYTES = 4 * 1024
  * deleted message's reactions are hidden by its clean-up marker until they're removed.
  *
  * It reads at most `MAX_REACTION_BYTES` of reactions, starting a message only while a full
- * one's worth of the largest rows still fits. A message it didn't get to is left out of the
- * result, so the client asks again for those; every message it looked at has a list, empty
- * if it has none (or is deleted, or isn't the person's).
+ * one's worth of the largest rows still fits, so messages it didn't get to are left out of
+ * the result, as a deleted one still being cleaned up is. Every other message gets a list,
+ * empty if it has no reactions (or isn't the person's).
  */
 export const reactions = query({
   args: { chatId: v.id('chats'), messageIds: v.array(v.id('messages')) },
@@ -120,10 +120,7 @@ export const reactions = query({
         .query('reactionCleanups')
         .withIndex('by_message', (q) => q.eq('messageId', messageId))
         .first()
-      if (deleted) {
-        out[messageId] = []
-        continue
-      }
+      if (deleted) continue
       const rows = await ctx.db
         .query('reactions')
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))

@@ -340,8 +340,8 @@ describe('reads that large messages could push past the read limit', () => {
       await ctx.db.insert('reactionCleanups', { messageId: ids[0]! })
     })
     const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
-    expect(Object.keys(result)).toHaveLength(30)
-    expect(result[ids[0]!]).toEqual([])
+    expect(Object.keys(result)).toHaveLength(29)
+    expect(result[ids[0]!]).toBeUndefined()
     expect(result[ids[1]!]).toEqual([{ key: '👍', senderKey: 'self' }])
     // Someone else asking about these IDs, from their own chat, sees nothing of them.
     const b = await signIn(t, 'user_c')

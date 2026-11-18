@@ -7,7 +7,9 @@ from `@trioditis/backend/api`; shared types come from `@trioditis/core`, and sea
 
 Every function needs a signed-in member of the server unless it says otherwise, and
 refuses anyone else's data with the same error as a missing row. Errors are `ConvexError`s
-whose `data` is a sentence the UI can show as it is.
+whose `data` is a sentence the UI can show as it is. Any of those functions can also throw
+`You’re signed out. Sign in again to continue.` and `Your account isn’t a member of this
+server.`; each section lists the rest, word for word.
 
 Nothing readable ever goes to the server: names, message bodies, label names and drafts are
 sealed on the device (`docs/architecture/sealing.md`) and opened on the device. Not even
@@ -93,6 +95,11 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
 `INVITE_REQUIRED`.
+
+Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
+`Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
+invitation can’t be revoked.` · `Someone is signing up with that invitation right now. Try
+again in a few minutes.`
 
 ## Keys
 
@@ -219,12 +226,12 @@ succeeds and the other is refused. Every error leaves both as they were, so sign
 unlocking always take the same password. Better Auth's own password change is turned off:
 this is the only way.
 
-| Error                                                                                 | State afterwards                                                      |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `That proof…` / `This backup changed on another device…` / `Those password settings…` | Nothing changed                                                       |
-| `Your current password is wrong, or the new one isn’t allowed.`                       | Nothing changed (the proof is used up: get a new one to retry)        |
-| `Your password changed on another device. Reload and try again.`                      | Nothing changed: another change won. Sign in with the password it set |
-| `This account has no password to change.`                                             | Nothing changed                                                       |
+| Error                                                                                                                                                    | State afterwards                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `That proof…` / `This backup changed on another device…` / `Those password settings…` / `That isn’t a wrapped key.` / `Set up this account’s key first.` | Nothing changed                                                       |
+| `Your current password is wrong, or the new one isn’t allowed.`                                                                                          | Nothing changed (the proof is used up: get a new one to retry)        |
+| `Your password changed on another device. Reload and try again.`                                                                                         | Nothing changed: another change won. Sign in with the password it set |
+| `This account has no password to change.`                                                                                                                | Nothing changed                                                       |
 
 ### Errors
 
@@ -271,7 +278,9 @@ wakes it.
 The list is the view's pinned chats, most recent first, then the rest, most recent first,
 paged as one list: pins that don't fit on the first page carry on to the next, and none is
 left out. A page holds at most 50 chats (`numItems` above 50 counts as 50) and reads at most
-8 MiB, so it can end early: keep loading with the cursor. With `network`, only that
+8 MiB, so it can end early: keep loading with the cursor. A page reloaded with an
+`endCursor` range is held to the same bounds, and says so with `pageStatus:
+'SplitRequired'` and a `splitCursor` (`usePaginatedQuery` splits it). With `network`, only that
 network's chats, in the same order. With `labelId`, the chats with that label in the view,
 in the order they were labelled, pinned or not.
 
@@ -308,12 +317,13 @@ All take `{ chatId }` plus what's listed, and return `null`.
 | `chats.setMuted`      | `muted`, `until?` | `until` in the future and within a year (365 days); no `until` mutes until unmuted                                                                                                                                                                                            |
 | `chats.snooze`        | `until`           | Within a year (365 days); see Views for waking                                                                                                                                                                                                                                |
 | `chats.wake`          |                   | Ends a snooze now                                                                                                                                                                                                                                                             |
-| `chats.acceptRequest` |                   | Moves a request to the inbox. Trioditis-side for now; a later request flag from the network doesn't undo it                                                                                                                                                                   |
+| `chats.acceptRequest` |                   | Clears the request flag; the chat then moves to the view its other flags give (see Views: the inbox, unless it is also blocked, snoozed or archived). Trioditis-side for now; a later request flag from the network doesn't undo it                                           |
 | `chats.setBlocked`    | `blocked`         | Trioditis-side for now: hidden here, but the network isn't told and messages still arrive                                                                                                                                                                                     |
 | `chats.setLabels`     | `labelIds`        | Exactly these labels (the person's own, at most 20)                                                                                                                                                                                                                           |
 
 Errors: `That chat doesn’t exist.` · `Pick a time in the future.` · `Pick a time within a
-year.` · `That label doesn’t exist.`
+year.` · `That label doesn’t exist.` (`setLabels`, and `list` with `labelId`) · `A chat can
+have at most 20 labels.` (`setLabels`)
 
 ## Messages
 
@@ -349,8 +359,9 @@ Alongside the page:
   `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message.
   `senderKey` is `self` or `ghost:<ghostId>`. A deleted message has none (it's left out,
   or gets an empty list), and so does an ID that isn't one of the person's messages. It
-  never reads the messages themselves, so a page of large messages can't push it past the
-  read limit.
+  never reads the messages themselves, and reads at most 8 MiB of reactions, going through
+  the IDs in order: in the rare case that runs out, the IDs it didn't reach are left out,
+  and asking again for those (minus deleted ones) gets them.
 - `api.messages.receipts({ chatId })` returns `[{ senderKey, upToEventId, networkTs }]`.
 - `api.messages.typing({ chatId })` returns `[{ senderKey, expiresAt }]` for rows still
   live when it ran. Hide a row once `expiresAt` passes: queries don't rerun just because
@@ -370,7 +381,15 @@ await convex.mutation(api.messages.send, {
 })
 ```
 
-- `bridgeKey` is `{ publicKey: fromBase64Url((await api.keys.bridge).publicKey) }`.
+- `bridgeKey` comes from `api.keys.bridge`, which is `null` on a server with no bridge key
+  set up yet; then sending and connecting networks aren't available:
+
+  ```ts
+  const bridge = await convex.query(api.keys.bridge, {})
+  if (!bridge) throw new Error('This server isn’t set up to send yet.')
+  const bridgeKey = { publicKey: fromBase64Url(bridge.publicKey) }
+  ```
+
 - Each sealed object is at most 64 KiB.
 - The same `clientMessageId` again does nothing, so retrying a call that may have failed is
   safe.
@@ -390,12 +409,14 @@ await convex.mutation(api.messages.send, {
 | `unknown`           | **May not have sent.** Trioditis never resends on its own, because the network may have it. Offer "Send again" (a new `clientMessageId`, which may duplicate) or "Discard" (`messages.discardSend({ clientMessageId })`). A late confirmation can still move it to `sent` |
 
 A send that couldn't go out within 24 hours becomes `failed` (never sent) or `unknown` (it
-may have reached the network).
+may have reached the network), at that deadline whether or not a gateway is running. One the
+bridge host took but never reported on becomes `unknown` an hour after the deadline.
 
-Errors: `That message ID isn’t valid.` (16 to 64 letters, digits, `-` or `_`) · `That
-message isn’t sealed, or is too long.` · `That message can’t be replied to.` · `Only a
-message that failed or may not have sent can be discarded.` · `This message reached the
-network, so it can’t be discarded here.`
+Errors: `That chat doesn’t exist.` · `That message ID isn’t valid.` (16 to 64 letters,
+digits, `-` or `_`) · `That message isn’t sealed, or is too long.` · `That message can’t be
+replied to.` · `Only a message that failed or may not have sent can be discarded.` · `This
+message reached the network, so it can’t be discarded here.` · `Ask for at most 100
+messages’ reactions at once.` (`reactions`)
 
 ### Scheduled sends
 
@@ -414,11 +435,14 @@ an ordinary send's, as `sealing.md` (Bridge key exposure) explains and accepts.
 
 `state` is `scheduled`, or `failed` when its time came and its chat was gone: it was never
 sent, and its sealed copies are deleted. A failed one stays listed until `scheduled.cancel`
-dismisses it.
+dismisses it. `scheduled.list` returns at most 500 of each state, so at most 500 failed
+ones are shown at once; dismissing some brings the rest into view.
 
-Errors: `Pick a time in the future.` · `Pick a time within a year.` · `You can schedule at
-most 500 messages.` · `That scheduled message doesn’t exist.` · `That message has already
-gone out.` · `That message couldn’t be sent: its chat is gone.` (`sendNow` on a failed one)
+Errors: `That chat doesn’t exist.` · `Pick a time in the future.` · `Pick a time within a
+year.` · `You can schedule at most 500 messages.` · the sealing and reply errors of
+`messages.send` (`create`) · `Ask for at most 20 at once.` (`copies`) · `That scheduled
+message doesn’t exist.` · `That message has already gone out.` · `That message couldn’t be
+sent: its chat is gone.` (`sendNow` on a failed one)
 
 ## Labels
 
@@ -435,6 +459,9 @@ Seal a label's plaintext, `{ name, color }`, to the person: kind `label`, object
 At most 100 labels of up to 4 KiB each. `labels.remove` takes the label off its first 1,000
 chats at once and the rest in batches straight after; until then a chat may still list the
 removed label's ID in `labelIds`. Show only labels that `labels.list` returns.
+
+Errors: `That label ID isn’t valid.` · `That label isn’t sealed, or is too long.` · `You can
+have at most 100 labels.` · `That label doesn’t exist.`
 
 ## Networks and connecting accounts
 
@@ -488,7 +515,8 @@ Accounts: `api.logins.accounts` returns
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
 one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
 bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
-hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why.
+hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why. Both
+happen on time whether or not a gateway is running.
 
 Errors: `That network isn’t enabled on this server.` · `Finish setting up your key, with
 its password and recovery key, before connecting a network.` · `That isn’t a login method
@@ -522,7 +550,8 @@ public key, so they open like anything else. It needs `keys.setup` done first an
 where `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` (exactly when `server.info` says
 `demo: true`). The contacts, and each chat with its messages, are written whole, so a call
 that fails partway leaves no half-written chat, and calling again finishes the rest. Once
-everything is there, a call does nothing (`{ seeded: false }`).
+everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
+available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
 
 - **Previews** create a known test account by script: sign up with
   `authPassword(password, email)` and the setup token, call `keys.challenge({ publicKey })`

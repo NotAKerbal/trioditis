@@ -312,8 +312,7 @@ async function settleOverdue(ctx: MutationCtx, now: number) {
 
 /** Settles one overdue command; it then has no `expiresAt`, so nothing settles it twice. */
 async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
-  const unsettled =
-    command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
+  const unsettled = command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
   await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
   if (unsettled) await markCopy(ctx, command, 'unknown')
   await expireLogin(ctx, command)
