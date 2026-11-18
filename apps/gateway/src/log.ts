@@ -22,6 +22,7 @@ const KNOWN = [
 const BACKEND_MESSAGES: ReadonlySet<string> = new Set([
   'Not the gateway',
   'Host network mismatch',
+  'Network not enabled',
   'Batch too large',
   'Host ID too long',
 ])
