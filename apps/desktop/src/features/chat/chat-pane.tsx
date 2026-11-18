@@ -24,7 +24,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   networkName,
   useChat,
@@ -34,6 +34,7 @@ import {
   type Chat,
   type ChatId,
 } from '~/data/chats.ts'
+import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useBridgeKey, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
@@ -86,17 +87,26 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const [replyTo, setReplyTo] = useState<Message | null>(null)
   const [details, setDetails] = useState(true)
 
+  // Counts every change to the draft, so a send or schedule that ends later can tell whether
+  // the person typed in the meantime.
+  const draftRev = useRef(0)
   const setDraft = (text: string) => {
+    draftRev.current++
     setDraftState(text)
     if (text) drafts.set(chat.id, text)
     else drafts.delete(chat.id)
+  }
+  /** Puts back text whose send didn't go, ahead of anything typed since, so nothing is lost. */
+  const restoreDraft = (text: string) => {
+    const now = drafts.get(chat.id) ?? ''
+    setDraft(now ? `${text}\n${now}` : text)
   }
 
   // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
   const scheduledTexts = useScheduledTexts(pending.map((s) => s._id))
   const scheduled = useMemo(
-    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id) ?? '' })),
+    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id) })),
     [pending, scheduledTexts],
   )
 
@@ -115,16 +125,24 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   async function onSend() {
     const text = draft.trim()
     if (!text) return
-    const reply = replyTo?.eventId
+    // Nothing leaves the composer until it can be sent.
+    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
+    const reply = replyTo
     setDraft('')
     setReplyTo(null)
-    // Put the text back if the send didn't reach the server, so nothing typed is lost.
-    await sendText(text, reply).catch(() => setDraft(text))
+    // Put the text and reply back if the send didn't reach the server, keeping anything newer.
+    await sendText(text, reply?.eventId).catch(() => {
+      restoreDraft(text)
+      setReplyTo((current) => current ?? reply)
+    })
   }
 
   async function onSchedule(sendAt: number) {
     const text = draft.trim()
-    if (!text || !bridgeKey) return
+    if (!text) return
+    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
+    const rev = draftRev.current
+    const reply = replyTo
     const clientMessageId = newClientId()
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
@@ -134,10 +152,13 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
         clientMessageId,
         sendAt,
         ...sealed,
-        ...(replyTo ? { replyTo: replyTo.eventId } : {}),
+        ...(reply ? { replyTo: reply.eventId } : {}),
       })
-      setDraft('')
-      setReplyTo(null)
+      // Clear what was scheduled, unless the person has typed since: then that stays.
+      if (draftRev.current === rev) {
+        setDraft('')
+        setReplyTo((current) => (current === reply ? null : current))
+      }
       toast(`Scheduled for ${formatWhen(sendAt)}`)
     } catch (e) {
       toast(errorMessage(e, 'That message couldn’t be scheduled.'))
@@ -310,10 +331,11 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onCancelScheduled={(id, body) =>
             void cancelScheduled({ scheduledId: id }).then(
               () => {
-                // Keep anything already in the composer; add the cancelled text below it.
-                setDraft(draft.trim() ? `${draft}\n${body}` : body)
+                // Keep anything in the composer by now; add the cancelled text below it.
+                const now = drafts.get(chat.id) ?? ''
+                setDraft(now.trim() ? `${now}\n${body}` : body)
                 toast(
-                  draft.trim()
+                  now.trim()
                     ? 'Cancelled. The message was added below your draft.'
                     : 'Cancelled. The message is back in the composer.',
                 )
@@ -330,9 +352,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onCancelReply={() => setReplyTo(null)}
           onSend={() => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
-          disabled={
-            chat.row.blocked ? 'You blocked this chat' : chat.row.isRequest ? 'Accept the request to reply' : null
-          }
+          disabled={composerBlocked(chat.row, bridgeKey)}
         />
       </main>
       {details ? <DetailsPanel chat={chat} act={act} /> : null}

@@ -5,7 +5,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import { useEffect, useMemo, useState } from 'react'
-import { tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
+import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
 import { reactionRequests } from './reaction-requests.ts'
@@ -31,12 +31,8 @@ const bodyCache = new Map<string, MessagePlaintext | null>()
 
 function openBody(m: Doc<'messages'>, session: Session): MessagePlaintext | null {
   const envelope = m.sealedEdit ?? m.sealed
-  if (!envelope) return null
   const objectId = m.sealedEdit ? m.editEventId! : m.sealedObjectId
-  const key = `${m._id}:${envelope.ct}`
-  if (!bodyCache.has(key))
-    bodyCache.set(key, tryOpen<MessagePlaintext>(envelope, session.keyPair, 'message', session.userId, objectId))
-  return bodyCache.get(key) ?? null
+  return openCached(bodyCache, envelope, session.keyPair, session.kid, 'message', session.userId, objectId)
 }
 
 function toMessage(m: Doc<'messages'>, session: Session): Message {
@@ -70,6 +66,15 @@ export function useMessages(chatId: ChatId) {
 }
 
 type ReactionAnswer = Record<string, { key: string; senderKey: string }[]>
+const MAX_REACTIONS_PER_MESSAGE = 100
+
+/** One reaction on a message, with how many gave it: `more` when there may be others unseen. */
+export interface Reaction {
+  key: string
+  count: number
+  more: boolean
+  mine: boolean
+}
 // Outside the hook, so useQueries can keep its result while the answers don't change.
 const answersOf = (results: { data?: ReactionAnswer | undefined }[]) => results.map((r) => r.data)
 
@@ -86,12 +91,14 @@ export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
   )
   const answers = useQueries({ queries: requests.map(request), combine: answersOf })
   return useMemo(() => {
-    const out = new Map<string, { key: string; count: number; mine: boolean }[]>()
+    const out = new Map<string, Reaction[]>()
     const data: ReactionAnswer = Object.assign({}, ...answers.filter(Boolean))
     for (const [messageId, list] of Object.entries(data)) {
-      const byKey = new Map<string, { key: string; count: number; mine: boolean }>()
+      // The server gives a message's first 100 reactions at most: at that, any count may be more.
+      const more = list.length >= MAX_REACTIONS_PER_MESSAGE
+      const byKey = new Map<string, Reaction>()
       for (const r of list) {
-        const entry = byKey.get(r.key) ?? { key: r.key, count: 0, mine: false }
+        const entry = byKey.get(r.key) ?? { key: r.key, count: 0, more, mine: false }
         entry.count++
         if (r.senderKey === 'self') entry.mine = true
         byKey.set(r.key, entry)
@@ -115,8 +122,10 @@ export function useTyping(chatId: ChatId) {
   return (data ?? []).filter((t) => t.expiresAt > now)
 }
 
-export function useBridgeKey() {
-  return useQuery(convexQuery(api.keys.bridge, {})).data?.publicKey ?? null
+/** The bridge's public key: undefined while it loads, null when the server has none (see bridge-ready.ts). */
+export function useBridgeKey(): string | null | undefined {
+  const { data, isPending } = useQuery(convexQuery(api.keys.bridge, {}))
+  return isPending ? undefined : (data?.publicKey ?? null)
 }
 
 export function useSendMutations() {

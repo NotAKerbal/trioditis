@@ -30,6 +30,31 @@ export function tryOpen<T>(
 }
 
 /**
+ * `tryOpen`, remembered, since re-renders would otherwise decrypt everything again. The cache key
+ * is everything the result depends on: the whole envelope, its kind, owner and object ID, and the
+ * key that opens it. So a copy with a changed nonce, recipient or object ID is opened afresh (and
+ * fails if it should), and one person's results never serve another's. It keeps at most `max`.
+ */
+export function openCached<T>(
+  cache: Map<string, T | null>,
+  envelope: Envelope | null | undefined,
+  keyPair: KeyPair,
+  kid: string,
+  kind: SealKind,
+  ownerUserId: string,
+  objectId: string,
+  max = 10_000,
+): T | null {
+  if (!envelope) return null
+  const key = JSON.stringify([kid, kind, ownerUserId, objectId, envelope])
+  if (cache.has(key)) return cache.get(key) ?? null
+  const value = tryOpen<T>(envelope, keyPair, kind, ownerUserId, objectId)
+  if (cache.size >= max) cache.delete(cache.keys().next().value!)
+  cache.set(key, value)
+  return value
+}
+
+/**
  * Seals a text message twice, as messages.send and scheduled.create take it: for the bridge
  * host (kind `outbound`) and as the person's own stored copy (kind `message`).
  */

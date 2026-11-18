@@ -11,6 +11,7 @@ import { ArrowLeft, CheckCircle2, AlertCircle } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useEffect, useRef, useState } from 'react'
 import { networkName } from '~/data/chats.ts'
+import { loginInputBlocked } from '~/data/bridge-ready.ts'
 import { useBridgeKey } from '~/data/messages.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { sealLoginInput } from '~/lib/sealed.ts'
@@ -59,15 +60,34 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
     latest.current = submitReducer(latest.current, event)
     setSubmission(latest.current)
   }
+  const attempts = useRef(0)
   const started = useRef(false)
+  // The login this stepper is running, for leaving it: whichever way the stepper closes
+  // (Accounts, Escape, the dialog's close button, another section), an unfinished login is
+  // cancelled, including one whose start answers only after the stepper has gone.
+  const live = useRef<{ id: Id<'loginSessions'> | null; over: boolean; closed: boolean }>({
+    id: null,
+    over: false,
+    closed: false,
+  })
+  const abandon = (id: Id<'loginSessions'>) => void cancel({ loginSessionId: id }).catch(() => undefined)
 
   const begin = () => {
     setStartError(null)
     setLoginSessionId(null)
     setValues({})
     dispatch({ type: 'step', stepId: null })
-    start({ network: network as Network, ...(flowId ? { flowId } : {}) }).then(setLoginSessionId, (e: unknown) =>
-      setStartError(errorMessage(e, 'That login couldn’t start.')),
+    live.current = { id: null, over: false, closed: live.current.closed }
+    const run = live.current
+    start({ network: network as Network, ...(flowId ? { flowId } : {}) }).then(
+      (id) => {
+        run.id = id
+        if (run.closed || live.current !== run) abandon(id)
+        else setLoginSessionId(id)
+      },
+      (e: unknown) => {
+        if (live.current === run) setStartError(errorMessage(e, 'That login couldn’t start.'))
+      },
     )
   }
   // Start once when the stepper opens (StrictMode runs effects twice in development).
@@ -76,6 +96,18 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
     started.current = true
     begin()
   })
+  useEffect(() => {
+    live.current.closed = false
+    return () => {
+      // StrictMode unmounts and mounts again at once in development: wait a moment, and leave
+      // the login be if the stepper came back.
+      const run = live.current
+      run.closed = true
+      setTimeout(() => {
+        if (run.closed && run.id && !run.over) abandon(run.id)
+      }, 0)
+    }
+  }, [])
 
   const { data: login } = useQuery({
     ...convexQuery(api.logins.session, loginSessionId ? { loginSessionId } : 'skip'),
@@ -83,6 +115,12 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const step = login?.step
   const done = login?.state === 'complete' || step?.type === 'complete'
   const failed = login?.state === 'error' || step?.type === 'error'
+  const cancelled = login?.state === 'cancelled' || step?.type === 'cancelled'
+  // A login that's over needs no cancelling on the way out.
+  const over = done || failed || cancelled || login === null
+  useEffect(() => {
+    live.current.over = over
+  }, [over])
 
   // A new step clears what was typed for the last one, and can be sent.
   const stepId = step?.stepId
@@ -94,24 +132,23 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   async function send(input: Record<string, string>) {
     if (!loginSessionId || !step || !bridgeKey || !canSubmit(latest.current, step.stepId)) return
     const sentStepId = step.stepId
-    dispatch({ type: 'send', stepId: sentStepId })
+    const attempt = ++attempts.current
+    dispatch({ type: 'send', stepId: sentStepId, attempt })
     try {
       await submit({
         loginSessionId,
         stepId: sentStepId,
         sealed: sealLoginInput(input, loginSessionId, sentStepId, session.userId, bridgeKey),
       })
-      dispatch({ type: 'sent', stepId: sentStepId })
+      dispatch({ type: 'sent', attempt })
     } catch (e) {
       // The server's sentence, as it is. The person can send again; nothing retries for them.
-      dispatch({ type: 'failed', stepId: sentStepId, message: errorMessage(e, 'That didn’t go through. Try again.') })
+      dispatch({ type: 'failed', attempt, message: errorMessage(e, 'That didn’t go through. Try again.') })
     }
   }
 
-  const close = () => {
-    if (loginSessionId && !done && !failed) void cancel({ loginSessionId }).catch(() => undefined)
-    onClose()
-  }
+  // Closing unmounts the stepper, which cancels an unfinished login (above).
+  const close = onClose
 
   return (
     <div>
@@ -152,7 +189,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
         </div>
       ) : failed ? (
         <Problem message={ERRORS[step?.error ?? ''] ?? 'The login didn’t finish. Start again.'} onRetry={begin} />
-      ) : login.state === 'cancelled' || step.type === 'cancelled' ? (
+      ) : cancelled ? (
         <Problem message="The login was cancelled." onRetry={begin} />
       ) : (
         <div className="rounded-lg p-5 shadow-[0_0_0_1px_var(--border)]">
@@ -216,7 +253,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                     autoComplete="off"
                     spellCheck={false}
                     required
-                    disabled={submission.sentStepId === step.stepId}
+                    disabled={submission.sentStepId === step.stepId || !bridgeKey}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
                   />
@@ -225,6 +262,9 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                   ) : null}
                 </label>
               ))}
+              {loginInputBlocked(bridgeKey) ? (
+                <p className="mb-3 text-sm text-muted-foreground">{loginInputBlocked(bridgeKey)}</p>
+              ) : null}
               {submission.error ? (
                 <p role="alert" className="mb-3 text-sm text-danger">
                   {submission.error}

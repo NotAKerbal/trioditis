@@ -4,19 +4,20 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { AlertCircle, Check, CheckCheck, Clock, Reply } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { messageTime } from '~/data/format.ts'
-import type { Message } from '~/data/messages.ts'
+import type { Message, Reaction } from '~/data/messages.ts'
 import { formatWhen } from '~/data/snooze.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
-  body: string
+  /** Its text, once its copy is opened here; undefined until then. */
+  body: string | undefined
   sendAt: number
 }
 
 interface MessageListProps {
   messages: Message[]
   loading: boolean
-  reactions: Map<string, { key: string; count: number; mine: boolean }[]>
+  reactions: Map<string, Reaction[]>
   scheduled: ScheduledItem[]
   group: boolean
   typing: number
@@ -41,13 +42,43 @@ function dayLabel(ms: number) {
 export function MessageList(props: MessageListProps) {
   const { messages, reactions, scheduled } = props
   const scroller = useRef<HTMLDivElement>(null)
+  const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
+  // Set while earlier messages load: where the list was, to keep the same messages in view.
+  const before = useRef<{ firstId: string | undefined; height: number } | null>(null)
 
-  // Stay pinned to the newest message unless the person has scrolled up to read.
+  const loadEarlier = () => {
+    const el = scroller.current
+    if (el) before.current = { firstId: messages[0]?.id, height: el.scrollHeight }
+    props.onLoadMore()
+  }
+  const loadEarlierRef = useRef(loadEarlier)
+  loadEarlierRef.current = loadEarlier
+
+  // Stay pinned to the newest message unless the person has scrolled up to read. When earlier
+  // messages come in above, move down by what they added, so what was on screen stays put.
   useLayoutEffect(() => {
     const el = scroller.current
-    if (el && atBottom.current) el.scrollTop = el.scrollHeight
+    if (!el) return
+    const was = before.current
+    if (was && messages[0]?.id !== was.firstId) {
+      el.scrollTop += el.scrollHeight - was.height
+      before.current = null
+    } else if (atBottom.current) el.scrollTop = el.scrollHeight
   }, [messages, scheduled.length, props.typing])
+
+  // Earlier messages load as the top of the list scrolls near; the button stays as a fallback.
+  // A page can end early under the server's byte budget, so only the cursor says it's the start.
+  useEffect(() => {
+    const el = top.current
+    if (!el || !props.canLoadMore) return
+    const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && loadEarlierRef.current(), {
+      root: scroller.current,
+      rootMargin: '300px 0px 0px 0px',
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [props.canLoadMore])
   useEffect(() => {
     const el = scroller.current
     if (!el) return
@@ -64,8 +95,8 @@ export function MessageList(props: MessageListProps) {
   return (
     <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-2" aria-live="polite">
       {props.canLoadMore ? (
-        <div className="mb-3 flex justify-center">
-          <Button size="sm" onClick={props.onLoadMore}>
+        <div ref={top} className="mb-3 flex justify-center">
+          <Button size="sm" onClick={loadEarlier}>
             Load earlier messages
           </Button>
         </div>
@@ -131,6 +162,7 @@ export function MessageList(props: MessageListProps) {
                       )}
                     >
                       {r.key} {r.count}
+                      {r.more ? '+' : ''}
                     </span>
                   ))}
                 </div>
@@ -147,8 +179,9 @@ export function MessageList(props: MessageListProps) {
                   aria-label="Reply"
                   title="Reply"
                   onClick={() => props.onReply(m)}
+                  // In the tab order always, shown on hover or when it has keyboard focus.
                   className={cn(
-                    'absolute top-1 hidden size-7 items-center justify-center rounded-md bg-surface text-muted-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:flex group-hover:flex hover:text-foreground',
+                    'absolute top-1 flex size-7 items-center justify-center rounded-md bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100',
                     m.self ? '-left-9' : '-right-9',
                   )}
                 >
@@ -162,18 +195,20 @@ export function MessageList(props: MessageListProps) {
       {scheduled.map((s) => (
         <div key={s.id} className="mb-2 ml-auto flex max-w-[78%] flex-col items-end">
           <div className="rounded-[18px] px-3 py-2 leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
-            {s.body}
+            {s.body ?? <span className="text-subtle-foreground">Opening…</span>}
           </div>
           <div className="mx-2.5 mt-0.5 flex items-center gap-2 text-xs text-primary-ink">
             <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
             <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onSendScheduledNow(s.id)}>
               Send now
             </Button>
+            {/* Cancelling puts the text back in the composer, so it waits until the text is here. */}
             <Button
               variant="link"
               size="sm"
               className="h-auto text-xs"
-              onClick={() => props.onCancelScheduled(s.id, s.body)}
+              disabled={s.body === undefined}
+              onClick={() => s.body !== undefined && props.onCancelScheduled(s.id, s.body)}
             >
               Cancel
             </Button>

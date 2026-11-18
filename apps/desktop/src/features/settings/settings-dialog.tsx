@@ -3,7 +3,8 @@ import type { Id } from '@trioditis/backend/dataModel'
 import {
   decodeRecoveryKey,
   generateRecoveryKey,
-  makeKeyBackup,
+  newPasswordParams,
+  passwordKey,
   SealError,
   toBase64Url,
   unwrapIdentityKey,
@@ -627,9 +628,21 @@ function Keys() {
     try {
       const currentAuthPassword = await derivedAuthPassword(current, email)
       const newAuthPassword = await derivedAuthPassword(next, email)
-      // Fresh Argon2id settings and the wrap, opened again: it throws a SealError unless the new
-      // password gives back this key.
-      const { password: newWrap } = makeKeyBackup(session.keyPair.privateKey, next, session.userId)
+      // A fresh salt, and work factors never below the backup being replaced: the server refuses
+      // weaker ones, and an account may have been set up with stronger.
+      const fresh = newPasswordParams()
+      const old = identity?.backups.find((b) => b.kind === 'password')?.params
+      const params = {
+        ...fresh,
+        opslimit: Math.max(fresh.opslimit, old?.opslimit ?? 0),
+        memlimit: Math.max(fresh.memlimit, old?.memlimit ?? 0),
+      }
+      const context = { userId: session.userId, kid: session.kid, kind: 'password' } as const
+      const wrappingKey = passwordKey(next, params)
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, wrappingKey, context)
+      // Opened again, as makeKeyBackup does: it throws a SealError unless it gives back this key.
+      unwrapIdentityKey(wrap, wrappingKey, context, session.keyPair.publicKey)
+      const newWrap = { ...wrap, params }
       // It returns the backup's new revision; keys.identity brings it here as well.
       await changePasswordAction({
         currentAuthPassword,

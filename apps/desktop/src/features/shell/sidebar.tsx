@@ -34,6 +34,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   networkName,
+  useChatCounts,
   useChats,
   useLabels,
   useNetworks,
@@ -91,7 +92,14 @@ export function Sidebar({
   const [network, setNetwork] = useState<Network | undefined>()
   const [labelId, setLabelId] = useState<LabelId | undefined>()
   const [simpleShow, setSimpleShow] = useState<ChatView>('inbox')
-  const [open, setOpen] = useState({ read: false, snoozed: false, scheduled: false, requests: false, archived: false })
+  const [open, setOpen] = useState({
+    read: false,
+    snoozed: false,
+    scheduled: false,
+    requests: false,
+    archived: false,
+    blocked: false,
+  })
   const searchRef = useRef<HTMLInputElement>(null)
 
   // ⌘K / Ctrl+K jumps to search, unless a dialog is open (it makes the page behind it inert).
@@ -113,10 +121,15 @@ export function Sidebar({
   const snoozedList = useChats('snoozed', filter, focused)
   const requestsList = useChats('requests', filter, focused)
   const archivedList = useChats('archived', filter, focused)
+  const blockedList = useChats('blocked', filter, focused)
   const inbox = main.chats
   const snoozed = snoozedList.chats
   const requests = requestsList.chats
   const archived = archivedList.chats
+  const blocked = blockedList.chats
+  // The server's badge counts cover every chat, not only the pages loaded, but not a filter.
+  const serverCounts = useChatCounts()
+  const counts = network || labelId ? undefined : serverCounts
   // A scheduled send whose chat was gone when its time came failed: it's listed apart, to dismiss.
   const scheduledRows = useScheduled()
   const scheduledMessages = useMemo(() => scheduledRows?.filter((s) => s.state !== 'failed'), [scheduledRows])
@@ -129,9 +142,13 @@ export function Sidebar({
   const searching = q.length > 0
   const everything = useMemo(() => {
     const seen = new Map<string, Chat>()
-    for (const list of [inbox, snoozed, requests, archived]) for (const c of list ?? []) seen.set(c.id, c)
+    for (const list of [inbox, snoozed, requests, archived, blocked]) for (const c of list ?? []) seen.set(c.id, c)
     return [...seen.values()]
-  }, [inbox, snoozed, requests, archived])
+  }, [inbox, snoozed, requests, archived, blocked])
+  // Search looks through the chats loaded so far; these are the views with more to load.
+  const unloaded = (focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]).filter(
+    (l) => l.canLoadMore,
+  )
   const results = searching
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
@@ -161,6 +178,7 @@ export function Sidebar({
           ...(open.snoozed ? (snoozed ?? []) : []),
           ...(open.requests ? (requests ?? []) : []),
           ...(open.archived ? (archived ?? []) : []),
+          ...(open.blocked ? (blocked ?? []) : []),
         ]
       : (inbox ?? [])
   const shownIds = shown.map((c) => c.id as string)
@@ -171,7 +189,7 @@ export function Sidebar({
   // opening a chat marks it read, and nobody asked to read it.
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
-  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived))
+  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
   useEffect(() => {
     if (!loaded || lastFilterKey.current === filterKey) return
     lastFilterKey.current = filterKey
@@ -247,6 +265,9 @@ export function Sidebar({
                     onSelect={() => setSimpleShow(s.view)}
                   >
                     {s.icon} {s.label}
+                    {s.view === 'requests' && counts?.requests.count ? (
+                      <DropdownMenuTrail>{badge(counts.requests)}</DropdownMenuTrail>
+                    ) : null}
                   </DropdownMenuCheckboxItem>
                 ))}
               </>
@@ -328,11 +349,22 @@ export function Sidebar({
           <ListSkeleton />
         ) : searching ? (
           <>
-            <SectionHeader label="Results in all chats" count={results.length} />
+            <SectionHeader
+              label={unloaded.length ? 'Results in loaded chats' : 'Results in all chats'}
+              count={results.length}
+            />
             {results.length ? results.map((c) => row(c)) : <Empty>No chats match.</Empty>}
+            {unloaded.length ? (
+              <LoadMore
+                list={{ canLoadMore: true, loadMore: () => unloaded.forEach((l) => l.loadMore()) }}
+                auto={false}
+                label="Search more chats"
+              />
+            ) : null}
           </>
         ) : !focused ? (
-          inbox.length ? (
+          // A page can hold no rows yet more to come, so only the end of the view is empty.
+          inbox.length || main.canLoadMore ? (
             <>
               {inbox.map((c) => row(c))}
               <LoadMore list={main} />
@@ -348,16 +380,23 @@ export function Sidebar({
           <>
             {unread.length ? (
               <>
-                <SectionHeader label="Unread" count={unread.length} />
+                <SectionHeader
+                  label="Unread"
+                  count={counts ? badge(counts.inbox) : unread.length}
+                  note={counts?.woke.count ? `${badge(counts.woke)} woke` : undefined}
+                />
                 {unread.map((c) => row(c))}
               </>
-            ) : (
+            ) : main.canLoadMore ? null : (
               <Empty>
                 {everything.length
                   ? 'You’re all caught up.'
                   : 'No chats yet. Connect a network in Settings → Accounts and they’ll show up here.'}
               </Empty>
             )}
+            {/* The inbox's next page can hold unread chats too, so it's offered with Read folded;
+                it loads on scroll only at the end of the open Read list. */}
+            {!open.read ? <LoadMore list={main} auto={false} /> : null}
             <div className="mt-2 border-t border-border pt-1.5">
               <Divider
                 label="Read"
@@ -406,6 +445,7 @@ export function Sidebar({
                 label="Requests"
                 icon={<UserPlus />}
                 count={requests?.length ?? 0}
+                total={counts?.requests}
                 more={requestsList}
                 open={open.requests}
                 onToggle={() => setOpen((o) => ({ ...o, requests: !o.requests }))}
@@ -422,6 +462,16 @@ export function Sidebar({
               >
                 {archived?.map((c) => row(c))}
               </Divider>
+              <Divider
+                label="Blocked"
+                icon={<Ban />}
+                count={blocked?.length ?? 0}
+                more={blockedList}
+                open={open.blocked}
+                onToggle={() => setOpen((o) => ({ ...o, blocked: !o.blocked }))}
+              >
+                {blocked?.map((c) => row(c))}
+              </Divider>
             </div>
           </>
         )}
@@ -432,19 +482,27 @@ export function Sidebar({
   )
 }
 
-function SectionHeader({ label, count }: { label: string; count: number }) {
+/** A badge count from chats.counts: it stops at 99, and `more` says there may be others. */
+const badge = (c: { count: number; more: boolean }) => `${c.count}${c.more ? '+' : ''}`
+
+function SectionHeader({ label, count, note }: { label: string; count: number | string; note?: string }) {
   return (
     <div className="flex items-center gap-1.5 px-2 pt-3 pb-1.5 text-xs font-semibold tracking-[0.05em] text-subtle-foreground uppercase">
       {label} <span className="text-primary">{count}</span>
+      {note ? <span className="font-medium normal-case">· {note}</span> : null}
     </div>
   )
 }
 
-/** A collapsed section, like T3 Code's: label, count and a rule; click to open. Hidden when empty. */
+/**
+ * A collapsed section, like T3 Code's: label, count and a rule; click to open. Hidden only when
+ * the view is empty to its end: a page can hold no rows yet more to come.
+ */
 function Divider({
   label,
   icon,
   count,
+  total,
   more,
   open,
   onToggle,
@@ -453,13 +511,15 @@ function Divider({
   label: string
   icon: ReactNode
   count: number
+  /** The server's count for the whole view, when it has one, in place of the loaded count. */
+  total?: { count: number; more: boolean } | undefined
   /** The view has more chats than are loaded: the count reads "50+" and opening shows Load more. */
   more?: ChatList
   open: boolean
   onToggle: () => void
   children: ReactNode
 }) {
-  if (count === 0) return null
+  if (count === 0 && !more?.canLoadMore && !total?.count) return null
   return (
     <>
       <Button
@@ -473,8 +533,7 @@ function Divider({
         <span className="text-subtle-foreground [&_svg]:size-3.5">{icon}</span>
         {label}
         <span className="text-sm font-medium text-subtle-foreground">
-          {count}
-          {more?.canLoadMore ? '+' : ''}
+          {total ? badge(total) : `${count}${more?.canLoadMore ? '+' : ''}`}
         </span>
         <span className="h-px flex-1 bg-border-strong" />
       </Button>
@@ -518,24 +577,33 @@ function FailedScheduled({ rows }: { rows: { _id: Id<'scheduledSends'>; sendAt: 
 /**
  * Loads the next page of a view as it scrolls near, with the button as a fallback. A page can end
  * early under the server's byte budget, so only the cursor says a view is done, not a short page.
+ * `auto` off makes it a button only, where loading on sight could fetch a whole view unseen.
  */
-function LoadMore({ list }: { list: ChatList }) {
+function LoadMore({
+  list,
+  auto = true,
+  label = 'Load more chats',
+}: {
+  list: Pick<ChatList, 'canLoadMore' | 'loadMore'>
+  auto?: boolean
+  label?: string
+}) {
   const ref = useRef<HTMLButtonElement>(null)
   const loadMore = useRef(list.loadMore)
   loadMore.current = list.loadMore
   useEffect(() => {
     const el = ref.current
-    if (!el) return
+    if (!el || !auto) return
     const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && loadMore.current(), {
       rootMargin: '200px',
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [list.canLoadMore])
+  }, [list.canLoadMore, auto])
   if (!list.canLoadMore) return null
   return (
     <Button ref={ref} variant="ghost" size="sm" block className="my-1" onClick={list.loadMore}>
-      Load more chats
+      {label}
     </Button>
   )
 }

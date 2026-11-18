@@ -20,6 +20,9 @@ export function Shell() {
   // The chats the sidebar has loaded, by ID, so auto-advance can open the next one properly.
   const chatsById = useRef(new Map<string, Chat>())
   const selectedId = search.chat
+  // The open chat as of now, for an action that finishes later: `selectedId` is as of its start.
+  const selectedRef = useRef(selectedId)
+  selectedRef.current = selectedId
 
   const select = (id: string | undefined) => void navigate({ search: (s) => ({ ...s, chat: id }) })
   const openSettings = (section: SettingsSection | undefined) =>
@@ -44,6 +47,8 @@ export function Shell() {
     // A Convex mutation resolves once its query results have arrived; give React a frame to
     // render them before checking whether the chat is still listed.
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    // If the person opened another chat (or closed it) meanwhile, that choice stands.
+    if (selectedRef.current !== chatId) return
     if (shownRef.current.includes(chatId)) return
     const i = before.indexOf(chatId)
     const listed = (id: string) => shownRef.current.includes(id)

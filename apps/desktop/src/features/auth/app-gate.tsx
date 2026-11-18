@@ -8,6 +8,7 @@ import {
   passwordKey,
   ready,
   SealError,
+  toBase64Url,
   unwrapIdentityKey,
 } from '@trioditis/crypto'
 import { Button } from '@trioditis/ui/button'
@@ -85,16 +86,44 @@ function MemberGate({ children }: { children: ReactNode }) {
 function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | 'member'; children: ReactNode }) {
   const remote = useQuery(convexQuery(api.keys.identity, {}))
   const local = useQuery({ queryKey: ['identity', userId], queryFn: () => loadIdentity(userId), staleTime: Infinity })
+  // While setup is saving, the server's state turns `ready` before this device has kept the key.
+  // Holding the setup screen until it's done keeps its progress, errors and retry on screen.
+  const [held, setHeld] = useState<SetupFor | null>(null)
   if (remote.isPending || local.isPending || !remote.data) return <Splash />
   const { state, publicKey, kid, backups } = remote.data
-  const onDone = () => void local.refetch()
   const here = local.data && local.data.kid === kid ? local.data : null
-  // Setting up a key or unlocking one keeps it on this device, which an insecure page can't do.
-  // A key already here was opened with WebCrypto, so the page is secure.
-  if (state === 'none') return canKeepKeys() ? <KeySetup userId={userId} onDone={onDone} /> : <InsecurePage />
+  const setupFor: SetupFor | null =
+    held ??
+    (state === 'none'
+      ? { has: { password: false, recovery: false } }
+      : state === 'needsBackup' && here
+        ? {
+            existing: here.keyPair,
+            has: {
+              password: backups.some((b) => b.kind === 'password'),
+              recovery: backups.some((b) => b.kind === 'recovery'),
+            },
+          }
+        : null)
+  if (setupFor) {
+    // Setting up a key keeps it on this device, which an insecure page can't do.
+    if (!canKeepKeys()) return <InsecurePage />
+    return (
+      <KeySetup
+        userId={userId}
+        existing={setupFor.existing}
+        has={setupFor.has}
+        onSaving={() => setHeld(setupFor)}
+        onLeave={() => setHeld(null)}
+        onDone={async () => {
+          await Promise.all([local.refetch(), remote.refetch()])
+          setHeld(null)
+        }}
+      />
+    )
+  }
   if (state === 'needsBackup') {
     // The key exists but its backups aren't both there: only a device holding the key can make them.
-    if (here) return <KeySetup userId={userId} existing={here.keyPair} onDone={() => void remote.refetch()} />
     return (
       <AuthCard
         title="Finish setting up on your first device"
@@ -108,8 +137,18 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
+  // A key already here was opened with WebCrypto, so only unlocking needs the check.
   if (!canKeepKeys()) return <InsecurePage />
-  return <Unlock userId={userId} kid={kid!} publicKey={publicKey!} backups={backups} onDone={onDone} />
+  return (
+    <Unlock userId={userId} kid={kid!} publicKey={publicKey!} backups={backups} onDone={() => void local.refetch()} />
+  )
+}
+
+/** What key setup is for: a new key, or the missing backups of one this device holds. */
+interface SetupFor {
+  existing?: KeyPair
+  /** The backups the server already has for the key; setup makes only the others. */
+  has: { password: boolean; recovery: boolean }
 }
 
 /**
@@ -140,19 +179,44 @@ function reason(error: unknown): string {
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 30))
 
 /**
- * First-device setup, or finishing the backups of a key this device already has (`existing`):
- * the key is wrapped with the person's password and a new recovery key, which they must
- * confirm saving before anything is sent. Then the device proves it holds the key, and the
- * server stores both backups at once.
+ * First-device setup, or finishing the backups of a key this device already has (`existing`).
+ * The server stores only the backups it doesn't have (`has`), so this makes only those: a
+ * password backup with the password the person just signed in with, and a recovery key they
+ * must confirm saving before anything is sent. Then the device proves it holds the key, and
+ * the server stores them.
  */
-function KeySetup({ userId, existing, onDone }: { userId: string; existing?: KeyPair; onDone: () => void }) {
+function KeySetup({
+  userId,
+  existing,
+  has,
+  onSaving,
+  onLeave,
+  onDone,
+}: {
+  userId: string
+  existing?: KeyPair
+  has: SetupFor['has']
+  /** Saving has started: keep this screen until onDone or onLeave. */
+  onSaving: () => void
+  /** The person gave up keeping the key here after the server saved it; they'll unlock instead. */
+  onLeave: () => void
+  onDone: () => Promise<void>
+}) {
   const setup = useMutation(api.keys.setup)
-  const [password, setPassword] = useState(() => takePassword() ?? '')
-  const [prepared, setPrepared] = useState<{ keyPair: KeyPair; setup: ReturnType<typeof makeKeySetup> } | null>(null)
+  // The password backup must open with the password that signs in, so it's only ever the one
+  // just used to sign in or up, which the server has checked. Without it, sign in again.
+  const [password] = useState(() => (has.password ? null : takePassword()))
+  const [prepared, setPrepared] = useState<{
+    keyPair: KeyPair
+    setup: ReturnType<typeof makeKeySetup>
+    showRecovery: boolean
+  } | null>(null)
   const [saved, setSaved] = useState(false)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set once the server has the backups, if keeping the key on this device then failed.
+  const [keptKid, setKeptKid] = useState<string | null>(null)
 
   async function prepare(event?: React.FormEvent) {
     event?.preventDefault()
@@ -162,9 +226,17 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
       await ready()
       await nextFrame()
       const keyPair = existing ?? generateKeyPair()
-      // Wraps the key with the password (Argon2id, about a second) and a new recovery key, and
-      // opens both wraps again: it throws a SealError unless both give back this key.
-      setPrepared({ keyPair, setup: makeKeySetup(keyPair.privateKey, password, userId) })
+      // keys.setup takes both wraps, but stores only the backups it lacks. A wrap for one it has
+      // is ignored, so that one is made with a throwaway password and never shown.
+      const wrapPassword = password ?? toBase64Url(crypto.getRandomValues(new Uint8Array(24)))
+      // Wraps the key (Argon2id, about a second) and opens both wraps again: it throws a
+      // SealError unless both give back this key.
+      const made = makeKeySetup(keyPair.privateKey, wrapPassword, userId)
+      const next = { keyPair, setup: made, showRecovery: !has.recovery }
+      setPrepared(next)
+      setBusy(false)
+      // With the recovery backup already there, there's nothing to confirm.
+      if (!next.showRecovery) await finish(next)
     } catch (e) {
       // Nothing has been sent yet, so there's no half-made key to undo.
       setError(
@@ -172,12 +244,12 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
           ? 'Your key’s backups didn’t check out on this device, so nothing was saved. Try again.'
           : `Your key couldn’t be made on this device (${reason(e)}). Reload the page and try again.`,
       )
+      setBusy(false)
     }
-    setBusy(false)
   }
 
-  async function finish() {
-    if (!prepared) return
+  async function finish(job = prepared) {
+    if (!job) return
     setBusy(true)
     setError(null)
     const fail = (message: string) => {
@@ -187,44 +259,82 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
     // Taken now, not when the recovery key was shown: a proof expires after five minutes.
     let proof: string
     try {
-      proof = await proveKey(prepared.keyPair)
+      proof = await proveKey(job.keyPair)
     } catch (e) {
       return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
     }
     let kid: string
+    onSaving()
     try {
-      kid = (await setup({ ...prepared.setup.args, proof })).kid
+      kid = (await setup({ ...job.setup.args, proof })).kid
     } catch (e) {
+      onLeave()
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
-    try {
-      await storeIdentity(userId, kid, prepared.keyPair)
-    } catch (e) {
-      return fail(
-        `Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}). Reload the page and unlock with your password.`,
-      )
-    }
-    onDone()
+    await keep(kid, job.keyPair)
   }
 
-  if (!prepared) {
+  /** Keeps the key on this device, once the server has its backups. */
+  async function keep(kid: string, keyPair: KeyPair) {
+    setBusy(true)
+    setError(null)
+    try {
+      await storeIdentity(userId, kid, keyPair)
+    } catch (e) {
+      setKeptKid(kid)
+      setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
+      setBusy(false)
+      return
+    }
+    await onDone()
+  }
+
+  if (keptKid && prepared) {
+    return (
+      <AuthCard
+        title="Keep your key on this device"
+        description="Its backups are saved on the server. If this device can’t keep it, unlock with your password instead."
+      >
+        <FormError message={error} />
+        <Button
+          variant="primary"
+          size="lg"
+          block
+          className="mb-2"
+          loading={busy}
+          onClick={() => void keep(keptKid, prepared.keyPair)}
+        >
+          Try again
+        </Button>
+        <Button block onClick={onLeave}>
+          Unlock with my password
+        </Button>
+      </AuthCard>
+    )
+  }
+
+  if (!prepared || !prepared.showRecovery) {
+    if (!has.password && !password) {
+      return (
+        <AuthCard
+          title={existing ? 'Finish setting up your key' : 'Set up your key'}
+          description="Your key’s backup is protected by the password you sign in with. Sign in again, and setup carries on from there."
+        >
+          <SignOutButton label="Sign in again" />
+        </AuthCard>
+      )
+    }
     return (
       <AuthCard
         title={existing ? 'Finish setting up your key' : 'Set up your key'}
-        description="Trioditis seals every message to a key only your devices hold, so the server can’t read them. Your password protects a backup of it, so your other devices can open your messages too."
+        description={
+          has.password
+            ? 'Your key still needs a recovery key, the way back in if you forget your password.'
+            : 'Trioditis seals every message to a key only your devices hold, so the server can’t read them. The password you just used protects a backup of it, so your other devices can open your messages too.'
+        }
       >
         <form onSubmit={prepare}>
           <FormError message={error} />
-          <Field label="Your password" hint="The one you sign in with.">
-            <Input
-              type="password"
-              autoComplete="current-password"
-              required
-              minLength={12}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </Field>
           <Button type="submit" variant="primary" size="lg" block loading={busy}>
             {busy ? 'Securing your key…' : 'Continue'}
           </Button>
@@ -262,7 +372,7 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
         <Checkbox className="mt-0.5" checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
         I’ve saved my recovery key somewhere safe.
       </label>
-      <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={finish}>
+      <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={() => void finish()}>
         Finish setup
       </Button>
     </AuthCard>

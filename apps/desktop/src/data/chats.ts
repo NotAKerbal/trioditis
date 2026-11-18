@@ -4,12 +4,14 @@ import type { ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
 import { DEFAULT_PREFERENCES, NETWORK_INFO } from '@trioditis/core'
 import { toast } from '@trioditis/ui/toast'
 import { convexQuery } from '@convex-dev/react-query'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
+import type { FunctionReturnType } from 'convex/server'
 import { useMemo } from 'react'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import {
+  openCached,
   tryOpen,
   type ChatPlaintext,
   type LabelColor,
@@ -39,15 +41,11 @@ export interface Chat {
 
 export const networkName = (network: string) => NETWORK_INFO[network as Network]?.name ?? network
 
-// Opened metadata, by chat and ciphertext, so re-renders don't decrypt everything again.
+// Opened chat metadata (openCached), so re-renders don't decrypt every row again.
 const metaCache = new Map<string, ChatPlaintext | null>()
 
 function openMeta(row: ChatRow, session: Session): ChatPlaintext | null {
-  if (!row.sealedMeta) return null
-  const key = `${row._id}:${row.sealedMeta.ct}`
-  if (!metaCache.has(key))
-    metaCache.set(key, tryOpen<ChatPlaintext>(row.sealedMeta, session.keyPair, 'chat', session.userId, row.portalId))
-  return metaCache.get(key) ?? null
+  return openCached(metaCache, row.sealedMeta, session.keyPair, session.kid, 'chat', session.userId, row.portalId)
 }
 
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
@@ -236,20 +234,26 @@ export function useScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.list, chatId ? { chatId } : {})).data
 }
 
+type ScheduledCopy = FunctionReturnType<typeof api.scheduled.copies>[number]
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const copiesOf = (results: { data?: ScheduledCopy[] | undefined }[]) => results.flatMap((r) => r.data ?? [])
+
 /**
  * The person's sealed copies of scheduled messages, opened on this device, by scheduled ID.
- * `scheduled.list` carries no content; copies come at most 20 at a time.
+ * `scheduled.list` carries no content; copies are asked for 20 at a time, the most it takes.
  */
 export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, string> {
   const session = useSession()
-  const first = ids.slice(0, 20)
-  const { data } = useQuery({
-    ...convexQuery(api.scheduled.copies, first.length > 0 ? { scheduledIds: first } : 'skip'),
+  const batches: Id<'scheduledSends'>[][] = []
+  for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20))
+  const data = useQueries({
+    queries: batches.map((scheduledIds) => convexQuery(api.scheduled.copies, { scheduledIds })),
+    combine: copiesOf,
   })
   const clientIds = useScheduled()
   return useMemo(() => {
     const out = new Map<string, string>()
-    for (const row of data ?? []) {
+    for (const row of data) {
       const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
       const body = tryOpen<MessagePlaintext>(
