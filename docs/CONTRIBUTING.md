@@ -54,6 +54,9 @@ This one command:
 
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
+Like the app, the account signs in with the password derived from that one (`authPassword` in
+packages/crypto) once packages/crypto has it; a dev instance set up before then needs to start
+over (see [Starting over](#starting-over)) for the app to sign in.
 
 Sign in to the web app at the address it prints, `http://localhost:<port>`. The web app's dev
 server forwards sign-in (`/api/auth`) and the MCP server to the backend, so the browser signs
@@ -147,8 +150,15 @@ preview backend of its own and a Vercel preview of the web app. It prints the UR
 account when it finishes. `pnpm preview --dry-run` prints every step and does nothing.
 
 **A preview is demo-only.** It offers only the fake network, runs no gateway or bridge host,
-and its data is made up (`scripts/demo.mjs`), sealed for the test account exactly as real data
-would be. No real account or real message ever goes to Convex's cloud.
+and its data is made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to
+the test account's own key exactly as real data would be. No real account or real message
+ever goes to Convex's cloud.
+
+Previews are short-lived and per branch, so each gets the known test account. It signs in with
+the password the app derives from `trioditis-dev-tester` (`authPassword` in packages/crypto),
+not the typed one, and its key is set up the way the app's first device does it, with the
+recovery key printed at the end. Running `pnpm preview` needs packages/crypto's client API
+functions; it stops before creating anything if they're missing.
 
 |              |                                                                                      |
 | ------------ | ------------------------------------------------------------------------------------ |
@@ -175,8 +185,9 @@ How it works:
 5. Deploys the web app to a Vercel preview, with `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and
    `TRIODITIS_PREVIEW` as build variables, and without git details, so a preview made from
    `dev`'s tip can't take over nightly's domain.
-6. Points `SITE_URL` at the preview's URL, creates the test account through it, and loads the
-   demo data.
+6. Points `SITE_URL` at the preview's URL, creates the test account through it, sets up its
+   key (`keys.setup`), and asks the backend for its demo data (`demo.seedForMe`) as that
+   account.
 
 On Vercel, `scripts/vercel-build.mjs` builds the web app and writes Vercel's Build Output
 itself: the app's files, plus routes that send `/api/auth`, `/mcp` and the OAuth discovery
@@ -188,12 +199,24 @@ other path to `index.html`.
 A push to `dev` deploys nightly, a demo-only instance on its own Convex deployment. Nobody
 deploys it by hand.
 
-|          | Nightly                                                    |
-| -------- | ---------------------------------------------------------- |
-| Branch   | `dev`                                                      |
-| Backend  | The `nightly` deployment in the `trioditis` Convex project |
-| Networks | The fake network only; no bridge host                      |
-| Data     | The demo data, for the test account                        |
+|          | Nightly                                                          |
+| -------- | ---------------------------------------------------------------- |
+| Branch   | `dev`                                                            |
+| Backend  | The `nightly` deployment in the `trioditis` Convex project       |
+| Networks | The fake network only; no bridge host                            |
+| Accounts | None to start with: the first admin signs up with the setup link |
+| Data     | Demo data for whoever signs up, sealed to their own key          |
+
+**Nightly gets no test account, ever.** Its first admin signs up with the setup link,
+`<nightly>/setup?token=<token>`, and invites anyone else. The deploy that creates the token
+prints the link in its Vercel build log, once; after that, get the token with:
+
+```sh
+cd packages/backend && npx convex env get TRIODITIS_SETUP_TOKEN --deployment isaac-cochran:trioditis:nightly
+```
+
+Nightly sets `TRIODITIS_DEMO=1`, so whoever signs up gets demo data from the backend
+(`demo.seedForMe`), sealed to their own key. No known password is involved.
 
 There is no production site on Vercel. Trioditis's production is a server people run
 themselves (`deploy/`). `main` is enabled for Git deploys so a production site can be added
@@ -209,14 +232,14 @@ build command with `scripts/vercel-build.mjs`. For a push to `dev`, that script:
    it is missing, not a production key, or for a deployment other than nightly's.
 2. Checks the backend's variables. It sets `SITE_URL` to nightly's address the first time and
    stops the build if it holds a different one. It sets `TRIODITIS_NETWORKS=fake` the first
-   time and stops the build if it holds anything else. It creates the secrets it needs if
-   they're missing.
+   time and stops the build if it holds anything else. It sets `TRIODITIS_DEMO=1`. It creates
+   the secrets it needs if they're missing, and creates `TRIODITIS_SETUP_TOKEN` once, printing
+   the setup link on that run only.
 3. Runs `convex deploy`, which pushes the backend functions and builds the web app with
    `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and `VITE_TRIODITIS_ENVIRONMENT=nightly`. Nightly
    is a Vercel preview build deploying to a production Convex deployment on purpose, so it
    passes `--check-build-environment disable`.
-4. Writes the Build Output, as for a preview, and creates the test account and the demo data
-   if they aren't there.
+4. Writes the Build Output, as for a preview. It creates no account.
 
 If any step fails, the deployment fails and the site keeps serving the last good one.
 
@@ -225,8 +248,8 @@ If any step fails, the deployment fails and the site keeps serving the last good
 `scripts/vercel-ignore.mjs` is Vercel's Ignored Build Step. It builds only if one of these
 changed since the branch's last successful deployment: `apps/desktop/`, `packages/`,
 `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, `.vercelignore`,
-`.gitignore`, `.gitattributes`, `vercel.json`, `scripts/vercel-build.mjs`, `scripts/lib.mjs`
-and `scripts/demo.mjs`. When it can't tell (a branch's first deployment, a commit missing from
+`.gitignore`, `.gitattributes`, `vercel.json`, `scripts/vercel-build.mjs` and
+`scripts/lib.mjs`. When it can't tell (a branch's first deployment, a commit missing from
 Vercel's clone, a `pnpm preview` deploy), it builds. A skipped commit shows as **Canceled**.
 
 ### Setting it up
@@ -308,7 +331,7 @@ packages/
   core/           Shared types and the bridge protocol's wire types
   crypto/         Sealing (docs/architecture/sealing.md)
   config/         Shared TypeScript config
-scripts/          pnpm dev, preview, fake and check; the Vercel build and skip steps; demo data
+scripts/          pnpm dev, preview, fake and check; the Vercel build and skip steps; the preview test account
 deploy/           The self-hosted bundle
 docs/
   PLAN.md         Product and implementation plan

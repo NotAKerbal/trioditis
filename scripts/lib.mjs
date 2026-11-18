@@ -297,24 +297,35 @@ export function desktopPackage() {
 }
 
 /**
+ * The password the app sends when someone signs in with `typed`: derived by packages/crypto's
+ * `authPassword` once it has one (the client API work), so the typed password, which also
+ * unlocks their key backup, never reaches the server. Until then, the typed password itself.
+ */
+export async function signInPassword(typed, email) {
+  const crypto = await import('@trioditis/crypto')
+  return typeof crypto.authPassword === 'function' ? await crypto.authPassword(typed, email) : typed
+}
+
+/**
  * Creates the test account on a backend unless it is already there, and returns its user ID.
+ * `password` is what the app sends at sign-in (`signInPassword`).
  * The first account on a server is its admin and needs the setup token; on a backend that
  * already has an admin who isn't the test account, it says so instead. Requests go to
  * `authUrl` as if sent from `origin`.
  */
-export async function ensureTester({ authUrl, origin, setupToken }) {
+export async function ensureTester({ authUrl, origin, setupToken, password = TESTER.password }) {
   const post = (path, body, headers = {}) =>
     fetch(`${authUrl}/api/auth/${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin, ...headers },
       body: JSON.stringify(body),
     })
-  const signIn = await post('sign-in/email', { email: TESTER.email, password: TESTER.password })
+  const signIn = await post('sign-in/email', { email: TESTER.email, password })
   if (signIn.ok) {
     console.log('Already there from an earlier run.')
     return (await signIn.json()).user.id
   }
-  const signUp = await post('sign-up/email', TESTER, { 'x-trioditis-invite': setupToken })
+  const signUp = await post('sign-up/email', { ...TESTER, password }, { 'x-trioditis-invite': setupToken })
   if (signUp.ok) {
     console.log('Created, as the admin.')
     return (await signUp.json()).user.id

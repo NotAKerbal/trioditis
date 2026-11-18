@@ -20,12 +20,13 @@ import {
   capture,
   convexRef,
   ensureTester,
+  signInPassword,
   root,
   run,
   step,
   x25519,
 } from './lib.mjs'
-import { seedDemo } from './demo.mjs'
+import { clientCrypto, seedTesterDemo, setUpTesterKeys, signInAsTester } from './demo.mjs'
 
 const VERCEL_CLI = 'vercel@65.14.0'
 
@@ -49,6 +50,14 @@ if (!dryRun && (!accounts.vercelOrgId || !accounts.vercelWebProjectId)) {
   )
   process.exit(1)
 }
+// The test account's sign-in and key setup need the client API's crypto. Checked before
+// anything is created on either service.
+const crypto = dryRun
+  ? null
+  : await clientCrypto().catch((error) => {
+      console.error(error.message)
+      process.exit(1)
+    })
 // Convex adds the `preview/` prefix to the reference of a preview deployment it creates.
 const ref = convexRef(`preview/${name}`)
 
@@ -147,6 +156,9 @@ try {
   if (!new RegExp(`^TRIODITIS_NETWORKS=${CLOUD_NETWORKS}$`, 'm').test(settings)) {
     act('capture', 'pnpm', convexEnv('set', 'TRIODITIS_NETWORKS', CLOUD_NETWORKS), { ...inBackend, quiet: true })
   }
+  // The backend makes demo data for whoever signs up, sealed to their own key.
+  if (!/^TRIODITIS_DEMO=1$/m.test(settings))
+    act('capture', 'pnpm', convexEnv('set', 'TRIODITIS_DEMO', '1'), { ...inBackend, quiet: true })
   act('run', 'pnpm', convex('deploy', '--yes'), { ...inBackend, env: { CONVEX_DEPLOY_KEY: deployKey ?? '' } })
 
   step('Web app: Vercel preview')
@@ -197,17 +209,21 @@ try {
 }
 
 if (dryRun) {
-  console.log('\nThen: create the test account through the preview URL, and load the demo data. Nothing was done.')
+  console.log(
+    '\nThen: create the test account through the preview URL, set up its key, and load its demo data. Nothing was done.',
+  )
   process.exit(0)
 }
 
-const convexRun = (fn, fnArgs) =>
-  capture('pnpm', convex('run', fn, JSON.stringify(fnArgs), '--deployment', ref), { ...inBackend, quiet: true })
 step('Creating the test account')
 const setupToken = capture('pnpm', convexEnv('get', 'TRIODITIS_SETUP_TOKEN'), { ...inBackend, quiet: true })
-const userId = await ensureTester({ authUrl: url, origin: url, setupToken })
-step('Loading the demo data')
-await seedDemo(convexRun, userId)
+const password = await signInPassword(TESTER.password, TESTER.email)
+await ensureTester({ authUrl: url, origin: url, setupToken, password })
+const { client, userId } = await signInAsTester(url, `https://${deploymentName}.convex.cloud`, password)
+step('Setting up its key')
+await setUpTesterKeys(crypto, client, userId)
+step('Loading its demo data')
+await seedTesterDemo(client)
 
 console.log(`
 \x1b[1mPreview ready\x1b[0m

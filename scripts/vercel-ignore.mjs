@@ -24,7 +24,6 @@ const paths = [
   'packages',
   'scripts/vercel-build.mjs',
   'scripts/lib.mjs',
-  'scripts/demo.mjs',
 ]
 
 const build = (reason) => {

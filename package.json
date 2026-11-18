@@ -29,6 +29,7 @@
   },
   "type": "module",
   "dependencies": {
-    "@trioditis/crypto": "workspace:*"
+    "@trioditis/crypto": "workspace:*",
+    "convex": "1.50.0"
   }
 }

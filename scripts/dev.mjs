@@ -31,6 +31,7 @@ import {
   portsFor,
   root,
   run,
+  signInPassword,
   start,
   step,
   stopGroup,
@@ -182,7 +183,12 @@ try {
     ),
   ])
   step('Creating the test account')
-  await ensureTester({ authUrl: convexSiteUrl, origin: siteUrl, setupToken: secrets.TRIODITIS_SETUP_TOKEN })
+  await ensureTester({
+    authUrl: convexSiteUrl,
+    origin: siteUrl,
+    setupToken: secrets.TRIODITIS_SETUP_TOKEN,
+    password: await signInPassword(TESTER.password, TESTER.email),
+  })
 } catch (error) {
   console.error(`\n${error.message}`)
   stop(1)

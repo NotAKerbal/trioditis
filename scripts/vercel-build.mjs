@@ -5,8 +5,10 @@
 //           vercel-ignore.mjs skips main until a Vercel production site is set up
 //
 // For nightly it deploys the Convex functions with the CONVEX_DEPLOY_KEY that Vercel holds
-// for the `dev` branch, builds the web app against that backend, and loads the demo data. A
-// build started by `pnpm preview` is given its backend already and only builds the web app.
+// for the `dev` branch and builds the web app against that backend. Nightly gets no test
+// account, ever: its first admin signs up with the setup link, printed once, and anyone who
+// signs up gets demo data sealed to their own key (TRIODITIS_DEMO=1). A build started by
+// `pnpm preview` is given its backend already and only builds the web app.
 //
 // Either way it writes Vercel's Build Output (.vercel/output): the app's static files, and
 // routes that send sign-in (/api/auth), the MCP server and its OAuth discovery documents to
@@ -14,22 +16,20 @@
 // app's index.html.
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import {
   CLOUD_NETWORKS,
   DESKTOP_PACKAGE,
-  TESTER,
   backendDir,
   capture,
+  convexRef,
   desktopDir,
-  ensureTester,
   environments,
   root,
   run,
   step,
   x25519,
 } from './lib.mjs'
-import { randomBytes } from 'node:crypto'
-import { seedDemo } from './demo.mjs'
 
 const fail = (message) => {
   console.error(`\n\x1b[1m${message}\x1b[0m`)
@@ -122,11 +122,12 @@ if (names.includes('TRIODITIS_NETWORKS')) {
 } else {
   set('TRIODITIS_NETWORKS', CLOUD_NETWORKS)
 }
+// Demo data for whoever signs up, made by the backend and sealed to their own key.
+if (!names.includes('TRIODITIS_DEMO') || get('TRIODITIS_DEMO') !== '1') set('TRIODITIS_DEMO', '1')
 const secret = () => randomBytes(32).toString('base64url')
 const defaults = {
   BETTER_AUTH_SECRET: secret,
   GATEWAY_SECRET: secret,
-  TRIODITIS_SETUP_TOKEN: secret,
   BRIDGE_PUBLIC_KEY: () => x25519().publicKey,
   AGENT_ACCESS_PUBLIC_KEY: () => x25519().publicKey,
 }
@@ -135,6 +136,14 @@ for (const [variable, make] of Object.entries(defaults)) {
     set(variable, make())
     console.log(`Created ${variable}.`)
   }
+}
+// The first admin signs up with the setup link. It is shown only on the run that makes the
+// token, and kept on the backend after that.
+let setupLink = null
+if (!names.includes('TRIODITIS_SETUP_TOKEN')) {
+  const token = secret()
+  set('TRIODITIS_SETUP_TOKEN', token)
+  setupLink = `${target.siteUrl}/setup?token=${token}`
 }
 
 // `--cmd` builds the web app with VITE_CONVEX_URL set to this backend. Nightly is a Vercel
@@ -157,11 +166,11 @@ run(
 )
 writeBuildOutput(convexSiteUrl)
 
-step(`Demo data: ${name}`)
-const userId = await ensureTester({
-  authUrl: convexSiteUrl,
-  origin: target.siteUrl,
-  setupToken: get('TRIODITIS_SETUP_TOKEN'),
-})
-await seedDemo((fn, args) => capture('pnpm', convex('run', fn, JSON.stringify(args)), inBackend), userId)
-console.log(`Sign in at ${target.siteUrl} as ${TESTER.email}.`)
+if (setupLink) {
+  console.log(`\n\x1b[1mNightly's first admin signs up here, once:\x1b[0m ${setupLink}`)
+} else {
+  console.log(
+    `\nNightly's setup link is ${target.siteUrl}/setup?token=<token>, until its first admin has signed up. The token: ` +
+      `cd packages/backend && npx convex env get TRIODITIS_SETUP_TOKEN --deployment ${convexRef(name)}`,
+  )
+}
