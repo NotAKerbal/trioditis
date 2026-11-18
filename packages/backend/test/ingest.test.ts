@@ -431,11 +431,12 @@ describe('ingest', () => {
     seq = 0
     const t = setup()
     await ingest(t, [message('e1')])
-    const messageId = (await messages(t))[0]!._id
+    const { _id: messageId, chatId } = (await messages(t))[0]!
     await t.run(async (ctx) => {
       for (let i = 0; i < 500; i++) {
         await ctx.db.insert('reactions', {
           userId: 'user_a',
+          chatId,
           messageId,
           senderKey: `ghost:g${i}`,
           key: '👍',
@@ -453,8 +454,12 @@ describe('ingest', () => {
     })
     expect(await ingest(t, [redaction])).toEqual({ ackedThrough: 2 })
     expect((await messages(t))[0]!.redactedAt).toBe(3_000)
+    // Until they're gone, a marker hides them from `messages.reactions`.
+    const markers = async () => await t.run(async (ctx) => await ctx.db.query('reactionCleanups').collect())
+    expect(await markers()).toHaveLength(1)
     await t.finishAllScheduledFunctions(vi.runAllTimers)
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+    expect(await markers()).toHaveLength(0)
     vi.useRealTimers()
   })
 
@@ -471,6 +476,28 @@ describe('ingest', () => {
       ['too_large', 'user_a'],
       ['too_large', ''],
     ])
+  })
+
+  it('counts mentions, wakes a snoozed chat on a new message, and records requests', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: sealed('c'), isRequest: true })])
+    await t.run(async (ctx) => {
+      const chat = (await ctx.db.query('chats').first())!
+      await ctx.db.patch(chat._id, { snoozedUntil: Date.now() + 60_000, woke: false })
+    })
+    await ingest(t, [message('e1', { mentionsMe: true }), message('e2')])
+    expect(await chat(t)).toMatchObject({ isRequest: true, mentionCount: 1, unreadCount: 2, woke: true })
+    // Once accepted, a later description of the chat doesn't make it a request again.
+    await t.run(async (ctx) => {
+      await ctx.db.patch((await ctx.db.query('chats').first())!._id, { isRequest: false })
+    })
+    await ingest(t, [event('chat', { portalId: 'portal_1', kind: 'dm', sealed: sealed('c2'), isRequest: true })])
+    expect((await chat(t)).isRequest).toBe(false)
+    await ingest(t, [
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e2', networkTs: 9_000 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 0, mentionCount: 0 })
   })
 
   it('quarantines chat metadata over its cap', async () => {
@@ -493,6 +520,42 @@ describe('ingest', () => {
       event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
     ])
     expect((await chat(t)).unreadCount).toBe(2)
+  })
+
+  it('recounts unread and mentions after a delayed read receipt', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000, mentionsMe: true }),
+      message('e2', { networkTs: 2_000, mentionsMe: true }),
+      message('e3', { networkTs: 3_000 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 3, mentionCount: 2 })
+    await ingest(t, [
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 1_500 }),
+    ])
+    expect(await chat(t)).toMatchObject({ unreadCount: 2, mentionCount: 1 })
+  })
+
+  it('puts chats ingest creates in the right list', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1'),
+      event('chat', { portalId: 'portal_2', kind: 'dm', sealed: sealed('c2'), isRequest: true }),
+    ])
+    const views = async () =>
+      Object.fromEntries(
+        (await t.run(async (ctx) => await ctx.db.query('chats').collect())).map((row) => [row.portalId, row.view]),
+      )
+    expect(await views()).toEqual({ portal_1: 'inbox', portal_2: 'requests' })
+    await t.run(async (ctx) => {
+      const chat = (await ctx.db.query('chats').collect()).find((row) => row.portalId === 'portal_1')!
+      await ctx.db.patch(chat._id, { snoozedUntil: Date.now() + 60_000, woke: false, archived: true, view: 'snoozed' })
+    })
+    // A new message wakes the snooze and brings the chat back to the inbox.
+    await ingest(t, [message('e2')])
+    expect((await views()).portal_1).toBe('inbox')
   })
 
   it('refuses events for a network the server doesn’t offer', async () => {

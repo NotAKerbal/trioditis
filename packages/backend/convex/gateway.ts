@@ -1,8 +1,11 @@
 import { ConvexError, v } from 'convex/values'
+import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
-import { Unmappable, applyEvent, byteSize, startMeter } from './lib/ingest'
+import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
+import { byteSize } from './lib/bounded'
+import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
@@ -279,6 +282,7 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
   await expireLogin(ctx, command)
+  await onCommandExpired(ctx, command)
 }
 
 /** How long after its deadline a command the bridge host accepted may go without an outcome. */
@@ -288,7 +292,8 @@ const OVERDUE_GRACE_MS = 60 * 60 * 1000
  * A command the bridge host accepted but never reported on (it went away) would wait forever.
  * Once well past its deadline, a send becomes `unknown`, so the person can choose; it is never
  * sent again, and a late outcome from the bridge host still settles it. A login still waiting
- * on the command ends with `expired`, so the person can start it again.
+ * on the command ends with `expired`, so the person can start it again, and a logout still
+ * pending stops being pending, with `timeout`.
  */
 async function settleOverdue(ctx: MutationCtx, now: number) {
   const overdue = await ctx.db
@@ -302,14 +307,57 @@ async function settleOverdue(ctx: MutationCtx, now: number) {
         .lte('expiresAt', now - OVERDUE_GRACE_MS),
     )
     .take(MAX_EXPIRIES)
-  for (const command of overdue) {
-    const unsettled =
-      command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
-    await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
-    if (unsettled) await markCopy(ctx, command, 'unknown')
-    await expireLogin(ctx, command)
-  }
+  for (const command of overdue) await settle(ctx, command)
 }
+
+/** Settles one overdue command; it then has no `expiresAt`, so nothing settles it twice. */
+async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
+  const unsettled = command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
+  await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
+  if (unsettled) await markCopy(ctx, command, 'unknown')
+  await expireLogin(ctx, command)
+  await onCommandOverdue(ctx, command)
+}
+
+/**
+ * Runs at a command's deadline, scheduled when it was queued, so a command ends on time even
+ * when no gateway is claiming. At the deadline its bridge-readable payload is deleted, and:
+ * one still queued expires; one claimed expires once its lease is over too (until then the
+ * gateway may be handing it over, and its result for that lease still counts, as it would
+ * have before the deadline); one the bridge host accepted is settled an hour later if it never
+ * reported back. The gateway's own sweep does the same; whichever runs first wins, and the
+ * other finds nothing left to do.
+ */
+export const commandDeadline = internalMutation({
+  args: { commandId: v.id('outbox') },
+  returns: v.null(),
+  handler: async (ctx, { commandId }) => {
+    const command = await ctx.db.get(commandId)
+    if (!command) return null
+    const now = Date.now()
+    const later = async (at: number) => await ctx.scheduler.runAt(at, internal.gateway.commandDeadline, { commandId })
+    // Run early (as a migration may), it waits for the deadline: a claim before then still
+    // needs the payload.
+    if (command.expiresAt !== undefined && command.expiresAt > now) {
+      await later(command.expiresAt)
+      return null
+    }
+    // Past the deadline, whatever state it's in, nothing bridge-readable stays.
+    await deletePayload(ctx, commandId)
+    if (command.expiresAt === undefined) return null
+    if (command.state === 'queued') {
+      await expire(ctx, command)
+    } else if (command.state === 'claimed') {
+      if (command.leaseUntil !== undefined && command.leaseUntil > now) await later(command.leaseUntil)
+      else await expire(ctx, command)
+    } else if (command.state === 'dispatched') {
+      const overdueAt = command.expiresAt + OVERDUE_GRACE_MS
+      if (overdueAt <= now) await settle(ctx, command)
+      else await later(overdueAt)
+    }
+    return null
+  },
+})
 
 /** A login command the bridge host refused ends that login with its error. */
 async function failLogin(ctx: MutationCtx, command: Doc<'outbox'>, error: Doc<'outbox'>['lastError']) {
@@ -546,6 +594,7 @@ export const commandResult = mutation({
     })
     await markCopy(ctx, command, 'failed')
     await failLogin(ctx, command, error ?? 'invalid_command')
+    await onCommandRejected(ctx, command, error ?? 'invalid_command')
     return null
   },
 })

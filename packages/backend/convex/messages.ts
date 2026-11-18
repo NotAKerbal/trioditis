@@ -2,15 +2,9 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
-import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
-import { queueCommand } from './lib/outbox'
-import { sortKey } from './lib/ingest'
+import { byteSize } from './lib/bounded'
+import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
-
-/** A send still waiting to go out after this asks the person first. */
-const SEND_EXPIRY_MS = 24 * 60 * 60 * 1000
-
-const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{16,64}$/
 
 /** The most messages one page holds. */
 const MAX_PAGE_ITEMS = 100
@@ -56,71 +50,13 @@ export const send = mutation({
     replyTo: v.optional(v.string()),
   },
   returns: v.null(),
-  handler: async (ctx, args) => {
+  handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
-    const chat = await ownChat(ctx, member.userId, args.chatId)
-    if (!CLIENT_MESSAGE_ID.test(args.clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
+    const chat = await ownChat(ctx, member.userId, chatId)
     // Sending the same message again does nothing, whatever has changed since.
-    const already = await ctx.db
-      .query('outbox')
-      .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', args.clientMessageId))
-      .first()
-    if (already) return null
-    if (!isEnvelope(args.forBridge, MAX_CLIENT_SEALED_BYTES) || !isEnvelope(args.copy, MAX_CLIENT_SEALED_BYTES)) {
-      throw new ConvexError('That message isn’t sealed, or is too long.')
-    }
-    // A reply must quote a message in this chat that reached the network.
-    if (args.replyTo !== undefined) {
-      if (args.replyTo.length > 256 || args.replyTo.startsWith('pending:'))
-        throw new ConvexError('That message can’t be replied to.')
-      const replyTo = args.replyTo
-      const quoted = await ctx.db
-        .query('messages')
-        .withIndex('by_event', (q) => q.eq('userId', member.userId).eq('network', chat.network).eq('eventId', replyTo))
-        .unique()
-      if (!quoted || quoted.chatId !== chat._id || quoted.redactedAt !== undefined) {
-        throw new ConvexError('That message can’t be replied to.')
-      }
-    }
-    const now = Date.now()
-    await ctx.db.insert('messages', {
-      userId: member.userId,
-      chatId: chat._id,
-      network: chat.network,
-      eventId: `pending:${args.clientMessageId}`,
-      networkTs: now,
-      sortKey: sortKey(now, `pending:${args.clientMessageId}`),
-      sender: { self: true },
-      sealed: args.copy,
-      sealedObjectId: args.clientMessageId,
-      historical: false,
-      clientMessageId: args.clientMessageId,
-      delivery: 'queued',
-      ...(args.replyTo ? { replyTo: args.replyTo } : {}),
-    })
-    await queueCommand(
-      ctx,
-      {
-        userId: member.userId,
-        network: chat.network,
-        loginId: chat.loginId,
-        chatId: chat._id,
-        payload: {
-          type: 'send',
-          portalId: chat.portalId,
-          clientMessageId: args.clientMessageId,
-          ...(args.replyTo ? { replyTo: args.replyTo } : {}),
-        },
-        state: 'queued',
-        attempts: 0,
-        delivery: 'queued',
-        clientMessageId: args.clientMessageId,
-        createdAt: now,
-        expiresAt: now + SEND_EXPIRY_MS,
-      },
-      args.forBridge,
-    )
-    await ctx.db.patch(chat._id, { lastMessageAt: Math.max(chat.lastMessageAt, now) })
+    if (await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)) return null
+    await checkSend(ctx, chat, input)
+    await queueSend(ctx, chat, input)
     return null
   },
 })
@@ -147,5 +83,85 @@ export const discardSend = mutation({
     }
     await ctx.db.delete(message._id)
     return null
+  },
+})
+
+/** The most reactions shown per message. */
+const MAX_REACTIONS_PER_MESSAGE = 100
+/** The most `messages.reactions` reads of reaction rows, well under a query's 16 MiB. */
+const MAX_REACTION_BYTES = 8 * 1024 * 1024
+/**
+ * The largest a reaction row can be: its key, event ID, sender and user ID are each capped
+ * at 256 characters at ingest (`MAX_ID_LENGTH`), up to 3 bytes each in UTF-8, plus IDs.
+ */
+const MAX_REACTION_ROW_BYTES = 4 * 1024
+
+/**
+ * Active reactions on the given messages (at most 100 messages, 100 reactions each). It never
+ * reads the messages themselves, which can be large: a reaction row says whose it is, and a
+ * deleted message's reactions are hidden by its clean-up marker until they're removed.
+ *
+ * It reads at most `MAX_REACTION_BYTES` of reactions, starting a message only while a full
+ * one's worth of the largest rows still fits, so messages it didn't get to are left out of
+ * the result, as a deleted one still being cleaned up is. Every other message gets a list,
+ * empty if it has no reactions (or isn't the person's).
+ */
+export const reactions = query({
+  args: { chatId: v.id('chats'), messageIds: v.array(v.id('messages')) },
+  handler: async (ctx, { chatId, messageIds }) => {
+    const member = await requireMember(ctx)
+    await ownChat(ctx, member.userId, chatId)
+    if (messageIds.length > 100) throw new ConvexError('Ask for at most 100 messages’ reactions at once.')
+    const out: Record<string, { key: string; senderKey: string }[]> = {}
+    let bytes = 0
+    for (const messageId of messageIds) {
+      if (MAX_REACTION_BYTES - bytes < MAX_REACTIONS_PER_MESSAGE * MAX_REACTION_ROW_BYTES) break
+      const deleted = await ctx.db
+        .query('reactionCleanups')
+        .withIndex('by_message', (q) => q.eq('messageId', messageId))
+        .first()
+      if (deleted) continue
+      const rows = await ctx.db
+        .query('reactions')
+        .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
+        .take(MAX_REACTIONS_PER_MESSAGE)
+      bytes += byteSize(rows)
+      out[messageId] = rows
+        .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
+        .map(({ key, senderKey }) => ({ key, senderKey }))
+    }
+    return out
+  },
+})
+
+/** How far each participant has read in a chat: `senderKey` is `self` or `ghost:<ghostId>`. */
+export const receipts = query({
+  args: { chatId: v.id('chats') },
+  handler: async (ctx, { chatId }) => {
+    const member = await requireMember(ctx)
+    await ownChat(ctx, member.userId, chatId)
+    const rows = await ctx.db
+      .query('receipts')
+      .withIndex('by_chat_sender', (q) => q.eq('chatId', chatId))
+      .take(500)
+    return rows.map(({ senderKey, upToEventId, networkTs }) => ({ senderKey, upToEventId, networkTs }))
+  },
+})
+
+/**
+ * Who is typing in a chat. Each row says until when; the client hides rows once `expiresAt`
+ * has passed, since a query doesn't rerun just because time passes.
+ */
+export const typing = query({
+  args: { chatId: v.id('chats') },
+  handler: async (ctx, { chatId }) => {
+    const member = await requireMember(ctx)
+    await ownChat(ctx, member.userId, chatId)
+    const now = Date.now()
+    const rows = await ctx.db
+      .query('typing')
+      .withIndex('by_chat_expires', (q) => q.eq('chatId', chatId).gt('expiresAt', now))
+      .take(100)
+    return rows.map(({ senderKey, expiresAt }) => ({ senderKey, expiresAt }))
   },
 })

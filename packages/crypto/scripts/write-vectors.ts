@@ -4,7 +4,7 @@
 // Run with `pnpm --filter @trioditis/crypto vectors` after changing the format.
 
 import { writeFileSync } from 'node:fs'
-import sodium from 'libsodium-wrappers'
+import sodium from 'libsodium-wrappers-sumo'
 import { encryptMedia, keyId, ready, sealJson, toBase64Url, type SealContext } from '../src/index.ts'
 
 await ready()
