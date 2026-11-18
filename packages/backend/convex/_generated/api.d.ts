@@ -35,6 +35,7 @@ import type * as messages from "../messages.js";
 import type * as networks from "../networks.js";
 import type * as preferences from "../preferences.js";
 import type * as scheduled from "../scheduled.js";
+import type * as server from "../server.js";
 import type * as validators from "../validators.js";
 
 import type {
@@ -71,6 +72,7 @@ declare const fullApi: ApiFromModules<{
   networks: typeof networks;
   preferences: typeof preferences;
   scheduled: typeof scheduled;
+  server: typeof server;
   validators: typeof validators;
 }>;
 

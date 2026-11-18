@@ -174,3 +174,16 @@ describe('privacy between people', () => {
     ])
   })
 })
+
+describe('server info', () => {
+  it('says whether this is a demo server, signed in or not', async () => {
+    const t = setup()
+    expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true })
+    process.env.TRIODITIS_DEMO = '1'
+    try {
+      expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false })
+    } finally {
+      delete process.env.TRIODITIS_DEMO
+    }
+  })
+})
