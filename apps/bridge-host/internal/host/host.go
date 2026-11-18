@@ -19,8 +19,8 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
+	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/id"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/gateway"
@@ -105,12 +105,6 @@ func BridgeConfig() *bridgeconfig.BridgeConfig {
 	}
 }
 
-// commandsDisabled is bridgev2's command processor. Trioditis has no bot commands.
-type commandsDisabled struct{}
-
-func (commandsDisabled) Handle(context.Context, id.RoomID, id.EventID, *bridgev2.User, string, id.EventID) {
-}
-
 // New builds a host without starting it.
 func New(cfg Config) (*Host, error) {
 	if cfg.NetworkConnector == nil {
@@ -166,7 +160,9 @@ func New(cfg Config) (*Host, error) {
 		cfg.AdjustBridgeConfig(bridgeCfg)
 	}
 	h.Bridge = bridgev2.NewBridge(networkid.BridgeID(cfg.Network), db, cfg.Log, bridgeCfg, h.Connector, cfg.NetworkConnector,
-		func(*bridgev2.Bridge) bridgev2.CommandProcessor { return commandsDisabled{} })
+		// bridgev2's own command processor: the WhatsApp connector registers commands on it
+		// and asserts its type. The unreachable prefix above means it never runs.
+		func(br *bridgev2.Bridge) bridgev2.CommandProcessor { return commands.NewProcessor(br) })
 	return h, nil
 }
 
