@@ -676,6 +676,10 @@ describe('key writes bound to a session', () => {
     await expect(
       bob.mutation(api.preferences.set, { sidebarLayout: 'simple', sessionId: alicePage }),
     ).rejects.toMatchObject(sessionChanged)
+    // Approving an agent from a switched consent page.
+    await expect(
+      bob.action(api.mcp.authorize, { requestId: 'request', approve: true, sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
     // An admin's page switched to another admin.
     const admin = await signIn(t, 'admin', 'admin')
     await expect(
@@ -688,6 +692,16 @@ describe('key writes bound to a session', () => {
     expect(await t.run(async (ctx) => await ctx.db.query('labels').collect())).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('preferences').collect())).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('invitations').collect())).toEqual([])
+  })
+
+  it('passes an agent approval with the page’s session on to the MCP component', async () => {
+    const t = setup()
+    const carol = await signIn(t, 'carol')
+    const { sessionId } = (await carol.query(api.members.me, {}))!
+    // No such request: the component's own answer, so its handler ran.
+    await expect(carol.action(api.mcp.authorize, { requestId: 'none', approve: false, sessionId })).rejects.toThrow(
+      /expired/,
+    )
   })
 
   it('starts a network login with the page’s session named', async () => {

@@ -247,13 +247,14 @@ characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
 `account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
-`preferences.set` and `members.invite` take an optional `sessionId`: pass the `sessionId` from
+`preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
+take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
 signing in as someone else can switch the token the page's calls run as while the page still
 shows the first account; a key or backup meant for one account would then be written to the
 other, which can never open it, or a network connected to the other account, whose key then
 seals what it brings in, or a label or demo data sealed to the wrong key, or a setting or an
-invitation made as the wrong person. The others act only on an ID the page already holds,
+invitation made as the wrong person, or an agent given the wrong account's chats. The others act only on an ID the page already holds,
 which each checks belongs to the caller, so a switched page finds nothing to change. With `sessionId`, the call is refused before it writes
 anything unless it runs as that same Better Auth session, with `ConvexError` data
 `{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
