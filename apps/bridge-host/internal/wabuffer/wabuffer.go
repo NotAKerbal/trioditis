@@ -1,18 +1,21 @@
 // Package wabuffer keeps whatsmeow's decrypted-event buffer within its retention limit.
 //
 // whatsmeow keeps each decrypted incoming WhatsApp message (plaintext) in
-// whatsmeow_event_buffer from decryption until its handler, which journals it sealed,
-// returns, and then clears the plaintext. A row keeps its plaintext only if handling failed,
-// the process stopped in between, or clearing it failed; WhatsApp redelivers a message that
-// wasn't acknowledged, and the buffered copy is what lets it be bridged, since the Signal
-// session can't decrypt it twice. Such a row can't be cleared early: it holds no message ID,
+// whatsmeow_event_buffer from decryption until its handler returns success, and then clears
+// the plaintext. That is normally once the message is journaled sealed, but bridgev2 also
+// reports success when its 5-minute handler limit passes, while handling carries on. A row
+// keeps its plaintext only if handling failed, the process stopped in between, or clearing
+// it failed; WhatsApp redelivers a message that wasn't acknowledged, and the buffered copy is
+// what lets it be bridged, since the Signal session can't decrypt it twice. (A failed clear
+// is still acknowledged, so that row waits for the sweep.) Such a row can't be cleared early: it holds no message ID,
 // so the host can't tell whether it was bridged, and a row without plaintext makes whatsmeow
 // drop the redelivery as already handled.
 //
 // Past 14 days no redelivery can come, and whatsmeow deletes those rows, but only after an
 // incoming message it decrypts, and at most every 12 hours. On a quiet login a row could
 // outlive the limit indefinitely, so the bridge host runs the same sweep itself: at start-up
-// and every hour. See docs/architecture/sealing.md, What else is stored in plaintext.
+// and every hour. A row goes at the first sweep that succeeds once it is past 14 days; one
+// that fails (the database unavailable, say) leaves it for the next. See docs/architecture/sealing.md, What else is stored in plaintext.
 package wabuffer
 
 import (
@@ -24,8 +27,8 @@ import (
 	"go.mau.fi/whatsmeow/store"
 )
 
-// Interval is how often the buffer is swept. A row's plaintext lasts at most about 14 days
-// plus this.
+// Interval is how often the buffer is swept. While sweeps succeed, a row's plaintext lasts at
+// most about 14 days plus this.
 const Interval = time.Hour
 
 // Devices lists the WhatsApp logins in the bridge host's database (whatsmeow's

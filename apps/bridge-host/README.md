@@ -69,6 +69,9 @@ identity keys kept in the data directory (never do that in production):
 ./bin/bridge-host --network whatsapp --user isaac inspect
 ```
 
+Ctrl+C (or SIGTERM) ends `login` at any point, a prompt included, and stops the host
+cleanly. `login` exits with status 1 if the login fails or is interrupted.
+
 ## Design
 
 - **No homeserver.** `Connector` implements `bridgev2.MatrixConnector` (including the
@@ -234,7 +237,8 @@ journaling; `internal/connector` that escaped metadata and oversized messages se
 their limits, and that an outcome the journal can never take is recorded as `unknown` and
 releases its chat; `internal/gateway` that an event too large to send goes as a stand-in;
 `internal/wabuffer`, on a seeded whatsmeow store, that the sweep deletes only rows past 14
-days, keeps sweeping, and stops while its parent context is live.
+days, keeps sweeping, and stops while its parent context is live; `cmd/bridge-host` that
+SIGINT or SIGTERM at a login prompt, with stdin left open, stops the host and exits 1.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
@@ -397,7 +401,12 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   production that needs a handler to finish just as its 5-minute limit passes; the tests that
   make bridgev2 background every handler at once hit it often, so they live in
   `internal/host/background_test.go` behind `//go:build !race` and run only without
-  `-race`. Report it upstream, and move them back once it is fixed.
+  `-race`.
+- **Report the bridgev2 race upstream, then restore race coverage.** File the race above
+  with mautrix (both the write and the read are in `bridgev2/portal.go`, lines 457 and 493 in
+  v0.33.0). Once a release fixes it, drop the `!race` build tag from `background_test.go` so
+  its four cases (a send held, a reaction held with its late outcome, a deleted chat, the
+  hold limit) run under `-race` again.
 - **Shutdown and stuck connectors.** A connector call that never returns leaves its chat's
   goroutine (and the wait for it) behind when the host stops in-process; process exit
   reclaims them.
