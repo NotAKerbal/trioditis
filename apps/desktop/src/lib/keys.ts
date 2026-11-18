@@ -41,6 +41,14 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
   }
 }
 
+/**
+ * Whether this page can keep a key on this device. The stored copy is encrypted with WebCrypto,
+ * which browsers only offer to a secure page: one served over HTTPS, or from localhost.
+ */
+export function canKeepKeys(): boolean {
+  return window.isSecureContext && globalThis.crypto?.subtle !== undefined
+}
+
 /** This device's copy of the identity key for `userId`, if it has one. */
 export async function loadIdentity(userId: string): Promise<{ kid: string; keyPair: KeyPair } | null> {
   await ready()
@@ -54,6 +62,7 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
 
 /** Keeps an unwrapped identity key on this device. */
 export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair): Promise<void> {
+  if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))

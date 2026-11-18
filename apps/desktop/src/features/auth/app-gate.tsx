@@ -10,6 +10,7 @@ import {
   unwrapIdentityKey,
 } from '@trioditis/crypto'
 import { Button } from '@trioditis/ui/button'
+import { Checkbox } from '@trioditis/ui/checkbox'
 import { Input } from '@trioditis/ui/input'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
@@ -18,7 +19,7 @@ import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
-import { forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
+import { canKeepKeys, forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -87,7 +88,9 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   const { state, publicKey, kid, backups } = remote.data
   const onDone = () => void local.refetch()
   const here = local.data && local.data.kid === kid ? local.data : null
-  if (state === 'none') return <KeySetup userId={userId} onDone={onDone} />
+  // Setting up a key or unlocking one keeps it on this device, which an insecure page can't do.
+  // A key already here was opened with WebCrypto, so the page is secure.
+  if (state === 'none') return canKeepKeys() ? <KeySetup userId={userId} onDone={onDone} /> : <InsecurePage />
   if (state === 'needsBackup') {
     // The key exists but its backups aren't both there: only a device holding the key can make them.
     if (here) return <KeySetup userId={userId} existing={here.keyPair} onDone={() => void remote.refetch()} />
@@ -104,7 +107,32 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
+  if (!canKeepKeys()) return <InsecurePage />
   return <Unlock userId={userId} kid={kid!} publicKey={publicKey!} backups={backups} onDone={onDone} />
+}
+
+/**
+ * In place of key setup or unlocking on a page that isn't a secure context. The browser keeps
+ * WebCrypto, which encrypts this device's copy of the key, from such pages, so without it the key
+ * would have nowhere safe to stay.
+ */
+function InsecurePage() {
+  return (
+    <AuthCard
+      title="This page can’t keep your key"
+      description="Open this server over HTTPS, or on localhost, to keep your key on this device. Your browser only allows the encryption that protects it on a secure page."
+    >
+      <p className="mb-4 text-sm text-muted-foreground">
+        This page is <span className="font-mono break-all">{window.location.origin}</span>.
+      </p>
+      <SignOutButton />
+    </AuthCard>
+  )
+}
+
+/** What an error says went wrong, for the end of a sentence. */
+function reason(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : 'the browser gave no reason'
 }
 
 /** Lets the browser paint a spinner before a blocking computation like Argon2id. */
@@ -128,11 +156,15 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
     event?.preventDefault()
     setBusy(true)
     setError(null)
-    await ready()
-    await nextFrame()
-    const keyPair = existing ?? generateKeyPair()
-    // Wraps the key with the password (Argon2id, about a second) and a new recovery key.
-    setPrepared({ keyPair, setup: makeKeySetup(keyPair.privateKey, password, userId) })
+    try {
+      await ready()
+      await nextFrame()
+      const keyPair = existing ?? generateKeyPair()
+      // Wraps the key with the password (Argon2id, about a second) and a new recovery key.
+      setPrepared({ keyPair, setup: makeKeySetup(keyPair.privateKey, password, userId) })
+    } catch (e) {
+      setError(`Your key couldn’t be made on this device (${reason(e)}). Reload the page and try again.`)
+    }
     setBusy(false)
   }
 
@@ -140,15 +172,30 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
     if (!prepared) return
     setBusy(true)
     setError(null)
-    try {
-      const proof = existing ? await proveKey(existing) : undefined
-      const { kid } = await setup({ ...prepared.setup.args, ...(proof ? { proof } : {}) })
-      await storeIdentity(userId, kid, prepared.keyPair)
-      onDone()
-    } catch (e) {
-      setError(errorMessage(e, 'Your key couldn’t be saved. Try again.'))
+    const fail = (message: string) => {
+      setError(message)
       setBusy(false)
     }
+    let proof: string | undefined
+    try {
+      proof = existing ? await proveKey(existing) : undefined
+    } catch (e) {
+      return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
+    }
+    let kid: string
+    try {
+      kid = (await setup({ ...prepared.setup.args, ...(proof ? { proof } : {}) })).kid
+    } catch (e) {
+      return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
+    }
+    try {
+      await storeIdentity(userId, kid, prepared.keyPair)
+    } catch (e) {
+      return fail(
+        `Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}). Reload the page and unlock with your password.`,
+      )
+    }
+    onDone()
   }
 
   if (!prepared) {
@@ -203,12 +250,7 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
         {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
       </Button>
       <label className="mb-5 flex items-start gap-2.5 text-sm">
-        <input
-          type="checkbox"
-          className="mt-0.5 size-4 accent-[var(--accent)]"
-          checked={saved}
-          onChange={(e) => setSaved(e.target.checked)}
-        />
+        <Checkbox className="mt-0.5" checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
         I’ve saved my recovery key somewhere safe.
       </label>
       <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={finish}>
@@ -249,20 +291,41 @@ function Unlock({
     setBusy(true)
     setError(null)
     await nextFrame()
+    const fail = (message: string) => {
+      setError(message)
+      setBusy(false)
+    }
+    // Each step says what went wrong in it: only a key that doesn't open means a wrong password.
+    let wrappingKey: Uint8Array
     try {
       await ready()
-      const wrappingKey = how === 'password' ? passwordKey(value, backup.params!) : decodeRecoveryKey(value)
-      const keyPair = unwrapIdentityKey(backup, wrappingKey, { userId, kid, kind: how }, fromBase64Url(publicKey))
-      await storeIdentity(userId, kid, keyPair)
-      onDone()
+      wrappingKey = how === 'password' ? passwordKey(value, backup.params!) : decodeRecoveryKey(value)
+    } catch (e) {
+      return fail(
+        how === 'password'
+          ? `Your password couldn’t be checked on this device (${reason(e)}). Reload the page and try again.`
+          : // decodeRecoveryKey says whether the text isn't a recovery key or has a typo.
+            `${errorMessage(e, 'That isn’t a recovery key')}. Check it and try again.`,
+      )
+    }
+    let keyPair: KeyPair
+    try {
+      keyPair = unwrapIdentityKey(backup, wrappingKey, { userId, kid, kind: how }, fromBase64Url(publicKey))
     } catch {
-      setError(
+      return fail(
         how === 'password'
           ? 'That password doesn’t open your key. Try again, or use your recovery key.'
           : 'That recovery key doesn’t match. Check it and try again.',
       )
-      setBusy(false)
     }
+    try {
+      await storeIdentity(userId, kid, keyPair)
+    } catch (e) {
+      return fail(
+        `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
+      )
+    }
+    onDone()
   }
 
   // Coming straight from sign-in, try the password that was just typed. It is taken once, so

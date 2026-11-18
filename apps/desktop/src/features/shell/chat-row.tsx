@@ -46,7 +46,8 @@ export function ChatRow({
   const snoozed = chat.row.snoozedUntil !== null && !chat.row.woke
   return (
     <div className="group relative">
-      <button
+      <Button
+        variant="bare"
         type="button"
         onClick={onOpen}
         aria-current={selected ? 'true' : undefined}
@@ -103,7 +104,7 @@ export function ChatRow({
             </span>
           ) : null}
         </span>
-      </button>
+      </Button>
       <RowActionBar actions={actions} />
     </div>
   )

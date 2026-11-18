@@ -66,7 +66,8 @@ export function DetailsPanel({
         <h3 className="mb-2.5 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">Labels</h3>
         <div className="flex flex-wrap gap-1.5">
           {labels?.map((l) => (
-            <button
+            <Button
+              variant="bare"
               key={l.id}
               type="button"
               aria-pressed={on.has(l.id)}
@@ -77,7 +78,7 @@ export function DetailsPanel({
               )}
             >
               <LabelDot color={l.color} /> {l.name}
-            </button>
+            </Button>
           ))}
           <NewLabel
             onCreated={(id) =>
@@ -111,7 +112,8 @@ export function DetailsPanel({
 
 function Quick({ on, icon, label, onClick }: { on?: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button
+    <Button
+      variant="bare"
       type="button"
       aria-pressed={on}
       onClick={onClick}
@@ -122,7 +124,7 @@ function Quick({ on, icon, label, onClick }: { on?: boolean; icon: ReactNode; la
     >
       {icon}
       {label}
-    </button>
+    </Button>
   )
 }
 
@@ -136,14 +138,15 @@ function NewLabel({ onCreated }: { onCreated: (id: LabelId) => void }) {
 
   if (!editing) {
     return (
-      <button
+      <Button
+        variant="bare"
         type="button"
         aria-label="New label"
         onClick={() => setEditing(true)}
         className="inline-flex h-[26px] items-center rounded-full border border-dashed border-border-strong px-2 text-subtle-foreground hover:text-foreground"
       >
         <Plus className="size-3.5" />
-      </button>
+      </Button>
     )
   }
   return (
@@ -177,7 +180,8 @@ function NewLabel({ onCreated }: { onCreated: (id: LabelId) => void }) {
       />
       <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Label colour">
         {LABEL_COLORS.map((c) => (
-          <button
+          <Button
+            variant="bare"
             key={c}
             type="button"
             role="radio"
@@ -187,7 +191,7 @@ function NewLabel({ onCreated }: { onCreated: (id: LabelId) => void }) {
             className={cn('flex size-6 items-center justify-center rounded-full', color === c && 'ring-2 ring-ring')}
           >
             <LabelDot color={c} className="size-3" />
-          </button>
+          </Button>
         ))}
         <span className="flex-1" />
         <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
