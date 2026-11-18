@@ -183,8 +183,10 @@ choice, one bucket for every client, would let anyone keep everyone out by filli
 
 **The per-account limit** bounds guessing at one account from many addresses. It is a
 trade-off: anyone can use it up for someone else's email and keep them from signing in with
-a password. So it is loose: it refills at three times the per-address limit, so keeping an
-account refused takes requests from more than three addresses at once, and a passkey sign-in
+a password. So it is loose: it refills at 30 a minute, three times the per-address limit.
+Where a trusted proxy gives the client address, one address alone can't keep an account
+refused, but three or more together can take each token as it refills, and a real sign-in may
+then lose the race for it; without the per-address limit, one address can. A passkey sign-in
 isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
 and buckets that have refilled are deleted every ten minutes.
 
@@ -418,6 +420,51 @@ A `ChatRow` (type in `@trioditis/core`):
 | `snoozedUntil`, `woke`                       | When the snooze ends, and whether it has                                                                                                            |
 | `labelIds`                                   | The person's labels on this chat                                                                                                                    |
 | `lastMessageAt`                              | Network time of the latest message                                                                                                                  |
+| `lastMessage`                                | The newest message, for a preview: see below. `null` when the chat has no messages                                                                  |
+
+#### The last message
+
+`lastMessage` is the chat's newest message, the one `messages.list` shows first (by
+`sortKey`, imported history included), or `null` when the chat has none:
+
+```ts
+interface LastMessage {
+  messageId: Id<'messages'> // the message's `_id` in `messages.list`
+  at: number // its `networkTs`
+  self: boolean // `sender` is `{ self: true }`
+  ghostId?: string // otherwise `sender.ghostId`
+  redacted: boolean // deleted for everyone: show "Message deleted"
+  sealed: Envelope | null // `sealedEdit ?? sealed`
+  objectId: string // `editEventId` for an edit, else `sealedObjectId`
+}
+```
+
+Open it exactly as the message (see Reading): kind `message`, object ID `objectId`.
+
+```ts
+const last = row.lastMessage
+const preview = last?.sealed
+  ? openJson<MessagePlaintext>(last.sealed, identity, { kind: 'message', ownerUserId: userId, objectId: last.objectId })
+  : null
+```
+
+`sealed` is `null` when the message was deleted (`redacted: true`), and when its envelope is
+over 4 KiB as stored (its JSON in UTF-8), which a text message almost never is: show
+"Message" then, and open the chat for the rest. Everything else is there either way.
+
+It is kept live: a new message, an edit of the newest one, the network's echo of a send
+(the same `messageId`, with the network's time and content), a deletion, and a discarded send
+(the one before it takes over) all change the row, as any change to a chat does. A message
+that arrives late with an older time never replaces a newer one. Because it includes
+imported history and the person's pending sends, `lastMessage.at` can differ from
+`lastMessageAt`, which orders the inbox.
+
+The server keeps it as a small pointer on the chat, so the list reads no messages. A row is
+at most about 18 KiB with the largest sealed metadata (8 KiB) and preview (4 KiB), so a full
+page of 50 is under 1 MiB, far inside its 8 MiB. A backend upgraded from before it gives
+each chat its pointer in `migrations:runAll`, after the deploy. Until then an older chat's
+`lastMessage` is `null`, unless a message arrives in it, is echoed, edited, redacted or
+discarded; other changes (pinning the chat, a send's delivery status) don't fill it in.
 
 `api.chats.get({ chatId })` returns one row. `api.chats.counts` returns
 `{ inbox, requests, woke }`, each `{ count, more }`: unread unmuted inbox chats, message
@@ -737,12 +784,9 @@ here.
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
    needs a new `members` event from the bridge host, so it comes later. Fallback: the
    sender shows as "Someone".
-3. **Last-message preview.** Chat rows gain `sealedPreview`: the newest message's body cut
-   to 200 characters plus its sender (`ghostId` or self), sealed with a new kind `preview`
-   and object ID `portalId`, at most 2 KiB. The bridge host seals it with each `message`
-   event; the person's own sends seal one alongside `copy`. Deleting or editing the newest
-   message replaces it. It stays small so a page of 50 rows stays well inside the read
-   limit. Fallback: no preview line.
+3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
+   envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
+   replaced the `sealedPreview` planned here, so nothing new is sealed for it.
 4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
    email, sealed to the bridge key) and `startChat`, following bridgev2's
    `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls

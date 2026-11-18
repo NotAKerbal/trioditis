@@ -4,6 +4,7 @@ import type { MutationCtx, QueryCtx } from '../_generated/server'
 import type { envelope } from '../validators'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './envelope'
 import { sortKey } from './ingest'
+import { noteMessage } from './lastMessage'
 import { queueCommand } from './outbox'
 
 // Sending a message: the checks every send goes through, and turning it into the person's
@@ -64,21 +65,22 @@ export async function checkSend(ctx: QueryCtx, chat: Doc<'chats'>, input: SendIn
 export async function queueSend(ctx: MutationCtx, chat: Doc<'chats'>, input: SendInput) {
   const now = Date.now()
   const pendingId = `pending:${input.clientMessageId}`
-  await ctx.db.insert('messages', {
+  const copy = {
     userId: chat.userId,
     chatId: chat._id,
     network: chat.network,
     eventId: pendingId,
     networkTs: now,
     sortKey: sortKey(now, pendingId),
-    sender: { self: true },
+    sender: { self: true as const },
     sealed: input.copy,
     sealedObjectId: input.clientMessageId,
     historical: false,
     clientMessageId: input.clientMessageId,
-    delivery: 'queued',
+    delivery: 'queued' as const,
     ...(input.replyTo ? { replyTo: input.replyTo } : {}),
-  })
+  }
+  await noteMessage(ctx, chat, { _id: await ctx.db.insert('messages', copy), ...copy })
   await queueCommand(
     ctx,
     {
