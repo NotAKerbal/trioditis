@@ -16,7 +16,8 @@ export function setup() {
   process.env.TRIODITIS_SETUP_TOKEN = SETUP_TOKEN
   process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
   process.env.SITE_URL = 'https://trioditis.test'
-  const t = convexTest(schema, modules)
+  // Real Convex transaction limits, so a test can't pass by doing what a deployment refuses.
+  const t = convexTest({ schema, modules, transactionLimits: true })
   t.registerComponent('betterAuth', betterAuthSchema, betterAuthModules)
   mcpTest.register(t, 'mcp')
   return t
