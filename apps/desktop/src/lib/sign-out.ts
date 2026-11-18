@@ -12,9 +12,9 @@ export const SIGN_OUT_FAILED =
 export const SIGN_OUT_UNSTORED =
   'You’re still signed in: this device couldn’t record the sign-out, so it wasn’t sent. Check that this site may store data, then try again.'
 
-/** What to say when someone else is signed in here now, so the server can't say their session ended. */
+/** What to say when this page never learned the session's token, so it can't end it. */
 export const SIGN_OUT_SWITCHED =
-  'Someone else has signed in on this device since, in another tab, so it couldn’t be confirmed that your session ended. Sign in as yourself again, then sign out, to be sure.'
+  'Someone else has signed in on this device since, in another tab, so this page can’t end your session. Sign in as yourself again, then sign out, to end it.'
 
 /** How long a call to the auth server may take before it's given up on. */
 export const AUTH_WAIT_MS = 10_000
@@ -35,7 +35,18 @@ async function signedIn(): Promise<SignedIn | null> {
     fetchOptions: { signal: AbortSignal.timeout(AUTH_WAIT_MS) },
   })
   if (error) throw new Error(error.message ?? 'the server couldn’t say who’s signed in')
-  return data ? { userId: data.user.id, id: data.session.id, token: data.session.token } : null
+  if (!data) return null
+  tokens.set(data.session.id, data.session.token)
+  return { userId: data.user.id, id: data.session.id, token: data.session.token }
+}
+
+// The token of every session this page has seen, by ID, to end a session the gate was opened
+// for even once the cookie holds another (another tab signed in since). Memory only.
+const tokens = new Map<string, string>()
+
+/** Notes the token of the session this browser is in, for signOut to end it later. */
+export function rememberSession(): Promise<unknown> {
+  return signedIn().catch(() => undefined)
 }
 
 /** The session this tab is signed in to as `userId` (see signedIn); null if not signed in as them. */
@@ -48,18 +59,19 @@ export async function currentSession(userId: string): Promise<SignedIn | null> {
 export const currentSessionId = (userId: string) => currentSession(userId).then((session) => session?.id ?? null)
 
 /**
- * Asks the server to end exactly the session with `token`, whatever session this browser's
- * cookie holds by now (another tab may have signed in again since). It clears the cookie only if
- * it's that one. Whether it worked is told by asking afterwards (see signOut), not by the answer:
- * the server answers yes when the cookie is someone else's and it ended nothing.
+ * Ends exactly the session with `token`, whoever this browser's cookie signs in by now
+ * (POST /api/auth/end-session, docs/architecture/client-api.md). True when the server says it
+ * ended it, or that it had ended already. It sets no cookie, so a late answer can't touch a
+ * sign-in made meanwhile in another tab.
  */
 async function endSession(token: string): Promise<boolean> {
   try {
-    const result = await authClient.revokeSession({
-      token,
-      fetchOptions: { signal: AbortSignal.timeout(AUTH_WAIT_MS) },
+    const { data, error } = await authClient.$fetch<{ result: 'ended' | 'absent' }>('/end-session', {
+      method: 'POST',
+      body: { token },
+      signal: AbortSignal.timeout(AUTH_WAIT_MS),
     })
-    return !result?.error
+    return !error && (data?.result === 'ended' || data?.result === 'absent')
   } catch {
     return false
   }
@@ -87,60 +99,51 @@ interface SignOutOptions {
 }
 
 /**
- * Signs `userId` out of this device: the session this browser holds for them, and no other.
+ * Signs `userId` out of `sessionId`, the session the screen is for: that one, and no other,
+ * whatever session this browser's cookie holds by now.
  *
  * It first forgets this device's copy of their key (or only key `onlyKid`; with null, none,
  * though saves under way anywhere are still stopped), noting the session it's ending: from then
  * on no tab keeps a key here for that session, whatever comes of this (lib/keys.ts). Only once
- * that's recorded does it end the session, and then it asks the server again: this device is
- * signed out once its cookie no longer holds that session. Then it goes to the sign-in page.
- *
- * If they aren't signed in here any more, there's no session of theirs to end: the key is
- * forgotten, and nothing is sent. If someone else is signed in here now, the server can't say
- * whether their session ended, and it says so.
+ * that's recorded does it end the session, by its token. Then it goes to the sign-in page.
  *
  * Returns null when it went through; otherwise, what to tell the person, who can try again.
  */
-export async function signOut(userId: string, { onlyKid, backedUpKid }: SignOutOptions = {}): Promise<string | null> {
-  let before: SignedIn | null
+export async function signOut(
+  userId: string,
+  sessionId: string,
+  { onlyKid, backedUpKid }: SignOutOptions = {},
+): Promise<string | null> {
+  let now: SignedIn | null
   try {
-    before = await signedIn()
+    now = await signedIn()
   } catch {
+    // Nothing is changed when the server can't be reached: signing out couldn't go through.
     return SIGN_OUT_FAILED
   }
-  const session = before?.userId === userId ? before : null
   let unconfirmed = false
   try {
-    await forgetFirmly(userId, { onlyKid, endingSession: session?.id })
+    await forgetFirmly(userId, { onlyKid, endingSession: sessionId })
   } catch {
-    // A save under way could still land after the session ends, so it isn't ended. With no
-    // session left to end, there's nothing for a save to land under: just say the key may stay.
-    if (session) return SIGN_OUT_UNSTORED
-    unconfirmed = true
+    // A save under way could still land after the session ends, so it isn't ended.
+    return SIGN_OUT_UNSTORED
   }
   // Fenced now, so the key here is the last one that will be: forget it too if its backups have
   // turned out to exist meanwhile (another tab may have finished them, then unlocked).
-  if (onlyKid === null && backedUpKid && !unconfirmed) {
+  if (onlyKid === null && backedUpKid) {
     try {
       const kid = await backedUpKid()
-      if (kid) await forgetFirmly(userId, { onlyKid: kid, endingSession: session?.id })
+      if (kid) await forgetFirmly(userId, { onlyKid: kid, endingSession: sessionId })
     } catch {
       unconfirmed = true
     }
   }
-  if (session) {
-    const answered = await endSession(session.token)
-    let after: SignedIn | null
-    try {
-      after = await signedIn()
-    } catch {
-      return SIGN_OUT_FAILED
-    }
-    if (after && after.userId !== userId) return SIGN_OUT_SWITCHED
-    // Still held here, or ended only if the server said so: they've signed in again meanwhile,
-    // in another tab, and that session is the one the cookie holds now.
-    if (after?.id === session.id || (after && !answered)) return SIGN_OUT_FAILED
-  } else if (before) return SIGN_OUT_SWITCHED
+  const token = tokens.get(sessionId)
+  // Never seen here, and someone else's session is the cookie's now: it can't be ended from
+  // here. With no one signed in here, the sign-in page is where this tab belongs.
+  if (!token && now) return SIGN_OUT_SWITCHED
+  if (token && !(await endSession(token))) return SIGN_OUT_FAILED
+  tokens.delete(sessionId)
   window.location.assign(unconfirmed ? KEY_UNCONFIRMED : '/sign-in')
   return null
 }

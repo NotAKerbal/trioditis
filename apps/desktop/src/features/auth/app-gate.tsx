@@ -26,7 +26,7 @@ import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { currentSessionId, signOut } from '~/lib/sign-out.ts'
+import { currentSessionId, rememberSession, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -69,28 +69,46 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
 }
 
 function MemberGate({ children }: { children: ReactNode }) {
+  // Who is signed in, in which session, and their membership, all from the one result, so
+  // signing out always ends the session this page is for (members.me).
   const me = useQuery(convexQuery(api.members.me, {}))
-  // Who this screen is for, to sign out of their session only, whoever another tab has signed in.
-  const shown = authClient.useSession().data?.user.id
+  const sessionId = me.data?.sessionId
+  // Notes that session's token while the cookie holds it, to end it even after another tab has
+  // signed in since (lib/sign-out.ts).
+  useEffect(() => {
+    if (sessionId) void rememberSession()
+  }, [sessionId])
   if (me.isPending) return <Splash />
-  if (!me.data) {
+  // The session Convex was given has ended.
+  if (!me.data) return <Navigate to="/sign-in" />
+  if (!me.data.member) {
     return (
       <AuthCard
         title="This account isn’t on this server"
         description="It may have been removed. Ask the server’s admin for an invitation."
       >
-        <SignOutButton userId={shown} />
+        <SignOutButton userId={me.data.userId} sessionId={me.data.sessionId} />
       </AuthCard>
     )
   }
   return (
-    <KeyGate key={me.data.userId} userId={me.data.userId} role={me.data.role}>
+    <KeyGate key={me.data.userId} userId={me.data.userId} sessionId={me.data.sessionId} role={me.data.member.role}>
       {children}
     </KeyGate>
   )
 }
 
-function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | 'member'; children: ReactNode }) {
+function KeyGate({
+  userId,
+  sessionId,
+  role,
+  children,
+}: {
+  userId: string
+  sessionId: string
+  role: 'admin' | 'member'
+  children: ReactNode
+}) {
   const remote = useQuery(convexQuery(api.keys.identity, {}))
   // The save token (lib/keys.ts): taken as the gate opens, before any setup or unlock, and again
   // whenever saves are fenced in any tab (a sign-out attempt, whichever way it went) or this tab
@@ -168,7 +186,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
     // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
     // none is, but saves still under way in any tab are stopped all the same.
-    const failure = await signOut(userId, {
+    const failure = await signOut(userId, sessionId, {
       onlyKid: backedUp ? keyKid : null,
       backedUpKid: backedUp ? undefined : backedUpNow,
     })
@@ -226,7 +244,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   )
   if (held) return setupScreen(held)
   if (local.data && setUpKid && local.data.kid === setUpKid) {
-    const session: Session = { userId, role, kid: local.data.kid, keyPair: local.data.keyPair }
+    const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
   if (token === null || remote.isPending || local.isPending || !remote.data) return <Splash />
@@ -246,7 +264,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
         : null
   if (setupFor) {
     // Setting up a key keeps it on this device, which an insecure page can't do.
-    if (!canKeepKeys()) return <InsecurePage userId={userId} />
+    if (!canKeepKeys()) return <InsecurePage userId={userId} sessionId={sessionId} />
     return setupScreen(setupFor)
   }
   if (state === 'needsBackup') {
@@ -281,11 +299,11 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     )
   }
   if (here) {
-    const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
+    const session: Session = { userId, sessionId, role, kid: here.kid, keyPair: here.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
   // A key already here was opened with WebCrypto, so only unlocking needs the check.
-  if (!canKeepKeys()) return <InsecurePage userId={userId} />
+  if (!canKeepKeys()) return <InsecurePage userId={userId} sessionId={sessionId} />
   return (
     <Unlock
       userId={userId}
@@ -324,7 +342,7 @@ interface SetupFor {
  * WebCrypto, which encrypts this device's copy of the key, from such pages, so without it the key
  * would have nowhere safe to stay.
  */
-function InsecurePage({ userId }: { userId: string }) {
+function InsecurePage({ userId, sessionId }: { userId: string; sessionId: string }) {
   return (
     <AuthCard
       title="This page can’t keep your key"
@@ -333,7 +351,7 @@ function InsecurePage({ userId }: { userId: string }) {
       <p className="mb-4 text-sm text-muted-foreground">
         This page is <span className="font-mono break-all">{window.location.origin}</span>.
       </p>
-      <SignOutButton userId={userId} />
+      <SignOutButton userId={userId} sessionId={sessionId} />
     </AuthCard>
   )
 }
@@ -1058,8 +1076,16 @@ function RecoveryUntrackedNote() {
   )
 }
 
-/** Signs `userId` out of this device (lib/sign-out.ts); until it's known who's shown, it waits. */
-export function SignOutButton({ userId, label = 'Sign out' }: { userId: string | undefined; label?: string }) {
+/** Signs `userId` out of `sessionId`, the session the screen is for (lib/sign-out.ts). */
+export function SignOutButton({
+  userId,
+  sessionId,
+  label = 'Sign out',
+}: {
+  userId: string
+  sessionId: string
+  label?: string
+}) {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
   return (
@@ -1071,12 +1097,11 @@ export function SignOutButton({ userId, label = 'Sign out' }: { userId: string |
       ) : null}
       <Button
         block
-        loading={busy || !userId}
+        loading={busy}
         onClick={async () => {
-          if (!userId) return
           setBusy(true)
           setFailure(null)
-          const failed = await signOut(userId)
+          const failed = await signOut(userId, sessionId)
           if (failed === null) return
           setFailure(failed)
           setBusy(false)

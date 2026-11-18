@@ -82,7 +82,11 @@ export function BottomBar({
             <KeyRound /> Keys and devices
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => void signOut(session.userId).then((failure) => failure && toast(failure))}>
+          <DropdownMenuItem
+            onSelect={() =>
+              void signOut(session.userId, session.sessionId).then((failure) => failure && toast(failure))
+            }
+          >
             <LogOut /> Sign out of this device
           </DropdownMenuItem>
         </DropdownMenuContent>
