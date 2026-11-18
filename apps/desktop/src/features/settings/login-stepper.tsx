@@ -69,8 +69,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   })
 
   const { data: login } = useQuery({
-    ...convexQuery(api.logins.session, { loginSessionId: loginSessionId! }),
-    enabled: !!loginSessionId,
+    ...convexQuery(api.logins.session, loginSessionId ? { loginSessionId } : 'skip'),
   })
   const step = login?.step
   const done = login?.state === 'complete' || step?.type === 'complete'

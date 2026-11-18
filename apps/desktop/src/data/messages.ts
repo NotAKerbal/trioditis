@@ -72,8 +72,7 @@ export function useMessages(chatId: ChatId) {
 export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
   const ids = messageIds.slice(-100)
   const { data } = useQuery({
-    ...convexQuery(api.messages.reactions, { chatId, messageIds: ids }),
-    enabled: ids.length > 0,
+    ...convexQuery(api.messages.reactions, ids.length > 0 ? { chatId, messageIds: ids } : 'skip'),
   })
   return useMemo(() => {
     const out = new Map<string, { key: string; count: number; mine: boolean }[]>()

@@ -104,9 +104,9 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
 
 export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
   const session = useSession()
+  // 'skip', not `enabled: false`: the Convex adapter subscribes to any query it's given.
   const { data, isError } = useQuery({
-    ...convexQuery(api.chats.get, { chatId: chatId! }),
-    enabled: !!chatId,
+    ...convexQuery(api.chats.get, chatId ? { chatId } : 'skip'),
     retry: false,
   })
   return useMemo(() => {
@@ -210,6 +210,11 @@ export function useSidebarLayout(): [SidebarLayout, (layout: SidebarLayout) => v
   ]
 }
 
+/** What this server offers: whether it's a demo, and whether it takes invitations (server.info). */
+export function useServerInfo() {
+  return useQuery(convexQuery(api.server.info, {})).data
+}
+
 export function useNetworks() {
   return useQuery(convexQuery(api.networks.list, {})).data
 }
@@ -234,8 +239,7 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
   const session = useSession()
   const first = ids.slice(0, 20)
   const { data } = useQuery({
-    ...convexQuery(api.scheduled.copies, { scheduledIds: first }),
-    enabled: first.length > 0,
+    ...convexQuery(api.scheduled.copies, first.length > 0 ? { scheduledIds: first } : 'skip'),
   })
   const clientIds = useScheduled()
   return useMemo(() => {
