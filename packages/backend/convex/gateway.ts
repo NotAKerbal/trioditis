@@ -281,15 +281,16 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await expireLogin(ctx, command)
 }
 
-/** How long after its deadline a send the bridge host accepted may go without an outcome. */
+/** How long after its deadline a command the bridge host accepted may go without an outcome. */
 const OVERDUE_GRACE_MS = 60 * 60 * 1000
 
 /**
- * A send the bridge host accepted but never reported on (it went away) would stay "Sending"
- * forever. Once well past its deadline it becomes `unknown`, so the person can choose. It is
- * never sent again, and a late outcome from the bridge host still settles it.
+ * A command the bridge host accepted but never reported on (it went away) would wait forever.
+ * Once well past its deadline, a send becomes `unknown`, so the person can choose; it is never
+ * sent again, and a late outcome from the bridge host still settles it. A login still waiting
+ * on the command ends with `expired`, so the person can start it again.
  */
-async function settleOverdueSends(ctx: MutationCtx, now: number) {
+async function settleOverdue(ctx: MutationCtx, now: number) {
   const overdue = await ctx.db
     .query('outbox')
     // From 0: a send settled here has no `expiresAt`, which sorts before every number, so
@@ -306,6 +307,7 @@ async function settleOverdueSends(ctx: MutationCtx, now: number) {
       command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
     await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
     if (unsettled) await markCopy(ctx, command, 'unknown')
+    await expireLogin(ctx, command)
   }
 }
 
@@ -385,7 +387,7 @@ export const claimCommands = mutation({
       return owner ? liveHosts.get(owner) : undefined
     }
 
-    await settleOverdueSends(ctx, now)
+    await settleOverdue(ctx, now)
 
     // Queued commands are scanned a window at a time, carrying on from where the last claim
     // stopped and wrapping round, so commands that can't go out yet (their host is down) never
