@@ -1,13 +1,14 @@
-import { APIError } from 'better-auth/api'
+import { APIError, createAuthEndpoint } from 'better-auth/api'
+import type { BetterAuthPlugin } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
 import { createClient } from '@convex-dev/better-auth'
 import type { AuthFunctions, GenericCtx } from '@convex-dev/better-auth'
 import { convex } from '@convex-dev/better-auth/plugins'
-import { ConvexError } from 'convex/values'
+import { ConvexError, v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
-import { query } from './_generated/server'
+import { internalMutation, query } from './_generated/server'
 import authConfig from './auth.config'
 import authSchema from './betterAuth/schema'
 import { sha256Hex } from './lib/hash'
@@ -32,6 +33,67 @@ export const { onCreate, onUpdate, onDelete } = authComponent.triggersApi()
  * first (the admin) from the setup token the installer prints.
  */
 export const INVITE_HEADER = 'x-trioditis-invite'
+
+/** Longer than any session token Better Auth issues (32 characters). */
+const MAX_SESSION_TOKEN_LENGTH = 256
+
+/**
+ * `POST /api/auth/end-session` with `{ token }`: ends exactly the session with that token,
+ * whoever the request's cookie signs in. Holding the token is the authority, as it is for the
+ * cookie that carries it.
+ *
+ * The app ends a session this way when another tab may have signed in as someone else since
+ * it read the token: Better Auth's /revoke-session acts only on the cookie's own user's
+ * sessions and answers `status: true` even when it deleted nothing, and /sign-out ends the
+ * cookie's session, which may no longer be the one meant.
+ *
+ * It answers 200 with `{ result: 'ended' }` when it deleted the session, or
+ * `{ result: 'absent' }` when there was no session with that token; anything else is an
+ * error and nothing was changed, or it couldn't tell. It sets no cookie, not even an expired
+ * one: a late answer could otherwise clear a sign-in made meanwhile in another tab.
+ */
+const endSession = (ctx: GenericCtx<DataModel>) =>
+  ({
+    id: 'trioditis-session',
+    endpoints: {
+      endSession: createAuthEndpoint('/end-session', { method: 'POST' }, async (endpoint) => {
+        // Origin is checked whether or not a cookie came with the request, which Better Auth's
+        // own check skips when there is none.
+        const origin = endpoint.request?.headers.get('origin')
+        if (!origin || origin === 'null' || !endpoint.context.isTrustedOrigin(origin, { allowRelativePaths: false })) {
+          throw new APIError('FORBIDDEN', { message: 'Invalid origin' })
+        }
+        const token: unknown = (endpoint.body as { token?: unknown } | undefined)?.token
+        if (typeof token !== 'string' || token.length === 0 || token.length > MAX_SESSION_TOKEN_LENGTH) {
+          throw new APIError('BAD_REQUEST', { message: 'A session token is required.' })
+        }
+        if (!('runMutation' in ctx)) throw new APIError('INTERNAL_SERVER_ERROR')
+        const result = await ctx.runMutation(internal.auth.endSessionByToken, { token })
+        return endpoint.json({ result })
+      }),
+    },
+    rateLimit: [{ pathMatcher: (path) => path === '/end-session', window: 10, max: 10 }],
+  }) satisfies BetterAuthPlugin
+
+/**
+ * Deletes the session with `token`, if there is one, in one transaction: a session that is
+ * found is the one deleted, so `ended` always means this call removed it.
+ */
+export const endSessionByToken = internalMutation({
+  args: { token: v.string() },
+  returns: v.union(v.literal('ended'), v.literal('absent')),
+  handler: async (ctx, { token }) => {
+    const session = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+      model: 'session',
+      where: [{ field: 'token', value: token }],
+    })) as { _id: string } | null
+    if (!session) return 'absent'
+    await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+      input: { model: 'session', where: [{ field: '_id', value: session._id }] },
+    })
+    return 'ended'
+  },
+})
 
 /**
  * Better Auth's settings. Kept apart from `createAuth` so the component's adapter can read
@@ -119,6 +181,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
         authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
       }),
       convex({ authConfig }),
+      endSession(ctx),
     ],
   } satisfies BetterAuthOptions
 }
@@ -128,14 +191,17 @@ export const createAuth = (ctx: GenericCtx<DataModel>) => {
 }
 
 /**
- * The signed-in user's ID, or null. Every function that touches a person's data gets them
- * here (or from `requireUserId`), so this one place decides who is signed in.
+ * The signed-in user and the Better Auth session they're signed in with, or null. Every
+ * function that touches a person's data gets them here (or from `currentUserId` and
+ * `requireUserId`), so this one place decides who is signed in.
  *
  * A Convex token works for several minutes after it is issued, so the user counts as signed
  * in only while the Better Auth session it names is still there, theirs and unexpired.
  * Signing out deletes that row, and live queries run again without the user.
  */
-export async function currentUserId(ctx: GenericCtx<DataModel>): Promise<string | null> {
+export async function currentSession(
+  ctx: GenericCtx<DataModel>,
+): Promise<{ userId: string; sessionId: string } | null> {
   const identity = await ctx.auth.getUserIdentity()
   const sessionId = identity?.sessionId
   if (!identity || typeof sessionId !== 'string') return null
@@ -147,7 +213,12 @@ export async function currentUserId(ctx: GenericCtx<DataModel>): Promise<string 
       { field: 'expiresAt', operator: 'gt', value: Date.now() },
     ],
   })
-  return session ? identity.subject : null
+  return session ? { userId: identity.subject, sessionId } : null
+}
+
+/** The signed-in user's ID, or null. */
+export async function currentUserId(ctx: GenericCtx<DataModel>): Promise<string | null> {
+  return (await currentSession(ctx))?.userId ?? null
 }
 
 export async function requireUserId(ctx: GenericCtx<DataModel>): Promise<string> {
