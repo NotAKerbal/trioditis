@@ -326,4 +326,27 @@ describe('ingest', () => {
       ingest(t, [event('loginState', { state: 'UNKNOWN_ERROR', error: 'wrong code 123456' })]),
     ).rejects.toThrow()
   })
+
+  it('quarantines an envelope too big to store', async () => {
+    seq = 0
+    const t = setup()
+    const big = { ...sealed('big'), ct: 'A'.repeat(Math.ceil(((512 * 1024 + 1) * 4) / 3)) }
+    expect(await ingest(t, [message('e1', { sealed: big }), message('e2')])).toEqual({ ackedThrough: 2 })
+    expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
+  })
+
+  it('refuses events for a login from a host that isn’t running it', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [event('loginState', { state: 'CONNECTED' })])
+    const fromOther = await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-2',
+      network: 'whatsapp',
+      events: [{ ...message('e1'), seq: 1 }],
+    })
+    expect(fromOther).toEqual({ ackedThrough: 1 })
+    expect(await messages(t)).toHaveLength(0)
+    expect(await quarantined(t)).toMatchObject([{ hostId: 'whatsapp-2', reason: 'foreign_host' }])
+  })
 })

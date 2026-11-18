@@ -92,6 +92,11 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 - `commandId` is idempotent: repeating a command ID returns `202` without running it
   again. A command that may already have reached a host is only ever delivered again to
   that same host, whose journal knows its ID.
+- **Ownership:** once a host is running a login, only it may send events for that login
+  (a login moves to another host only through a newer `CONNECTED` report). A login's steps
+  are accepted only from the host its start command was handed to.
+- **Sizes:** a sealed object in an event may be at most 512 KiB; files travel separately.
+  Clients may seal at most 64 KiB into a send or login input.
 - **Routing:** a command for a connected login goes to the host that reported that login's
   state; a new login goes to the network's most recently seen host. Only hosts in the
   gateway's `BRIDGE_HOSTS` and heard from recently are used.
@@ -141,7 +146,7 @@ Connector error details are logged locally by the bridge host only, without cont
 
 Events the backend can't apply are quarantined with a reason code (`missing_target`,
 `missing_chat`, `foreign_login`, `foreign_host`, `unknown_login_session`, `unknown_send`,
-`malformed_envelope`, `invalid_event`), never with their content.
+`malformed_envelope`, `too_large`, `invalid_event`), never with their content.
 
 ## Logins
 
