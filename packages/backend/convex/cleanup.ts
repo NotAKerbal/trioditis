@@ -16,7 +16,16 @@ export const reactionsOfMessage = internalMutation({
       .withIndex('by_message', (q) => q.eq('messageId', messageId))
       .take(BATCH)
     for (const reaction of batch) await ctx.db.delete(reaction._id)
-    if (batch.length === BATCH) await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId })
+    if (batch.length === BATCH) {
+      await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId })
+      return null
+    }
+    // All gone: the marker that hid them while this ran can go too.
+    const markers = await ctx.db
+      .query('reactionCleanups')
+      .withIndex('by_message', (q) => q.eq('messageId', messageId))
+      .take(10)
+    for (const marker of markers) await ctx.db.delete(marker._id)
     return null
   },
 })

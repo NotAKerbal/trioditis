@@ -270,6 +270,15 @@ export default defineSchema({
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
     .index('by_message_active', ['messageId', 'removedAt']),
 
+  /**
+   * A deleted message whose reactions are still being removed (in batches, by
+   * `cleanup.reactionsOfMessage`). `messages.reactions` shows none for it meanwhile, without
+   * reading the message row, which can be large.
+   */
+  reactionCleanups: defineTable({
+    messageId: v.id('messages'),
+  }).index('by_message', ['messageId']),
+
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
     userId: v.string(),

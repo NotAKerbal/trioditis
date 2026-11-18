@@ -453,8 +453,12 @@ describe('ingest', () => {
     })
     expect(await ingest(t, [redaction])).toEqual({ ackedThrough: 2 })
     expect((await messages(t))[0]!.redactedAt).toBe(3_000)
+    // Until they're gone, a marker hides them from `messages.reactions`.
+    const markers = async () => await t.run(async (ctx) => await ctx.db.query('reactionCleanups').collect())
+    expect(await markers()).toHaveLength(1)
     await t.finishAllScheduledFunctions(vi.runAllTimers)
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+    expect(await markers()).toHaveLength(0)
     vi.useRealTimers()
   })
 

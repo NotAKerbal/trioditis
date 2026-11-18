@@ -85,7 +85,11 @@ export const discardSend = mutation({
   },
 })
 
-/** Active reactions on the given messages of a chat (at most 100 messages, 100 reactions each). */
+/**
+ * Active reactions on the given messages (at most 100 messages, 100 reactions each). It never
+ * reads the messages themselves, which can be large: a reaction row says whose it is, and a
+ * deleted message's reactions are hidden by its clean-up marker until they're removed.
+ */
 export const reactions = query({
   args: { chatId: v.id('chats'), messageIds: v.array(v.id('messages')) },
   handler: async (ctx, { chatId, messageIds }) => {
@@ -94,15 +98,17 @@ export const reactions = query({
     if (messageIds.length > 100) throw new ConvexError('Ask for at most 100 messages’ reactions at once.')
     const out: Record<string, { key: string; senderKey: string }[]> = {}
     for (const messageId of messageIds) {
-      const message = await ctx.db.get(messageId)
-      // A deleted message has no reactions, even before the clean-up job removes them.
-      if (!message || message.chatId !== chatId || message.redactedAt !== undefined) continue
+      const deleted = await ctx.db
+        .query('reactionCleanups')
+        .withIndex('by_message', (q) => q.eq('messageId', messageId))
+        .first()
+      if (deleted) continue
       const rows = await ctx.db
         .query('reactions')
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
         .take(100)
       out[messageId] = rows
-        .filter((row) => row.removedAt === undefined)
+        .filter((row) => row.userId === member.userId && row.removedAt === undefined)
         .map(({ key, senderKey }) => ({ key, senderKey }))
     }
     return out

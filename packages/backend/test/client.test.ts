@@ -254,6 +254,96 @@ describe('messages alongside the page', () => {
   })
 })
 
+describe('reads that large messages could push past the read limit', () => {
+  const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+
+  /** Messages at the size cap, each with an edit at the cap too: about 700 KiB a row. */
+  async function bigMessages(t: T, chatId: Id<'chats'>, count: number, fields: Record<string, unknown> = {}) {
+    const ids: Id<'messages'>[] = []
+    // One transaction per row: a few of them together would pass the limit being tested.
+    for (let i = 0; i < count; i++) {
+      const ts = i + 1
+      ids.push(
+        await t.run(
+          async (ctx) =>
+            await ctx.db.insert('messages', {
+              userId: 'user_a',
+              chatId,
+              network: 'whatsapp',
+              eventId: `m${i}`,
+              networkTs: ts,
+              sortKey: `${String(ts).padStart(16, '0')}:m${i}`,
+              sender: { ghostId: 'g' },
+              sealed: big(`m${i}`),
+              sealedObjectId: `m${i}`,
+              sealedEdit: big(`e${i}`),
+              editEventId: `e${i}`,
+              historical: false,
+              ...fields,
+            }),
+        ),
+      )
+    }
+    return ids
+  }
+
+  it('marks read over many large messages, telling the network the newest it can see', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 30 })
+    await bigMessages(t, chatId, 30)
+    await a.mutation(api.chats.markRead, { chatId })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((row) => row.payload)).toEqual([{ type: 'markRead', portalId: 'p', upToEventId: 'm29' }])
+    expect((await a.query(api.chats.get, { chatId })).unreadCount).toBe(0)
+  })
+
+  it('marks read locally when the newest it can afford to read never reached the network', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 1 })
+    await aMessage(t, chatId, 'bridged', 0)
+    // Pending copies are never this large; the point is only that the scan stops at its budget.
+    for (let i = 0; i < 30; i++) {
+      await aMessage(t, chatId, `pending:m${i}`, i + 1, { sealed: big(`m${i}`), sealedEdit: big(`e${i}`) })
+    }
+    await a.mutation(api.chats.markRead, { chatId })
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+  })
+
+  it('returns reactions for a page of large messages without reading the messages', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await signIn(t, 'user_b')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const ids = await bigMessages(t, chatId, 30)
+    await t.run(async (ctx) => {
+      for (const messageId of ids) {
+        await ctx.db.insert('reactions', {
+          userId: 'user_a',
+          messageId,
+          senderKey: 'self',
+          key: '👍',
+          eventId: `r${messageId}`,
+          addedAt: 1,
+          networkTs: 1,
+        })
+      }
+      // A deleted message's reactions are hidden while its clean-up runs.
+      await ctx.db.insert('reactionCleanups', { messageId: ids[0]! })
+    })
+    const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
+    expect(Object.keys(result)).toHaveLength(29)
+    expect(result[ids[0]!]).toBeUndefined()
+    expect(result[ids[1]!]).toEqual([{ key: '👍', senderKey: 'self' }])
+    // Someone else asking about these IDs, from their own chat, sees nothing of them.
+    const b = await signIn(t, 'user_c')
+    const theirs = await aChat(t, 'user_c', 'q')
+    const seen = await b.query(api.messages.reactions, { chatId: theirs, messageIds: ids.slice(1, 3) })
+    expect(Object.values(seen).flat()).toEqual([])
+  })
+})
+
 describe('labels', () => {
   it('creates sealed labels, assigns them, filters by them, and removes them everywhere', async () => {
     const t = setup()
