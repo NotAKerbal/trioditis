@@ -11,6 +11,7 @@ import {
   network,
   sender,
   storedChatView,
+  storedLastMessage,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -108,6 +109,13 @@ export default defineSchema({
     sealedMeta: v.optional(envelope),
     parentPortalId: v.optional(v.string()),
     lastMessageAt: v.number(),
+    /**
+     * The newest message, as `messages.list` orders them, so the chat list can show it
+     * without reading any message. Kept by lib/lastMessage.ts on every write that changes
+     * which message that is, or what it says. `null` when the chat has no messages; missing on
+     * a chat from before it was kept, until `migrations.backfillChatLast` reaches it.
+     */
+    last: v.optional(v.union(v.null(), storedLastMessage)),
     unreadCount: v.number(),
     pinned: v.boolean(),
     archived: v.boolean(),

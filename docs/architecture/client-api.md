@@ -341,6 +341,50 @@ A `ChatRow` (type in `@trioditis/core`):
 | `snoozedUntil`, `woke`                       | When the snooze ends, and whether it has                                                                                                            |
 | `labelIds`                                   | The person's labels on this chat                                                                                                                    |
 | `lastMessageAt`                              | Network time of the latest message                                                                                                                  |
+| `lastMessage`                                | The newest message, for a preview: see below. `null` when the chat has no messages                                                                  |
+
+#### The last message
+
+`lastMessage` is the chat's newest message, the one `messages.list` shows first (by
+`sortKey`, imported history included), or `null` when the chat has none:
+
+```ts
+interface LastMessage {
+  messageId: Id<'messages'> // the message's `_id` in `messages.list`
+  at: number // its `networkTs`
+  self: boolean // `sender` is `{ self: true }`
+  ghostId?: string // otherwise `sender.ghostId`
+  redacted: boolean // deleted for everyone: show "Message deleted"
+  sealed: Envelope | null // `sealedEdit ?? sealed`
+  objectId: string // `editEventId` for an edit, else `sealedObjectId`
+}
+```
+
+Open it exactly as the message (see Reading): kind `message`, object ID `objectId`.
+
+```ts
+const last = row.lastMessage
+const preview = last?.sealed
+  ? openJson<MessagePlaintext>(last.sealed, identity, { kind: 'message', ownerUserId: userId, objectId: last.objectId })
+  : null
+```
+
+`sealed` is `null` when the message was deleted (`redacted: true`), and when its envelope is
+over 4 KiB as stored (its JSON in UTF-8), which a text message almost never is: show
+"Message" then, and open the chat for the rest. Everything else is there either way.
+
+It is kept live: a new message, an edit of the newest one, the network's echo of a send
+(the same `messageId`, with the network's time and content), a deletion, and a discarded send
+(the one before it takes over) all change the row, as any change to a chat does. A message
+that arrives late with an older time never replaces a newer one. Because it includes
+imported history and the person's pending sends, `lastMessage.at` can differ from
+`lastMessageAt`, which orders the inbox.
+
+The server keeps it as a small pointer on the chat, so the list reads no messages. A row is
+at most about 18 KiB with the largest sealed metadata (8 KiB) and preview (4 KiB), so a full
+page of 50 is under 1 MiB, far inside its 8 MiB. A backend upgraded from before it gives
+each chat its pointer in `migrations:runAll`, after the deploy; until then an older chat's
+`lastMessage` is `null`.
 
 `api.chats.get({ chatId })` returns one row. `api.chats.counts` returns
 `{ inbox, requests, woke }`, each `{ count, more }`: unread unmuted inbox chats, message

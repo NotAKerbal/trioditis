@@ -3,6 +3,7 @@ import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
 import { byteSize } from './lib/bounded'
+import { forgetMessage } from './lib/lastMessage'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -82,6 +83,8 @@ export const discardSend = mutation({
       throw new ConvexError('This message reached the network, so it can’t be discarded here.')
     }
     await ctx.db.delete(message._id)
+    const chat = await ctx.db.get(message.chatId)
+    if (chat) await forgetMessage(ctx, chat, message._id)
     return null
   },
 })

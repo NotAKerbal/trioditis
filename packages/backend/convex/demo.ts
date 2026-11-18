@@ -4,6 +4,7 @@ import { action, internalMutation, type MutationCtx } from './_generated/server'
 import { requireUserId } from './auth'
 import { chatViewOf } from './lib/chatView'
 import { sortKey } from './lib/ingest'
+import { refreshLast } from './lib/lastMessage'
 import { sealJson } from './lib/seal'
 import { chatKind, envelope, sender } from './validators'
 
@@ -278,6 +279,7 @@ export const writeChat = internalMutation({
         historical: false,
       })
     }
+    await refreshLast(ctx, chatId)
     return null
   },
 })
