@@ -99,6 +99,11 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 		// A login recorded as in progress but not running here was lost (a restart): the
 		// person is waiting on it, so it ends with an error they see. One that has simply
 		// ended (a second submit after it completed) is only refused.
+		// One this process ended is over, not lost, even in the moment before its record is
+		// deleted.
+		if _, ended := c.endedLogins.Load(cmd.LoginSessionID); ended {
+			return conflict(protocol.ErrInvalidCommand, "the login is over")
+		}
 		lost, err := c.Store.HasLoginSession(ctx, cmd.LoginSessionID)
 		if err != nil {
 			return err
@@ -195,7 +200,7 @@ const maxLoginStepBytes = 64 * 1024
 func (s *loginSession) emit(step *protocol.LoginStep) error {
 	if data, err := json.Marshal(step); err == nil && len(data) > maxLoginStepBytes {
 		// A network asking to show something this big can't be shown; the login ends instead.
-		s.c.logins.Delete(s.id)
+		s.c.forgetLogin(s.id)
 		s.finish()
 		return s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: protocol.ErrLoginFailed})
 	}
@@ -242,7 +247,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		err = errors.New("login process returned no step")
 	}
 	if err != nil {
-		s.c.logins.Delete(s.id)
+		s.c.forgetLogin(s.id)
 		s.finish()
 		// Only the error's type is logged: a connector's error text can quote what the person
 		// typed. The person sees a code.
@@ -296,7 +301,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			}
 			out.LoginID = loginID
 		}
-		s.c.logins.Delete(s.id)
+		s.c.forgetLogin(s.id)
 		s.lock.Lock()
 		s.done = true
 		s.lock.Unlock()
@@ -332,8 +337,16 @@ func (c *Connector) endLoginWithError(ctx context.Context, userID, loginSessionI
 	if loginSessionID == "" {
 		return nil
 	}
+	c.endedLogins.Store(loginSessionID, struct{}{})
 	if raw, ok := c.logins.LoadAndDelete(loginSessionID); ok {
 		raw.(*loginSession).finish()
 	}
 	return c.endLogin(ctx, userID, loginSessionID, &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
+}
+
+// forgetLogin stops running a login. It is remembered as ended (by this process), so a submit
+// arriving before its record is deleted isn't taken for a login a restart lost.
+func (c *Connector) forgetLogin(id string) {
+	c.endedLogins.Store(id, struct{}{})
+	c.logins.Delete(id)
 }

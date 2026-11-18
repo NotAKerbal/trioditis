@@ -89,17 +89,16 @@ func (c *Connector) runQueued(ctx context.Context) {
 		c.Log.Err(err).Msg("Failed to read the command queue")
 		return
 	}
-	for _, qc := range queued {
+	for _, cmd := range candidates(queued) {
 		if ctx.Err() != nil {
 			return
 		}
-		cmd := qc.Command
 		if cmd.PortalID == "" {
 			c.runOne(ctx, cmd)
 			continue
 		}
 		// A chat whose lane is running a command, or that has a send waiting for its outcome,
-		// holds every later command for it, in order.
+		// holds its earliest command, and so every later one.
 		if _, busy := c.busy.Load(cmd.PortalID); busy {
 			continue
 		}
@@ -120,6 +119,26 @@ func (c *Connector) runQueued(ctx context.Context) {
 			c.execute(ctx, cmd)
 		}()
 	}
+}
+
+// candidates is what one pass may start, in queue order: every command without a chat, and
+// only the earliest waiting command of each chat. A chat's later commands are never
+// candidates while an earlier one waits, so they can't overtake it even if the chat's lane
+// frees up part-way through a pass.
+func candidates(queued []*store.QueuedCommand) []*protocol.Command {
+	seen := map[string]bool{}
+	var out []*protocol.Command
+	for _, qc := range queued {
+		cmd := qc.Command
+		if cmd.PortalID != "" {
+			if seen[cmd.PortalID] {
+				continue
+			}
+			seen[cmd.PortalID] = true
+		}
+		out = append(out, cmd)
+	}
+	return out
 }
 
 func (c *Connector) runOne(ctx context.Context, cmd *protocol.Command) {

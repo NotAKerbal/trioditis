@@ -123,19 +123,29 @@ identity keys kept in the data directory (never do that in production):
 - **One writer.** The bridge host's own write transactions run one at a time in the
   process (a transaction inside another joins it), so they can't take the journal counter and
   ID rows in opposite orders and deadlock on PostgreSQL.
-- **Sends, one at a time per chat.** The next command for a chat waits until a send in it
-  has an outcome. `notAfter` (required on every send) is checked when the send starts and
-  again right before it is handed to bridgev2, after sealing and recording, with a margin
-  (`HandoffMargin`, 2 minutes) for what bridgev2 may still wait on before the connector
-  transmits: the chat's lock and a reconnecting login (`SendReconnectWait`, 30 seconds).
-  bridgev2 gives no later point to check at. The hand-off records `submitted`; bridgev2's
+- **Sends, one at a time per chat, in order.** Only a chat's earliest waiting command is
+  ever started, so commands for one chat can't overtake each other, and the next command
+  waits until a send has an outcome. `notAfter` (required on every send) is checked when the
+  send starts and again right before it is handed to bridgev2, after sealing and recording,
+  with a margin (`HandoffMargin`, 11 minutes) for what bridgev2 may still wait on before the
+  connector transmits: the chat's lock, which an incoming event holds for at most bridgev2's
+  handler limit (5 minutes) before it is backgrounded, behind up to two such events, and a
+  reconnecting login (`SendReconnectWait`, 30 seconds). Nothing of ours runs between
+  bridgev2 taking the lock and the connector transmitting: bridgev2 calls the connector
+  directly, and the WhatsApp connector relies on its own client type (`login.Client.(*WhatsAppClient)`),
+  so its client can't be wrapped to check later. The hand-off records `submitted`; bridgev2's
   message status then records `sent` with the person's own copy (sealed at hand-off),
   `failed` (only if bridgev2 is certain) or `unknown`, each status committed together with
   the events reporting it, retried until it commits. No outcome within the send timeout is
   `unknown`, except that while bridgev2 still holds the send (it may be waiting for the
   chat's lock behind a slow incoming event, so may not have started) it is only marked
-  unknown after three timeouts; the chat's next command never starts before bridgev2 has
-  returned. The send is remembered for an hour, so an outcome that arrives later is still
+  unknown after three timeouts (9 minutes by default). The chat's next command never starts
+  before the send's handler has finished: if bridgev2 stops waiting on it (after five
+  minutes it backgrounds the handler and returns), the chat stays held, even once the send
+  is marked unknown, until bridgev2 reports its outcome. Outcomes are written with a fresh
+  context per attempt from the bridge's lifetime, not the chat's, so a chat deleted while
+  its send is out doesn't stop the outcome being recorded; one still unwritten when the
+  bridge stops stays `submitted` and becomes `unknown` at the next start. The send is remembered for an hour, so an outcome that arrives later is still
   recorded. A send in flight at a restart becomes `unknown`. Nothing is ever retried. A repeated
   `clientMessageId` repeats the last status. Relations (replies, edit, reaction and read
   targets) must belong to the command's chat.
@@ -236,7 +246,9 @@ suite. WhatsApp additionally uses:
   as the end of history and deletes every cached history row for the chat, including newer
   ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
 - A send can still reach the network after `notAfter` only if bridgev2 holds it past the
-  2-minute margin (a chat's incoming event holding its lock that long).
+  11-minute margin: behind more than two incoming events that each hit bridgev2's 5-minute
+  handler limit. Closing that needs a hook in bridgev2 or the connector right before it
+  transmits (see Known follow-ups).
 - Outbound attachments expect the client's ciphertext already at
   `<data>/media/<network>/<mediaId>`. Nothing puts it there yet; that is the gateway's
   media path.
@@ -288,6 +300,19 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   can't prune outside it (an upstream change, or a guard around its history store).
 - **Live checks.** WhatsApp pairing, messaging and history, and the conformance suite on
   PostgreSQL (`TRIODITIS_TEST_POSTGRES_URI`), haven't been run.
+- **Deadline at transmission.** `notAfter` is enforced at hand-off with an 11-minute margin.
+  Enforcing it at the moment of transmission needs a pre-send hook in bridgev2 (or a
+  connector that tolerates a wrapped client); propose one upstream.
+- **A chat held forever.** A send whose handler never returns (a connector stuck for good)
+  holds its chat until the bridge host restarts. Add an operator command to release it.
+- **Login recovery edge cases.** A submit for a login that recovery already ended gets
+  `invalid_command` rather than `login_failed`, and a login started before the v3 migration
+  has no row to recover, so it isn't ended with an error.
+- **Shutdown and stuck connectors.** A connector call that never returns leaves its chat's
+  goroutine (and the wait for it) behind when the host stops in-process; process exit
+  reclaims them.
+- **Ack cost.** Each acknowledgement scrubs login codes by scanning the acknowledged part of
+  the journal; with journal pruning that stays small, without it the cost grows.
 
 ### Other risks
 

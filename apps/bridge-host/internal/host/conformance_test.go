@@ -19,10 +19,13 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
@@ -668,6 +671,48 @@ func TestConformance(t *testing.T) {
 		}
 		h.net.SetIncomingDelay(0)
 		h.host.Connector.SendTimeout = 5 * time.Second
+	})
+
+	t.Run("a send still running after bridgev2 stops waiting holds its chat", func(t *testing.T) {
+		// bridgev2 normally gives up waiting after five minutes; with no ticks it gives up at
+		// once, and the send carries on in the background.
+		ticks := bridgev2.EventHandlingTimeoutTicks
+		bridgev2.EventHandlingTimeoutTicks = 0
+		defer func() { bridgev2.EventHandlingTimeoutTicks = ticks }()
+		h.host.Connector.SendTimeout = 100 * time.Millisecond
+		defer func() { h.host.Connector.SendTimeout = 5 * time.Second }()
+		before := len(h.net.Sent())
+		h.net.SetSendDelay(1500 * time.Millisecond)
+		send("cm-background", "still sending")
+		send("cm-after-background", "must wait for it")
+		// Marked unknown once it has been stuck long enough, while still running...
+		gw.waitFor(t, "unknown while still running", statusOf("cm-background", protocol.StatusUnknown))
+		h.net.SetSendDelay(0)
+		time.Sleep(300 * time.Millisecond)
+		// ...but the chat's next send hasn't started alongside it.
+		if n := len(h.net.Sent()) - before; n != 0 {
+			t.Fatalf("%d sends reached the network while the first was still being handled", n)
+		}
+		gw.waitFor(t, "the first finishes", statusOf("cm-background", protocol.StatusSent))
+		gw.waitFor(t, "then the next goes", statusOf("cm-after-background", protocol.StatusSent))
+		if sent := h.net.Sent(); len(sent)-before != 2 || sent[before].Body != "still sending" {
+			t.Fatalf("expected both sends in order, got %d", len(sent)-before)
+		}
+	})
+
+	t.Run("an outcome reported with a cancelled context is still recorded", func(t *testing.T) {
+		h.net.SetSendDelay(800 * time.Millisecond)
+		defer h.net.SetSendDelay(0)
+		send("cm-cancelled-ctx", "its chat goes away")
+		gw.waitFor(t, "submitted", statusOf("cm-cancelled-ctx", protocol.StatusSubmitted))
+		// As bridgev2 does when the chat is deleted while the send is out: the context it
+		// reports the outcome with is already cancelled.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		h.host.Connector.SendMessageStatus(ctx, &bridgev2.MessageStatus{Status: event.MessageStatusSuccess}, &bridgev2.MessageStatusEventInfo{
+			SourceEventID: ids.OutgoingEventID("alice", "cm-cancelled-ctx"),
+		})
+		gw.waitFor(t, "sent, recorded despite the cancelled context", statusOf("cm-cancelled-ctx", protocol.StatusSent))
 	})
 
 	t.Run("a login step takes one submit", func(t *testing.T) {

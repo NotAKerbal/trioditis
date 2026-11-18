@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
@@ -620,6 +621,7 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			plain.AvatarUnchanged = true
 		}
 	}
+	plain.Name, plain.Topic = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Topic, maxTopicBytes)
 	sealed, err := c.seal(ctx, o, seal.KindChat, o.portalID, plain)
 	if err != nil {
 		return err
@@ -685,6 +687,7 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	// agent-access key granted for one chat.
 	contactOwner := *o
 	contactOwner.portalID = ""
+	plain.Name, plain.Handle = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Handle, maxNameBytes)
 	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID, plain)
 	if err != nil {
 		return err
@@ -742,4 +745,22 @@ func (c *Connector) anyOwnerFor(ctx context.Context, userID string, ghost networ
 		}
 	}
 	return nil, nil
+}
+
+// Chat and contact metadata is sealed into at most 8 KiB (the backend quarantines more), so
+// a name, handle or topic that long is cut short, at a character boundary.
+const (
+	maxNameBytes  = 512
+	maxTopicBytes = 4096
+)
+
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

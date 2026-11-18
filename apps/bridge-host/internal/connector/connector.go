@@ -54,6 +54,8 @@ type Connector struct {
 	ghosts  *exsync.Map[networkid.UserID, *Intent]
 	pending sync.Map // id.EventID → *pendingCommand
 	logins  sync.Map // login session ID → *loginSession
+	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
+	endedLogins sync.Map
 	// busy holds chats (by opaque portal ID) with a send in flight; the worker runs their
 	// next command once it settles.
 	busy sync.Map // portal ID → id.EventID
@@ -231,6 +233,14 @@ func (c *Connector) BatchSend(ctx context.Context, roomID id.RoomID, req *mautri
 		return nil, err
 	}
 	resp := &mautrix.RespBeeperBatchSend{EventIDs: make([]id.EventID, len(req.Events))}
+	// The recipients are fetched first: fetching can wait on the gateway, and nothing slow may
+	// run while the transaction below holds the database writer, or other chats' writes (a
+	// send's mapping, say) would wait behind it.
+	recipients, err := c.Keys.Recipients(ctx, owner.userID, owner.portalID)
+	if err != nil {
+		return nil, fmt.Errorf("can't seal for %s: %w", owner.userID, err)
+	}
+	ctx = withRecipients(ctx, owner, recipients)
 	// The whole batch goes into the journal in one transaction, so a failure part-way leaves
 	// none of it for bridgev2 to retry around. (Every event also has a deterministic ID, so
 	// even a replayed batch is stored once by Convex.)
@@ -340,9 +350,40 @@ func (c *Connector) ghostOpaque(ctx context.Context, ghost networkid.UserID) (st
 }
 
 func (c *Connector) seal(ctx context.Context, o *owner, kind seal.Kind, objectID string, value any) (*seal.Envelope, error) {
-	recipients, err := c.Keys.Recipients(ctx, o.userID, o.portalID)
-	if err != nil {
-		return nil, fmt.Errorf("can't seal for %s: %w", o.userID, err)
+	recipients, ok := prefetchedRecipients(ctx, o)
+	if !ok {
+		var err error
+		if recipients, err = c.Keys.Recipients(ctx, o.userID, o.portalID); err != nil {
+			return nil, fmt.Errorf("can't seal for %s: %w", o.userID, err)
+		}
 	}
 	return seal.SealJSON(value, recipients, seal.Context{Kind: kind, OwnerUserID: o.userID, ObjectID: objectID})
+}
+
+// prefetched carries recipients fetched before a transaction, so sealing inside it never
+// waits on the gateway.
+type prefetched struct {
+	userID, portalID string
+	recipients       []seal.PublicKey
+}
+
+type prefetchedKey struct{}
+
+func withRecipients(ctx context.Context, o *owner, recipients []seal.PublicKey) context.Context {
+	return context.WithValue(ctx, prefetchedKey{}, &prefetched{userID: o.userID, portalID: o.portalID, recipients: recipients})
+}
+
+func prefetchedRecipients(ctx context.Context, o *owner) ([]seal.PublicKey, bool) {
+	p, ok := ctx.Value(prefetchedKey{}).(*prefetched)
+	if !ok || p.userID != o.userID || len(p.recipients) == 0 {
+		return nil, false
+	}
+	if o.portalID == "" {
+		// Sealed to the person only (a contact): their identity key comes first.
+		return p.recipients[:1], true
+	}
+	if p.portalID != o.portalID {
+		return nil, false
+	}
+	return p.recipients, true
 }

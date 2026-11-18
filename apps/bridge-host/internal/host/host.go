@@ -92,7 +92,7 @@ func BridgeConfig() *bridgeconfig.BridgeConfig {
 		PortalEventBuffer: 0,
 		// How long a send waits for a login that is reconnecting before it fails. Bounded, so
 		// a send checked against its deadline can't wait long after the check.
-		SendReconnectWait: 30 * time.Second,
+		SendReconnectWait: connector.SendReconnectWait,
 		// A repeated Matrix-side event with the same ID is recognized instead of resent.
 		DeduplicateMatrixMessages: true,
 		BridgeNotices:             false,
