@@ -25,7 +25,7 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
-import { canKeepKeys, loadIdentity, storeIdentity } from '~/lib/keys.ts'
+import { canKeepKeys, loadIdentity, saveToken, storeIdentity } from '~/lib/keys.ts'
 import { SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
@@ -351,6 +351,8 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
+  // The save token taken when finishing began (lib/keys.ts saveToken).
+  const saving = useRef<number | undefined>(undefined)
   // Signing out is the gate's (KeyGate); this names the key it's for, to decide whether its
   // backups are known to exist.
   const signOutButton = (label = 'Sign out') => (
@@ -438,6 +440,8 @@ function KeySetup({
     if (!job || isLeaving()) return
     setBusy(true)
     setError(null)
+    // A sign-out in another tab from here on stops keeping the key (see keep).
+    saving.current = await saveToken(userId).catch(() => undefined)
     const fail = (message: string) => {
       setError(message)
       setBusy(false)
@@ -504,7 +508,7 @@ function KeySetup({
     setBusy(true)
     setError(null)
     try {
-      await storeIdentity(userId, kid, keyPair)
+      await storeIdentity(userId, kid, keyPair, saving.current)
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
@@ -728,6 +732,8 @@ function Unlock({
       )
     setBusy(true)
     setError(null)
+    // Taken before any waiting: a sign-out in another tab from here on stops the save below.
+    const token = await saveToken(userId).catch(() => undefined)
     await nextFrame()
     const fail = (message: string) => {
       setError(message)
@@ -758,7 +764,7 @@ function Unlock({
     }
     if (isLeaving()) return
     try {
-      await storeIdentity(userId, kid, keyPair)
+      await storeIdentity(userId, kid, keyPair, token)
     } catch (e) {
       return fail(
         `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
@@ -944,6 +950,8 @@ function RecoveryCheckAfterReload({
     queryFn: () => fingerprint(installedCt!),
     enabled: sameKey && !!installedCt,
     retry: false,
+    // WebCrypto, not the network: offline mustn't pause it and leave the splash up.
+    networkMode: 'always',
   })
   const matches = sameKey && installed !== undefined && installed === pending.fingerprint
   const done = () => {

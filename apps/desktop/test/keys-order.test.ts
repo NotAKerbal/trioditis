@@ -64,7 +64,7 @@ function fakeIndexedDB() {
 
 const db = fakeIndexedDB()
 Object.assign(globalThis, { indexedDB: db, window: { isSecureContext: true } })
-const { forgetIdentity, loadIdentity, storeIdentity } = await import('../src/lib/keys.ts')
+const { forgetIdentity, loadIdentity, saveToken, storeIdentity } = await import('../src/lib/keys.ts')
 
 describe('keeping and forgetting the key on this device', () => {
   beforeAll(ready)
@@ -94,6 +94,18 @@ describe('keeping and forgetting the key on this device', () => {
     expect((await loadIdentity('u4'))?.kid).toBe(keyId(keyPair.publicKey))
     await forgetIdentity('u4', keyId(keyPair.publicKey))
     expect(await loadIdentity('u4')).toBeNull()
+  })
+
+  it('refuses a save whose work began before a sign-out elsewhere, though it reaches storage after', async () => {
+    // Unlocking in one tab takes its token, then waits (deriving the key); meanwhile another
+    // tab signs out. The save that follows mustn't put the key back.
+    const keyPair = generateKeyPair()
+    const token = await saveToken('u5')
+    await forgetIdentity('u5')
+    await expect(storeIdentity('u5', keyId(keyPair.publicKey), keyPair, token)).rejects.toThrow(
+      'signed out of meanwhile',
+    )
+    expect(await loadIdentity('u5')).toBeNull()
   })
 
   it('keeps a key saved after forgetting, as signing in again does', async () => {

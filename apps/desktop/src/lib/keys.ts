@@ -106,10 +106,19 @@ function forgetCount(store: IDBObjectStore, userId: string, then: (count: number
   request.onsuccess = () => then((request.result as { count?: number } | undefined)?.count ?? 0)
 }
 
-/** Keeps an unwrapped identity key on this device, unless it's forgotten before it's written. */
-export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair): Promise<void> {
+/**
+ * A token for keeping a key that's about to be worked out (unlocked or set up): taken when that
+ * work begins and passed to storeIdentity, so a sign-out anywhere since, in any tab, stops the
+ * save, not only one during the save itself.
+ */
+export function saveToken(userId: string): Promise<number> {
+  return inTransaction<number>('readonly', (store, answer) => forgetCount(store, userId, answer))
+}
+
+/** Keeps an unwrapped identity key on this device, unless it's forgotten since `token` (or since now). */
+export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair, token?: number): Promise<void> {
   if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
-  const asked = await inTransaction<number>('readonly', (store, answer) => forgetCount(store, userId, answer))
+  const asked = token ?? (await saveToken(userId))
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
