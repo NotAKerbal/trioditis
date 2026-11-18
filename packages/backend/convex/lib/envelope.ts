@@ -80,6 +80,11 @@ const MAX_RECIPIENTS = 8
  */
 export const MAX_CLIENT_SEALED_BYTES = 64 * 1024
 
+/**
+ * Whether `value` is formatted as an envelope: canonical base64url, the right lengths, one to
+ * `MAX_RECIPIENTS` key entries. A format check only: it can't tell ciphertext from anything
+ * else encoded to look like it. That rests on whoever sealed it, and on the recipient opening it.
+ */
 export function isEnvelope(value: Infer<typeof envelope>, maxBytes = Infinity): boolean {
   if (value.keys.length === 0 || value.keys.length > MAX_RECIPIENTS) return false
   if (decodedLength(value.nonce) !== NONCE_BYTES) return false

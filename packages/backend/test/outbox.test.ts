@@ -935,6 +935,41 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     await as.mutation(api.logins.submit, { loginSessionId, stepId: 's2', sealed: sealed('c') })
   })
 
+  it('ends a login whose accepted submission never got an answer', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await accept(t, (await claim(t))[0]!)
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      ...HOST,
+      events: [
+        {
+          seq: 1,
+          type: 'loginStep',
+          userId: 'user_a',
+          loginId: '',
+          at: Date.now(),
+          loginSessionId,
+          step: { stepId: 's1', type: 'userInput' },
+        },
+      ],
+    })
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('a') })
+    await accept(t, (await claim(t))[0]!)
+    // The bridge host took the input, then went away without a next step or an error.
+    vi.advanceTimersByTime(10 * 60 * 1000 + 60 * 60 * 1000 + 1000)
+    await heartbeat(t)
+    await claim(t)
+    expect(await t.run(async (ctx) => await ctx.db.get(loginSessionId))).toMatchObject({
+      state: 'error',
+      step: { error: 'expired' },
+    })
+  })
+
   it('reaches an expired lease that shares its deadline with a window of leases for a host that’s down', async () => {
     const { t } = await ready()
     const expiredLease = (hostId: string) => ({
