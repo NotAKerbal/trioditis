@@ -82,7 +82,8 @@ export function ChatRow({
               </Badge>
             ) : (
               <span className="ml-auto shrink-0 pl-1 text-xs text-subtle-foreground">
-                {listTime(chat.row.lastMessageAt)}
+                {/* Imported history doesn't set a time, so a backfilled chat has none to show. */}
+                {chat.row.lastMessageAt > 0 ? listTime(chat.row.lastMessageAt) : null}
               </span>
             )}
           </span>

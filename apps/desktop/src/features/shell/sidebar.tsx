@@ -474,11 +474,26 @@ function Divider({
   )
 }
 
-/** Loads the next page of a view. Pages hold at most 50 chats. */
+/**
+ * Loads the next page of a view as it scrolls near, with the button as a fallback. A page can end
+ * early under the server's byte budget, so only the cursor says a view is done, not a short page.
+ */
 function LoadMore({ list }: { list: ChatList }) {
+  const ref = useRef<HTMLButtonElement>(null)
+  const loadMore = useRef(list.loadMore)
+  loadMore.current = list.loadMore
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && loadMore.current(), {
+      rootMargin: '200px',
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [list.canLoadMore])
   if (!list.canLoadMore) return null
   return (
-    <Button variant="ghost" size="sm" block className="my-1" onClick={list.loadMore}>
+    <Button ref={ref} variant="ghost" size="sm" block className="my-1" onClick={list.loadMore}>
       Load more chats
     </Button>
   )
