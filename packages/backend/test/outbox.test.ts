@@ -650,7 +650,8 @@ describe('sending', () => {
         await ctx.db.insert('outboxPayloads', { commandId, sealed: sealed(`b${n}`) })
       })
     }
-    await t.mutation(internal.migrations.scheduleCommandDeadlines, {})
+    // Through the entry point pnpm dev and the installer call.
+    await t.action(internal.migrations.runAll, {})
     await t.finishAllScheduledFunctions(vi.runAllTimers)
     expect(await t.run(async (ctx) => await ctx.db.query('outboxPayloads').collect())).toHaveLength(0)
     const rows = await t.run(async (ctx) => await ctx.db.query('outbox').collect())

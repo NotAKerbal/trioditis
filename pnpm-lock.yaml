@@ -169,6 +169,9 @@ importers:
       '@trioditis/crypto':
         specifier: workspace:*
         version: link:packages/crypto
+      convex:
+        specifier: 1.50.0
+        version: 1.50.0(react@19.3.1)
     devDependencies:
       '@convex-dev/eslint-plugin':
         specifier: 5.0.1

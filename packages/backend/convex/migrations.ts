@@ -1,9 +1,10 @@
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
-import { internalMutation } from './_generated/server'
+import { internalAction, internalMutation } from './_generated/server'
 
-// One-off fixes for rows written by an older version. Each is safe to run again. Run them once
-// after deploying the version that adds them (see docs/CONTRIBUTING.md, Schema changes).
+// One-off fixes for rows written by an older version. Each is safe to run any number of times.
+// `runAll` runs them all; `pnpm dev` and the self-hosted installer call it after every deploy,
+// so a backend that keeps its data is always caught up (docs/CONTRIBUTING.md, Schema changes).
 
 const BATCH = 100
 /** The states a command can still be ended from; every other one is settled. */
@@ -37,6 +38,19 @@ export const scheduleCommandDeadlines = internalMutation({
     }
     const next = page.isDone ? { state: state + 1, cursor: null } : { state, cursor: page.continueCursor }
     if (PENDING[next.state]) await ctx.scheduler.runAfter(0, internal.migrations.scheduleCommandDeadlines, next)
+    return null
+  },
+})
+
+/**
+ * Every migration, in order: the one entry point `pnpm dev` and the installer call. A new
+ * migration must be added here as well as defined above, or it never runs on its own.
+ */
+export const runAll = internalAction({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    await ctx.runMutation(internal.migrations.scheduleCommandDeadlines, {})
     return null
   },
 })
