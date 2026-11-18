@@ -42,6 +42,18 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
     baseURL: siteUrl,
     trustedOrigins: [siteUrl],
     database: authComponent.adapter(ctx),
+    // The password changes only through `account.changePassword`, which changes the key
+    // backup with it; a change here would leave sign-in and unlocking on different
+    // passwords. Resets need email, which servers don't send yet, and changing the email
+    // would change what `authPassword` derives.
+    disabledPaths: [
+      '/change-password',
+      '/set-password',
+      '/request-password-reset',
+      '/forget-password',
+      '/reset-password',
+      '/change-email',
+    ],
     emailAndPassword: {
       enabled: true,
       // Trioditis servers don't send email yet; invitations are links the admin shares.

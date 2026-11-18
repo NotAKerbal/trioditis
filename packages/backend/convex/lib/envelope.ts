@@ -1,3 +1,4 @@
+import { x25519 } from '@noble/curves/ed25519.js'
 import { blake2b } from '@noble/hashes/blake2.js'
 import type { Infer } from 'convex/values'
 import type { envelope } from '../validators'
@@ -23,20 +24,42 @@ export function decodedLength(text: string): number | null {
   return bytes
 }
 
-function decode(text: string): Uint8Array {
+export function decode(text: string): Uint8Array {
   const binary = atob(text.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - (text.length % 4)) % 4))
   return Uint8Array.from(binary, (char) => char.charCodeAt(0))
 }
 
-function encode(bytes: Uint8Array): string {
+export function encode(bytes: Uint8Array): string {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 }
 
-/** A canonical base64url X25519 public key. */
+/** 2^255 - 19, the field X25519 works in. */
+const FIELD_PRIME = 2n ** 255n - 19n
+/** Any scalar works for the check below: X25519 clears its low bits, so it's a multiple of 8. */
+const CHECK_SCALAR = new Uint8Array(32).fill(7)
+
+/**
+ * A canonical base64url X25519 public key that something can actually be sealed to. Its top
+ * bit is clear and its value is below the field prime, so one key has one spelling. A
+ * low-order point is refused: every shared secret with it is zero, so a box sealed to it
+ * protects nothing and a challenge sealed to it can't prove anything.
+ */
 export function isPublicKey(text: string): boolean {
-  return decodedLength(text) === 32
+  if (decodedLength(text) !== 32) return false
+  const bytes = decode(text)
+  if (bytes[31]! & 0x80) return false
+  let u = 0n
+  for (let i = 31; i >= 0; i--) u = (u << 8n) | BigInt(bytes[i]!)
+  if (u >= FIELD_PRIME) return false
+  try {
+    // noble refuses a point whose product is zero, which is exactly the low-order ones.
+    x25519.getSharedSecret(CHECK_SCALAR, bytes)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** The key ID of a public key: the first 16 bytes of BLAKE2b-256, base64url. */

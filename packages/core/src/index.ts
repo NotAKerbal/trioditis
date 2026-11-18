@@ -76,3 +76,5 @@ export interface ContactPlaintext {
   avatarUnchanged?: boolean
   [extra: string]: unknown
 }
+
+export * from './client.ts'
