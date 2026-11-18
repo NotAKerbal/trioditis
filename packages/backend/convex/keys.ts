@@ -4,6 +4,7 @@ import type { Doc } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
+import { takeToken } from './rateLimits'
 import { audit } from './lib/audit'
 import { decode, decodedLength, encode, isPublicKey, keyIdOf } from './lib/envelope'
 import { sha256Hex } from './lib/hash'
@@ -364,6 +365,9 @@ export const removePasskeyBackup = mutation({
   },
 })
 
+/** Current-password checks per account: as many as a person retyping would need. */
+const PASSWORD_CHECK_LIMIT = { window: 60, max: 5 }
+
 const passwordWrap = {
   nonce: v.string(),
   ct: v.string(),
@@ -392,6 +396,18 @@ export const checkPasswordChange = internalMutation({
       params: args.params,
     })
     await consumeKeyProof(ctx, member, args.proof)
+    // The action checks the current password next, and a session that holds the key could
+    // otherwise test guesses as fast as it can get proofs. Counted per account, like sign-in,
+    // and here, so a session that has ended (checked above) spends nothing.
+    const limit = await takeToken(ctx, {
+      key: await sha256Hex(`password-check|${args.userId}`),
+      ...PASSWORD_CHECK_LIMIT,
+    })
+    if (!limit.allowed) {
+      throw new ConvexError(
+        `Too many password attempts. Try again in ${limit.retryAfter ?? PASSWORD_CHECK_LIMIT.window} seconds.`,
+      )
+    }
     return null
   },
 })

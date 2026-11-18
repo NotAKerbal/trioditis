@@ -277,6 +277,9 @@ describe('what is counted', () => {
     expect(routePattern('/single/*').test('/single/child')).toBe(true)
     expect(routePattern('/single/*').test('/single/child/grandchild')).toBe(false)
     expect(routePattern('/multi/**').test('/multi/child/grandchild')).toBe(true)
+    expect(routePattern('/single/*').test('/single')).toBe(true)
+    expect(routePattern('/multi/**').test('/multi')).toBe(true)
+    for (const path of ['/multi/', '/multi/a/', '/multi/a//b']) expect(routePattern('/multi/**').test(path)).toBe(false)
     expect(routePattern('/end-session').test('/end-session/')).toBe(false)
   })
 

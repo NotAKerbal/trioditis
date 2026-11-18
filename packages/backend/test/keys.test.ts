@@ -468,6 +468,8 @@ describe('changing the password', { timeout: 30_000 }, () => {
       bob.mutation(internal.keys.checkPasswordChange, { userId: 'sam', proof, ...wrap, sessionId: bobSession }),
     ).rejects.toMatchObject(changed)
     expect(await signInHash(t)).toBe(before)
+    // A refused check spends none of the account's password checks.
+    expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
     const password = await t.run(
       async (ctx) =>
         await ctx.db
@@ -476,6 +478,20 @@ describe('changing the password', { timeout: 30_000 }, () => {
           .collect(),
     )
     expect(password.map((row) => row.revision)).toEqual([1])
+  })
+
+  it('counts a password check in the transaction that checks the session', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    await sam.mutation(internal.keys.checkPasswordChange, {
+      userId: 'sam',
+      proof: await proofFrom(sam, device.identity),
+      ...newWrap(device, 'new password!!'),
+      expectedRevision: 1,
+      sessionId,
+    })
+    expect(await t.run(async (ctx) => (await ctx.db.query('rateLimits').collect()).length)).toBe(1)
   })
 
   it('limits how often the current password can be checked', async () => {
