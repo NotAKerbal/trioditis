@@ -61,10 +61,26 @@ function encodable(event: unknown) {
   }
 }
 
-/** The event's type for quarantine, without trusting it to be a string. */
+const EVENT_TYPES: ReadonlySet<string> = new Set([
+  'message',
+  'edit',
+  'reaction',
+  'reactionRemove',
+  'redaction',
+  'receipt',
+  'typing',
+  'chat',
+  'contact',
+  'loginState',
+  'loginStep',
+  'sendStatus',
+  'backfillDone',
+])
+
+/** The event's type for quarantine: a known type, or `unknown`, never what the event says. */
 function typeOf(event: BridgeEvent) {
   const type = (event as { type?: unknown }).type
-  return typeof type === 'string' ? type : 'unknown'
+  return typeof type === 'string' && EVENT_TYPES.has(type) ? type : 'unknown'
 }
 
 type Outcome = { ackedThrough: number } | { expectedSeq: number }
