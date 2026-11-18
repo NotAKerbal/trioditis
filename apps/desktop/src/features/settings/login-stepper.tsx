@@ -15,6 +15,7 @@ import { useBridgeKey } from '~/data/messages.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { sealLoginInput } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
+import { canSubmit, initialSubmit, submitReducer, type SubmitEvent } from './login-submit.ts'
 
 // What each error code means for the person. See docs/architecture/bridge-protocol.md, Errors.
 const ERRORS: Record<string, string> = {
@@ -50,13 +51,21 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const [loginSessionId, setLoginSessionId] = useState<Id<'loginSessions'> | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, string>>({})
-  const [busy, setBusy] = useState(false)
+  // Each step's input goes once (login-submit.ts). The ref holds the same state as `submission`,
+  // up to date between renders, so a second submit in the same moment is refused too.
+  const [submission, setSubmission] = useState(initialSubmit)
+  const latest = useRef(initialSubmit)
+  const dispatch = (event: SubmitEvent) => {
+    latest.current = submitReducer(latest.current, event)
+    setSubmission(latest.current)
+  }
   const started = useRef(false)
 
   const begin = () => {
     setStartError(null)
     setLoginSessionId(null)
     setValues({})
+    dispatch({ type: 'step', stepId: null })
     start({ network: network as Network, ...(flowId ? { flowId } : {}) }).then(setLoginSessionId, (e: unknown) =>
       setStartError(errorMessage(e, 'That login couldn’t start.')),
     )
@@ -75,23 +84,28 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const done = login?.state === 'complete' || step?.type === 'complete'
   const failed = login?.state === 'error' || step?.type === 'error'
 
-  // A new step clears what was typed for the last one.
+  // A new step clears what was typed for the last one, and can be sent.
   const stepId = step?.stepId
-  useEffect(() => setValues({}), [stepId])
+  useEffect(() => {
+    setValues({})
+    dispatch({ type: 'step', stepId: stepId ?? null })
+  }, [stepId])
 
   async function send(input: Record<string, string>) {
-    if (!loginSessionId || !step || !bridgeKey) return
-    setBusy(true)
+    if (!loginSessionId || !step || !bridgeKey || !canSubmit(latest.current, step.stepId)) return
+    const sentStepId = step.stepId
+    dispatch({ type: 'send', stepId: sentStepId })
     try {
       await submit({
         loginSessionId,
-        stepId: step.stepId,
-        sealed: sealLoginInput(input, loginSessionId, step.stepId, session.userId, bridgeKey),
+        stepId: sentStepId,
+        sealed: sealLoginInput(input, loginSessionId, sentStepId, session.userId, bridgeKey),
       })
+      dispatch({ type: 'sent', stepId: sentStepId })
     } catch (e) {
-      setStartError(errorMessage(e, 'That didn’t go through. Try again.'))
+      // The server's sentence, as it is. The person can send again; nothing retries for them.
+      dispatch({ type: 'failed', stepId: sentStepId, message: errorMessage(e, 'That didn’t go through. Try again.') })
     }
-    setBusy(false)
   }
 
   const close = () => {
@@ -121,6 +135,8 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
 
       {startError ? (
         <Problem message={startError} onRetry={begin} />
+      ) : login === null ? (
+        <Problem message="That login is gone. Start again." onRetry={begin} />
       ) : !login || login.state === 'pending' || !step ? (
         <p className="py-8 text-center text-sm text-muted-foreground" aria-busy="true">
           Starting the login with {networkName(network)}…
@@ -200,6 +216,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                     autoComplete="off"
                     spellCheck={false}
                     required
+                    disabled={submission.sentStepId === step.stepId}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
                   />
@@ -208,14 +225,29 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                   ) : null}
                 </label>
               ))}
-              <div className="flex gap-2">
-                <Button type="submit" variant="primary" loading={busy} disabled={!bridgeKey}>
+              {submission.error ? (
+                <p role="alert" className="mb-3 text-sm text-danger">
+                  {submission.error}
+                </p>
+              ) : null}
+              <div className="flex items-center gap-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={submission.sending}
+                  disabled={!bridgeKey || submission.sentStepId === step.stepId}
+                >
                   Continue
                 </Button>
                 <Button type="button" variant="ghost" onClick={close}>
                   Cancel
                 </Button>
               </div>
+              {submission.sentStepId === step.stepId && !submission.sending ? (
+                <p className="mt-3 text-sm text-subtle-foreground" aria-live="polite">
+                  Sent. Waiting for {networkName(network)}…
+                </p>
+              ) : null}
             </form>
           ) : null}
         </div>
