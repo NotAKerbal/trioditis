@@ -1,0 +1,24 @@
+/* Page defaults. Kept apart from theme.css so a docs site can use the utilities without restyling itself. */
+@layer base {
+  *,
+  ::after,
+  ::before {
+    border-color: var(--border);
+  }
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent-ring);
+    outline-offset: 2px;
+  }
+}
