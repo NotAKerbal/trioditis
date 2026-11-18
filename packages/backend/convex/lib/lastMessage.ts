@@ -12,8 +12,8 @@ import { byteSize } from './bounded'
 // needs comparing with it, and the chat's messages are read only when the one it points at
 // moves down (an echo with an earlier time) or goes away (a discarded send): then the
 // newest is one index read. A chat from before the pointer was kept has none (`undefined`)
-// and gets one the same way, the first time a message in it is written or changed, or when
-// the backfill reaches it.
+// and gets one the same way when a message in it is inserted, echoed, edited, redacted or
+// discarded, or when the backfill reaches it (a delivery status change alone doesn't).
 //
 // Keys are compared as Convex's index compares them (`compareValues`, UTF-8 order), not with
 // JavaScript's `<` (UTF-16 order): the two disagree for some event IDs, and the pointer must

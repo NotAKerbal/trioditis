@@ -433,9 +433,9 @@ imported history and the person's pending sends, `lastMessage.at` can differ fro
 The server keeps it as a small pointer on the chat, so the list reads no messages. A row is
 at most about 18 KiB with the largest sealed metadata (8 KiB) and preview (4 KiB), so a full
 page of 50 is under 1 MiB, far inside its 8 MiB. A backend upgraded from before it gives
-each chat its pointer in `migrations:runAll`, after the deploy; until then, or until a
-message in it is written or changed, an older chat's `lastMessage` is `null` (changing only
-the chat, such as pinning it, doesn't fill it in).
+each chat its pointer in `migrations:runAll`, after the deploy. Until then an older chat's
+`lastMessage` is `null`, unless a message arrives in it, is echoed, edited, redacted or
+discarded; other changes (pinning the chat, a send's delivery status) don't fill it in.
 
 `api.chats.get({ chatId })` returns one row. `api.chats.counts` returns
 `{ inbox, requests, woke }`, each `{ count, more }`: unread unmuted inbox chats, message
@@ -754,12 +754,9 @@ here.
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
    needs a new `members` event from the bridge host, so it comes later. Fallback: the
    sender shows as "Someone".
-3. **Last-message preview.** Chat rows gain `sealedPreview`: the newest message's body cut
-   to 200 characters plus its sender (`ghostId` or self), sealed with a new kind `preview`
-   and object ID `portalId`, at most 2 KiB. The bridge host seals it with each `message`
-   event; the person's own sends seal one alongside `copy`. Deleting or editing the newest
-   message replaces it. It stays small so a page of 50 rows stays well inside the read
-   limit. Fallback: no preview line.
+3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
+   envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
+   replaced the `sealedPreview` planned here, so nothing new is sealed for it.
 4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
    email, sealed to the bridge key) and `startChat`, following bridgev2's
    `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls
