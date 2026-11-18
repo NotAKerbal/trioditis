@@ -61,7 +61,10 @@ deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
 ```
 
 `--public-url` makes that the server's address, and binds the port to `127.0.0.1` so it's
-only reachable through the proxy (pass `--bind` for a proxy on another machine). Any reverse
+only reachable through the proxy (pass `--bind` for a proxy on another machine). When the
+proxy runs on this machine, as Tailscale Serve does, the installer also starts a small
+`hairpin` forwarder: Tailscale only answers people on the tailnet, and the backend has to
+reach the public address to check sign-ins. Any reverse
 proxy that serves HTTPS works the same way. Reruns keep it; `--public-url ''` goes back to
 plain HTTP.
 
