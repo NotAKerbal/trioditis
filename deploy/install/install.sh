@@ -124,25 +124,41 @@ fi
 # --- Settings -----------------------------------------------------------------------------
 
 # deploy/.env appears with the first setting saved, after the options are checked, so an
-# install exists exactly when it does.
+# install exists exactly when it does. It's read once, here, and kept in memory: a read that
+# fails stops the install, rather than looking like missing settings and secrets.
 existing_install=0
-[ ! -e "$env_file" ] || existing_install=1
+env_text=''
+if [ -e "$env_file" ] || [ -L "$env_file" ]; then
+  existing_install=1
+  if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then die "deploy/.env isn't a regular file. Put the install's .env back there."; fi
+  env_text=$(cat "$env_file") || die "Couldn't read deploy/.env, which holds this install's settings and secrets."
+fi
 
-get() { grep -E "^$1=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
-has() { grep -qE "^$1=" "$env_file" 2>/dev/null; }
+get() { printf '%s\n' "$env_text" | grep -E "^$1=" | tail -1 | cut -d= -f2- || true; }
+has() { printf '%s\n' "$env_text" | grep -qE "^$1="; }
+# Writes $2 (a file's whole contents) to path $1 through a private temp file beside it, then a
+# rename onto the exact name, so the file is never half written and a symlink at the name is
+# replaced, not followed. $3 is its mode.
+write_file() {
+  local tmp
+  tmp=$(mktemp "$1.XXXXXX")
+  if ! { printf '%s\n' "$2" >"$tmp" && chmod "$3" "$tmp" && mv -T "$tmp" "$1"; }; then
+    rm -f "$tmp"
+    die "Couldn't write $1."
+  fi
+}
 # Sets NAME VALUE [NAME VALUE ...] in one atomic write, so a pair (such as a key pair) is
 # never saved half.
 set_var() {
-  local tmp names=''
-  tmp=$(mktemp "$env_file.XXXXXX")
+  local names='' text
   for ((i = 1; i < $#; i += 2)); do names="$names|${!i}"; done
-  grep -vE "^(${names#|})=" "$env_file" >"$tmp" 2>/dev/null || true
+  text=$(printf '%s\n' "$env_text" | grep -vE "^(${names#|})=" | sed '/^$/d' || true)
   while [ $# -ge 2 ]; do
-    printf '%s=%s\n' "$1" "$2" >>"$tmp"
+    text="$text${text:+$'\n'}$1=$2"
     shift 2
   done
-  chmod 600 "$tmp"
-  mv "$tmp" "$env_file"
+  write_file "$env_file" "$text" 600
+  env_text=$text
 }
 secret() { head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }
 hex_secret() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -355,10 +371,20 @@ keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 # directory, so it runs from there.
 # Exported COMPOSE_* variables would override deploy/.env (and name the images), so they're
 # dropped: this install's settings are the ones it saved.
+# deploy/.env is the only source of the install's settings and secrets: every variable it
+# sets, every one the compose files read, and Compose's own are dropped from the environment
+# Compose runs in, since an exported one would override the file (and the running stack would
+# no longer match the .env a backup saves).
 compose() {
-  (cd "$here/compose" &&
-    env -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE -u COMPOSE_PROFILES \
-      docker compose --env-file "$env_file" -p "$project" "$@")
+  local name scrub=()
+  for name in $( {
+    printf '%s\n' "$env_text" | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'
+    grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$here"/compose/*.yml | cut -c3-
+    printf '%s\n' COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+  } | sort -u); do
+    scrub+=(-u "$name")
+  done
+  (cd "$here/compose" && env "${scrub[@]}" docker compose --env-file "$env_file" -p "$project" "$@")
 }
 
 # --- Images -------------------------------------------------------------------------------
@@ -387,11 +413,11 @@ if [ "${#missing_pairs[@]}" -gt 0 ]; then
   unset -v keys public_key private_key
 fi
 
+# Caddy serves it (as another user), so it's world-readable; written like deploy/.env.
 mkdir -p "$here/runtime"
-cat >"$here/runtime/config.json" <<EOF
-{ "convexUrl": "$public_url/convex", "convexSiteUrl": "$public_url", "environment": "selfhosted" }
-EOF
-chmod 644 "$here/runtime/config.json"
+[ ! -L "$here/runtime" ] || die "deploy/runtime is a symlink; it must be a directory of this checkout."
+write_file "$here/runtime/config.json" \
+  "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
 # network's service at the same time, and the builds collide on the shared tag.

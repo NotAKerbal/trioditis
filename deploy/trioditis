@@ -1,14 +1,14 @@
 #!/bin/sh
 # `docker compose` for this install, with its settings. Usage: deploy/trioditis <compose args>
 # e.g. `deploy/trioditis ps`, `deploy/trioditis logs -f gateway`, `deploy/trioditis down`.
-# Also `deploy/trioditis backup <dir>`, `deploy/trioditis restore <archive>` and
+# Also `deploy/trioditis backup <dir>`, `deploy/trioditis restore <backup>` and
 # `deploy/trioditis create-admin <email>`: see docs/deploy.md.
 #
-# Backup and restore never act on a file or volume on the strength of an earlier look at it,
-# since another process could change it in between. Volumes are held by a container of this
-# command (Docker won't remove or replace a volume a container uses) before they're checked,
-# and are removed only by a label unique to this run, matched by Docker itself. Files are
-# written in a private directory and published with links that fail if anything is there.
+# What backup and restore guard against (docs/deploy.md, Backup and restore): the operator's
+# mistakes, a second trioditis command at the same time, other Compose projects on the same
+# Docker, interrupts, full disks and read-only filesystems, and steps that fail partway. The
+# checkout and the backup directory are writable only by the operator, so not against a
+# hostile process running as the same user that rewrites paths while a command runs.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 env_file="$here/.env"
@@ -20,11 +20,19 @@ fi
 # default), whatever COMPOSE_PROJECT_NAME says: it names the volumes that hold the data.
 project=$(grep -E '^COMPOSE_PROJECT_NAME=' "$env_file" | tail -1 | cut -d= -f2-)
 project=${project:-trioditis}
-# Exported COMPOSE_* variables would override .env, so they're dropped. Compose reads
-# COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs, so it runs in the
-# compose directory; this script stays where it was called, so paths given to it mean what
-# they say.
-unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+# deploy/.env is the only source of the install's settings and secrets, so every variable it
+# sets, every one the compose files read, and Compose's own are dropped here: an exported one
+# would override the file, and the running stack would no longer match the .env a backup
+# saves. Compose reads COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs,
+# so it runs in the compose directory; this script stays where it was called, so paths given
+# to it mean what they say.
+for name in $( {
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file"
+  grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$here"/compose/*.yml | cut -c3-
+  printf '%s\n' COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
+} | sort -u); do
+  unset "$name"
+done
 compose() { (cd "$here/compose" && docker compose --env-file "$env_file" -p "$project" "$@"); }
 
 # The archive tool: the bundle's pinned Alpine-based image, which has tar and gzip.
@@ -42,7 +50,7 @@ project_volumes() {
   docker volume ls -q --filter "label=com.docker.compose.project=$project" | sort
 }
 
-# A volume's labels, by key; empty if it has no such label.
+# A volume's label, by key; empty if it has none.
 volume_label() {
   docker volume inspect -f "{{index .Labels \"$2\"}}" "$1"
 }
@@ -58,51 +66,28 @@ take_lock() {
 
 random_hex() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# The device and inode of a file, to tell that a published path is the file written.
-file_id() { stat -c '%d:%i' "$1"; }
-
-# Publishes private file $1 at $2 as a hard link. `ln -T` fails if anything is at $2 (a file,
-# a directory, a link), and the result is checked to be a regular file that is $1 itself.
-# Returns 2 if the name was taken, 1 on any other failure.
-publish() {
-  if ! ln -T "$1" "$2" 2>/dev/null; then
-    if [ -e "$2" ] || [ -L "$2" ]; then return 2; fi
-    return 1
-  fi
-  [ -f "$2" ] && [ ! -L "$2" ] && [ "$(file_id "$2")" = "$(file_id "$1")" ] || return 1
-}
-
-# Removes path $2 only if it is still private file $1's link.
-unpublish() {
-  [ "$(file_id "$2" 2>/dev/null)" != "$(file_id "$1")" ] || rm -f "$2"
-}
-
 case "${1:-}" in
   backup)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
     mkdir -p "$2"
-    checkout=$(cd "$here/.." && pwd -P)
-    # Real paths, so a symlink can't lead the backup into the checkout; checked again before
-    # the files are published.
-    outside_checkout() {
-      real=$(cd "$1" && pwd -P) || return 1
-      case "$real/" in "$checkout"/*) return 1 ;; esac
-      echo "$real"
-    }
-    dir=$(outside_checkout "$2") || { echo "Back up outside the checkout: image builds copy it." >&2; exit 2; }
+    # Real paths, so a symlink can't lead the backup into the checkout.
+    dir=$(cd "$2" && pwd -P)
+    case "$dir/" in
+      "$(cd "$here/.." && pwd -P)"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;;
+    esac
     take_lock
     # Everything the backup writes is the caller's alone.
     umask 077
-    nonce=$(random_hex)
-    worker="$project-backup-$nonce"
-    # Both files are written in a directory of this backup's own (mktemp: new, 0700, the
-    # caller's), where nothing else can create or swap them, so they're private from the first
-    # byte and can be removed from any directory, a sticky one such as /tmp included.
+    worker="$project-backup-$(random_hex)"
+    # A backup is a directory holding the archive and the .env. It's assembled in a new
+    # private directory beside where it goes, and published with one rename that fails if
+    # anything is at the name, so there's either a whole backup there or none, and nothing
+    # already there is ever replaced. Until then cleanup only ever touches this directory.
     work=$(mktemp -d "$dir/.$project-backup-XXXXXX")
-    running=$(compose ps --services --status running | tr '\n' ' ')
     published=''
+    running=''
     # However it ends, even interrupted while stopping: the archive container goes first, so
-    # nothing still reads the volumes; this backup's directory goes; and what was running
+    # nothing still reads the volumes; the unpublished directory goes; and what was running
     # starts again once any stop still under way in Docker has finished. A second interrupt
     # can't cut this short, no step's failure skips the next, and a server that doesn't start
     # again makes the backup a failure.
@@ -110,7 +95,7 @@ case "${1:-}" in
       status=$?
       trap '' INT TERM HUP
       docker rm -f "$worker" >/dev/null 2>&1 || true
-      rm -rf "$work" || true
+      [ -z "$work" ] || rm -rf "$work" || true
       if [ -n "$running" ]; then
         compose stop >/dev/null 2>&1 || true
         # shellcheck disable=SC2086 # $running is a list of services
@@ -120,14 +105,16 @@ case "${1:-}" in
         fi
       fi
       if [ "$status" = 0 ]; then
-        echo "Backed up $(echo "$volumes" | wc -l | tr -d ' ') volumes of project $project to $published.tgz, and the secrets to $published.env."
-        echo "Both hold private data: keep them encrypted."
+        echo "Backed up project $project to $published (archive.tgz, and the secrets in secrets.env)."
+        echo "It holds private data: keep it encrypted."
       else
         echo "The backup failed." >&2
       fi
       exit "$status"
     }
     trap finish_backup EXIT
+    # One service per line; empty if none is running, so a cold backup starts nothing.
+    running=$(compose ps --services --status running)
 
     volumes=$(project_volumes)
     [ -n "$volumes" ] || { echo "No volumes for project $project." >&2; exit 1; }
@@ -139,12 +126,10 @@ case "${1:-}" in
       mounts="$mounts -v $volume:/volumes/$volume:ro"
       members="$members ./$volume"
     done
-    # Created first, the worker holds every volume; each is then checked to still be this
-    # project's (a volume gone since the listing would have been made anew, unlabelled).
-    # With --init it gets an interrupt, and tar runs in the background so the shell's trap
-    # stops it straight away.
+    # With --init the container gets an interrupt, and tar runs in the background so the
+    # shell's trap stops it straight away.
     # shellcheck disable=SC2086 # $mounts is a list of -v options
-    docker create --init --name "$worker" --log-driver none $mounts \
+    docker run --rm --init --name "$worker" --log-driver none $mounts \
       -e MEMBERS="$members" -e MANIFEST="$manifest" \
       --entrypoint sh "$tool" -c '
         trap "kill \$tar_pid 2>/dev/null; exit 130" INT TERM
@@ -158,81 +143,99 @@ case "${1:-}" in
           done
         } >"$MANIFEST"
         tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
-        wait "$tar_pid"' >/dev/null
-    for volume in $volumes; do
-      [ "$(volume_label "$volume" com.docker.compose.project)" = "$project" ] ||
-        { echo "Volume $volume changed during the backup." >&2; exit 1; }
-    done
-    docker start -a "$worker" >"$work/archive.tgz"
+        wait "$tar_pid"' >"$work/archive.tgz"
     cat "$env_file" >"$work/secrets.env"
 
-    # Published under a name no earlier backup there has, both files or neither: an existing
-    # file is never replaced (a -2, -3... suffix instead), and if the .env can't be published
-    # the archive is taken back.
-    [ "$(outside_checkout "$dir")" = "$dir" ] || { echo "The backup directory moved into the checkout." >&2; exit 1; }
     stamp="$dir/$project-$(date +%Y%m%d-%H%M%S)"
     n=1
-    while :; do
-      name=$stamp
-      [ "$n" = 1 ] || name="$stamp-$n"
-      if publish "$work/archive.tgz" "$name.tgz"; then
-        if publish "$work/secrets.env" "$name.env"; then break; else result=$?; fi
-        unpublish "$work/archive.tgz" "$name.tgz"
-      else
-        result=$?
-      fi
-      [ "$result" = 2 ] || { echo "Couldn't write the backup to $dir." >&2; exit 1; }
+    name=$stamp
+    # `mv -T --no-clobber` renames with RENAME_NOREPLACE: it fails if anything is at the name.
+    until mv -T --no-clobber "$work" "$name" 2>/dev/null; do
+      [ -e "$name" ] || [ -L "$name" ] || { echo "Couldn't publish the backup in $dir." >&2; exit 1; }
       n=$((n + 1))
       [ "$n" -le 100 ] || { echo "No free name for the backup in $dir." >&2; exit 1; }
+      name="$stamp-$n"
     done
+    work=''
     published=$name
     ;;
   restore)
     yes=0
     [ "${2:-}" != --yes ] || { yes=1; shift; }
-    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis restore [--yes] <archive.tgz>" >&2; exit 2; }
-    [ -f "$2" ] || { echo "No archive at $2." >&2; exit 1; }
-    archive_dir=$(cd "$(dirname "$2")" && pwd -P)
-    archive_name=$(basename "$2")
+    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis restore [--yes] <backup directory or archive.tgz>" >&2; exit 2; }
+    source=$2
+    [ ! -d "$source" ] || source="$source/archive.tgz"
+    # Anything readable once will do, a pipe included: it's opened a single time, below.
+    { [ -r "$source" ] && [ ! -d "$source" ]; } || { echo "No archive at $source." >&2; exit 1; }
     take_lock
     damaged() {
-      echo "$2 can't be restored: $1. Nothing was changed." >&2
+      echo "$source can't be restored: $1. Nothing was changed." >&2
       exit 1
     }
 
-    # What this restore makes is named, and labelled under keys, by a nonce of its own:
-    # trioditis.restore.<nonce>.staging on its temporary volumes, .created on any target it
-    # creates. Cleanup removes volumes only with `docker volume prune --filter label=<key>`,
-    # which Docker matches itself, so a volume without this restore's key is never touched.
-    # (Docker's prune ignores a label's value, so the nonce is in the key.)
+    # What this restore makes is named and labelled by a nonce of its own, under label keys
+    # that carry it: .staging on its temporary volumes, .rollback on the copies of the
+    # targets' previous contents, .created on any target it creates. Cleanup removes volumes
+    # only by `docker volume prune --filter label=<key>`, so a volume without this restore's
+    # key is never touched.
     nonce=$(random_hex)
     suffix="restore-$nonce"
     worker="$project-$suffix"
-    holder="$project-$suffix-archive"
     staging_label="trioditis.restore.$nonce.staging"
+    rollback_label="trioditis.restore.$nonce.rollback"
     created_label="trioditis.restore.$nonce.created"
     archive_volume="$project-$suffix-archive"
-    restored=0
-    # However it ends: the containers go first (they hold the volumes), then this restore's
-    # temporary volumes, and the targets it created unless the restore finished.
+    volumes=''
+    created=''
+    started=0
+    # However it ends. A worker that's running is waited for, not killed: after an interrupt
+    # it puts the previous contents back before it exits. Its exit says what happened, and so
+    # what to keep: the restored targets after a success, the copies of the previous contents
+    # if they couldn't be put back.
     finish_restore() {
       status=$?
       trap '' INT TERM HUP
-      docker rm -f "$worker" "$holder" >/dev/null 2>&1 || true
+      code=''
+      [ "$started" = 0 ] || code=$(docker wait "$worker" 2>/dev/null || echo lost)
+      docker rm -f "$worker" >/dev/null 2>&1 || true
+      keep_rollback=0
+      keep_created=0
+      case "$code" in
+        '') ;;
+        0)
+          status=0
+          keep_created=1
+          echo "Restored. Check deploy/.env is the secrets.env saved with this backup, then run deploy/install/install.sh to start the server."
+          ;;
+        3) status=1 && echo "The archive didn't extract as its manifest says. The volumes weren't changed; the server is stopped." >&2 ;;
+        5) status=1 && echo "The volumes to restore changed. They weren't changed; the server is stopped." >&2 ;;
+        8) status=1 && echo "Couldn't save a copy of the volumes' current contents (is the disk full?), so nothing was changed; the server is stopped." >&2 ;;
+        9) status=1 && echo "Interrupted before anything was changed; the server is stopped." >&2 ;;
+        6) status=1 && echo "Replacing the volumes' contents failed or was interrupted, so their previous contents were put back. The server is stopped; deploy/trioditis up -d starts it as it was." >&2 ;;
+        *)
+          status=1
+          keep_rollback=1
+          echo "Replacing the volumes' contents failed, and putting their previous contents back failed too (or the restore was stopped). Their previous contents are kept in these volumes; put each back with the command beside it (on a writable disk), then remove the copies:" >&2
+          # Not the targets this restore created: they had nothing before, and go below.
+          for volume in $volumes; do
+            case " $created " in *" $volume "*) continue ;; esac
+            echo "  docker run --rm -v $volume-$suffix-rollback:/from:ro -v $volume:/to --entrypoint sh $tool -c 'find /to -mindepth 1 -delete && cp -a /from/. /to/'" >&2
+          done
+          echo "  docker volume prune -af --filter label=$rollback_label" >&2
+          ;;
+      esac
       docker volume prune -af --filter "label=$staging_label" >/dev/null 2>&1 || true
-      [ "$restored" = 1 ] || docker volume prune -af --filter "label=$created_label" >/dev/null 2>&1 || true
+      [ "$keep_rollback" = 1 ] || docker volume prune -af --filter "label=$rollback_label" >/dev/null 2>&1 || true
+      [ "$keep_created" = 1 ] || docker volume prune -af --filter "label=$created_label" >/dev/null 2>&1 || true
       exit "$status"
     }
     trap finish_restore EXIT
 
-    # The archive is copied once into a volume of this restore's own, held by a container from
-    # just after it's created, and only that copy is read from here on, so a file changed after
-    # it's checked can't be the one applied.
+    # The archive is opened once, by this shell, and streamed into a volume of this restore's
+    # own; only that copy is read from here on.
     docker volume create --label "$staging_label=1" "$archive_volume" >/dev/null
-    docker create --name "$holder" -v "$archive_volume:/archive" "$tool" >/dev/null
-    [ "$(volume_label "$archive_volume" "$staging_label")" = 1 ] || { echo "Volume $archive_volume isn't this restore's." >&2; exit 1; }
-    docker run --rm --log-driver none -v "$archive_dir:/source:ro" -v "$archive_volume:/archive" \
-      -e NAME="$archive_name" --entrypoint sh "$tool" -c 'cp "/source/$NAME" /archive/archive.tgz'
+    docker run --rm -i --log-driver none -v "$archive_volume:/archive" --entrypoint sh "$tool" \
+      -c 'cat >/archive/archive.tgz' <"$source"
 
     # The whole copy is checked before anything changes: its compression, a full listing, and
     # the manifest, which must be its last entry. The manifest names the volumes.
@@ -242,21 +245,20 @@ case "${1:-}" in
         gzip -t "$archive" && tar -tzf "$archive" >/tmp/list || exit 1
         [ "$(tail -1 /tmp/list)" = "./$MANIFEST" ] || exit 2
         tar -xzOf "$archive" "./$MANIFEST" && echo "dirs $(sed -n "s#^\./\([^/][^/]*\)/.*#\1#p" /tmp/list | sort -u | tr "\n" " ")"' 2>/dev/null); then
-      damaged "it's damaged, cut short, or not a backup from deploy/trioditis backup" "$2"
+      damaged "it's damaged, cut short, or not a backup from deploy/trioditis backup"
     fi
-    [ "$(echo "$listing" | head -1)" = "trioditis-backup 1" ] || damaged "its manifest isn't one this version reads" "$2"
+    [ "$(echo "$listing" | head -1)" = "trioditis-backup 1" ] || damaged "its manifest isn't one this version reads"
     volumes=$(echo "$listing" | awk '$1 == "volume" { print $2 }' | sort)
-    [ -n "$volumes" ] || damaged "its manifest lists no volumes" "$2"
+    [ -n "$volumes" ] || damaged "its manifest lists no volumes"
     volume_list=$(echo "$volumes" | tr '\n' ' ')
     [ "$volume_list" = "$(echo "$listing" | awk '$1 == "dirs" { $1 = ""; print }' | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ')" ] ||
-      damaged "its contents don't match its manifest" "$2"
+      damaged "its contents don't match its manifest"
 
     # Each must be one of this project's volumes: the name past the project must be one of the
     # bundle's (so project "a" never takes project "a_b"'s). A missing one is created now,
-    # labelled as Compose labels its own (so it adopts it) and with this restore's key; each
-    # gets a fresh staging volume.
+    # labelled as Compose labels its own (so it adopts it) and with this restore's key. Each
+    # gets a staging volume for the archive's copy and a rollback volume for its own.
     mounts="-v $archive_volume:/archive:ro"
-    created=''
     for volume in $volumes; do
       case "$volume" in
         "${project}_"*) key=${volume#"${project}"_} ;;
@@ -264,7 +266,7 @@ case "${1:-}" in
       esac
       case "$key" in
         postgres | convex | caddy-data | caddy-config | bridge-*) ;;
-        *) echo "$2 holds volume $volume, which isn't project $project's. Restore it from the checkout of the install it came from." >&2; exit 1 ;;
+        *) echo "$source holds volume $volume, which isn't project $project's. Restore it from the checkout of the install it came from." >&2; exit 1 ;;
       esac
       if ! docker volume inspect "$volume" >/dev/null 2>&1; then
         docker volume create --label "com.docker.compose.project=$project" \
@@ -272,18 +274,29 @@ case "${1:-}" in
         created="$created $volume"
       fi
       docker volume create --label "$staging_label=1" "$volume-$suffix" >/dev/null
-      mounts="$mounts -v $volume:/target/$volume -v $volume-$suffix:/staging/$volume"
+      docker volume create --label "$rollback_label=1" "$volume-$suffix-rollback" >/dev/null
+      mounts="$mounts -v $volume:/target/$volume -v $volume-$suffix:/staging/$volume -v $volume-$suffix-rollback:/rollback/$volume"
     done
 
-    # One worker does it all, from the private copy: it checks the targets are exactly the
+    # One worker does it all, from the private copy. It checks the targets are exactly the
     # manifest's volumes; extracts into the staging volumes and checks each against the
-    # manifest; and only then replaces each volume's contents with its staged copy, owner and
-    # mode included. Created now, before anything is checked, it holds every volume, so what's
-    # checked below is what it writes.
+    # manifest; copies each target's current contents into its rollback volume; and only then
+    # replaces each target's contents, owner and mode included. If any replacement fails or
+    # it's interrupted, it puts every target's previous contents back. Created now, before
+    # anything is checked, it holds every volume, so what's checked below is what it writes.
     # shellcheck disable=SC2086 # $mounts is a list of -v options
     docker create --init --name "$worker" --log-driver none $mounts \
       -e MANIFEST="$manifest" -e VOLUMES="$volume_list" --entrypoint sh "$tool" -c '
+        interrupted=0
+        trap "interrupted=1" INT TERM
         archive=/archive/archive.tgz
+        # Makes directory $2 a copy of $1: contents, and the owner and mode of $2 itself.
+        copy() {
+          find "$2" -mindepth 1 -delete &&
+            cp -a "$1/." "$2/" &&
+            chown "$(stat -c %u:%g "$1")" "$2" &&
+            chmod "$(stat -c %a "$1")" "$2"
+        }
         [ "$(ls /target | sort | tr "\n" " ")" = "$VOLUMES" ] || { echo "The volumes to restore changed." >&2; exit 5; }
         tar -xzf "$archive" -C /staging || { echo "Extracting the archive failed." >&2; exit 3; }
         [ "$(awk "\$1 == \"volume\" { print \$2 }" "/staging/$MANIFEST" | sort | tr "\n" " ")" = "$VOLUMES" ] || exit 3
@@ -296,23 +309,29 @@ case "${1:-}" in
             exit 3
           fi
         done <"/staging/$MANIFEST"
-        echo "Extracted and checked; replacing the volumes'"'"' contents."
+        [ "$interrupted" = 0 ] || exit 9
+        echo "Extracted and checked; saving the volumes'"'"' current contents."
         for volume in $VOLUMES; do
-          target=/target/$volume
-          staged=/staging/$volume
-          find "$target" -mindepth 1 -delete &&
-            cp -a "$staged/." "$target/" &&
-            chown "$(stat -c %u:%g "$staged")" "$target" &&
-            chmod "$(stat -c %a "$staged")" "$target" || exit 4
+          copy "/target/$volume" "/rollback/$volume" || exit 8
+          [ "$interrupted" = 0 ] || exit 9
+        done
+        echo "Replacing the volumes'"'"' contents."
+        for volume in $VOLUMES; do
+          if ! copy "/staging/$volume" "/target/$volume" || [ "$interrupted" = 1 ]; then
+            echo "Putting the previous contents back." >&2
+            for previous in $VOLUMES; do copy "/rollback/$previous" "/target/$previous" || exit 7; done
+            exit 6
+          fi
         done' >/dev/null
-    # Now held, every volume is checked: each target carries Compose's labels for this project
-    # and that volume (one this restore created also its key, so another that appeared under
-    # its name first is refused), and every staging volume is this restore's.
+    # Now held, each target must carry Compose's labels for this project and that volume; one
+    # this restore created must also carry its key (another that appeared under its name
+    # first doesn't).
     for volume in $volumes; do
       key=${volume#"${project}"_}
       labels="$(volume_label "$volume" com.docker.compose.project)|$(volume_label "$volume" com.docker.compose.volume)"
       if [ "$labels" != "$project|$key" ]; then
         echo "Volume $volume isn't this install's (its Compose project and volume labels are '$labels', not '$project|$key'). Nothing was changed." >&2
+        [ "$labels" != '|' ] || echo "If it's empty, Docker made it just now because it was removed during the restore: remove it (docker volume rm $volume) and run the restore again." >&2
         exit 1
       fi
       case " $created " in
@@ -321,8 +340,6 @@ case "${1:-}" in
             { echo "Volume $volume appeared while this restore was creating it. Nothing was changed." >&2; exit 1; }
           ;;
       esac
-      [ "$(volume_label "$volume-$suffix" "$staging_label")" = 1 ] ||
-        { echo "Volume $volume-$suffix isn't this restore's. Nothing was changed." >&2; exit 1; }
     done
 
     echo "This replaces the contents of: $volume_list"
@@ -333,17 +350,9 @@ case "${1:-}" in
       [ "$answer" = y ] || [ "$answer" = Y ] || exit 1
     fi
     compose --profile '*' down
-    if docker start -a "$worker"; then
-      restored=1
-      echo "Restored. Check deploy/.env is the one saved with this backup, then run deploy/install/install.sh to start the server."
-    else
-      case "$(docker inspect -f '{{.State.ExitCode}}' "$worker" 2>/dev/null)" in
-        3) echo "The archive didn't extract as its manifest says. The volumes weren't changed; the server is stopped." >&2 ;;
-        5) echo "The volumes to restore changed. They weren't changed; the server is stopped." >&2 ;;
-        *) echo "The restore stopped while replacing the volumes' contents, so they're incomplete. The archive is intact: run the restore again." >&2 ;;
-      esac
-      exit 1
-    fi
+    started=1
+    # Its outcome is reported, and acted on, by finish_restore.
+    docker start -a "$worker" || true
     ;;
   create-admin)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis create-admin <email>" >&2; exit 2; }

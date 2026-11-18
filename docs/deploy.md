@@ -56,6 +56,11 @@ Every option is saved in `deploy/.env` and kept on later runs, so a rerun with n
 leaves the install as it is, and an option changes only its own setting. See
 [Upgrade](#upgrade).
 
+`deploy/.env` is the only source of the install's settings and secrets: the installer and
+`deploy/trioditis` drop any exported variable of the same name (and Compose's own), so the
+running server always matches the file a backup saves. To change one, such as the setup
+token, edit `deploy/.env` and run the installer again; the new value replaces the saved one.
+
 ### Local mode
 
 The default. Caddy serves plain HTTP on a port, with no domain and no certificates, for a
@@ -236,53 +241,87 @@ Proxmox, use encrypted storage for the VM. Encrypting those connector tables wit
 ## Backup and restore
 
 Fuller `backup` and `restore` commands (online, encrypted, scheduled) are Phase 1. For now,
-`deploy/trioditis` takes a consistent archive while the server is stopped:
+`deploy/trioditis` takes a consistent backup while the server is stopped:
 
 ```sh
 deploy/trioditis backup ~/trioditis-backups
 ```
 
-It takes a lock in `deploy/` (the installer takes it too), so only one backup, restore or
-install of the install runs at a time.
-It stops the server, archives every Docker volume of this install's Compose project (found
-by the label Compose gives them, so it never takes another install's, and it includes the
-volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
-was running. The two files are `<project>-<date>-<time>.tgz` and `.env` (with `-2`, `-3`…
-added rather than replace earlier ones), yours and readable only by you from the start, in
-any directory (`/tmp` included). Both are written in a private directory of the backup's own
-and only published once complete, as links that fail rather than replace anything already at
-the name (a file, a directory or a link), and always as a pair: if the `.env` can't be
-published, the archive is taken back. The archive's last entry is a manifest of
-every volume with its number of entries and bytes. An interrupted backup (Ctrl-C), even while
-the server is still stopping, leaves no archive behind and starts again what was running;
-if the server doesn't start again, the backup counts as failed.
-The directory must be outside the checkout, symlinks resolved: image builds copy the
-checkout, and a backup outside it can't end up in an image or a commit by mistake.
+A backup is a directory, `<project>-<date>-<time>` (with `-2`, `-3`… added rather than
+replace an earlier one), readable only by you, holding `archive.tgz` (every Docker volume of
+this install's Compose project, found by the label Compose gives them, so never another
+install's, and including the volume of a network you've dropped) and `secrets.env` (a copy
+of `deploy/.env`). The archive's last entry is a manifest of every volume with its number of
+entries and bytes. The backup stops the server, writes both files in a private directory
+beside the destination, publishes it with one rename that fails rather than replace anything
+at the name, and starts again what was running. So there's either a whole backup at the
+name or none: an interrupted backup (Ctrl-C), even while the server is still stopping,
+leaves nothing behind, and if the server doesn't start again the backup counts as failed. The
+destination must be outside the checkout (symlinks resolved): image builds copy the checkout.
 
-To restore, put the `.env` saved with the backup back as `deploy/.env` in a checkout of the
-same version, then:
+To restore, put the backup's `secrets.env` back as `deploy/.env` in a checkout of the same
+version, then:
 
 ```sh
-deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>.tgz
+deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>
 deploy/install/install.sh
 ```
 
-`restore` first copies the archive into a volume of its own and reads only that copy, so a
-file changed afterwards can't be the one applied. It checks the whole copy before it changes
-anything, and refuses one that's damaged or cut short (its manifest must be its last entry),
-one whose volumes belong to another project, or one that would overwrite an existing volume
-Compose didn't label as this install's. It creates any missing volume itself, labelled with a
-key unique to this restore. Before it checks any volume, one worker container already holds
-them all (Docker won't remove or replace a volume a container uses), so the volumes it checks
-are the ones it writes. It asks before it stops the server (`--yes` skips the question).
-Then the worker extracts into temporary volumes, checks every volume against the manifest,
-and only then replaces the volumes' contents. So a bad archive never costs the data you
-have. Whatever happens, it removes only volumes carrying its own key: its temporary ones,
-and the ones it created unless the restore finished. That needs free space for two more
-copies of the data while it runs (the archive's and the extracted one). Archives from before
-the manifest can't be restored this way. Keep backups
-encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
-server has.
+`restore` (which also takes an `archive.tgz` directly) reads the archive once and streams it
+into a volume of its own, and works only from that copy. It checks the whole copy before
+anything changes, and refuses one that's damaged or cut short (its manifest must be its last
+entry), one whose volumes belong to another project, or one that would overwrite a volume
+Compose didn't label as this install's. It creates any missing volume itself. Before it
+checks any volume, one worker container already holds them all (Docker won't remove or
+replace a volume a container uses), so the volumes it checks are the ones it writes. It asks
+before it stops the server (`--yes` skips the question). Then the worker extracts into
+temporary volumes, checks every volume against the manifest, saves a copy of each volume's
+current contents, and only then replaces them. If replacing any of them fails (a full or
+read-only disk) or is interrupted, it puts every volume's previous contents back. If even
+that fails, it keeps the copies and prints, for each volume, the command that puts it back.
+That needs free space for three more copies of the data while it runs (the archive's, the
+extracted one, and the copy of what's there). It removes only volumes labelled with a key of
+its own (`trioditis.restore.<nonce>.…`). Archives from before the manifest can't be restored
+this way. Keep backups encrypted: they contain the connector state above, and `secrets.env`
+holds every secret the server has.
+
+Backup, restore and the installer take a lock in `deploy/`, so only one of them runs at a
+time for an install.
+
+### What backup and restore guard against
+
+The checkout and the backup directory must be writable only by you, the operator. Within
+that, backup and restore are built to stay safe through your own mistakes, a second
+`deploy/trioditis` or installer run at the same time, other Compose projects on the same
+Docker, interrupts, full disks and read-only filesystems, and steps that fail partway. They
+don't guard against a hostile process running as your user that rewrites paths while they
+run: anything that can do that can already read and change the install.
+
+### Testing the bundle
+
+`deploy/test/` checks the guarantees above, and the installer's file handling:
+
+```sh
+deploy/test/run.sh          # all of them, about five minutes; or one, e.g. deploy/test/restore-failure.sh
+```
+
+Each test makes its own throwaway install directory and Compose project
+(`trioditis-test-<random>`) with volumes it fills itself, so it builds and starts nothing and
+never touches an install; it removes everything it made when it ends. They need Docker (run
+them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alpine image
+(pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
+`docker` and needs none of that.
+
+| Test                  | What it checks                                                                                                                                                          |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `restore-failure.sh`  | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps the copies and says how to put them back |
+| `restore-archive.sh`  | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                    |
+| `backup-publish.sh`   | A cold backup works and starts nothing; a taken name moves the backup to the next one; Ctrl-C while it streams leaves nothing behind                                    |
+| `env-source.sh`       | Exported variables don't override `deploy/.env` for Compose                                                                                                             |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value                  |
+
+`TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
+a test against another version of `deploy/trioditis` (or `install.sh`).
 
 ## Proxmox
 
