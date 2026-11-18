@@ -153,11 +153,10 @@ function authRouteOf(path: string) {
 
 export function routePattern(path: string) {
   // As better-call's router: `:name` is one segment, a final `*` one segment or none, and
-  // `**` any number of segments, none included. Empty segments (`//`, a trailing `/`) match
-  // nothing.
-  const pattern = path
-    .split('/')
-    .filter((segment) => segment !== '')
+  // `**` any number of segments, none included. Empty segments (`//`, or a trailing `/` the
+  // route doesn't declare) match nothing; one it does declare must be there.
+  const segments = path.split('/').filter((segment) => segment !== '')
+  const pattern = segments
     .map((segment, index, all) => {
       if (segment === '**') return '(?:/[^/]+)*'
       if (segment === '*') return index === all.length - 1 ? '(?:/[^/]+)?' : '/[^/]+'
@@ -165,7 +164,7 @@ export function routePattern(path: string) {
       return `/${segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
     })
     .join('')
-  return new RegExp(`^${pattern}$`)
+  return new RegExp(`^${pattern}${path.length > 1 && path.endsWith('/') ? '/' : ''}$`)
 }
 
 /**
