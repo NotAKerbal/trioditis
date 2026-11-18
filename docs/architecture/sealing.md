@@ -148,13 +148,21 @@ history until it is imported), whatsmeow's contacts, and whatsmeow's decrypted-e
 (`whatsmeow_event_buffer`). That buffer holds each incoming WhatsApp message's decrypted
 protobuf (content included) from decryption until the bridge host has journaled it sealed
 (usually moments; at most bridgev2's 5-minute handler limit), and whatsmeow then clears the
-plaintext. It stays only if
-handling failed or the process stopped in between: until WhatsApp redelivers the message
-(it wasn't acknowledged) and it is bridged, or for at most 14 days, after which the row is
-deleted. It is kept on purpose: a message can be decrypted only once, so without it a crash
-mid-message would lose that message. See the bridge host README, Plaintext at rest.
+plaintext. It is kept on purpose: a message can be decrypted only once, so without it a
+crash mid-message would lose that message. Plaintext stays in a row only when:
+
+- handling failed, or the process stopped before it finished: the message wasn't
+  acknowledged, so WhatsApp redelivers it, and the buffered copy is bridged and cleared then;
+- clearing the plaintext failed with a database error: whatsmeow still acknowledges the
+  message, so no redelivery clears it.
+
+Either way the row is deleted, plaintext and all, once it is about 14 days old (WhatsApp's
+redelivery window), checked hourly by the bridge host. One case loses a message rather than
+keeping it: after bridgev2's 5-minute handler limit it reports success while handling
+carries on in the background, so whatsmeow clears the plaintext and acknowledges the
+message; if the process stops before the sealed event is journaled, WhatsApp doesn't
+redeliver it. See the bridge host README, Plaintext at rest.
 
 **Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
-encrypted backups**; the
-installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
+encrypted backups**; the installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
 columns are sealed with a server-held key. See docs/PLAN.md, Open questions.

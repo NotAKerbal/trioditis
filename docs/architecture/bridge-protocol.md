@@ -192,9 +192,10 @@ and on login commands, and may be on others.
   open and that acknowledgement never comes, every send on the login waits indefinitely
   (until the chat is deleted, the login disconnects again, or the bridge host stops), and a
   send waiting behind it is transmitted, after `notAfter`, once the lock clears. A late
-  transmission is reported as what happened, never as `expired`: `sent` once the network
-  confirms it (even after the send was marked `unknown`), or `unknown` if no outcome
-  arrives. Closing this needs a pre-send hook in bridgev2 or the connector, and a bounded
+  transmission is reported as what happened, never as `expired`: `sent` if the network
+  confirms it while the bridge host still remembers the send (even after it was marked
+  `unknown`, for up to an hour after its chat was released without an outcome), and
+  otherwise `unknown`. Closing this needs a pre-send hook in bridgev2 or the connector, and a bounded
   retransmit wait in whatsmeow (bridge host README, Known follow-ups).
 
 ## Errors
@@ -261,5 +262,10 @@ The bridge host caches the response for 60 seconds. A person with no identity ke
 (signed up but not finished device setup) gets `409`, and `loginStart` for them is
 refused, so no network events can exist for someone the bridge host can't seal to.
 
-The bridge host's journal stores events **after** sealing. Plaintext content is never
-written to disk.
+The bridge host's journal stores events **after** sealing: the bridge host itself never
+writes plaintext content to its journal or its own tables. The network connectors' own
+storage, in the same database, is the exception: bridgev2's chat and contact tables, and for
+WhatsApp its history-sync table and whatsmeow's decrypted-event buffer, which holds an
+incoming message's plaintext until it is journaled and, after a failure, for up to about 14
+days. See `sealing.md`, What else is stored in plaintext, and the bridge host README,
+Plaintext at rest.

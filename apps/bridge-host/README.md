@@ -287,7 +287,9 @@ suite. WhatsApp additionally uses:
   called with timeout 0, `request.go`), still holding the lock: if the new connection stays
   up and the acknowledgement never comes, every chat on that login waits indefinitely, and a
   send queued behind it transmits after `notAfter` once the lock clears. A late send is
-  reported truthfully: `sent` when the network confirms it, else `unknown`, never `expired`.
+  reported truthfully, never as `expired`: `sent` if the network confirms it while the host
+  still remembers the send (up to an hour after its chat was released without an outcome),
+  else `unknown`.
 - **whatsmeow resends a frame after a disconnect.** If the connection drops after a message
   frame went out but before WhatsApp acknowledged it, whatsmeow waits up to 5 seconds for a
   reconnect and sends the same frame again, with the same message ID, inside the same
@@ -326,12 +328,18 @@ suite). But the connectors' own storage, in the same database, does:
   redelivers it (it isn't acknowledged until it is handled). Turning it off would lose that
   message. The row is written in the decrypting transaction and its plaintext cleared as soon
   as the handler returns, which is once the message is journaled sealed (usually moments; at
-  most bridgev2's 5-minute handler limit, after which bridgev2 reports success and carries
-  on). Plaintext stays only after a failure or crash in between, until the redelivery is
-  bridged, or at most 14 days (WhatsApp's redelivery window), when whatsmeow deletes the row;
-  `run` does that sweep at start-up too, rather than waiting for the next message. A row
-  can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a
-  row without plaintext makes whatsmeow drop the redelivery as already handled. Outgoing
+  most bridgev2's 5-minute handler limit). Plaintext stays in a row only when handling failed
+  or the process stopped in between (the message wasn't acknowledged, so WhatsApp redelivers
+  it, and the redelivery is bridged and cleared), or when clearing it failed with a database
+  error (whatsmeow logs it and still acknowledges the message, so nothing clears it). Either
+  way the row is deleted once it is about 14 days old (WhatsApp's redelivery window): whatsmeow
+  sweeps only after an incoming message, at most every 12 hours, so the host runs the same
+  sweep itself, at start-up and hourly (`internal/wabuffer`), and stops it on shutdown. A row
+  can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a row
+  without plaintext makes whatsmeow drop the redelivery as already handled. One case loses a
+  message instead: after its 5-minute handler limit bridgev2 reports success while handling
+  carries on in the background, so whatsmeow clears the plaintext and acknowledges; if the
+  process stops before the sealed event is journaled, WhatsApp doesn't redeliver it. Outgoing
   messages kept for retry receipts stay in memory (`use_whatsapp_retry_store` is off).
 - A connector's media conversion can write a replacement file (for example a converted
   voice note) wherever the connector chooses; the host reads and removes it, but doesn't
@@ -362,8 +370,9 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   only, sealing those columns with a server key, or patching connectors.
 - **Explicit WhatsApp backfill.** Re-enable "load older" for WhatsApp once fetching a range
   can't prune outside it (an upstream change, or a guard around its history store).
-- **Live checks.** WhatsApp pairing, messaging and history, and the conformance suite on
-  PostgreSQL (`TRIODITIS_TEST_POSTGRES_URI`), haven't been run.
+- **Live checks.** WhatsApp pairing, messaging and history haven't been run. On PostgreSQL,
+  `TestPostgres` (the core flow) has passed on PostgreSQL 16.15 and 17.7; the rest of the
+  conformance suite hasn't been run there.
 - **Deadline at transmission.** `notAfter` is checked at hand-off with an 11-minute margin,
   and for media again when the attachment is read; after that it is best effort. Enforcing
   it at the moment of transmission needs a pre-send hook in bridgev2 that takes a deadline
