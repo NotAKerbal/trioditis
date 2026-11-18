@@ -98,6 +98,17 @@ async function endSession(token: string): Promise<boolean> {
   }
 }
 
+/**
+ * Stops saves of `userId`'s key for `sessionId`, in every tab, removing nothing: the first step
+ * of signing out from setup, taken before anything is waited on (see KeyGate). False if it
+ * couldn't be recorded.
+ */
+export const fenceSession = (userId: string, sessionId: string) =>
+  forgetFirmly(userId, { onlyKid: null, endingSession: sessionId }).then(
+    () => true,
+    () => false,
+  )
+
 /** Forgets the key, trying a few times: storage that fails once may not the next time. */
 async function forgetFirmly(userId: string, options: Parameters<typeof forgetIdentity>[1]) {
   for (let attempt = 1; ; attempt++) {
@@ -144,6 +155,12 @@ export async function signOut(
     // A save under way could still land after the session ends, so it isn't ended.
     return SIGN_OUT_UNSTORED
   }
+  // Noted as the page opened (waiting for that if it's still on its way); never asked for now,
+  // when a read could set the cookie back to this session after another tab signed in. Without
+  // it nothing more is asked of anyone.
+  await noting.get(sessionId)
+  const token = tokens.get(sessionId)
+  if (!token) return SIGN_OUT_SWITCHED
   // Fenced now, so the key here is the last one that will be: forget it too if its backups have
   // turned out to exist meanwhile (another tab may have finished them, then unlocked).
   if (onlyKid === null && backedUpKid) {
@@ -154,11 +171,6 @@ export async function signOut(
       unconfirmed = true
     }
   }
-  // Noted as the page opened (waiting for that if it's still on its way); never asked for now,
-  // when a read could set the cookie back to this session after another tab signed in.
-  await noting.get(sessionId)
-  const token = tokens.get(sessionId)
-  if (!token) return SIGN_OUT_SWITCHED
   if (!(await endSession(token))) return SIGN_OUT_FAILED
   tokens.delete(sessionId)
   announceAccountChange()

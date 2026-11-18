@@ -2,6 +2,9 @@ import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { Link, Navigate, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { KeyRound } from 'lucide-react'
+import { convexQuery } from '@convex-dev/react-query'
+import { api } from '@trioditis/backend/api'
+import { useQuery } from '@tanstack/react-query'
 import { useConvexAuth } from 'convex/react'
 import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
@@ -23,7 +26,10 @@ function SignIn() {
 
   // Signed in already, in another tab (which reloaded this one, lib/account-tabs.ts): the app
   // is where this tab belongs now.
+  // Only a session the server still has counts (members.me), not a Convex token that hasn't
+  // expired yet: one whose session just ended stays here.
   const { isAuthenticated } = useConvexAuth()
+  const me = useQuery(convexQuery(api.members.me, isAuthenticated ? {} : 'skip'))
   async function withPassword(event: React.FormEvent) {
     event.preventDefault()
     setBusy('password')
@@ -58,7 +64,7 @@ function SignIn() {
     await navigate({ to: '/' })
   }
 
-  if (isAuthenticated) return <Navigate to="/" />
+  if (isAuthenticated && me.data) return <Navigate to="/" />
 
   return (
     <AuthCard

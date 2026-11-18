@@ -106,7 +106,8 @@ export function ChatRow({
           </span>
           <span className="mt-0.5 flex items-center gap-1.5">
             <span className={cn('truncate text-sm', unread ? 'text-muted-foreground' : 'text-subtle-foreground')}>
-              {preview ??
+              {/* With previews off, nothing a message says: a scheduled one's text included. */}
+              {(prefs.previews ? preview : undefined) ??
                 (line.kind === 'draft' ? (
                   <>
                     <span className="font-medium text-danger">Draft:</span> {line.text}

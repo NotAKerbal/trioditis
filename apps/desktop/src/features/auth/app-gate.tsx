@@ -22,11 +22,11 @@ import { ConvexHttpClient } from 'convex/browser'
 import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
-import { authClient } from '~/lib/auth-client.ts'
+import { authClient, convexTokenFor } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { currentSessionId, rememberSession, signOut } from '~/lib/sign-out.ts'
+import { currentSessionId, fenceSession, rememberSession, SIGN_OUT_UNSTORED, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -94,8 +94,12 @@ function MemberGate({ children }: { children: ReactNode }) {
   }, [sessionId])
   if (opened.current && sessionId && opened.current !== sessionId) return <Splash />
   if (me.isPending) return <Splash />
-  // The session Convex was given has ended.
-  if (!me.data) return <Navigate to="/sign-in" />
+  // The session Convex was given has ended. Loaded afresh, the page asks for a token again and
+  // finds none, rather than going on with the one it holds until it expires.
+  if (!me.data) {
+    window.location.assign('/sign-in')
+    return <Splash />
+  }
   if (!me.data.member) {
     return (
       <AuthCard
@@ -171,8 +175,8 @@ function KeyGate({
   const acked = useRef(new Set<string>())
 
   // Signing out from setup or unlock is the gate's, shown ahead of everything else here, so
-  // nothing (setup finishing, the app opening) takes its screen while it runs. It waits a little
-  // for a backup call under way, then forgets this device's key if its backups are known to
+  // nothing (setup finishing, the app opening) takes its screen while it runs. It stops saves for
+  // this session first, then waits a little for a backup call under way, then forgets this device's key if its backups are known to
   // exist, from setup's own answer or from the server for this key; unsure, it keeps it (it may
   // be the only copy). From then on no tab keeps a key for this session (lib/keys.ts).
   // If it fails, going back reloads the page, to start again from what's really there.
@@ -195,6 +199,13 @@ function KeyGate({
     leavingRef.current = true
     leavingFor.current = keyKid
     setLeaving('running')
+    // Saves for this session stop first, in every tab, before anything is waited on: if this page
+    // goes away meanwhile (another tab's sign-in reloads it), no key lands after the sign-out began.
+    if (!(await fenceSession(userId, sessionId))) {
+      leavingFailure.current = SIGN_OUT_UNSTORED
+      setLeaving('failed')
+      return
+    }
     await settled(backup.current.call)
     const server = remoteNow.current
     const backedUp =
@@ -347,30 +358,19 @@ async function backedUpNow(sessionId: string): Promise<string | null> {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error('the server didn’t answer in time')), LEAVE_WAIT_MS),
   )
-  // Asked of the server itself: the app's client would answer from its live subscription,
-  // which can still hold the state from before another tab finished the backups.
+  // Asked of Convex itself: the app's client would answer from its live subscription, which can
+  // still hold the state from before another tab finished the backups. Asked as the page's own
+  // session, with the Convex token it was already given for it: nothing goes to the auth server,
+  // so no answer can set a cookie, and another tab's sign-in since changes nothing here.
   const read = async () => {
-    const { data } = await authClient.convex.token({ fetchOptions: { throw: false } })
-    if (!data?.token) throw new Error('this page isn’t signed in to the server any more')
-    // Only an answer for the page's own session counts: another tab may have signed in since.
-    if (tokenSession(data.token) !== sessionId) throw new Error('the signed-in session has changed')
+    const token = convexTokenFor(sessionId)
+    if (!token) throw new Error('this page has no token for its session')
     const http = new ConvexHttpClient(config.convexUrl)
-    http.setAuth(data.token)
+    http.setAuth(token)
     return http.query(api.keys.identity, {})
   }
   const identity = await Promise.race([read(), timeout])
   return identity.state === 'ready' ? identity.kid : null
-}
-
-/** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */
-function tokenSession(jwt: string): string | null {
-  try {
-    const payload = jwt.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/')
-    const claims = JSON.parse(atob(payload)) as { sessionId?: unknown }
-    return typeof claims.sessionId === 'string' ? claims.sessionId : null
-  } catch {
-    return null
-  }
 }
 
 /** What key setup is for: a new key, or the missing backups of one this device holds. */

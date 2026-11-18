@@ -17,10 +17,36 @@ export const authClient = createAuthClient({
       const seconds = Number(response.headers.get('Retry-After'))
       retryAfter = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null
     },
+    // Each Convex token the app is given (the provider asks through this client), kept by the
+    // session it names, so a later read can use the page's own without asking again.
+    onSuccess: ({ request, data }) => {
+      const token = (data as { token?: unknown } | null)?.token
+      if (!String(request.url).includes('/convex/token') || typeof token !== 'string') return
+      const session = tokenSession(token)
+      if (session) convexTokens.set(session, token)
+    },
   },
 })
 
 let retryAfter: number | null = null
+const convexTokens = new Map<string, string>()
+
+/** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */
+export function tokenSession(jwt: string): string | null {
+  try {
+    const payload = jwt.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(payload)) as { sessionId?: unknown }
+    return typeof claims.sessionId === 'string' ? claims.sessionId : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The latest Convex token this page was given for `sessionId`, if any: for asking Convex
+ * directly as that session, with no request to the auth server (which can set cookies).
+ */
+export const convexTokenFor = (sessionId: string) => convexTokens.get(sessionId) ?? null
 
 /** How long the last refused auth request said to wait, in seconds, if it said. */
 export const lastRetryAfter = () => retryAfter

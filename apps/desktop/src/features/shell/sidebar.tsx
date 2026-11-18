@@ -51,6 +51,7 @@ import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
+import { usePrefs } from '~/lib/prefs.ts'
 
 /** What the sidebar asks the shell to do to a chat. The shell owns selection and auto-advance. */
 export type SidebarAction =
@@ -88,6 +89,7 @@ export function Sidebar({
   bottomBar,
 }: SidebarProps) {
   const [layout] = useSidebarLayout()
+  const prefs = usePrefs()
   const [query, setQuery] = useState('')
   const [network, setNetwork] = useState<Network | undefined>()
   const [labelId, setLabelId] = useState<LabelId | undefined>()
@@ -441,7 +443,7 @@ export function Sidebar({
                     )
                   ) : (
                     <p key={s._id} className="px-2.5 py-2 text-sm text-muted-foreground">
-                      {formatWhen(s.sendAt)} · {s.body}
+                      {formatWhen(s.sendAt)} · {prefs.previews ? s.body : 'Scheduled message'}
                     </p>
                   ),
                 )}
