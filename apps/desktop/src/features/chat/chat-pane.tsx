@@ -81,10 +81,11 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadMore } = useMessages(chat.id)
-  // A deleted message has no reactions: leaving it out saves the server a request for nothing.
+  // Deleted messages and pending copies have no reactions: leaving them out saves requests for
+  // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
   const reactions = useReactions(
     chat.id,
-    messages.filter((m) => !m.deleted),
+    messages.filter((m) => !m.deleted && !m.pending),
   )
   const typing = useTyping(chat.id)
   const scheduledRows = useScheduled(chat.id)

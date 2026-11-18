@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_IDS_PER_REQUEST, reactionGroups, reactionRequests, unreached } from '../src/data/reaction-requests.ts'
+import {
+  KEEP_SHOWN_MS,
+  MAX_IDS_PER_REQUEST,
+  reactionGroups,
+  reactionRequests,
+  showReactions,
+  unreached,
+} from '../src/data/reaction-requests.ts'
 
 const ids = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `m${from + i}`)
 /** An answer covering `reached`, as the server gives one: each reached ID, with its reactions or none. */
@@ -101,5 +108,37 @@ describe('grouping messages so requests stay put as the list grows', () => {
     expect(all).toHaveLength(5100)
     const requests = reactionGroups(all).flatMap((g) => reactionRequests(g, (a) => answer(a)))
     expect(requests.flat()).toEqual(all.map((m) => m.id))
+  })
+})
+
+describe('what a message shows while its reactions are asked for again', () => {
+  const t0 = 1_000_000
+  const heart = [{ key: '❤️' }]
+  const before = new Map([['m1', { list: heart, at: t0 }]])
+
+  it('keeps the last list while the new request is on its way', () => {
+    const { shown, expires } = showReactions(['m1'], {}, new Set(['m1']), before, t0 + 1000)
+    expect(shown.get('m1')?.list).toBe(heart)
+    expect(expires).toBe(t0 + KEEP_SHOWN_MS)
+  })
+
+  it('takes a new answer at once, an empty one too', () => {
+    const { shown, expires } = showReactions(['m1'], { m1: [] }, new Set(), before, t0 + 1000)
+    expect(shown.get('m1')?.list).toEqual([])
+    expect(expires).toBeNull()
+  })
+
+  it('shows nothing once the request has failed', () => {
+    const { shown } = showReactions(['m1'], {}, new Set(), before, t0 + 1000)
+    expect(shown.has('m1')).toBe(false)
+  })
+
+  it('shows nothing once the wait runs past the limit', () => {
+    const { shown } = showReactions(['m1'], {}, new Set(['m1']), before, t0 + KEEP_SHOWN_MS)
+    expect(shown.has('m1')).toBe(false)
+  })
+
+  it('keeps nothing for a message no longer passed in', () => {
+    expect(showReactions([], {}, new Set(['m1']), before, t0).shown.size).toBe(0)
   })
 })

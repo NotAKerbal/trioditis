@@ -9,7 +9,7 @@ import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
 import type { BridgeStatus } from './bridge-ready.ts'
-import { reactionGroups, reactionRequests } from './reaction-requests.ts'
+import { reactionGroups, reactionRequests, showReactions, type Shown } from './reaction-requests.ts'
 
 export interface Message {
   id: Id<'messages'>
@@ -77,34 +77,49 @@ export interface Reaction {
   mine: boolean
 }
 // Outside the hook, so useQueries can keep its result while the answers don't change.
-const answersOf = (results: { data?: ReactionAnswer | undefined }[]) => results.map((r) => r.data)
+const resultsOf = (results: { data?: ReactionAnswer | undefined; isPending: boolean }[]) =>
+  results.map((r) => ({ data: r.data, pending: r.isPending }))
+// A request replaced by another (its group moved) stops being watched soon after, not in minutes.
+const REACTIONS_GC_MS = 10_000
 
 /**
- * Reactions on the loaded messages (oldest first), grouped by key with who reacted. They're asked
- * for in groups that stay put as the list grows, 100 at most, and again for any an answer didn't
- * reach (reaction-requests.ts): each request's answer is read from the cache, so the requests
- * grow as answers come. While a group's request is new, its messages keep what they last showed.
+ * Reactions on the loaded messages (oldest first, pending copies left out), grouped by key with
+ * who reacted. They're asked for in groups that stay put as the list grows, 100 at most, and
+ * again for any an answer didn't reach (reaction-requests.ts): each request's answer is read from
+ * the cache, so the requests grow as answers come. While a group's new request is on its way, its
+ * messages keep what they showed, for a few seconds at most (showReactions).
  */
 export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at: number }[]) {
   const queryClient = useQueryClient()
   const request = (asked: Id<'messages'>[]) => convexQuery(api.messages.reactions, { chatId, messageIds: asked })
   const answerFor = (asked: Id<'messages'>[]) => queryClient.getQueryData<ReactionAnswer>(request(asked).queryKey)
   const requests = reactionGroups(messages).flatMap((group) => reactionRequests(group, answerFor))
-  const answers = useQueries({ queries: requests.map(request), combine: answersOf })
-  const shown = useRef<ReactionAnswer>({})
+  const results = useQueries({
+    queries: requests.map((asked) => ({ ...request(asked), gcTime: REACTIONS_GC_MS })),
+    combine: resultsOf,
+  })
+  const before = useRef(new Map<string, Shown<ReactionAnswer[string]>>())
+  // Bumped when a kept list runs out, to show what's true then.
+  const [tick, setTick] = useState(0)
   const ids = messages.map((m) => m.id).join()
-  const data = useMemo(() => {
-    const fresh: ReactionAnswer = Object.assign({}, ...answers.filter(Boolean))
-    const out: ReactionAnswer = {}
-    for (const id of ids ? ids.split(',') : []) {
-      const list = fresh[id] ?? shown.current[id]
-      if (list) out[id] = list
-    }
-    return out
-  }, [answers, ids])
+  const asked = requests.map((r) => r.join()).join('|')
+  // `tick` is a dependency so it looks again when a kept list runs out.
+  const { shown, expires } = useMemo(() => {
+    const fresh: ReactionAnswer = {}
+    const waiting = new Set<string>()
+    results.forEach((r, i) => {
+      if (r.data) Object.assign(fresh, r.data)
+      else if (r.pending) for (const id of asked.split('|')[i]?.split(',') ?? []) waiting.add(id)
+    })
+    return showReactions(ids ? ids.split(',') : [], fresh, waiting, before.current, Date.now())
+  }, [results, ids, asked, tick])
   useEffect(() => {
-    shown.current = data
-  }, [data])
+    before.current = shown
+    if (expires === null) return
+    const timer = setTimeout(() => setTick((t) => t + 1), Math.max(0, expires - Date.now()) + 20)
+    return () => clearTimeout(timer)
+  }, [shown, expires])
+  const data = useMemo(() => Object.fromEntries([...shown].map(([id, s]) => [id, s.list])) as ReactionAnswer, [shown])
   return useMemo(() => {
     const out = new Map<string, Reaction[]>()
     for (const [messageId, list] of Object.entries(data)) {
