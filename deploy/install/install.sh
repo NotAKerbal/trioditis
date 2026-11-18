@@ -449,7 +449,15 @@ fi
 # --- Everything else ----------------------------------------------------------------------
 
 say "Deploying the functions and starting the server"
-compose up -d --remove-orphans
+if ! compose up -d --remove-orphans; then
+  # The functions job (deploy, then migrations) is what usually stops it; its log says why.
+  functions=$(compose ps -aq functions 2>/dev/null || true)
+  if [ -n "$functions" ] && [ "$(docker inspect -f '{{.State.ExitCode}}' "$functions" 2>/dev/null)" != 0 ]; then
+    compose logs --no-log-prefix --tail 20 functions >&2 || true
+    die "Deploying the functions or running a migration failed (its log is above; a failing function's details are in deploy/trioditis logs backend). Fix the cause and run this again."
+  fi
+  die "Starting the server failed (above). Fix the cause and run this again."
+fi
 ready_services=(gateway caddy)
 for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done
 [ "$hairpin" = 0 ] || ready_services+=(hairpin)

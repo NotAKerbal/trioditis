@@ -4,3 +4,6 @@ pnpm-lock.yaml
 LICENSE
 apps/bridge-host/
 **/testdata/**
+
+# Written by deploy/install/install.sh for a local install.
+deploy/runtime/

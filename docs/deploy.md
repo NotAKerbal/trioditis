@@ -129,16 +129,16 @@ removes its bridge host; its volume and database stay, in case you add it back.
 
 ## What's running
 
-| Service            | What it is                                                    | Exposed                      |
-| ------------------ | ------------------------------------------------------------- | ---------------------------- |
-| `caddy`            | The web app, and the proxy to everything below                | Yes: the only published port |
-| `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode  | On Docker's host address     |
-| `loopback`         | Only on a loopback address: see Local mode                    | No: in the backend's network |
-| `backend`          | The Convex backend, on Postgres                               | No                           |
-| `postgres`         | Postgres 17: Convex's data and each bridge host's             | No                           |
-| `functions`        | One-shot: sets Convex's environment and deploys the functions | No                           |
-| `gateway`          | Moves events between bridge hosts and Convex                  | No                           |
-| `bridge-<network>` | A bridge host: runs that network's connector                  | No                           |
+| Service            | What it is                                                                         | Exposed                      |
+| ------------------ | ---------------------------------------------------------------------------------- | ---------------------------- |
+| `caddy`            | The web app, and the proxy to everything below                                     | Yes: the only published port |
+| `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode                       | On Docker's host address     |
+| `loopback`         | Only on a loopback address: see Local mode                                         | No: in the backend's network |
+| `backend`          | The Convex backend, on Postgres                                                    | No                           |
+| `postgres`         | Postgres 17: Convex's data and each bridge host's                                  | No                           |
+| `functions`        | One-shot: sets Convex's environment, deploys the functions and runs the migrations | No                           |
+| `gateway`          | Moves events between bridge hosts and Convex                                       | No                           |
+| `bridge-<network>` | A bridge host: runs that network's connector                                       | No                           |
 
 `deploy/trioditis` is `docker compose` for this install, with its settings:
 
@@ -192,7 +192,15 @@ The rerun keeps every secret and every setting the last run saved in `deploy/.en
 mode, the domain or public URL, the port, the bind address and host, the networks, and
 `--e2e`. Pass an option only to change that one. It rebuilds the images from the new
 checkout, redeploys the functions, restarts what changed, and removes services that are no
-longer enabled. The Convex backend migrates its database in place on start; the image is
+longer enabled. After each deploy of the functions, it runs pending migrations, which fix rows
+an older version wrote, so an upgrade needs nothing run by hand. It calls their one entry
+point, `migrations:runAll` in `packages/backend/convex/migrations.ts`, directly on this
+install's backend with its admin key. That runs every migration in order, every deploy,
+since each is safe to run again. A backend without `runAll` (an older version) is skipped
+with a note. `runAll` waits for the first batch of each migration, and a failure there stops
+the install with its error (`deploy/trioditis logs functions`, and the backend's log for the
+details). Later batches run in the background, so a failure in one of those shows in the
+backend's log (`deploy/trioditis logs backend`) rather than failing the install. The Convex backend migrates its database in place on start; the image is
 pinned, and only moves when the bundle changes it.
 
 Back up before upgrading (below).
@@ -225,11 +233,13 @@ deploy/trioditis backup ~/trioditis-backups
 It stops the server, archives every Docker volume of this install's Compose project (found
 by the label Compose gives them, so it never takes another install's, and it includes the
 volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
-was running. The two files are `<project>-<date>-<time>.tgz` and `.env`, readable only by
-you from the start; the archive is written under a temporary name and only takes its own
-once complete, and an interrupted backup (Ctrl-C) leaves nothing behind. The directory must
-be outside the checkout, symlinks resolved: image builds copy the checkout, and a backup
-outside it can't end up in an image or a commit by mistake.
+was running. The two files are `<project>-<date>-<time>.tgz` and `.env`, yours and readable
+only by you from the start, in any directory (`/tmp` included). The archive is written under
+a temporary name and only takes its own once complete, and its last entry is a manifest of
+every volume with its number of entries and bytes. An interrupted backup (Ctrl-C), even while
+the server is still stopping, leaves no archive behind and starts again what was running.
+The directory must be outside the checkout, symlinks resolved: image builds copy the
+checkout, and a backup outside it can't end up in an image or a commit by mistake.
 
 To restore, put the `.env` saved with the backup back as `deploy/.env` in a checkout of the
 same version, then:
@@ -240,11 +250,15 @@ deploy/install/install.sh
 ```
 
 `restore` checks the whole archive before it changes anything, and refuses one that's
-damaged, one whose volumes belong to another project, or one that would overwrite an
-existing volume Compose didn't label as this install's. It asks before it stops the server
-(`--yes` skips the question), extracts into temporary volumes, and only replaces the
-volumes' contents once everything has extracted, so a bad archive never costs the data you
-have. That needs free space for a second copy of the data while it runs. Keep backups
+damaged or cut short (its manifest must be its last entry), one whose volumes belong to
+another project, or one that would overwrite an existing volume Compose didn't label as this
+install's. It asks before it stops the server (`--yes` skips the question). It then
+extracts into temporary volumes, checks every volume against the manifest, and only then
+replaces the volumes' contents. Just before it writes, it checks each volume is still the one
+it checked at the start (same creation time and labels), and holds them all so none can be
+swapped while it writes. So a bad archive never costs the data you have. That needs free
+space for a second copy of the data while it runs. Archives from before the manifest can't be
+restored this way. Keep backups
 encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
 server has.
 
