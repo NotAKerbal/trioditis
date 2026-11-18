@@ -437,7 +437,7 @@ func TestConformance(t *testing.T) {
 		})
 		var contactPlain protocol.ContactPlaintext
 		h.open("alice", contact, &contactPlain)
-		if contactPlain.Name != "Fake peer-family" {
+		if contactPlain.Name != "Peer-family" {
 			t.Fatalf("contact name %q", contactPlain.Name)
 		}
 		// Chat and contact names never appear in the journal. (bridgev2's own portal and
@@ -448,9 +448,29 @@ func TestConformance(t *testing.T) {
 		}
 		for _, evt := range journal {
 			raw, _ := json.Marshal(evt)
-			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Fake peer-family")) {
+			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Peer-family")) {
 				t.Fatalf("journal event %d holds a plaintext name", evt.Seq)
 			}
+		}
+	})
+
+	t.Run("a dm- chat is a direct chat named after the other person", func(t *testing.T) {
+		if err := h.net.Incoming(aliceNet, "dm-carol", "carol", "d1", "hi, it's carol", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		msg := gw.waitFor(t, "direct message", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventMessage && e.UserID == "alice" && e.Sender.GhostID != "" && e.PortalID != portalID
+		})
+		chat := gw.waitFor(t, "direct chat event", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventChat && e.PortalID == msg.PortalID
+		})
+		if chat.Kind != "dm" {
+			t.Fatalf("kind %q", chat.Kind)
+		}
+		var chatPlain protocol.ChatPlaintext
+		h.open("alice", chat, &chatPlain)
+		if chatPlain.Name != "Carol" {
+			t.Fatalf("chat name %q", chatPlain.Name)
 		}
 	})
 

@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.mau.fi/util/configupgrade"
 
@@ -184,14 +187,22 @@ func (c *Client) IsThisUser(_ context.Context, userID networkid.UserID) bool {
 	return userID == c.self()
 }
 
+// GetChatInfo describes a chat from its ID. A chat whose ID is "dm-<user>" is a direct chat
+// with that user, named after them, as the dev stack's `pnpm fake` sends them; any other ID
+// is a group with one other member.
 func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	other := networkid.UserID("peer-" + string(portal.ID))
 	name := "Chat " + string(portal.ID)
 	roomType := database.RoomTypeDefault
+	if peer, ok := strings.CutPrefix(string(portal.ID), "dm-"); ok && peer != "" {
+		other = networkid.UserID(peer)
+		name = DisplayName(other)
+		roomType = database.RoomTypeDM
+	}
 	return &bridgev2.ChatInfo{
 		Name: &name,
 		Type: &roomType,
-		Members: &bridgev2.ChatMemberList{IsFull: true, Members: []bridgev2.ChatMember{
+		Members: &bridgev2.ChatMemberList{IsFull: true, OtherUserID: other, Members: []bridgev2.ChatMember{
 			{EventSender: bridgev2.EventSender{IsFromMe: true, Sender: c.self()}, Membership: event.MembershipJoin},
 			{EventSender: bridgev2.EventSender{Sender: other}, Membership: event.MembershipJoin},
 		}},
@@ -199,8 +210,18 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	}, nil
 }
 
+// DisplayName is the name the fake network gives a user: their ID with a capital letter, so
+// "alice" is Alice.
+func DisplayName(userID networkid.UserID) string {
+	first, size := utf8.DecodeRuneInString(string(userID))
+	if first == utf8.RuneError {
+		return string(userID)
+	}
+	return string(unicode.ToUpper(first)) + string(userID)[size:]
+}
+
 func (c *Client) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	name := "Fake " + string(ghost.ID)
+	name := DisplayName(ghost.ID)
 	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"fake:" + string(ghost.ID)}}, nil
 }
 
