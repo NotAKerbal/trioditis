@@ -68,6 +68,19 @@ describe('accounts', () => {
     vi.useRealTimers()
   })
 
+  it('turns invitations off on demo servers', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    process.env.TRIODITIS_DEMO = '1'
+    try {
+      await expect(admin.mutation(api.members.invite, { email: 'real@example.com', role: 'member' })).rejects.toThrow(
+        /demo/,
+      )
+    } finally {
+      delete process.env.TRIODITIS_DEMO
+    }
+  })
+
   it('only lets admins invite', async () => {
     const t = setup()
     const member = await signIn(t, 'sam')

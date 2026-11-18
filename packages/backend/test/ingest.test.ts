@@ -552,4 +552,12 @@ describe('ingest', () => {
     await ingest(t, [message('e2')])
     expect((await views()).portal_1).toBe('inbox')
   })
+
+  it('refuses events for a network the server doesn’t offer', async () => {
+    seq = 0
+    const t = setup()
+    await expect(
+      t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId: 'signal-1', network: 'signal', events: [] }),
+    ).rejects.toThrow(/not enabled/)
+  })
 })

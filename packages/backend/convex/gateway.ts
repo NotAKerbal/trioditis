@@ -5,6 +5,7 @@ import { constantTimeEqual } from './lib/hash'
 import { onCommandExpired, onCommandRejected } from './lib/commandOutcome'
 import { Unmappable, applyEvent, byteSize, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
+import { enabledNetworks } from './lib/networks'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -98,6 +99,9 @@ export const ingest = mutation({
   handler: async (ctx, args) => {
     assertGateway(args.secret)
     if (args.events.length > MAX_BATCH) throw new ConvexError('Batch too large')
+    // Only networks this server offers. A demo deployment (fake only) so never stores events
+    // from a real network, whoever holds the gateway secret.
+    if (!enabledNetworks().has(args.network)) throw new ConvexError('Network not enabled')
     const now = Date.now()
     const host = await registerHost(ctx, args.hostId, args.network, now)
 
