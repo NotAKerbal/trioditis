@@ -9,6 +9,16 @@ import type { Backend } from './backend.ts'
 
 /** Matches the backend's limit per ingest call. */
 export const CHUNK = 100
+/**
+ * The most event bytes (as JSON) in one ingest call, well under Convex's limits on a call's
+ * arguments and a mutation's writes.
+ */
+export const CHUNK_BYTES = 4 * 1024 * 1024
+/**
+ * An event bigger than this can't be valid (a sealed object is at most 256 KiB, and IDs are
+ * short), so it is quarantined without being sent.
+ */
+export const MAX_EVENT_BYTES = 1024 * 1024
 
 export type Reply = { status: number; body: unknown }
 
@@ -42,11 +52,10 @@ function isValidationError(error: unknown) {
   return error instanceof Error && error.message.includes('ArgumentValidationError')
 }
 
-/** Whether the Convex client can encode the event at all. */
+/** Whether the Convex client can encode the event at all, within the size any event may have. */
 function encodable(event: unknown) {
   try {
-    convexToJson(event as Value)
-    return true
+    return JSON.stringify(convexToJson(event as Value)).length <= MAX_EVENT_BYTES
   } catch {
     return false
   }
@@ -92,6 +101,25 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
   return outcome
 }
 
+/** Splits events, in order, into chunks within both the count and the byte limit. */
+export function chunk(events: BridgeEvent[]): BridgeEvent[][] {
+  const chunks: BridgeEvent[][] = []
+  let current: BridgeEvent[] = []
+  let bytes = 0
+  for (const event of events) {
+    const size = JSON.stringify(event).length
+    if (current.length > 0 && (current.length >= CHUNK || bytes + size > CHUNK_BYTES)) {
+      chunks.push(current)
+      current = []
+      bytes = 0
+    }
+    current.push(event)
+    bytes += size
+  }
+  if (current.length > 0 || chunks.length === 0) chunks.push(current)
+  return chunks
+}
+
 /**
  * Applies a batch, a chunk at a time. An empty batch is the host's heartbeat: it answers with
  * the last sequence Convex has, so a restarted bridge host knows where to resume.
@@ -100,13 +128,11 @@ export async function handleEvents(backend: Backend, value: unknown): Promise<Re
   const batch = parseBatch(value)
   if (!batch) return { status: 400, body: { error: 'invalid_command' } }
   const events = [...batch.events].sort((a, b) => a.seq - b.seq)
-  let start = 0
   let ackedThrough = 0
-  do {
-    const outcome = await applyChunk(backend, batch, events.slice(start, start + CHUNK))
+  for (const part of chunk(events)) {
+    const outcome = await applyChunk(backend, batch, part)
     if ('expectedSeq' in outcome) return { status: 409, body: { expectedSeq: outcome.expectedSeq } }
     ackedThrough = outcome.ackedThrough
-    start += CHUNK
-  } while (start < events.length)
+  }
   return { status: 200, body: { ackedThrough } }
 }

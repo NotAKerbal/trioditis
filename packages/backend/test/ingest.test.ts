@@ -330,7 +330,7 @@ describe('ingest', () => {
   it('quarantines an envelope too big to store', async () => {
     seq = 0
     const t = setup()
-    const big = { ...sealed('big'), ct: 'A'.repeat(Math.ceil(((512 * 1024 + 1) * 4) / 3)) }
+    const big = { ...sealed('big'), ct: 'A'.repeat(Math.ceil(((256 * 1024 + 1) * 4) / 3)) }
     expect(await ingest(t, [message('e1', { sealed: big }), message('e2')])).toEqual({ ackedThrough: 2 })
     expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
   })
@@ -348,5 +348,29 @@ describe('ingest', () => {
     expect(fromOther).toEqual({ ackedThrough: 1 })
     expect(await messages(t)).toHaveLength(0)
     expect(await quarantined(t)).toMatchObject([{ hostId: 'whatsapp-2', reason: 'foreign_host' }])
+  })
+
+  it('quarantines an event carrying an ID too long to be one', async () => {
+    seq = 0
+    const t = setup()
+    expect(await ingest(t, [message('x'.repeat(300)), message('e2')])).toEqual({ ackedThrough: 2 })
+    expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'too_large' }])
+  })
+
+  it('stores a message and an edit both at the size limit', async () => {
+    seq = 0
+    const t = setup()
+    const atLimit = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+    const original = message('e1', { sealed: atLimit('m') })
+    const edit = event('edit', {
+      portalId: 'portal_1',
+      eventId: 'edit1',
+      targetEventId: 'e1',
+      networkTs: 3_000,
+      sender: { ghostId: 'ghost_1' },
+      sealed: atLimit('e'),
+    })
+    expect(await ingest(t, [original, edit])).toEqual({ ackedThrough: 2 })
+    expect((await messages(t))[0]).toMatchObject({ editEventId: 'edit1' })
   })
 })

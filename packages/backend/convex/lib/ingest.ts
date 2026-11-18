@@ -427,8 +427,35 @@ async function applySendStatus(
   if (message) await ctx.db.patch(message._id, { delivery: advance(message.delivery, event.status) })
 }
 
-/** The most an incoming sealed object may hold, well under Convex's 1 MiB document limit. */
-const MAX_INCOMING_SEALED_BYTES = 512 * 1024
+/**
+ * The most an incoming sealed object may hold. A message row can hold two (the message and
+ * its latest edit), which must fit in Convex's 1 MiB document limit as base64 text.
+ */
+export const MAX_INCOMING_SEALED_BYTES = 256 * 1024
+/** The longest ID an event may carry: they are hashes and opaque IDs, never content. */
+export const MAX_ID_LENGTH = 256
+
+const ID_FIELDS = [
+  'loginId',
+  'portalId',
+  'eventId',
+  'targetEventId',
+  'ghostId',
+  'upToEventId',
+  'replyTo',
+  'threadRoot',
+  'clientMessageId',
+  'loginSessionId',
+  'parentPortalId',
+  'key',
+] as const
+
+function hasOversizedId(event: BridgeEventDoc) {
+  const fields = event as unknown as Record<string, unknown>
+  if (ID_FIELDS.some((name) => typeof fields[name] === 'string' && (fields[name] as string).length > MAX_ID_LENGTH))
+    return true
+  return event.type === 'loginStep' && event.step.stepId.length > MAX_ID_LENGTH
+}
 
 /**
  * Whether `origin` may speak for the event's login: once a host is running a login, events
@@ -437,6 +464,13 @@ const MAX_INCOMING_SEALED_BYTES = 512 * 1024
  */
 async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
   if (event.type === 'loginState' || event.type === 'loginStep' || !event.loginId) return
+  // The outcome or echo of a send is checked against the host that send was handed to,
+  // which may differ from the login's owner after the login moved hosts.
+  if (event.type === 'sendStatus') return
+  if (event.type === 'message' && 'self' in event.sender && event.clientMessageId) {
+    const send = await findOutboxSend(ctx, event.userId, event.clientMessageId)
+    if (send) return
+  }
   const loginId = event.loginId
   const account = await ctx.db
     .query('networkAccounts')
@@ -447,6 +481,7 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
 
 export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
   const { network } = origin
+  if (hasOversizedId(event)) throw new Unmappable('too_large')
   if ('sealed' in event) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     if (!isEnvelope(event.sealed, MAX_INCOMING_SEALED_BYTES)) throw new Unmappable('too_large')

@@ -79,7 +79,7 @@ export const submit = mutation({
     const member = await requireMember(ctx)
     const session = await ctx.db.get(args.loginSessionId)
     if (!session || session.userId !== member.userId) throw new ConvexError('That login doesn’t exist.')
-    if (session.state !== 'active' || session.step?.stepId !== args.stepId) {
+    if (args.stepId.length > 256 || session.state !== 'active' || session.step?.stepId !== args.stepId) {
       throw new ConvexError('That step of the login is over. Start again if it didn’t finish.')
     }
     if (!isEnvelope(args.sealed, MAX_CLIENT_SEALED_BYTES))

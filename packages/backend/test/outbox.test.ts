@@ -667,4 +667,27 @@ describe('sending', () => {
       }),
     ).rejects.toThrow(/replied to/)
   })
+
+  it('still accepts the outcome from the host a send went to after the login moved hosts', async () => {
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    await claim(t)
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-2',
+      network: 'whatsapp',
+      events: [
+        {
+          seq: 1,
+          type: 'loginState',
+          userId: 'user_a',
+          loginId: 'login_a',
+          at: Date.now() + 1_000,
+          state: 'CONNECTED',
+        },
+      ],
+    })
+    await status(t, id(1), 'sent')
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'dispatched', delivery: 'sent' })
+  })
 })

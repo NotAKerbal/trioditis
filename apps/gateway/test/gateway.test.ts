@@ -140,6 +140,25 @@ describe('events', () => {
     expect((backend.ingested[0]![0] as { seq: number }).seq).toBe(1)
   })
 
+  it('splits a batch by size as well as count, and quarantines an event too big to be valid', async () => {
+    const backend = fakeBackend()
+    const base = await serve(backend)
+    const padding = 'x'.repeat(900 * 1024)
+    const events = [
+      ...Array.from({ length: 6 }, (_, i) => ({ ...event(i + 1), portalId: padding })),
+      { ...event(7), portalId: 'y'.repeat(2 * 1024 * 1024) },
+    ]
+    expect(await post(base, batch(events))).toEqual({ status: 200, body: { ackedThrough: 7 } })
+    // The second chunk holds the oversized event, so its valid events go one at a time.
+    expect(backend.ingested.map((part) => part.length)).toEqual([4, 1, 1])
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 7,
+      type: 'typing',
+    })
+  })
+
   it('answers an empty batch with where Convex is, as a heartbeat', async () => {
     const backend = fakeBackend({ ingest: vi.fn(async () => ({ ackedThrough: 41 })) })
     expect(await post(await serve(backend), batch([]))).toEqual({ status: 200, body: { ackedThrough: 41 } })
