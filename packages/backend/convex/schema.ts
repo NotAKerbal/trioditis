@@ -2,6 +2,7 @@ import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 import {
   chatKind,
+  chatView,
   commandPayload,
   deliveryState,
   envelope,
@@ -62,6 +63,10 @@ export default defineSchema({
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
     updatedAt: v.number(),
+    /** A logout was asked for and hasn't been confirmed yet. */
+    logoutPending: v.optional(v.boolean()),
+    /** Why the last logout didn't happen. */
+    logoutError: v.optional(errorCode),
   })
     .index('by_user', ['userId'])
     .index('by_login', ['network', 'loginId']),
@@ -109,8 +114,15 @@ export default defineSchema({
     isRequest: v.optional(v.boolean()),
     /** Hidden by the person. Trioditis-side only; the network isn't told yet. */
     blocked: v.optional(v.boolean()),
+    /**
+     * Which list the chat is in, kept by `lib/chatView.ts` on every write so the lists are
+     * index ranges. Missing for a deleted chat, which is in none.
+     */
+    view: v.optional(chatView),
   })
     .index('by_user_lastMessage', ['userId', 'lastMessageAt'])
+    .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
+    .index('by_user_view_network_last', ['userId', 'view', 'network', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
 
   /**
@@ -154,8 +166,21 @@ export default defineSchema({
     /** For `passkey`: which credential, and its PRF salt. */
     credentialId: v.optional(v.string()),
     prfSalt: v.optional(v.string()),
+    /** Increases each time this backup is replaced; a replacement names the one it replaces. */
+    revision: v.number(),
     createdAt: v.number(),
   }).index('by_user', ['userId', 'kind']),
+
+  /**
+   * Proofs that a device holds the identity private key: a random challenge, sealed to the
+   * public key for the device to open. Only its hash is kept, for five minutes, and it works
+   * once.
+   */
+  keyChallenges: defineTable({
+    userId: v.string(),
+    hash: v.string(),
+    expiresAt: v.number(),
+  }).index('by_user', ['userId']),
 
   /**
    * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
@@ -167,14 +192,22 @@ export default defineSchema({
     clientMessageId: v.string(),
     sendAt: v.number(),
     state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled')),
-    forBridge: v.optional(envelope),
-    copy: v.optional(envelope),
     replyTo: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index('by_user', ['userId', 'state', 'sendAt'])
     .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
+
+  /**
+   * A scheduled message's sealed copies, kept apart so listing and counting scheduled
+   * messages never reads them. Deleted when the message goes out or is cancelled.
+   */
+  scheduledPayloads: defineTable({
+    scheduledId: v.id('scheduledSends'),
+    forBridge: envelope,
+    copy: envelope,
+  }).index('by_scheduled', ['scheduledId']),
 
   contacts: defineTable({
     userId: v.string(),
@@ -226,7 +259,10 @@ export default defineSchema({
     networkTs: v.number(),
     /** Kept as a tombstone rather than deleted, for the same reason. */
     removedAt: v.optional(v.number()),
-  }).index('by_message', ['messageId', 'senderKey', 'key']),
+  })
+    .index('by_message', ['messageId', 'senderKey', 'key'])
+    // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
+    .index('by_message_active', ['messageId', 'removedAt']),
 
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
@@ -248,7 +284,9 @@ export default defineSchema({
     chatId: v.id('chats'),
     senderKey: v.string(),
     expiresAt: v.number(),
-  }).index('by_chat_sender', ['chatId', 'senderKey']),
+  })
+    .index('by_chat_sender', ['chatId', 'senderKey'])
+    .index('by_chat_expires', ['chatId', 'expiresAt']),
 
   /**
    * Commands for the bridge host. Each row's ID is the command's `commandId`, so the bridge

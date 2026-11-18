@@ -1,14 +1,15 @@
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api'
 import type { Doc } from './_generated/dataModel'
-import { internalMutation, mutation, query, type MutationCtx } from './_generated/server'
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
 // the time comes it becomes an ordinary send, and its 24-hour deadline starts then. Until then
-// the bridge-readable copy waits in `scheduledSends`, deleted once it goes out or is cancelled.
+// the sealed copies wait in `scheduledPayloads`, apart from the metadata so listing never reads
+// them, and are deleted once the message goes out or is cancelled.
 
 const MAX_AHEAD_MS = 365 * 24 * 60 * 60 * 1000
 const MAX_SCHEDULED = 500
@@ -18,8 +19,6 @@ const scheduledRow = v.object({
   chatId: v.id('chats'),
   clientMessageId: v.string(),
   sendAt: v.number(),
-  /** The person's own copy, sealed with kind `message` and object ID `clientMessageId`. */
-  copy: v.union(v.null(), envelope),
   replyTo: v.union(v.null(), v.string()),
 })
 
@@ -29,12 +28,23 @@ function toRow(row: Doc<'scheduledSends'>) {
     chatId: row.chatId,
     clientMessageId: row.clientMessageId,
     sendAt: row.sendAt,
-    copy: row.copy ?? null,
     replyTo: row.replyTo ?? null,
   }
 }
 
-/** The person's scheduled messages, soonest first; in one chat if `chatId` is given. */
+async function payloadOf(ctx: QueryCtx, scheduledId: Doc<'scheduledSends'>['_id']) {
+  return await ctx.db
+    .query('scheduledPayloads')
+    .withIndex('by_scheduled', (q) => q.eq('scheduledId', scheduledId))
+    .unique()
+}
+
+async function deletePayload(ctx: MutationCtx, scheduledId: Doc<'scheduledSends'>['_id']) {
+  const payload = await payloadOf(ctx, scheduledId)
+  if (payload) await ctx.db.delete(payload._id)
+}
+
+/** The person's scheduled messages, soonest first; in one chat if `chatId` is given. No content. */
 export const list = query({
   args: { chatId: v.optional(v.id('chats')) },
   returns: v.array(scheduledRow),
@@ -53,6 +63,27 @@ export const list = query({
       .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('state', 'scheduled'))
       .take(MAX_SCHEDULED)
     return rows.map(toRow)
+  },
+})
+
+/**
+ * The person's own copies of up to 20 scheduled messages, to show what they say: sealed with
+ * kind `message` and object ID `clientMessageId`.
+ */
+export const copies = query({
+  args: { scheduledIds: v.array(v.id('scheduledSends')) },
+  returns: v.array(v.object({ _id: v.id('scheduledSends'), copy: envelope })),
+  handler: async (ctx, { scheduledIds }) => {
+    const member = await requireMember(ctx)
+    if (scheduledIds.length > 20) throw new ConvexError('Ask for at most 20 at once.')
+    const out = []
+    for (const scheduledId of scheduledIds) {
+      const row = await ctx.db.get(scheduledId)
+      if (!row || row.userId !== member.userId || row.state !== 'scheduled') continue
+      const payload = await payloadOf(ctx, scheduledId)
+      if (payload) out.push({ _id: scheduledId, copy: payload.copy })
+    }
+    return out
   },
 })
 
@@ -89,11 +120,10 @@ export const create = mutation({
       clientMessageId: input.clientMessageId,
       sendAt,
       state: 'scheduled',
-      forBridge: input.forBridge,
-      copy: input.copy,
       ...(input.replyTo ? { replyTo: input.replyTo } : {}),
       createdAt: now,
     })
+    await ctx.db.insert('scheduledPayloads', { scheduledId: id, forBridge: input.forBridge, copy: input.copy })
     await ctx.scheduler.runAt(sendAt, internal.scheduled.fire, { scheduledId: id })
     return id
   },
@@ -108,15 +138,17 @@ async function ownScheduled(ctx: MutationCtx, scheduledId: Doc<'scheduledSends'>
 
 /** Sends a scheduled message now. If its time already came, it is already on its way. */
 async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>) {
-  if (row.state !== 'scheduled' || !row.forBridge || !row.copy) return
-  await ctx.db.patch(row._id, { state: 'sent', forBridge: undefined, copy: undefined })
+  if (row.state !== 'scheduled') return
+  const payload = await payloadOf(ctx, row._id)
+  await ctx.db.patch(row._id, { state: 'sent' })
+  if (payload) await ctx.db.delete(payload._id)
   const chat = await ctx.db.get(row.chatId)
   // The chat is gone, so there's nowhere to send it. The person's copy goes with it.
-  if (!chat || chat.deleted) return
+  if (!payload || !chat || chat.deleted) return
   await queueSend(ctx, chat, {
     clientMessageId: row.clientMessageId,
-    forBridge: row.forBridge,
-    copy: row.copy,
+    forBridge: payload.forBridge,
+    copy: payload.copy,
     ...(row.replyTo ? { replyTo: row.replyTo } : {}),
   })
 }
@@ -127,7 +159,8 @@ export const cancel = mutation({
   handler: async (ctx, { scheduledId }) => {
     const row = await ownScheduled(ctx, scheduledId)
     if (row.state !== 'scheduled') throw new ConvexError('That message has already gone out.')
-    await ctx.db.patch(row._id, { state: 'cancelled', forBridge: undefined, copy: undefined })
+    await ctx.db.patch(row._id, { state: 'cancelled' })
+    await deletePayload(ctx, row._id)
     return null
   },
 })

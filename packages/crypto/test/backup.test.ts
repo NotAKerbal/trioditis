@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   SealError,
+  authPassword,
+  makeKeyBackup,
+  toBase64Url,
   decodeRecoveryKey,
   encodeRecoveryKey,
   generateKeyPair,
@@ -59,6 +62,29 @@ describe('identity key backups', () => {
   })
 })
 
+describe('auth passwords', () => {
+  it('is the same for the same password and email, whatever the email’s case or the password’s form', () => {
+    const one = authPassword('Ångström', 'Sam@Example.com')
+    expect(one).toBe(authPassword('A\u030angstro\u0308m', ' sam@example.com '))
+    expect(one).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(one).not.toBe(authPassword('Ångström', 'alex@example.com'))
+    expect(one).not.toContain('Ångström')
+  })
+
+  it('never equals the key backup’s wrapping key', () => {
+    const params = newPasswordParams()
+    expect(authPassword('pw pw pw pw', 'a@b.c')).not.toBe(toBase64Url(passwordKey('pw pw pw pw', params)))
+  })
+
+  it('makes a password backup that the normal unlock opens', () => {
+    const identity = generateKeyPair()
+    const backup = makeKeyBackup(identity.privateKey, 'demo password', 'user_1')
+    expect(backup.kid).toBe(keyId(identity.publicKey))
+    const opened = unwrapIdentityKey(backup.password, passwordKey('demo password', backup.password.params), { userId: 'user_1', kid: backup.kid, kind: 'password' }, identity.publicKey)
+    expect(opened.privateKey).toEqual(identity.privateKey)
+  })
+})
+
 describe('recovery keys', () => {
   it('round-trips, forgiving case, spaces, dashes and look-alike letters', () => {
     const { bytes, text } = generateRecoveryKey()
@@ -73,6 +99,15 @@ describe('recovery keys', () => {
     const first = text[0] === 'A' ? 'B' : 'A'
     expect(() => decodeRecoveryKey(first + text.slice(1))).toThrow(SealError)
     expect(() => decodeRecoveryKey('not a key')).toThrow(SealError)
+  })
+
+  it('accepts only one spelling of each key', () => {
+    const { text } = generateRecoveryKey()
+    // The last character carries three padding bits; setting one changes the spelling only.
+    const last = text.at(-1)!
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+    const padded = alphabet[alphabet.indexOf(last) | 1]!
+    if (padded !== last) expect(() => decodeRecoveryKey(text.slice(0, -1) + padded)).toThrow(SealError)
   })
 
   it('encodes exactly 32 bytes', () => {

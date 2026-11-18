@@ -263,6 +263,8 @@ const WRAPPING_KEY_BYTES = 32
 /** Argon2id at 3 passes over 64 MiB: about a second in a browser, and costly to guess at. */
 const PASSWORD_OPSLIMIT = 3
 const PASSWORD_MEMLIMIT = 64 * 1024 * 1024
+/** The weakest settings a key backup may use. The server refuses anything below them. */
+export const MIN_PASSWORD_PARAMS = { opslimit: PASSWORD_OPSLIMIT, memlimit: PASSWORD_MEMLIMIT } as const
 
 function backupAssociatedData({ userId, kid, kind }: KeyBackupContext): Uint8Array {
   if (!userId || !kid) throw new SealError('A key backup needs an owner and a key ID')
@@ -284,7 +286,7 @@ export function passwordKey(password: string, params: PasswordParams): Uint8Arra
   if (!password) throw new SealError('A password is required')
   return sodium.crypto_pwhash(
     WRAPPING_KEY_BYTES,
-    password,
+    password.normalize('NFKC'),
     fromBase64Url(params.salt),
     params.opslimit,
     params.memlimit,
@@ -334,6 +336,56 @@ export function unwrapIdentityKey(
   const pair = keyPairFromPrivateKey(privateKey)
   if (!sodium.memcmp(pair.publicKey, publicKey)) throw new SealError('The backup holds a different key')
   return pair
+}
+
+/**
+ * A password backup of the identity key, exactly as `keys.setup` stores it: fresh Argon2id
+ * settings and the wrap. For scripts that seed an account (previews, the nightly) as well as
+ * the first-device flow.
+ */
+export function makeKeyBackup(privateKey: Uint8Array, password: string, userId: string) {
+  const { publicKey } = keyPairFromPrivateKey(privateKey)
+  const kid = keyId(publicKey)
+  const params = newPasswordParams()
+  const wrap = wrapIdentityKey(privateKey, passwordKey(password, params), { userId, kid, kind: 'password' })
+  return { publicKey: toBase64Url(publicKey), kid, password: { ...wrap, params } }
+}
+
+/**
+ * What a person's password becomes before it goes to the sign-in server, so the server never
+ * sees the password itself and can't unwrap the key backup with it. It is Argon2id over the
+ * password (NFKC-normalised), salted by the person's email, then BLAKE2b-256, as base64url.
+ * Used for sign-up, sign-in and changing the password; the key backup's wrapping key is a
+ * separate Argon2id with its own random salt (`passwordKey`).
+ *
+ * The salt is the email, so changing the email means signing in with the old one, deriving
+ * again with the new one, and changing the password to that.
+ */
+export function authPassword(password: string, email: string): string {
+  if (!password) throw new SealError('A password is required')
+  const salt = sodium.crypto_generichash(
+    sodium.crypto_pwhash_SALTBYTES,
+    sodium.from_string(`trioditis/auth/v1/${email.trim().toLowerCase()}`),
+    null,
+  )
+  const stretched = sodium.crypto_pwhash(
+    32,
+    password.normalize('NFKC'),
+    salt,
+    sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_ALG_ARGON2ID13,
+  )
+  return toBase64Url(sodium.crypto_generichash(32, stretched, null))
+}
+
+/** Opens a sealed box made for `keyPair` (libsodium `crypto_box_seal`), such as a key challenge. */
+export function openSealedBox(sealed: Uint8Array, keyPair: KeyPair): Uint8Array {
+  try {
+    return sodium.crypto_box_seal_open(sealed, keyPair.publicKey, keyPair.privateKey)
+  } catch {
+    throw new SealError('That wasn’t sealed to this key')
+  }
 }
 
 export function keyPairFromPrivateKey(privateKey: Uint8Array): KeyPair {
@@ -397,7 +449,10 @@ export function decodeRecoveryKey(text: string): Uint8Array {
       bits -= 8
     }
   }
-  if (out.length !== RECOVERY_KEY_BYTES + CHECKSUM_BYTES) throw new SealError('That isn’t a recovery key')
+  // One spelling per key: the bits left over in the last character must be zero.
+  if (out.length !== RECOVERY_KEY_BYTES + CHECKSUM_BYTES || (value & ((1 << bits) - 1)) !== 0) {
+    throw new SealError('That isn’t a recovery key')
+  }
   const bytes = Uint8Array.from(out.slice(0, RECOVERY_KEY_BYTES))
   if (!sodium.memcmp(checksum(bytes), Uint8Array.from(out.slice(RECOVERY_KEY_BYTES)))) {
     throw new SealError('That recovery key has a typo')

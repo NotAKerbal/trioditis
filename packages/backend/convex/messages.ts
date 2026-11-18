@@ -85,7 +85,7 @@ export const discardSend = mutation({
   },
 })
 
-/** Reactions on the given messages of a chat (at most 100), as `messageId → [{ key, senderKey }]`. */
+/** Active reactions on the given messages of a chat (at most 100 messages, 100 reactions each). */
 export const reactions = query({
   args: { chatId: v.id('chats'), messageIds: v.array(v.id('messages')) },
   handler: async (ctx, { chatId, messageIds }) => {
@@ -99,8 +99,8 @@ export const reactions = query({
       if (!message || message.chatId !== chatId || message.redactedAt !== undefined) continue
       const rows = await ctx.db
         .query('reactions')
-        .withIndex('by_message', (q) => q.eq('messageId', messageId))
-        .collect()
+        .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
+        .take(100)
       out[messageId] = rows
         .filter((row) => row.removedAt === undefined)
         .map(({ key, senderKey }) => ({ key, senderKey }))
@@ -132,9 +132,10 @@ export const typing = query({
   handler: async (ctx, { chatId }) => {
     const member = await requireMember(ctx)
     await ownChat(ctx, member.userId, chatId)
+    const now = Date.now()
     const rows = await ctx.db
       .query('typing')
-      .withIndex('by_chat_sender', (q) => q.eq('chatId', chatId))
+      .withIndex('by_chat_expires', (q) => q.eq('chatId', chatId).gt('expiresAt', now))
       .take(100)
     return rows.map(({ senderKey, expiresAt }) => ({ senderKey, expiresAt }))
   },
