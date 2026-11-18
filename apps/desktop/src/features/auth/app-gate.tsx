@@ -98,6 +98,8 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // (it can lag, or still hold an error from during setup).
   const [setUpKid, setSetUpKid] = useState<string | null>(null)
   const [, recheck] = useReducer((n: number) => n + 1, 0)
+  // Recovery checks settled on this page, even if clearing their note from storage failed.
+  const acked = useRef(new Set<string>())
 
   // Signing out from setup or unlock is the gate's, shown ahead of everything else here, so
   // nothing (setup finishing, the app opening) takes its screen while it runs. It waits a little
@@ -107,27 +109,36 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // If it fails, going back reloads the page, to start again from what's really there.
   const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
   const leavingRef = useRef(false)
-  const backup = useRef<{ call: Promise<unknown> | null; saved: boolean; lost: boolean }>({
-    call: null,
-    saved: false,
-    lost: false,
-  })
+  const backup = useRef<{
+    call: Promise<unknown> | null
+    /** The key setup saw keys.setup accept: its backups exist. */
+    savedKid: string | null
+    lost: boolean
+    /** A recovery key shown here couldn't be kept track of across a reload. */
+    untracked: boolean
+  }>({ call: null, savedKid: null, lost: false, untracked: false })
   const remoteNow = useRef(remote.data)
   remoteNow.current = remote.data
+  // The key the first attempt was for; a retry is for the same one (null: keep whatever's here).
+  const leavingFor = useRef<string | null>(null)
   const signOutHere = async (keyKid: string | null) => {
     leavingRef.current = true
+    leavingFor.current = keyKid
     setLeaving('running')
     await settled(backup.current.call)
     const server = remoteNow.current
-    const backedUp = backup.current.saved || (server?.state === 'ready' && keyKid !== null && server.kid === keyKid)
-    if (await signOut(backedUp ? userId : undefined)) return
+    const backedUp =
+      keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
+    // Only that key is forgotten, and only if it's the one here (checked as it's removed).
+    if (await signOut(backedUp ? userId : undefined, backedUp ? { onlyKid: keyKid } : {})) return
     setLeaving('failed')
   }
   const isLeaving = () => leavingRef.current
   if (leaving) {
     return (
-      <SignOutProgress state={leaving} onRetry={() => void signOutHere(remoteNow.current?.kid ?? null)}>
+      <SignOutProgress state={leaving} onRetry={() => void signOutHere(leavingFor.current)}>
         {backup.current.lost ? <RecoveryLostNote /> : null}
+        {backup.current.untracked && !backup.current.lost ? <RecoveryUntrackedNote /> : null}
       </SignOutProgress>
     )
   }
@@ -142,9 +153,12 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       onSignOut={(keyKid) => void signOutHere(keyKid)}
       isLeaving={isLeaving}
       onBackup={(call) => {
-        backup.current.call = call.then(() => {
-          backup.current.saved = true
+        backup.current.call = call.then((result) => {
+          backup.current.savedKid = (result as { kid: string }).kid
         })
+      }}
+      onRecoveryUntracked={() => {
+        backup.current.untracked = true
       }}
       onRecoveryLost={(lost) => {
         backup.current.lost = lost
@@ -201,11 +215,22 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       </AuthCard>
     )
   }
-  // A recovery key shown before a reload may not be the one the server kept: say so first.
-  const pending = pendingRecoveryCheck(userId, kid ?? null)
-  if (pending) {
+  // A recovery key shown before a reload may not be the one the server kept: say so first. A
+  // note for another key means that key lost, and its recovery key won't work.
+  const pending = pendingRecoveryCheck(userId)
+  if (pending && !acked.current.has(pending.fingerprint)) {
     const installed = backups.find((b) => b.kind === 'recovery')
-    return <RecoveryCheckAfterReload pending={pending} installedCt={installed?.ct} onDone={recheck} />
+    return (
+      <RecoveryCheckAfterReload
+        pending={pending}
+        installedKid={kid ?? null}
+        installedCt={installed?.ct}
+        onDone={() => {
+          acked.current.add(pending.fingerprint)
+          recheck()
+        }}
+      />
+    )
   }
   if (here) {
     const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
@@ -280,6 +305,7 @@ function KeySetup({
   isLeaving,
   onBackup,
   onRecoveryLost,
+  onRecoveryUntracked,
   onDone,
 }: {
   userId: string
@@ -297,6 +323,8 @@ function KeySetup({
   onBackup: (call: Promise<unknown>) => void
   /** Whether the recovery key shown here lost to another device's. */
   onRecoveryLost: (lost: boolean) => void
+  /** The recovery key shown here couldn't be noted for checking after a reload. */
+  onRecoveryUntracked: () => void
   /** Setup is done and the key is kept here, as `kid`. */
   onDone: (kid: string) => Promise<void>
 }) {
@@ -381,14 +409,18 @@ function KeySetup({
       // SealError unless both give back this key.
       const made = makeKeySetup(keyPair.privateKey, wrapPassword, userId)
       const next = { keyPair, setup: made, showRecovery: !has.recovery }
+      // Noted before it's shown, so a reload from here on still checks it (see
+      // pendingRecoveryCheck); if it can't be, signing out says so before going back.
+      if (
+        next.showRecovery &&
+        !(await notePendingRecoveryCheck(userId, keyId(keyPair.publicKey), made.args.recovery.ct))
+      )
+        onRecoveryUntracked()
       setPrepared(next)
       setBusy(false)
       // From the moment a recovery key is shown, this screen stays: if another device finishes
       // setup meanwhile, the person must still learn which recovery key works.
-      if (next.showRecovery) {
-        onSaving()
-        void notePendingRecoveryCheck(userId, keyId(keyPair.publicKey), made.args.recovery.ct)
-      }
+      if (next.showRecovery) onSaving()
       // With the recovery backup already there, there's nothing to confirm.
       if (!next.showRecovery) await finish(next)
     } catch (e) {
@@ -861,12 +893,14 @@ async function fingerprint(ct: string) {
   return toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ct))))
 }
 
-async function notePendingRecoveryCheck(userId: string, kid: string, ct: string) {
-  const note: PendingRecoveryCheck = { userId, kid, fingerprint: await fingerprint(ct) }
+/** Notes the recovery key shown, for after a reload. False if it couldn't be noted. */
+async function notePendingRecoveryCheck(userId: string, kid: string, ct: string): Promise<boolean> {
   try {
+    const note: PendingRecoveryCheck = { userId, kid, fingerprint: await fingerprint(ct) }
     sessionStorage.setItem(RECOVERY_CHECK, JSON.stringify(note))
+    return true
   } catch {
-    // Without storage, only this page's own check covers it.
+    return false
   }
 }
 
@@ -878,53 +912,71 @@ function clearPendingRecoveryCheck() {
   }
 }
 
-function pendingRecoveryCheck(userId: string, kid: string | null): PendingRecoveryCheck | null {
+/** The person's noted recovery key, for whichever key it was shown with. */
+function pendingRecoveryCheck(userId: string): PendingRecoveryCheck | null {
   try {
     const note = JSON.parse(sessionStorage.getItem(RECOVERY_CHECK) ?? 'null') as PendingRecoveryCheck | null
-    return note && note.userId === userId && note.kid === kid ? note : null
+    return note && note.userId === userId ? note : null
   } catch {
     return null
   }
 }
 
-/** After a reload: is the recovery key shown before it the one the server kept? Says so if not. */
+/**
+ * After a reload: is the recovery key shown before it the one the server kept? For another key
+ * than the server's, it isn't (that key lost); for the same key, its fingerprint says. If that
+ * can't be worked out, it says so too, rather than going on as if it were fine.
+ */
 function RecoveryCheckAfterReload({
   pending,
+  installedKid,
   installedCt,
   onDone,
 }: {
   pending: PendingRecoveryCheck
+  installedKid: string | null
   installedCt: string | undefined
   onDone: () => void
 }) {
-  const { data: installed } = useQuery({
+  const sameKey = pending.kid === installedKid
+  const { data: installed, isError } = useQuery({
     queryKey: ['recovery-fingerprint', installedCt],
-    queryFn: () => (installedCt ? fingerprint(installedCt) : Promise.resolve(null)),
+    queryFn: () => fingerprint(installedCt!),
+    enabled: sameKey && !!installedCt,
+    retry: false,
   })
-  const matches = installed !== undefined && installed === pending.fingerprint
-  useEffect(() => {
-    if (!matches) return
+  const matches = sameKey && installed !== undefined && installed === pending.fingerprint
+  const done = () => {
     clearPendingRecoveryCheck()
     onDone()
-  }, [matches, onDone])
-  if (installed === undefined || matches) return <Splash />
+  }
+  useEffect(() => {
+    if (matches) done()
+  })
+  if (matches || (sameKey && installedCt && installed === undefined && !isError)) return <Splash />
+  const unknown = sameKey && (isError || !installedCt)
   return (
     <AuthCard
-      title="Your recovery key is the other one"
-      description="Another device finished saving its recovery key at the same time as this one. The recovery key shown here before won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
+      title={unknown ? 'Check your recovery key' : 'Your recovery key is the other one'}
+      description={
+        unknown
+          ? 'This device couldn’t check whether the recovery key it showed before is the one your account keeps. If you’re not sure it is, make a new one in Settings → Keys and devices.'
+          : 'Another device finished setting up your key at the same time as this one. The recovery key shown here before won’t work: keep the one from that device, or make a new one in Settings → Keys and devices.'
+      }
     >
-      <Button
-        variant="primary"
-        size="lg"
-        block
-        onClick={() => {
-          clearPendingRecoveryCheck()
-          onDone()
-        }}
-      >
+      <Button variant="primary" size="lg" block onClick={done}>
         Continue
       </Button>
     </AuthCard>
+  )
+}
+
+function RecoveryUntrackedNote() {
+  return (
+    <p className="mb-4 text-sm text-warning-ink">
+      This device couldn’t keep track of the recovery key it showed. After going back, if you’re not sure it’s the one
+      your account keeps, make a new one in Settings → Keys and devices.
+    </p>
   )
 }
 

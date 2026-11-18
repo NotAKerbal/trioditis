@@ -33,6 +33,32 @@ function openDb(): Promise<IDBDatabase> {
  * request succeeds: a write (keeping or forgetting a key) isn't done until then, and can still
  * be aborted.
  */
+/**
+ * Runs several requests in one transaction, which `run` chains from their callbacks; `answer`
+ * gives the result. It answers once the transaction has committed, and fails if it aborts.
+ */
+async function inTransaction<T>(
+  mode: IDBTransactionMode,
+  run: (store: IDBObjectStore, answer: (value: T) => void) => void,
+): Promise<T> {
+  const db = await openDb()
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction(STORE, mode)
+      let value: T
+      run(transaction.objectStore(STORE), (v) => {
+        value = v
+      })
+      transaction.oncomplete = () => resolve(value)
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () =>
+        reject(transaction.error ?? new Error('the change to this device’s storage was undone'))
+    })
+  } finally {
+    db.close()
+  }
+}
+
 async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   const db = await openDb()
   try {
@@ -68,34 +94,49 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
   return { kid: stored.kid, keyPair: { publicKey: fromBase64Url(stored.publicKey), privateKey } }
 }
 
-// Saving and forgetting a person's key take turns, in the order asked, and forgetting cancels
-// every save asked for before it: once forgetting has finished, no save can put the key back,
-// however long it took to get ready.
-const turns = new Map<string, Promise<unknown>>()
-const forgets = new Map<string, number>()
+// Saving and forgetting a person's key are ordered through the database itself, so they hold
+// across tabs too: each forget bumps a per-person count, in the same transaction as the delete,
+// and a save writes only if the count is still what it was when the save began, checked in the
+// same transaction as the write. Once forgetting has committed, no save asked for before it can
+// put the key back, however long its encryption took, in this tab or another.
+const forgetsKey = (userId: string) => `${userId}\u0000forgets`
 
-function inTurn<T>(userId: string, run: () => Promise<T>): Promise<T> {
-  const next = (turns.get(userId) ?? Promise.resolve()).catch(() => undefined).then(run)
-  turns.set(userId, next)
-  return next
+function forgetCount(store: IDBObjectStore, userId: string, then: (count: number) => void) {
+  const request = store.get(forgetsKey(userId))
+  request.onsuccess = () => then((request.result as { count?: number } | undefined)?.count ?? 0)
 }
 
-/** Keeps an unwrapped identity key on this device, unless it's forgotten before its turn comes. */
+/** Keeps an unwrapped identity key on this device, unless it's forgotten before it's written. */
 export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair): Promise<void> {
   if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
-  const asked = forgets.get(userId) ?? 0
+  const asked = await inTransaction<number>('readonly', (store, answer) => forgetCount(store, userId, answer))
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
   const record: StoredIdentity = { userId, kid, publicKey: toBase64Url(keyPair.publicKey), iv, wrapped, deviceKey }
-  await inTurn(userId, async () => {
-    if ((forgets.get(userId) ?? 0) !== asked) throw new Error('this device was signed out of meanwhile')
-    await withStore('readwrite', (s) => s.put(record))
-  })
+  const written = await inTransaction<boolean>('readwrite', (store, answer) =>
+    forgetCount(store, userId, (count) => {
+      answer(count === asked)
+      if (count === asked) store.put(record)
+    }),
+  )
+  if (!written) throw new Error('this device was signed out of meanwhile')
 }
 
-/** Forgets this device's key, as signing out does, after any save already in turn, and cancels the rest. */
-export async function forgetIdentity(userId: string): Promise<void> {
-  forgets.set(userId, (forgets.get(userId) ?? 0) + 1)
-  await inTurn(userId, () => withStore('readwrite', (s) => s.delete(userId)))
+/**
+ * Forgets this device's key, as signing out does, and stops any save asked for before it. With
+ * `onlyKid`, it removes the stored key only if it's that one: a different key here is someone
+ * else's evidence to keep.
+ */
+export async function forgetIdentity(userId: string, onlyKid?: string): Promise<void> {
+  await inTransaction<void>('readwrite', (store) =>
+    forgetCount(store, userId, (count) => {
+      store.put({ userId: forgetsKey(userId), count: count + 1 })
+      if (onlyKid === undefined) return void store.delete(userId)
+      const stored = store.get(userId)
+      stored.onsuccess = () => {
+        if ((stored.result as StoredIdentity | undefined)?.kid === onlyKid) store.delete(userId)
+      }
+    }),
+  )
 }
