@@ -5,7 +5,7 @@ import { KeyRound } from 'lucide-react'
 import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
 import { errorMessage } from '~/lib/errors.ts'
-import { authClient } from '~/lib/auth-client.ts'
+import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
@@ -21,7 +21,7 @@ function SignIn() {
     event.preventDefault()
     setBusy('password')
     setError(null)
-    const { error } = await authClient.signIn.email({ email, password })
+    const { error } = await authClient.signIn.email({ email, password: await derivedAuthPassword(password, email) })
     setBusy(null)
     if (error) return setError(errorMessage(error, 'That email and password didn’t match.'))
     // The same password unlocks the identity key on the next screen.

@@ -35,14 +35,14 @@ import {
   useLabels,
   useNetworks,
   useScheduled,
+  useScheduledTexts,
   useSidebarLayout,
   type Chat,
+  type ChatList,
   type ChatFilter,
   type LabelId,
 } from '~/data/chats.ts'
 import { formatWhen } from '~/data/snooze.ts'
-import { tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
-import { useSession } from '~/lib/session.tsx'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
 
@@ -81,7 +81,6 @@ export function Sidebar({
   chatsRef,
   bottomBar,
 }: SidebarProps) {
-  const session = useSession()
   const [layout] = useSidebarLayout()
   const [query, setQuery] = useState('')
   const [network, setNetwork] = useState<Network | undefined>()
@@ -104,12 +103,17 @@ export function Sidebar({
 
   const filter: ChatFilter = { network, labelId }
   const focused = layout === 'focused'
-  const inbox = useChats(focused ? 'inbox' : simpleShow, filter)
+  const main = useChats(focused ? 'inbox' : simpleShow, filter)
   // Focused mode shows every view at once, folded into dividers; Simple loads only the one it shows.
-  const snoozed = useChats('snoozed', filter, focused)
-  const requests = useChats('requests', filter, focused)
-  const archived = useChats('archived', filter, focused)
+  const snoozedList = useChats('snoozed', filter, focused)
+  const requestsList = useChats('requests', filter, focused)
+  const archivedList = useChats('archived', filter, focused)
+  const inbox = main.chats
+  const snoozed = snoozedList.chats
+  const requests = requestsList.chats
+  const archived = archivedList.chats
   const scheduledMessages = useScheduled()
+  const scheduledTexts = useScheduledTexts((scheduledMessages ?? []).map((s) => s._id))
   const labels = useLabels()
   const networks = useNetworks()
 
@@ -134,11 +138,9 @@ export function Sidebar({
       (scheduledMessages ?? []).map((s) => ({
         ...s,
         chat: everything.find((c) => c.id === s.chatId),
-        body:
-          tryOpen<MessagePlaintext>(s.copy, session.keyPair, 'message', session.userId, s.clientMessageId)?.body ??
-          'Scheduled message',
+        body: scheduledTexts.get(s._id) ?? 'Scheduled message',
       })),
-    [scheduledMessages, everything, session],
+    [scheduledMessages, everything, scheduledTexts],
   )
 
   // What is on screen, in order: the shell uses it to keep the open chat in view.
@@ -322,7 +324,10 @@ export function Sidebar({
           </>
         ) : !focused ? (
           inbox.length ? (
-            inbox.map((c) => row(c))
+            <>
+              {inbox.map((c) => row(c))}
+              <LoadMore list={main} />
+            </>
           ) : (
             <Empty>
               {simpleShow === 'inbox' && !filterActive
@@ -349,6 +354,7 @@ export function Sidebar({
                 label="Read"
                 icon={<Eye />}
                 count={read.length}
+                more={main}
                 open={open.read}
                 onToggle={() => setOpen((o) => ({ ...o, read: !o.read }))}
               >
@@ -358,6 +364,7 @@ export function Sidebar({
                 label="Snoozed"
                 icon={<AlarmClock />}
                 count={snoozed?.length ?? 0}
+                more={snoozedList}
                 open={open.snoozed}
                 onToggle={() => setOpen((o) => ({ ...o, snoozed: !o.snoozed }))}
               >
@@ -390,6 +397,7 @@ export function Sidebar({
                 label="Requests"
                 icon={<UserPlus />}
                 count={requests?.length ?? 0}
+                more={requestsList}
                 open={open.requests}
                 onToggle={() => setOpen((o) => ({ ...o, requests: !o.requests }))}
               >
@@ -399,6 +407,7 @@ export function Sidebar({
                 label="Archived"
                 icon={<Archive />}
                 count={archived?.length ?? 0}
+                more={archivedList}
                 open={open.archived}
                 onToggle={() => setOpen((o) => ({ ...o, archived: !o.archived }))}
               >
@@ -427,6 +436,7 @@ function Divider({
   label,
   icon,
   count,
+  more,
   open,
   onToggle,
   children,
@@ -434,6 +444,8 @@ function Divider({
   label: string
   icon: ReactNode
   count: number
+  /** The view has more chats than are loaded: the count reads "50+" and opening shows Load more. */
+  more?: ChatList
   open: boolean
   onToggle: () => void
   children: ReactNode
@@ -450,11 +462,25 @@ function Divider({
         <ChevronRight className={cn('size-3.5 text-subtle-foreground transition-transform', open && 'rotate-90')} />
         <span className="text-subtle-foreground [&_svg]:size-3.5">{icon}</span>
         {label}
-        <span className="text-sm font-medium text-subtle-foreground">{count}</span>
+        <span className="text-sm font-medium text-subtle-foreground">
+          {count}
+          {more?.canLoadMore ? '+' : ''}
+        </span>
         <span className="h-px flex-1 bg-border-strong" />
       </button>
       {open ? children : null}
+      {open && more ? <LoadMore list={more} /> : null}
     </>
+  )
+}
+
+/** Loads the next page of a view. Pages hold at most 50 chats. */
+function LoadMore({ list }: { list: ChatList }) {
+  if (!list.canLoadMore) return null
+  return (
+    <Button variant="ghost" size="sm" block className="my-1" onClick={list.loadMore}>
+      Load more chats
+    </Button>
   )
 }
 

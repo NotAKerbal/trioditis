@@ -25,11 +25,11 @@ import {
   PinOff,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { networkName, useChat, useChatActions, useScheduled, type Chat, type ChatId } from '~/data/chats.ts'
+import { networkName, useChat, useChatActions, useScheduled, useScheduledTexts, type Chat, type ChatId } from '~/data/chats.ts'
 import { useBridgeKey, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
-import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
+import { newClientId, sealText } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
@@ -83,15 +83,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     else drafts.delete(chat.id)
   }
 
+  const scheduledTexts = useScheduledTexts((scheduledRows ?? []).map((s) => s._id))
   const scheduled = useMemo(
-    () =>
-      (scheduledRows ?? []).map((s) => ({
-        id: s._id,
-        sendAt: s.sendAt,
-        body:
-          tryOpen<MessagePlaintext>(s.copy, session.keyPair, 'message', session.userId, s.clientMessageId)?.body ?? '',
-      })),
-    [scheduledRows, session],
+    () => (scheduledRows ?? []).map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id) ?? '' })),
+    [scheduledRows, scheduledTexts],
   )
 
   async function sendText(text: string, reply?: string) {

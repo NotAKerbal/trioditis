@@ -1,18 +1,6 @@
 import { api } from '@trioditis/backend/api'
-import type { KeyPair, PasswordParams, RecoveryKey } from '@trioditis/crypto'
-import {
-  decodeRecoveryKey,
-  fromBase64Url,
-  generateKeyPair,
-  generateRecoveryKey,
-  keyId,
-  newPasswordParams,
-  passwordKey,
-  ready,
-  toBase64Url,
-  unwrapIdentityKey,
-  wrapIdentityKey,
-} from '@trioditis/crypto'
+import type { KeyPair, PasswordParams } from '@trioditis/crypto'
+import { decodeRecoveryKey, fromBase64Url, generateKeyPair, makeKeySetup, passwordKey, ready, unwrapIdentityKey } from '@trioditis/crypto'
 import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { convexQuery } from '@convex-dev/react-query'
@@ -24,6 +12,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
 import { takePassword } from '~/lib/pending-password.ts'
+import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
@@ -86,31 +75,42 @@ function MemberGate({ children }: { children: ReactNode }) {
 function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | 'member'; children: ReactNode }) {
   const remote = useQuery(convexQuery(api.keys.identity, {}))
   const local = useQuery({ queryKey: ['identity', userId], queryFn: () => loadIdentity(userId), staleTime: Infinity })
-  if (remote.isPending || local.isPending) return <Splash />
-  if (!remote.data) return <Splash />
-  const { publicKey, kid, backups } = remote.data
+  if (remote.isPending || local.isPending || !remote.data) return <Splash />
+  const { state, publicKey, kid, backups } = remote.data
   const onDone = () => void local.refetch()
-  if (local.data && local.data.kid === kid) {
-    const session: Session = { userId, role, kid: local.data.kid, keyPair: local.data.keyPair }
+  const here = local.data && local.data.kid === kid ? local.data : null
+  if (state === 'none') return <KeySetup userId={userId} onDone={onDone} />
+  if (state === 'needsBackup') {
+    // The key exists but its backups aren't both there: only a device holding the key can make them.
+    if (here) return <KeySetup userId={userId} existing={here.keyPair} onDone={() => void remote.refetch()} />
+    return (
+      <AuthCard
+        title="Finish setting up on your first device"
+        description="Your key was made on another device, but its backups weren’t finished. Open Trioditis there to finish, then sign in here again."
+      >
+        <SignOutButton userId={userId} />
+      </AuthCard>
+    )
+  }
+  if (here) {
+    const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
-  if (!publicKey || !kid) return <KeySetup userId={userId} onDone={onDone} />
-  return <Unlock userId={userId} kid={kid} publicKey={publicKey} backups={backups} onDone={onDone} />
+  return <Unlock userId={userId} kid={kid!} publicKey={publicKey!} backups={backups} onDone={onDone} />
 }
 
 /** Lets the browser paint a spinner before a blocking computation like Argon2id. */
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 30))
 
-function KeySetup({ userId, onDone }: { userId: string; onDone: () => void }) {
+/**
+ * First-device setup, or finishing the backups of a key this device already has (`existing`):
+ * the key is wrapped with the person's password and a new recovery key, which they must
+ * confirm saving before anything is sent.
+ */
+function KeySetup({ userId, existing, onDone }: { userId: string; existing?: KeyPair; onDone: () => void }) {
   const setup = useMutation(api.keys.setup)
   const [password, setPassword] = useState(() => takePassword() ?? '')
-  const [prepared, setPrepared] = useState<{
-    keyPair: KeyPair
-    kid: string
-    recovery: RecoveryKey
-    params: PasswordParams
-    password: string
-  } | null>(null)
+  const [prepared, setPrepared] = useState<{ keyPair: KeyPair; setup: ReturnType<typeof makeKeySetup> } | null>(null)
   const [saved, setSaved] = useState(false)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -121,14 +121,10 @@ function KeySetup({ userId, onDone }: { userId: string; onDone: () => void }) {
     setBusy(true)
     setError(null)
     await ready()
-    const keyPair = generateKeyPair()
-    setPrepared({
-      keyPair,
-      kid: keyId(keyPair.publicKey),
-      recovery: generateRecoveryKey(),
-      params: newPasswordParams(),
-      password,
-    })
+    await nextFrame()
+    const keyPair = existing ?? generateKeyPair()
+    // Wraps the key with the password (Argon2id, about a second) and a new recovery key.
+    setPrepared({ keyPair, setup: makeKeySetup(keyPair.privateKey, password, userId) })
     setBusy(false)
   }
 
@@ -136,21 +132,10 @@ function KeySetup({ userId, onDone }: { userId: string; onDone: () => void }) {
     if (!prepared) return
     setBusy(true)
     setError(null)
-    await nextFrame()
     try {
-      const { keyPair, kid, recovery, params } = prepared
-      const passwordWrap = wrapIdentityKey(keyPair.privateKey, passwordKey(prepared.password, params), {
-        userId,
-        kid,
-        kind: 'password',
-      })
-      const recoveryWrap = wrapIdentityKey(keyPair.privateKey, recovery.bytes, { userId, kid, kind: 'recovery' })
-      await setup({
-        publicKey: toBase64Url(keyPair.publicKey),
-        password: { ...passwordWrap, params },
-        recovery: recoveryWrap,
-      })
-      await storeIdentity(userId, kid, keyPair)
+      const proof = existing ? await proveKey(existing) : undefined
+      const { kid } = await setup({ ...prepared.setup.args, ...(proof ? { proof } : {}) })
+      await storeIdentity(userId, kid, prepared.keyPair)
       onDone()
     } catch (e) {
       setError(errorMessage(e, 'Your key couldn’t be saved. Try again.'))
@@ -161,46 +146,34 @@ function KeySetup({ userId, onDone }: { userId: string; onDone: () => void }) {
   if (!prepared) {
     return (
       <AuthCard
-        title="Set up your key"
+        title={existing ? 'Finish setting up your key' : 'Set up your key'}
         description="Trioditis seals every message to a key only your devices hold, so the server can’t read them. Your password protects a backup of it, so your other devices can open your messages too."
       >
         <form onSubmit={prepare}>
           <FormError message={error} />
           <Field label="Your password" hint="The one you sign in with.">
-            <Input
-              type="password"
-              autoComplete="current-password"
-              required
-              minLength={12}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+            <Input type="password" autoComplete="current-password" required minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} />
           </Field>
           <Button type="submit" variant="primary" size="lg" block loading={busy}>
-            Continue
+            {busy ? 'Securing your key…' : 'Continue'}
           </Button>
         </form>
       </AuthCard>
     )
   }
 
+  const recoveryText = prepared.setup.recoveryText
   return (
-    <AuthCard
-      title="Save your recovery key"
-      description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now."
-    >
+    <AuthCard title="Save your recovery key" description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now.">
       <FormError message={error} />
-      <div
-        className="mb-3 rounded-md bg-surface-2 p-3 text-center font-mono text-base leading-relaxed tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]"
-        aria-label="Recovery key"
-      >
-        {prepared.recovery.text}
+      <div className="mb-3 rounded-md bg-surface-2 p-3 text-center font-mono text-base leading-relaxed tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]" aria-label="Recovery key">
+        {recoveryText}
       </div>
       <Button
         size="sm"
         className="mb-4"
         onClick={() =>
-          navigator.clipboard.writeText(prepared.recovery.text).then(
+          navigator.clipboard.writeText(recoveryText).then(
             () => setCopied(true),
             () => setError('Copying didn’t work here. Select the key and copy it yourself.'),
           )
@@ -209,16 +182,11 @@ function KeySetup({ userId, onDone }: { userId: string; onDone: () => void }) {
         {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
       </Button>
       <label className="mb-5 flex items-start gap-2.5 text-sm">
-        <input
-          type="checkbox"
-          className="mt-0.5 size-4 accent-[var(--accent)]"
-          checked={saved}
-          onChange={(e) => setSaved(e.target.checked)}
-        />
+        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
         I’ve saved my recovery key somewhere safe.
       </label>
       <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={finish}>
-        {busy ? 'Securing your key…' : 'Finish setup'}
+        Finish setup
       </Button>
     </AuthCard>
   )

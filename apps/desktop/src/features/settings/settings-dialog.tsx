@@ -19,13 +19,15 @@ import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
-import { useMutation } from 'convex/react'
+import { useAction, useMutation } from 'convex/react'
 import { Check, Copy, Eye, KeyRound, Plug, Plus, Users } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { networkName, useAccounts, useNetworkHealth, useNetworks, useSidebarLayout } from '~/data/chats.ts'
-import { authClient } from '~/lib/auth-client.ts'
+import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { config } from '~/lib/config.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
+import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 
@@ -282,8 +284,19 @@ function Accounts() {
               <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
               <div className="min-w-0 flex-1">
                 <div className="font-semibold">{networkName(a.network)}</div>
-                <div className={cn('text-sm', state.warn || bridgeDown ? 'text-warning' : 'text-muted-foreground')}>
-                  {bridgeDown ? 'The server’s bridge for this network isn’t running.' : state.text}
+                <div
+                  className={cn(
+                    'text-sm',
+                    state.warn || bridgeDown || a.logoutError ? 'text-warning' : 'text-muted-foreground',
+                  )}
+                >
+                  {a.logoutPending
+                    ? 'Disconnecting…'
+                    : a.logoutError
+                      ? 'It couldn’t be disconnected. Try again.'
+                      : bridgeDown
+                        ? 'The server’s bridge for this network isn’t running.'
+                        : state.text}
                 </div>
               </div>
               {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
@@ -302,9 +315,10 @@ function Accounts() {
               <Button
                 size="sm"
                 variant="ghost"
+                disabled={a.logoutPending}
                 onClick={() =>
                   void logout({ networkAccountId: a._id }).then(
-                    () => toast(`Disconnected ${networkName(a.network)}`),
+                    () => toast(`Disconnecting ${networkName(a.network)}…`),
                     (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
                   )
                 }
@@ -321,6 +335,7 @@ function Accounts() {
       <h3 className="mt-6 mb-2 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
         Connect a network
       </h3>
+      {config.environment !== 'production' ? <DemoSeed /> : null}
       {confirmRisk ? (
         <div className="mb-3 rounded-lg bg-warning-soft p-3.5 text-sm text-warning-ink">
           <b className="font-semibold">
@@ -378,6 +393,38 @@ function Accounts() {
         </p>
       ) : null}
     </>
+  )
+}
+
+/**
+ * Preview and nightly servers can fill an account with made-up chats on a fake network, to try
+ * the app without connecting a real one. The server refuses this everywhere else.
+ */
+function DemoSeed() {
+  const seed = useAction(api.demo.seedForMe)
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="mb-3 flex items-center gap-3 rounded-lg bg-surface-2 p-3 text-sm shadow-[inset_0_0_0_1px_var(--border)]">
+      <span className="flex-1 text-muted-foreground">
+        This is a {config.environment} server. You can fill your account with made-up demo chats.
+      </span>
+      <Button
+        size="sm"
+        loading={busy}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            const { seeded } = await seed({})
+            toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
+          } catch (e) {
+            toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
+          }
+          setBusy(false)
+        }}
+      >
+        Load demo chats
+      </Button>
+    </div>
   )
 }
 
@@ -494,23 +541,24 @@ function Members() {
 
 function Keys() {
   const session = useSession()
+  const { data: auth } = authClient.useSession()
+  const { data: identity } = useQuery(convexQuery(api.keys.identity, {}))
   const putBackup = useMutation(api.keys.putBackup)
+  const changePasswordAction = useAction(api.account.changePassword)
   const [recovery, setRecovery] = useState<RecoveryKey | null>(null)
   const [saved, setSaved] = useState(false)
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [busy, setBusy] = useState<'recovery' | 'password' | 'passkey' | null>(null)
+  // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
+  const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
   async function saveRecovery() {
     if (!recovery) return
     setBusy('recovery')
     try {
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, {
-        userId: session.userId,
-        kid: session.kid,
-        kind: 'recovery',
-      })
-      await putBackup({ kind: 'recovery', ...wrap })
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, { userId: session.userId, kid: session.kid, kind: 'recovery' })
+      await putBackup({ kind: 'recovery', ...wrap, proof: await proveKey(session.keyPair), expectedRevision: revisionOf('recovery') })
       toast('Your new recovery key is saved. The old one no longer works.')
       setRecovery(null)
       setSaved(false)
@@ -520,38 +568,30 @@ function Keys() {
     setBusy(null)
   }
 
+  /** One action changes the sign-in password and re-wraps the key backup (client-api.md, Changing the password). */
   async function changePassword(e: React.FormEvent) {
     e.preventDefault()
+    const email = auth?.user.email
+    if (!email) return
     setBusy('password')
-    await new Promise((r) => setTimeout(r, 30))
-    const { error } = await authClient.changePassword({
-      currentPassword: current,
-      newPassword: next,
-      revokeOtherSessions: false,
-    })
-    if (error) {
-      setBusy(null)
-      return toast(errorMessage(error, 'Your password couldn’t be changed.'))
-    }
-    // The key backup is wrapped by the password too, so wrap it again with the new one.
     try {
+      const currentAuthPassword = await derivedAuthPassword(current, email)
+      const newAuthPassword = await derivedAuthPassword(next, email)
       const params = newPasswordParams()
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, passwordKey(next, params), {
-        userId: session.userId,
-        kid: session.kid,
-        kind: 'password',
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, passwordKey(next, params), { userId: session.userId, kid: session.kid, kind: 'password' })
+      await changePasswordAction({
+        currentAuthPassword,
+        newAuthPassword,
+        newWrap: { ...wrap, params },
+        proof: await proveKey(session.keyPair),
+        expectedRevision: revisionOf('password'),
       })
-      await putBackup({ kind: 'password', ...wrap, params })
       toast('Password changed.')
       setCurrent('')
       setNext('')
     } catch (err) {
-      toast(
-        errorMessage(
-          err,
-          'Your password changed, but your key backup didn’t. Use your recovery key on new devices until you change it again.',
-        ),
-      )
+      // The backend's sentence says exactly what state things are in; show it as it is.
+      toast(errorMessage(err, 'Your password couldn’t be changed.'))
     }
     setBusy(null)
   }

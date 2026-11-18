@@ -2,7 +2,7 @@ import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
-import { INVITE_HEADER, authClient } from '~/lib/auth-client.ts'
+import { INVITE_HEADER, authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { Field, FormError } from './auth-card.tsx'
@@ -37,7 +37,7 @@ export function SignUpForm({
     const { error } = await authClient.signUp.email({
       name: name.trim() || email.split('@')[0]!,
       email,
-      password,
+      password: await derivedAuthPassword(password, email),
       fetchOptions: { headers: { [INVITE_HEADER]: setupToken.trim() } },
     })
     setBusy(false)

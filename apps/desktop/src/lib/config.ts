@@ -4,7 +4,7 @@
 
 export interface AppConfig {
   convexUrl: string
-  /** Where Better Auth's /api/auth lives. The app's own origin when it is proxied there, as in dev and the self-hosted bundle. */
+  /** The Convex deployment's HTTP actions. Auth doesn't use it directly: /api/auth is proxied on the app's own origin. */
   convexSiteUrl: string
   environment: string
 }
