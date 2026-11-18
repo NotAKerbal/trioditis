@@ -160,9 +160,16 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
             )
           ) : null}
           {step.type === 'displayAndWait' ? (
-            <p className="mt-3 text-center text-sm text-subtle-foreground">
-              This updates by itself once your phone confirms.
-            </p>
+            <>
+              <p className="mt-3 text-center text-sm text-subtle-foreground">
+                This updates by itself once your phone confirms.
+              </p>
+              <div className="mt-4 flex justify-center">
+                <Button variant="ghost" size="sm" onClick={close}>
+                  Cancel
+                </Button>
+              </div>
+            </>
           ) : null}
 
           {step.type === 'userInput' || step.type === 'cookies' ? (
@@ -202,9 +209,14 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                   ) : null}
                 </label>
               ))}
-              <Button type="submit" variant="primary" loading={busy} disabled={!bridgeKey}>
-                Continue
-              </Button>
+              <div className="flex gap-2">
+                <Button type="submit" variant="primary" loading={busy} disabled={!bridgeKey}>
+                  Continue
+                </Button>
+                <Button type="button" variant="ghost" onClick={close}>
+                  Cancel
+                </Button>
+              </div>
             </form>
           ) : null}
         </div>
