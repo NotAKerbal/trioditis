@@ -54,6 +54,8 @@ export default defineSchema({
     userId: v.string(),
     network,
     loginId: v.string(),
+    /** The bridge host that runs this login; its commands go there. */
+    hostId: v.optional(v.string()),
     state: loginState,
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
@@ -142,12 +144,20 @@ export default defineSchema({
     /** `self`, or the ghost ID. */
     senderKey: v.string(),
     key: v.string(),
-    /** The event that added it, so replaying that event after a removal doesn't add it back. */
+    /** The latest event that added it, and when the bridge host saw it. */
     eventId: v.string(),
+    addedAt: v.number(),
     networkTs: v.number(),
     /** Kept as a tombstone rather than deleted, for the same reason. */
     removedAt: v.optional(v.number()),
   }).index('by_message', ['messageId', 'senderKey', 'key']),
+
+  /** Every reaction event applied, so a replay of any of them changes nothing. */
+  reactionEvents: defineTable({
+    userId: v.string(),
+    network,
+    eventId: v.string(),
+  }).index('by_event', ['userId', 'network', 'eventId']),
 
   receipts: defineTable({
     userId: v.string(),
@@ -175,12 +185,6 @@ export default defineSchema({
     /** Commands for one chat go out in order, one at a time. */
     chatId: v.optional(v.id('chats')),
     payload: commandPayload,
-    /**
-     * The bridge-readable part (message or login input, sealed to the bridge key). Deleted as
-     * soon as the bridge host has accepted the command, or it is rejected or expires, so old
-     * outgoing messages and credentials don't sit in the database or its backups.
-     */
-    sealedPayload: v.optional(envelope),
     /**
      * `queued` → `claimed` (leased to the gateway) → `dispatched` (the bridge host has it) or
      * `rejected` or `expired`.
@@ -216,6 +220,17 @@ export default defineSchema({
     .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
+  /**
+   * The bridge-readable part of a command (a message or login input, sealed to the bridge
+   * key), kept apart so scanning the outbox never reads it. Deleted as soon as the bridge host
+   * has accepted the command, or it is rejected or expires, so old outgoing messages and
+   * credentials don't sit in the database or its backups.
+   */
+  outboxPayloads: defineTable({
+    commandId: v.id('outbox'),
+    sealed: envelope,
+  }).index('by_command', ['commandId']),
+
   /** Each bridge host's position in its event journal. */
   bridgeHosts: defineTable({
     hostId: v.string(),
@@ -225,7 +240,10 @@ export default defineSchema({
     lastSeenAt: v.number(),
   }).index('by_hostId', ['hostId']),
 
-  /** Events that couldn't be applied, kept for the health page instead of blocking the feed. */
+  /**
+   * Events that couldn't be applied, kept for the health page instead of blocking the feed.
+   * Only codes and IDs: never the event's content.
+   */
   quarantine: defineTable({
     hostId: v.string(),
     seq: v.number(),

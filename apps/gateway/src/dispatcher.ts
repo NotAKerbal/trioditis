@@ -1,4 +1,4 @@
-import type { BridgeCommand } from '@trioditis/core/bridge-protocol'
+import { ERROR_CODES, type BridgeCommand, type ErrorCode } from '@trioditis/core/bridge-protocol'
 import type { Backend, ClaimedCommand } from './backend.ts'
 import { describeError } from './log.ts'
 
@@ -10,7 +10,7 @@ import { describeError } from './log.ts'
 // to the same host, with the same commandId, and the host runs it at most once.
 // See docs/architecture/bridge-protocol.md, Commands.
 
-const ERROR_CODE = /^[a-z_]{1,40}$/
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set(ERROR_CODES)
 
 export interface DispatcherOptions {
   internalToken: string
@@ -68,7 +68,10 @@ export class Dispatcher {
         this.again = false
         for (;;) {
           if (this.stopped) return
-          const commands = await this.backend.claimCommands({ limit: 20 })
+          const commands = await this.backend.claimCommands({
+            limit: 20,
+            hostIds: [...this.options.bridgeHosts.keys()],
+          })
           if (commands.length === 0) break
           await Promise.all(commands.map((command) => this.deliver(command)))
         }
@@ -122,13 +125,17 @@ export class Dispatcher {
   }
 }
 
-/** The error code in a bridge host's 4xx body. Anything else becomes `invalid_command`. */
-async function errorCode(response: Response) {
+/**
+ * The error code in a bridge host's 4xx body. Anything that isn't a code both sides know
+ * (free text, or a code from a newer host) becomes `invalid_command`, so the backend can
+ * still record the rejection.
+ */
+async function errorCode(response: Response): Promise<ErrorCode> {
   try {
     const { error } = (await response.json()) as { error?: unknown }
-    if (typeof error === 'string' && ERROR_CODE.test(error)) return error as never
+    if (typeof error === 'string' && KNOWN_ERROR_CODES.has(error)) return error as ErrorCode
   } catch {
     // Not JSON: nothing to keep.
   }
-  return 'invalid_command' as const
+  return 'invalid_command'
 }

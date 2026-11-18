@@ -19,6 +19,7 @@ import type * as lib_envelope from "../lib/envelope.js";
 import type * as lib_hash from "../lib/hash.js";
 import type * as lib_ingest from "../lib/ingest.js";
 import type * as lib_networks from "../lib/networks.js";
+import type * as lib_outbox from "../lib/outbox.js";
 import type * as logins from "../logins.js";
 import type * as mcp from "../mcp.js";
 import type * as members from "../members.js";
@@ -43,6 +44,7 @@ declare const fullApi: ApiFromModules<{
   "lib/hash": typeof lib_hash;
   "lib/ingest": typeof lib_ingest;
   "lib/networks": typeof lib_networks;
+  "lib/outbox": typeof lib_outbox;
   logins: typeof logins;
   mcp: typeof mcp;
   members: typeof members;

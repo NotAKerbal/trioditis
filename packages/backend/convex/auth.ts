@@ -73,10 +73,25 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
           after: async (user, endpoint) => {
             if (!('runMutation' in ctx)) return
             const token = endpoint?.headers?.get(INVITE_HEADER)
-            await ctx.runMutation(internal.members.onAccountCreated, {
+            const { admitted } = await ctx.runMutation(internal.members.onAccountCreated, {
               userId: user.id,
               email: user.email,
               tokenHash: token ? await sha256Hex(token) : undefined,
+            })
+            if (admitted) return
+            // What admitted it in `before` no longer holds (which the reservation makes
+            // unlikely). Remove the account rather than leave one that can do nothing and
+            // keeps its email taken, and fail the sign-up.
+            await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+              input: { model: 'account', where: [{ field: 'userId', value: user.id }] },
+              paginationOpts: { cursor: null, numItems: 100 },
+            })
+            await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+              input: { model: 'user', where: [{ field: '_id', value: user.id }] },
+            })
+            throw new APIError('FORBIDDEN', {
+              code: 'INVITE_REQUIRED',
+              message: 'An invitation is required to create an account on this server.',
             })
           },
         },

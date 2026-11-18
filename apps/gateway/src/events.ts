@@ -20,9 +20,9 @@ interface Batch {
 const isText = (value: unknown) => typeof value === 'string' && value.length > 0
 
 /**
- * The batch, if it is one. Every event needs a usable sequence number and the fields every
- * event has; the rest of each event is checked by the backend, which quarantines events it
- * can't use without stopping the ones after.
+ * The batch, if it is one. Every event needs a usable sequence number, without which the
+ * order can't be kept; the rest of each event is checked by the backend, and an event it
+ * can't use is quarantined without stopping the ones after.
  */
 export function parseBatch(value: unknown): Batch | null {
   if (typeof value !== 'object' || value === null) return null
@@ -30,14 +30,25 @@ export function parseBatch(value: unknown): Batch | null {
   if (!isText(batch.hostId) || !NETWORKS.includes(batch.network as Network) || !Array.isArray(batch.events)) return null
   for (const event of batch.events as unknown[]) {
     if (typeof event !== 'object' || event === null) return null
-    const { seq, type } = event as Record<string, unknown>
-    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 1 || !isText(type)) return null
+    const { seq } = event as Record<string, unknown>
+    if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 1) return null
   }
   return { hostId: batch.hostId as string, network: batch.network as Network, events: batch.events as BridgeEvent[] }
 }
 
+/**
+ * Whether the event itself is the problem: the backend's validators refused it, or the Convex
+ * client couldn't encode it. Anything else (the backend is down) is not the event's fault, and
+ * nothing is quarantined for it.
+ */
 function isValidationError(error: unknown) {
-  return String(error).includes('ArgumentValidationError')
+  const text = String(error)
+  return (
+    text.includes('ArgumentValidationError') ||
+    text.includes('is not a supported Convex type') ||
+    /Field name .* (starts with|must only contain|is too long)/.test(text) ||
+    text.includes('is not a valid Convex value')
+  )
 }
 
 type Outcome = { ackedThrough: number } | { expectedSeq: number }
@@ -59,7 +70,7 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
       outcome = await backend.ingest({ ...target, events: [event] as never })
     } catch (error) {
       if (!isValidationError(error)) throw error
-      outcome = await backend.quarantineInvalid({ ...target, seq: event.seq, type: String(event.type) })
+      outcome = await backend.quarantineInvalid({ ...target, seq: event.seq, type: String(event.type ?? 'unknown') })
     }
     if ('expectedSeq' in outcome) return outcome
   }

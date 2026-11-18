@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
 import { fromBase64Url, generateKeyPair, keyId, ready, toBase64Url } from '@trioditis/crypto'
@@ -52,6 +52,21 @@ describe('accounts', () => {
     expect(invitations[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
     expect(invitations[0]).not.toHaveProperty('tokenHash')
     expect(await t.query(internal.members.isMember, { userId: 'sam' })).toBe(true)
+  })
+
+  it('finishes a sign-up whose invitation expired while it was in progress', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    const { token } = await admin.mutation(api.members.invite, { email: 'sam@example.com', role: 'member' })
+    const tokenHash = await sha256Hex(token)
+    vi.advanceTimersByTime(7 * 24 * 60 * 60 * 1000 - 1_000)
+    expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: true })
+    vi.advanceTimersByTime(5_000)
+    expect(
+      await t.mutation(internal.members.onAccountCreated, { userId: 'sam', email: 'sam@example.com', tokenHash }),
+    ).toEqual({ admitted: true })
+    vi.useRealTimers()
   })
 
   it('only lets admins invite', async () => {

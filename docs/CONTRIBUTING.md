@@ -90,6 +90,13 @@ checks that nothing readable reached Convex.
 `.data/` holds the dev stack's secrets and runtime data. It is git-ignored; never commit
 it.
 
+### Schema changes before the first release
+
+Until the first release there is no data to keep, so schema changes don't come with
+migrations. If a change no longer matches what a dev deployment holds, `convex dev` refuses
+to push it; clear the dev data (or start a fresh local deployment) and run `pnpm dev:setup`
+again. From the first release on, every schema change ships with its migration.
+
 ## Checks
 
 Run before opening a pull request:

@@ -3,6 +3,7 @@ import type { MutationCtx } from '../_generated/server'
 import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
+import { deletePayload } from './outbox'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
 // Every write is keyed so replaying an event changes nothing: the bridge host delivers at
@@ -12,8 +13,32 @@ import { isEnvelope } from './envelope'
 // caller can quarantine it without leaving half of it applied (a caught error doesn't roll
 // back earlier writes in the same mutation).
 
+/**
+ * Why an event can't be applied. Quarantine keeps only this code, never the event's content.
+ */
+export type UnmappableReason =
+  | 'missing_target'
+  | 'missing_chat'
+  | 'foreign_login'
+  | 'foreign_host'
+  | 'unknown_login_session'
+  | 'unknown_send'
+  | 'malformed_envelope'
+
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
-export class Unmappable extends Error {}
+export class Unmappable extends Error {
+  readonly reason: UnmappableReason
+  constructor(reason: UnmappableReason) {
+    super(reason)
+    this.reason = reason
+  }
+}
+
+/** Where an event came from. */
+export interface Origin {
+  network: Network
+  hostId: string
+}
 
 type Sender = Extract<BridgeEventDoc, { type: 'message' }>['sender']
 type Delivery = NonNullable<Doc<'messages'>['delivery']>
@@ -68,7 +93,7 @@ async function findMessage(ctx: MutationCtx, userId: string, network: Network, e
 
 async function targetMessage(ctx: MutationCtx, userId: string, network: Network, eventId: string) {
   const message = await findMessage(ctx, userId, network, eventId)
-  if (!message) throw new Unmappable(`No message ${eventId}`)
+  if (!message) throw new Unmappable('missing_target')
   return message
 }
 
@@ -77,6 +102,17 @@ async function findOutboxSend(ctx: MutationCtx, userId: string, clientMessageId:
     .query('outbox')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
+}
+
+/**
+ * The send `clientMessageId` names, if the reporting host is the one it went to. A report
+ * about another host's send must not settle it or delete its payload.
+ */
+async function sendFrom(ctx: MutationCtx, userId: string, clientMessageId: string, origin: Origin) {
+  const send = await findOutboxSend(ctx, userId, clientMessageId)
+  if (!send) return null
+  if (send.network !== origin.network || (send.hostId !== undefined && send.hostId !== origin.hostId)) return null
+  return send
 }
 
 async function findPersonsCopy(ctx: MutationCtx, userId: string, clientMessageId: string) {
@@ -113,21 +149,19 @@ export function advance(current: Doc<'messages'>['delivery'], next: Delivery): D
 /**
  * A status or echo for a send proves the bridge host has the command, even if its 202 never
  * reached the gateway. Settling the outbox row means it is never delivered again, and its
- * bridge-readable copy is deleted.
+ * bridge-readable payload is deleted.
  */
-async function settleSend(ctx: MutationCtx, userId: string, clientMessageId: string, delivery: Delivery) {
-  const send = await findOutboxSend(ctx, userId, clientMessageId)
-  if (!send) return null
+async function settleSend(ctx: MutationCtx, send: Doc<'outbox'>, delivery: Delivery) {
   const pending = send.state === 'queued' || send.state === 'claimed'
   await ctx.db.patch(send._id, {
     delivery: advance(send.delivery, delivery),
-    sealedPayload: undefined,
     ...(pending ? { state: 'dispatched' as const, leaseUntil: undefined } : {}),
   })
-  return send
+  await deletePayload(ctx, send._id)
 }
 
-async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, network: Network) {
+async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, origin: Origin) {
+  const { network } = origin
   if (await findMessage(ctx, event.userId, network, event.eventId)) return
   const chat = await chatFor(ctx, event, network)
   const fields = {
@@ -143,12 +177,14 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   }
 
   // The echo of a send from Trioditis replaces the person's pending copy: only a copy still
-  // pending, of their own message, in this chat. Anything else is stored as a new message.
+  // pending, of their own message, in this chat, echoed by the host the send went to.
+  // Anything else is stored as a new message.
   const clientMessageId = 'self' in event.sender ? event.clientMessageId : undefined
   const pending = clientMessageId ? await findPersonsCopy(ctx, event.userId, clientMessageId) : null
-  if (pending && clientMessageId && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
+  const send = clientMessageId ? await sendFrom(ctx, event.userId, clientMessageId, origin) : null
+  if (pending && send && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
     await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, 'sent') })
-    await settleSend(ctx, event.userId, clientMessageId, 'sent')
+    await settleSend(ctx, send, 'sent')
   } else {
     await ctx.db.insert('messages', { userId: event.userId, chatId: chat._id, network, ...fields })
   }
@@ -179,6 +215,14 @@ async function findReaction(ctx: MutationCtx, messageId: Id<'messages'>, sender:
 
 async function applyReaction(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'reaction' }>, network: Network) {
   const message = await targetMessage(ctx, event.userId, network, event.targetEventId)
+  // Every reaction event is applied once, so a replay of an old add (even after the reaction
+  // was removed and added again) changes nothing.
+  const seen = await ctx.db
+    .query('reactionEvents')
+    .withIndex('by_event', (q) => q.eq('userId', event.userId).eq('network', network).eq('eventId', event.eventId))
+    .unique()
+  if (seen) return
+  await ctx.db.insert('reactionEvents', { userId: event.userId, network, eventId: event.eventId })
   if (message.redactedAt !== undefined) return
   const existing = await findReaction(ctx, message._id, event.sender, event.key)
   if (!existing) {
@@ -188,14 +232,18 @@ async function applyReaction(ctx: MutationCtx, event: Extract<BridgeEventDoc, { 
       senderKey: senderKey(event.sender),
       key: event.key,
       eventId: event.eventId,
+      addedAt: event.at,
       networkTs: event.networkTs,
     })
     return
   }
-  // The same event again (a replay) changes nothing, even after the reaction was removed. A
-  // new reaction event after a removal adds it back.
-  if (existing.eventId === event.eventId || existing.removedAt === undefined) return
-  await ctx.db.patch(existing._id, { eventId: event.eventId, networkTs: event.networkTs, removedAt: undefined })
+  if (existing.removedAt === undefined) return
+  await ctx.db.patch(existing._id, {
+    eventId: event.eventId,
+    addedAt: event.at,
+    networkTs: event.networkTs,
+    removedAt: undefined,
+  })
 }
 
 async function applyReactionRemove(
@@ -206,7 +254,9 @@ async function applyReactionRemove(
   const message = await findMessage(ctx, event.userId, network, event.targetEventId)
   if (!message) return
   const existing = await findReaction(ctx, message._id, event.sender, event.key)
-  if (existing && existing.removedAt === undefined) await ctx.db.patch(existing._id, { removedAt: event.at })
+  // A removal older than the add it would undo (a replay) leaves the reaction alone.
+  if (!existing || existing.removedAt !== undefined || existing.addedAt > event.at) return
+  await ctx.db.patch(existing._id, { removedAt: event.at })
 }
 
 /** A deleted message keeps its row and place, but loses its content, edits and reactions. */
@@ -233,7 +283,7 @@ async function applyRedaction(
 
 async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'receipt' }>, network: Network) {
   const chat = await findChat(ctx, event.userId, network, event.portalId)
-  if (!chat) throw new Unmappable(`No chat ${event.portalId}`)
+  if (!chat) throw new Unmappable('missing_chat')
   const key = senderKey(event.sender)
   const existing = await ctx.db
     .query('receipts')
@@ -299,17 +349,19 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 async function applyLoginState(
   ctx: MutationCtx,
   event: Extract<BridgeEventDoc, { type: 'loginState' }>,
-  network: Network,
+  origin: Origin,
 ) {
+  const { network } = origin
   const existing = await ctx.db
     .query('networkAccounts')
     .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', event.loginId))
     .unique()
-  if (existing && existing.userId !== event.userId)
-    throw new Unmappable(`Login ${event.loginId} belongs to someone else`)
+  if (existing && existing.userId !== event.userId) throw new Unmappable('foreign_login')
   const fields = {
     state: event.state,
     error: event.error,
+    // The host reporting on a login is the one running it; its commands go there.
+    hostId: origin.hostId,
     updatedAt: event.at,
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
   }
@@ -320,7 +372,7 @@ async function applyLoginState(
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, hostId: string) {
   const sessionId = ctx.db.normalizeId('loginSessions', event.loginSessionId)
   const session = sessionId ? await ctx.db.get(sessionId) : null
-  if (!session || session.userId !== event.userId) throw new Unmappable(`No login session ${event.loginSessionId}`)
+  if (!session || session.userId !== event.userId) throw new Unmappable('unknown_login_session')
   const state =
     event.step.type === 'complete'
       ? 'complete'
@@ -338,21 +390,28 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
   })
 }
 
-async function applySendStatus(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'sendStatus' }>) {
-  if (!(await findOutboxSend(ctx, event.userId, event.clientMessageId))) {
-    throw new Unmappable(`No send ${event.clientMessageId}`)
+async function applySendStatus(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'sendStatus' }>,
+  origin: Origin,
+) {
+  const send = await sendFrom(ctx, event.userId, event.clientMessageId, origin)
+  if (!send) {
+    const elsewhere = await findOutboxSend(ctx, event.userId, event.clientMessageId)
+    throw new Unmappable(elsewhere ? 'foreign_host' : 'unknown_send')
   }
-  const send = (await settleSend(ctx, event.userId, event.clientMessageId, event.status))!
+  await settleSend(ctx, send, event.status)
   if (event.error) await ctx.db.patch(send._id, { lastError: event.error })
   const message = await findPersonsCopy(ctx, event.userId, event.clientMessageId)
   if (message) await ctx.db.patch(message._id, { delivery: advance(message.delivery, event.status) })
 }
 
-export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, network: Network, hostId: string) {
+export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
+  const { network, hostId } = origin
   if ('sealed' in event && !isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
   switch (event.type) {
     case 'message':
-      return await applyMessage(ctx, event, network)
+      return await applyMessage(ctx, event, origin)
     case 'edit':
       return await applyEdit(ctx, event, network)
     case 'reaction':
@@ -370,11 +429,11 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, networ
     case 'contact':
       return await applyContact(ctx, event, network)
     case 'loginState':
-      return await applyLoginState(ctx, event, network)
+      return await applyLoginState(ctx, event, origin)
     case 'loginStep':
       return await applyLoginStep(ctx, event, hostId)
     case 'sendStatus':
-      return await applySendStatus(ctx, event)
+      return await applySendStatus(ctx, event, origin)
     case 'backfillDone':
       return
   }

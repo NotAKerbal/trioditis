@@ -24,13 +24,19 @@ async function setupTokenMatches(tokenHash: string | undefined) {
   return constantTimeEqual(await sha256Hex(setupToken), tokenHash)
 }
 
+/**
+ * The invitation `tokenHash` names for `email`, if it can still be used. One held for a
+ * sign-up in progress stays usable until that sign-up finishes, even if it expires meanwhile.
+ */
 async function openInvitation(ctx: QueryCtx, email: string, tokenHash: string | undefined) {
   if (!tokenHash) return null
   const invitation = await ctx.db
     .query('invitations')
     .withIndex('by_tokenHash', (q) => q.eq('tokenHash', tokenHash))
     .unique()
-  if (!invitation || invitation.acceptedAt || invitation.expiresAt < Date.now()) return null
+  const now = Date.now()
+  const held = (invitation?.reservedUntil ?? 0) > now
+  if (!invitation || invitation.acceptedAt || (invitation.expiresAt < now && !held)) return null
   if (invitation.email !== normalizeEmail(email)) return null
   return invitation
 }

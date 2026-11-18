@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
 import { audit } from './lib/audit'
 import { isEnvelope } from './lib/envelope'
+import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
 import { envelope, network } from './validators'
 
@@ -47,7 +48,7 @@ export const start = mutation({
       state: 'pending',
       updatedAt: now,
     })
-    await ctx.db.insert('outbox', {
+    await queueCommand(ctx, {
       userId: member.userId,
       network: args.network,
       payload: {
@@ -59,6 +60,7 @@ export const start = mutation({
       state: 'queued',
       attempts: 0,
       createdAt: now,
+      expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.start', args.network)
     return loginSessionId
@@ -77,17 +79,23 @@ export const submit = mutation({
       throw new ConvexError('That step of the login is over. Start again if it didn’t finish.')
     }
     if (!isEnvelope(args.sealed)) throw new ConvexError('That input isn’t sealed.')
-    await ctx.db.insert('outbox', {
-      userId: member.userId,
-      network: session.network,
-      payload: { type: 'loginSubmit', loginSessionId: args.loginSessionId, stepId: args.stepId },
-      sealedPayload: args.sealed,
-      // The login runs inside the bridge host that started it.
-      ...(session.hostId ? { hostId: session.hostId } : {}),
-      state: 'queued',
-      attempts: 0,
-      createdAt: Date.now(),
-    })
+    const now = Date.now()
+    await queueCommand(
+      ctx,
+      {
+        userId: member.userId,
+        network: session.network,
+        payload: { type: 'loginSubmit', loginSessionId: args.loginSessionId, stepId: args.stepId },
+        // The login runs inside the bridge host that started it.
+        ...(session.hostId ? { hostId: session.hostId } : {}),
+        state: 'queued',
+        attempts: 0,
+        createdAt: now,
+        // Credentials don't wait around for a bridge host that never comes back.
+        expiresAt: now + LOGIN_COMMAND_TTL_MS,
+      },
+      args.sealed,
+    )
     return null
   },
 })
@@ -100,14 +108,16 @@ export const cancel = mutation({
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId) throw new ConvexError('That login doesn’t exist.')
     if (session.state === 'complete' || session.state === 'cancelled') return null
-    await ctx.db.insert('outbox', {
+    const now = Date.now()
+    await queueCommand(ctx, {
       userId: member.userId,
       network: session.network,
       payload: { type: 'loginCancel', loginSessionId },
       ...(session.hostId ? { hostId: session.hostId } : {}),
       state: 'queued',
       attempts: 0,
-      createdAt: Date.now(),
+      createdAt: now,
+      expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
     return null
   },

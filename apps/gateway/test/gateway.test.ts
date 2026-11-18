@@ -80,7 +80,24 @@ describe('events', () => {
     const base = await serve(fakeBackend())
     expect((await post(base, batch([{ ...event(1), seq: 0 }]))).status).toBe(400)
     expect((await post(base, batch([{ ...event(1), seq: 1.5 }]))).status).toBe(400)
-    expect((await post(base, batch([{ seq: 2 }]))).status).toBe(400)
+    expect((await post(base, batch([{ type: 'typing' }]))).status).toBe(400)
+  })
+
+  it('quarantines an event with a sequence number but no type', async () => {
+    const backend = fakeBackend()
+    backend.ingest = vi.fn(async (args) => {
+      const events = args.events as { seq: number; type?: string }[]
+      if (events.some((e) => !e.type)) throw new Error('ArgumentValidationError: Value does not match validator.')
+      return { ackedThrough: events.at(-1)?.seq ?? 0 }
+    })
+    const result = await post(await serve(backend), batch([event(1), { seq: 2 }]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 2 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 2,
+      type: 'unknown',
+    })
   })
 
   it('applies a big batch in chunks, in order, and acknowledges the last', async () => {
@@ -181,7 +198,14 @@ describe('dispatcher', () => {
     })
 
   it('records accepted and rejected commands with their lease, and leaves unreachable ones for their lease', async () => {
-    const backend = backendWith([command('ok'), command('bad'), command('text'), command('down'), command('busy')])
+    const backend = backendWith([
+      command('ok'),
+      command('bad'),
+      command('text'),
+      command('newer'),
+      command('down'),
+      command('busy'),
+    ])
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const { commandId } = JSON.parse(init?.body as string) as { commandId: string }
       expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${TOKEN}`)
@@ -191,11 +215,20 @@ describe('dispatcher', () => {
       // A host answering with free text (which could quote what the person typed) is recorded
       // only as an invalid command.
       if (commandId === 'text') return new Response('your code 123456 was wrong', { status: 400 })
+      // A code this gateway doesn't know (from a newer host) can't be stored either.
+      if (commandId === 'newer') return Response.json({ error: 'some_new_code' }, { status: 400 })
       if (commandId === 'busy') return new Response(null, { status: 503 })
       throw new TypeError('fetch failed')
     })
     await dispatcher(backend, fetch).drain()
-    expect(backend.commandResult).toHaveBeenCalledTimes(3)
+    expect(backend.commandResult).toHaveBeenCalledTimes(4)
+    expect(backend.commandResult).toHaveBeenCalledWith({
+      commandId: 'newer',
+      lease: 3,
+      accepted: false,
+      error: 'invalid_command',
+    })
+    expect(backend.claimCommands).toHaveBeenCalledWith({ limit: 20, hostIds: ['whatsapp-1'] })
     expect(backend.commandResult).toHaveBeenCalledWith({ commandId: 'ok', lease: 3, accepted: true })
     expect(backend.commandResult).toHaveBeenCalledWith({
       commandId: 'bad',
@@ -257,5 +290,6 @@ describe('config and logs', () => {
     )
     expect(describeError(error)).toBe('Error: ArgumentValidationError: Value does not match validator.')
     expect(describeError(new Error('refused. Value: {"body":"secret"}'))).toBe('Error: refused.')
+    expect(describeError(new Error('bad input "my password" in {"a":1}'))).toBe('Error: bad input … in …')
   })
 })
