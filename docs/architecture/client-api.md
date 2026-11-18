@@ -48,11 +48,11 @@ once before any sealing or password derivation.
 
 ### Server settings that matter to the client
 
-| Convex env                             | Must be                                                                                                                                                                                                                      |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                              |
-| `JWKS`                                 | Optional: a static key set (`npx convex run auth:rotateKeys \| npx convex env set JWKS`). Set it when the server can't reach its own public address (behind NAT); Convex then checks tokens without fetching them from there |
-| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`                                                                                                                                                      |
+| Convex env                             | Must be                                                                                                                                                                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                           |
+| (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up) |
+| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`                                                                                                                                                   |
 
 ## Passwords
 

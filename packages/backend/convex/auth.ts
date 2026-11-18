@@ -7,7 +7,7 @@ import { convex } from '@convex-dev/better-auth/plugins'
 import { ConvexError } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
-import { internalAction, query } from './_generated/server'
+import { query } from './_generated/server'
 import authConfig from './auth.config'
 import authSchema from './betterAuth/schema'
 import { sha256Hex } from './lib/hash'
@@ -106,8 +106,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
         rpName: 'Trioditis',
         authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
       }),
-      // A static JWKS (see auth.config.ts) must also be the one tokens are signed with.
-      convex({ authConfig, ...(process.env.JWKS ? { jwks: process.env.JWKS } : {}) }),
+      convex({ authConfig }),
     ],
   } satisfies BetterAuthOptions
 }
@@ -154,17 +153,5 @@ export const getCurrentUser = query({
     const user = await authComponent.getAnyUserById(ctx, userId)
     if (!user) return null
     return { id: user._id, name: user.name, email: user.email }
-  },
-})
-
-/**
- * Makes a new signing key set, for a static JWKS: `npx convex run auth:rotateKeys | npx convex
- * env set JWKS`. Only with deploy credentials.
- */
-export const rotateKeys = internalAction({
-  args: {},
-  handler: async (ctx) => {
-    const auth = createAuth(ctx)
-    return await auth.api.rotateKeys()
   },
 })
