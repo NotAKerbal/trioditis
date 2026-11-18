@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api'
 import { action, internalQuery } from './_generated/server'
-import { createAuth, requireUserId } from './auth'
+import { createAuth, requireSessionIfGiven, requireUserId } from './auth'
 import { credentialOf } from './keys'
 
 // Changing the password, which is two things that must stay in step: the sign-in password
@@ -41,9 +41,11 @@ export const changePassword = action({
     newWrap: v.object({ nonce: v.string(), ct: v.string(), params: passwordParams }),
     proof: v.string(),
     expectedRevision: v.number(),
+    sessionId: v.optional(v.string()),
   },
   returns: v.object({ revision: v.number() }),
   handler: async (ctx, args): Promise<{ revision: number }> => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const userId = await requireUserId(ctx)
     const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision }
     await ctx.runMutation(internal.keys.checkPasswordChange, { userId, proof: args.proof, ...wrap })

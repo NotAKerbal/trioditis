@@ -518,3 +518,101 @@ describe('changing the password', { timeout: 30_000 }, () => {
     }
   })
 })
+
+describe('key writes bound to a session', () => {
+  const sessionChanged = {
+    data: { code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' },
+  }
+
+  async function rows(t: T, userId: string) {
+    return await t.run(async (ctx) => ({
+      member: await ctx.db
+        .query('members')
+        .withIndex('by_userId', (q) => q.eq('userId', userId))
+        .unique(),
+      backups: await ctx.db
+        .query('keyBackups')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+      challenges: await ctx.db
+        .query('keyChallenges')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
+    }))
+  }
+
+  it('writes when the call runs as the page’s session, and when no session is named', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId } = (await alice.query(api.members.me, {}))!
+    const device = firstDevice('alice', 'alice password!!')
+    const { sealed } = await alice.mutation(api.keys.challenge, {
+      publicKey: toBase64Url(device.identity.publicKey),
+      sessionId,
+    })
+    const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), device.identity))
+    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({ kid: device.kid })
+
+    const bob = await fresh(t, 'bob')
+    const bobDevice = firstDevice('bob', 'bob password!!!!')
+    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid })
+  })
+
+  it('refuses, writing nothing, when the shared client has switched to another account', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId: alicePage } = (await alice.query(api.members.me, {}))!
+    // Bob signed in from another tab, so the page's calls now run as him.
+    const bob = await fresh(t, 'bob')
+    const device = firstDevice('alice', 'alice password!!')
+    const publicKey = toBase64Url(device.identity.publicKey)
+    const before = await rows(t, 'bob')
+
+    await expect(bob.mutation(api.keys.challenge, { publicKey, sessionId: alicePage })).rejects.toMatchObject(
+      sessionChanged,
+    )
+    await expect(
+      bob.mutation(api.keys.setup, { ...device.args, proof: 'p'.repeat(43), sessionId: alicePage }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.keys.putBackup, {
+        kind: 'recovery',
+        nonce: 'n'.repeat(32),
+        ct: 'c'.repeat(64),
+        proof: 'p'.repeat(43),
+        expectedRevision: 0,
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.keys.removePasskeyBackup, {
+        credentialId: credential(1),
+        proof: 'p'.repeat(43),
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.action(api.account.changePassword, {
+        currentAuthPassword: 'a'.repeat(43),
+        newAuthPassword: 'b'.repeat(43),
+        newWrap: { nonce: 'n'.repeat(32), ct: 'c'.repeat(64), params: newPasswordParams() },
+        proof: 'p'.repeat(43),
+        expectedRevision: 1,
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+
+    expect(await rows(t, 'bob')).toEqual(before)
+    expect((await rows(t, 'alice')).challenges).toEqual([])
+  })
+
+  it('refuses a page whose session has ended', async () => {
+    const t = setup()
+    const alice = await fresh(t, 'alice')
+    const { sessionId } = (await alice.query(api.members.me, {}))!
+    expect(await t.mutation(internal.auth.endSessionByToken, { token: 'token-alice' })).toBe('ended')
+    await expect(alice.mutation(api.keys.challenge, { publicKey: LOW_ORDER, sessionId })).rejects.toMatchObject(
+      sessionChanged,
+    )
+  })
+})

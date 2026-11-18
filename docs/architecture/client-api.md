@@ -11,6 +11,10 @@ whose `data` is a sentence the UI can show as it is. Any of those functions can 
 `You’re signed out. Sign in again to continue.` and `Your account isn’t a member of this
 server.`; each section lists the rest, word for word.
 
+One error the app acts on rather than only shows has `data` as `{ code, message }`: the
+`message` is the sentence to show, and the `code` is what to branch on. So far that is
+`sessionChanged` (Keys, Key writes are bound to the page's session).
+
 Nothing readable ever goes to the server: names, message bodies, label names and drafts are
 sealed on the device (`docs/architecture/sealing.md`) and opened on the device. Not even
 the password reaches the server (see Passwords).
@@ -238,6 +242,20 @@ replaced backup takes the next one, which needn't be the old revision plus one, 
 passkey backup removed and made again gets a new one, so a device still holding the old
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
+
+### Key writes are bound to the page's session
+
+`keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup` and
+`account.changePassword` take an optional `sessionId`: pass the `sessionId` from
+`members.me` that the page opened with. Tabs share the Convex client, so another tab
+signing in as someone else can switch the token the page's calls run as while the page still
+shows the first account; a key or backup meant for one account would then be written to the
+other, which can never open it. With `sessionId`, the call is refused before it writes
+anything unless it runs as that same Better Auth session, with `ConvexError` data
+`{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
+A session that has ended is refused the same way. Reload the page then: it reads `members.me`
+again. Without `sessionId` nothing is checked, as before; it will become required once every
+client sends it.
 
 ### Changing the password
 
