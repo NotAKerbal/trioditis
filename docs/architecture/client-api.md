@@ -124,7 +124,7 @@ answers `status: true` even when it deleted nothing.
 | 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                                             |
 | 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                                                |
 | 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status, not the message: which one comes depends on whether a cookie, an `Origin` or a `Referer` was sent |
-| 429    | The rate limit answer, with `Retry-After`                                  | Over 10 requests a minute from one address: see Rate limits                                                                                                                     |
+| 429    | The rate limit answer, with `Retry-After`                                  | This address's bucket is empty: 10 at once, then one every six seconds. Only where the proxy gives the client address: see Rate limits                                          |
 | 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                                     |
 
 Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
@@ -146,6 +146,18 @@ waits seconds, with no lockout to sit out.
 | `/sign-in/email`, `/sign-up/email` (which also redeems invitations and the setup token), `/passkey/generate-authenticate-options`, `/passkey/verify-authentication`, `/end-session` | 10 a minute, 10 at once | Client address        |
 | Every other auth route                                                                                                                                                              | 300 a minute            | Client address        |
 | `/sign-in/email`, `/sign-up/email`                                                                                                                                                  | 30 a minute, 30 at once | The email, lowercased |
+
+`/sign-in/email` and `/sign-up/email` take only JSON (`Content-Type: application/json`, as
+the app sends): Better Auth would also take a form, which the per-account limit can't read,
+so anything else is refused with 415. Better Auth's `/verify-password` is turned off (404);
+the current password is checked only by `account.changePassword`, which allows five checks a
+minute per account and otherwise throws `Too many password attempts. Try again in N
+seconds.` Requests to paths that aren't auth routes aren't counted.
+
+If counting a request fails, the request fails (a 500) rather than going through uncounted:
+a broken limiter keeps people from signing in instead of turning the limits off. Each such
+failure is logged as `[rate limit] Couldn't count a request to <path>, so it was refused`,
+with the error and never the key.
 
 Over a limit, the answer is 429 with `{ "message": "Too many requests. Please try again later." }`
 and `Retry-After` (and `X-Retry-After`) in whole seconds. Wait that long before trying again.

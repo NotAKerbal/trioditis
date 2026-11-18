@@ -37,7 +37,8 @@ export const consume = internalMutation({
       .unique()
     const tokens = row ? Math.min(max, row.tokens + (Math.max(0, now - row.updatedAt) * max) / windowMs) : max
     if (tokens < 1 - EPSILON) {
-      return { allowed: false, retryAfter: Math.max(1, Math.ceil(refillMs(1 - tokens) / 1000)) }
+      // The same allowance as above, so the wait given is the shortest that will be let through.
+      return { allowed: false, retryAfter: Math.max(1, Math.ceil(refillMs(1 - EPSILON - tokens) / 1000 - EPSILON)) }
     }
     const left = Math.max(0, tokens - 1)
     const bucket = { tokens: left, updatedAt: now, fullAt: now + Math.ceil(refillMs(max - left)) }

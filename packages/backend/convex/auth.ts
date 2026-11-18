@@ -8,7 +8,7 @@ import { convex } from '@convex-dev/better-auth/plugins'
 import { ConvexError, v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
-import { internalMutation, query } from './_generated/server'
+import { internalMutation, query, type ActionCtx } from './_generated/server'
 import authConfig from './auth.config'
 import authSchema from './betterAuth/schema'
 import { sha256Hex } from './lib/hash'
@@ -135,6 +135,27 @@ const ipOptions = { advanced: { ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER
 const perClient = (rule: { window: number; max: number }) => (request: Request) =>
   request.headers.has(CLIENT_IP_HEADER) && getIP(request, ipOptions) ? rule : false
 
+/** Where Better Auth serves its routes: its default, which `registerRoutes` uses too. */
+const AUTH_BASE_PATH = '/api/auth'
+
+/**
+ * Better Auth's routes, as patterns (a `:name` segment matches any one segment), filled in by
+ * `createAuth`. Until then every path counts as one.
+ */
+let authRoutes: RegExp[] | null = null
+
+function isAuthRoute(path: string) {
+  return !authRoutes || authRoutes.some((route) => route.test(path))
+}
+
+function routePattern(path: string) {
+  const escaped = path
+    .split('/')
+    .map((segment) => (segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('/')
+  return new RegExp(`^${escaped}$`)
+}
+
 /** The path under Better Auth's base path, as its rate limiter matches it. */
 function authPath(request: Request, baseURL: string) {
   const base = new URL(baseURL).pathname.replace(/\/+$/, '')
@@ -149,6 +170,29 @@ async function requestEmail(request: Request) {
     return typeof email === 'string' ? email.trim().toLowerCase() : null
   } catch {
     return null
+  }
+}
+
+/** Whether the request says its body is JSON, the only form the per-account limit can read. */
+function isJson(request: Request) {
+  return (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/json'
+}
+
+/**
+ * Takes a token, logging a failure clearly before passing it on. A failure fails the auth
+ * request (a 500) rather than letting it past the limit: a broken limiter keeps people from
+ * signing in, never turns the limits off. The key isn't logged: it can hold an address.
+ */
+async function consumeOrLog(
+  ctx: Pick<ActionCtx, 'runMutation'>,
+  path: string,
+  args: { key: string; max: number; window: number },
+) {
+  try {
+    return await ctx.runMutation(internal.rateLimits.consume, args)
+  } catch (error) {
+    console.error(`[rate limit] Couldn't count a request to ${path}, so it was refused:`, error)
+    throw error
   }
 }
 
@@ -179,9 +223,15 @@ const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
     onRequest: async (request, auth) => {
       const path = authPath(request, auth.baseURL)
       if (!ACCOUNT_PATHS.includes(path) || !('runMutation' in ctx)) return
+      // Better Auth also takes these as forms, which this couldn't count: the app sends JSON,
+      // so anything else is refused rather than let past the limit.
+      if (!isJson(request)) {
+        return { response: Response.json({ message: 'Send this as JSON.' }, { status: 415 }) }
+      }
+      // Without an email Better Auth refuses the request itself, before any password check.
       const email = await requestEmail(request)
       if (!email) return
-      const { allowed, retryAfter } = await ctx.runMutation(internal.rateLimits.consume, {
+      const { allowed, retryAfter } = await consumeOrLog(ctx, path, {
         key: await sha256Hex(`account|${path}|${email}`),
         ...ACCOUNT_LIMIT,
       })
@@ -220,14 +270,19 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       // rules for sign-in and sign-up.
       customRules: {
         ...Object.fromEntries(STRICT_PATHS.map((path) => [path, perClient(STRICT_LIMIT)])),
-        '/**': perClient(DEFAULT_LIMIT),
+        // Only Better Auth's own routes: a request to any other path would otherwise leave a
+        // bucket behind for each path made up.
+        '/**': (request: Request) =>
+          isAuthRoute(authPath(request, `${siteUrl}${AUTH_BASE_PATH}`)) ? perClient(DEFAULT_LIMIT)(request) : false,
       },
       customStorage: {
         consume: async (key, rule) => {
           // Only HTTP requests are rate limited, and HTTP actions can run mutations. In a
           // query nothing can be written, so nothing could be counted either.
           if (!('runMutation' in ctx)) return { allowed: true, retryAfter: null }
-          return await ctx.runMutation(internal.rateLimits.consume, { key: await sha256Hex(`client|${key}`), ...rule })
+          // Better Auth's key is `<address>|<path>`; only the path is logged.
+          const path = key.slice(key.lastIndexOf('|') + 1)
+          return await consumeOrLog(ctx, path, { key: await sha256Hex(`client|${key}`), ...rule })
         },
       },
     },
@@ -242,6 +297,9 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       '/forget-password',
       '/reset-password',
       '/change-email',
+      // Checks a signed-in session's password, which only account.changePassword (rate
+      // limited) should do.
+      '/verify-password',
     ],
     emailAndPassword: {
       enabled: true,
@@ -316,6 +374,10 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
 
 export const createAuth = (ctx: GenericCtx<DataModel>) => {
   const auth = betterAuth(createAuthOptions(ctx))
+  authRoutes ??= Object.values(auth.api as Record<string, { path?: unknown }>)
+    .map((endpoint) => endpoint.path)
+    .filter((path): path is string => typeof path === 'string')
+    .map(routePattern)
   return { ...auth, handler: async (request: Request) => withRetryAfter(await auth.handler(request)) }
 }
 

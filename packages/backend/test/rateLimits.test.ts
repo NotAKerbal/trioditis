@@ -219,6 +219,53 @@ describe('per account', () => {
   })
 })
 
+describe('what is counted', () => {
+  it('refuses email sign-in and sign-up sent as forms, which the per-account limit can’t read', async () => {
+    const t = setup()
+    await admin(t)
+    for (const path of ['sign-in/email', 'sign-up/email']) {
+      const form = await t.fetch(`/api/auth/${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: ORIGIN },
+        body: new URLSearchParams({ email: 'sam@example.com', password: PASSWORD, name: 'Sam' }).toString(),
+      })
+      expect(form.status).toBe(415)
+      const multipart = new FormData()
+      multipart.set('email', 'sam@example.com')
+      multipart.set('password', PASSWORD)
+      const parts = await t.fetch(`/api/auth/${path}`, { method: 'POST', headers: { origin: ORIGIN }, body: multipart })
+      expect(parts.status).toBe(415)
+    }
+  })
+
+  it('turns off Better Auth’s password check for a signed-in session', async () => {
+    const t = setup()
+    const response = await post(t, 'verify-password', { password: PASSWORD }, '203.0.113.1')
+    expect(response.status).toBe(404)
+  })
+
+  it('keeps no bucket for a path that isn’t an auth route', async () => {
+    const t = setup()
+    for (let i = 0; i < 5; i++) expect((await post(t, `made-up-${i}`, {}, '203.0.113.1')).status).toBe(404)
+    expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
+  })
+})
+
+describe('Retry-After', () => {
+  it('is the shortest wait that will be let through, even partway through a refill', async () => {
+    const t = setup()
+    const consume = () => t.mutation(internal.rateLimits.consume, { key: 'k', max: 10, window: 60 })
+    for (let i = 0; i < 10; i++) expect((await consume()).allowed).toBe(true)
+    // Eight seconds in, a third of a token is left over after this one.
+    advance(8)
+    expect((await consume()).allowed).toBe(true)
+    const refused = await consume()
+    expect(refused).toEqual({ allowed: false, retryAfter: 4 })
+    advance(4)
+    expect((await consume()).allowed).toBe(true)
+  })
+})
+
 describe('the store', () => {
   it('keeps the count in Convex, hashed, from one request to the next', async () => {
     const t = setup()
