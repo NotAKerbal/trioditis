@@ -12,6 +12,7 @@ const checks = [
   { name: 'pnpm typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'pnpm lint', cmd: 'pnpm', args: ['lint'] },
   { name: 'pnpm test', cmd: 'pnpm', args: ['test'] },
+  { name: 'pnpm test:scripts', cmd: 'pnpm', args: ['test:scripts'] },
 ]
 let go = null
 if (existsSync(resolve(bridgeDir, 'go.mod'))) {

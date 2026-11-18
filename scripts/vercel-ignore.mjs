@@ -6,7 +6,7 @@
 // branch's last successful deployment. Anything it can't tell (a branch's first deployment, a
 // commit missing from Vercel's shallow clone, a CLI deploy such as `pnpm preview`) builds.
 import { spawnSync } from 'node:child_process'
-import { environments, root } from './lib.mjs'
+import { root } from './lib.mjs'
 
 // Everything nightly's build reads: the web app, and the backend it deploys. Keep this in step
 // with the imports that reach outside apps/desktop and with "Which commits deploy" in
@@ -38,8 +38,7 @@ const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'ut
 
 const { VERCEL_ENV, VERCEL_GIT_PREVIOUS_SHA: previous, VERCEL_GIT_COMMIT_SHA: current, TRIODITIS_PREVIEW } = process.env
 if (TRIODITIS_PREVIEW) build('a `pnpm preview` deployment')
-if (VERCEL_ENV === 'production' && !environments.production)
-  skip('main has no Vercel site; production is self-hosted (deploy/).')
+if (VERCEL_ENV === 'production') skip('main has no Vercel site; production is self-hosted (deploy/).')
 if (!current) build('not a Git deployment')
 if (!previous) build('the first deployment of this branch')
 if (git('cat-file', '-e', `${previous}^{commit}`).status !== 0) {

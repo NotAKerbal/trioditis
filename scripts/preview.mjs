@@ -4,11 +4,12 @@
 //   pnpm preview                 named after the current git branch
 //   pnpm preview my-experiment   a name of your choice
 //   pnpm preview --fresh         throw the preview's data away and start empty
-//   pnpm preview --dry-run       print what it would do, and do nothing
+//   pnpm preview --dry-run       check what's needed, print what it would do, and do nothing
 //
-// A preview is demo-only: it offers only the fake network, runs no bridge host, and gets made-up
-// data (scripts/demo.mjs), so no real account or real message ever reaches Convex's cloud.
-// Running it again with the same name updates that preview and keeps its data.
+// A preview is demo-only: it offers only the fake network (TRIODITIS_NETWORKS=fake), runs no
+// bridge host, and its backend makes demo data for whoever signs up (TRIODITIS_DEMO=1, which
+// also turns invitations off), so no real account or real message ever reaches Convex's cloud.
+// Running it again with the same name updates that preview and keeps its data and secrets.
 // Needs `npx convex login` and `npx vercel login` to have been done once on this machine.
 import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -18,11 +19,14 @@ import {
   accounts,
   backendDir,
   capture,
+  cloudPrerequisites,
   convexRef,
   ensureTester,
-  signInPassword,
+  holdLock,
   root,
   run,
+  setConvexEnv,
+  signInPassword,
   step,
   x25519,
 } from './lib.mjs'
@@ -44,51 +48,68 @@ if (name.length < 3) {
   console.error('Give the preview a name of at least 3 letters or digits: pnpm preview <name>')
   process.exit(1)
 }
-if (!dryRun && (!accounts.vercelOrgId || !accounts.vercelWebProjectId)) {
-  console.error(
-    'Previews aren\'t set up yet: fill in accounts.vercelOrgId and accounts.vercelWebProjectId in scripts/lib.mjs (docs/CONTRIBUTING.md, "Setting it up").',
+
+// Everything is checked before anything is created or changed on either service.
+const missing = cloudPrerequisites()
+if (!accounts.vercelOrgId || !accounts.vercelWebProjectId) {
+  missing.push(
+    'accounts.vercelOrgId and accounts.vercelWebProjectId in scripts/lib.mjs (docs/CONTRIBUTING.md, "Setting it up")',
   )
-  process.exit(1)
 }
-// The test account's sign-in and key setup need the client API's crypto. Checked before
-// anything is created on either service.
-const crypto = dryRun
-  ? null
-  : await clientCrypto().catch((error) => {
-      console.error(error.message)
-      process.exit(1)
-    })
+const crypto = await clientCrypto().catch((error) => {
+  missing.push(error.message)
+  return null
+})
+if (missing.length > 0) {
+  console.error(`\x1b[1mpnpm preview can't run yet. Missing:\x1b[0m\n  - ${missing.join('\n  - ')}`)
+  if (!dryRun) process.exit(1)
+  console.log('\nThe dry run goes on to show the steps.')
+}
+
+// One run per preview name at a time.
+holdLock(`preview-${name}`)
+
 // Convex adds the `preview/` prefix to the reference of a preview deployment it creates.
 const ref = convexRef(`preview/${name}`)
-
 const convex = (...rest) => ['exec', 'convex', ...rest]
 const convexEnv = (...rest) => convex('env', ...rest, '--deployment', ref)
 const inBackend = { cwd: backendDir }
 
-/** In a dry run, shows the command instead of running it. Later arguments can be secrets. */
+/** In a dry run, shows the command instead of running it. */
 function act(kind, cmd, cmdArgs, options = {}) {
   if (dryRun) {
-    // A value being set is never shown: it can be a secret.
-    const shown = cmdArgs.map((arg, i) => (cmdArgs[i - 2] === 'set' && cmdArgs[i - 3] === 'env' ? '<value>' : arg))
-    console.log(`  would run: ${cmd} ${shown.join(' ')}`)
+    console.log(`  would run: ${cmd} ${cmdArgs.join(' ')}`)
     return ''
   }
   return kind === 'run' ? run(cmd, cmdArgs, options) : capture(cmd, cmdArgs, options)
 }
 
-function backendExists() {
-  if (dryRun) return false
+/** Sets variables through stdin, so their values never appear in a process list. */
+function setVariables(values) {
+  if (Object.keys(values).length === 0) return
+  if (dryRun) {
+    console.log(`  would set: ${Object.keys(values).join(', ')} on ${ref}`)
+    return
+  }
+  setConvexEnv(values, { ...inBackend, deployment: ref })
+}
+
+function existingNames() {
+  if (dryRun) return null
   try {
-    capture('pnpm', convexEnv('list'), { ...inBackend, quiet: true })
-    return true
+    return capture('pnpm', convexEnv('list', '--names-only'), { ...inBackend, quiet: true })
+      .split(/\s+/)
+      .filter(Boolean)
   } catch {
-    return false
+    return null
   }
 }
 
 step(`Backend: Convex deployment ${ref}${dryRun ? ' (dry run)' : ''}`)
-if (fresh || !backendExists()) {
+let names = existingNames()
+if (fresh || !names) {
   act('run', 'pnpm', convex('deployment', 'create', convexRef(name), '--type', 'preview'), inBackend)
+  names = []
 } else {
   console.log('Reusing the existing deployment and its data. Pass --fresh to start empty.')
 }
@@ -136,11 +157,10 @@ try {
   const convexSiteUrl = `https://${deploymentName}.convex.site`
 
   step('Backend settings')
-  const settings = dryRun ? '' : capture('pnpm', convexEnv('list'), { ...inBackend, quiet: true })
-  const has = (variable) => new RegExp(`^${variable}=`, 'm').test(settings)
+  // Only what's missing is set, so a rerun keeps the preview's secrets. The gateway secret and
+  // bridge key exist only because the backend expects them: no bridge host connects to a
+  // preview, and nothing outside the backend ever holds them.
   const secret = () => randomBytes(32).toString('base64url')
-  // A preview is demo-only: no real network, no bridge host. The gateway secret and bridge key
-  // exist only because the backend expects them; nothing outside it ever holds them.
   const wanted = {
     BETTER_AUTH_SECRET: secret,
     // Sign-in needs a site URL before the real one is known; it is replaced below.
@@ -150,15 +170,15 @@ try {
     BRIDGE_PUBLIC_KEY: () => x25519().publicKey,
     AGENT_ACCESS_PUBLIC_KEY: () => x25519().publicKey,
   }
-  for (const [variable, make] of Object.entries(wanted)) {
-    if (!has(variable)) act('capture', 'pnpm', convexEnv('set', variable, make()), { ...inBackend, quiet: true })
-  }
-  if (!new RegExp(`^TRIODITIS_NETWORKS=${CLOUD_NETWORKS}$`, 'm').test(settings)) {
-    act('capture', 'pnpm', convexEnv('set', 'TRIODITIS_NETWORKS', CLOUD_NETWORKS), { ...inBackend, quiet: true })
-  }
-  // The backend makes demo data for whoever signs up, sealed to their own key.
-  if (!/^TRIODITIS_DEMO=1$/m.test(settings))
-    act('capture', 'pnpm', convexEnv('set', 'TRIODITIS_DEMO', '1'), { ...inBackend, quiet: true })
+  const toSet = Object.fromEntries(
+    Object.entries(wanted)
+      .filter(([variable]) => !names.includes(variable))
+      .map(([variable, make]) => [variable, make()]),
+  )
+  // Always: a preview is demo-only, whatever it held before.
+  toSet.TRIODITIS_NETWORKS = CLOUD_NETWORKS
+  toSet.TRIODITIS_DEMO = '1'
+  setVariables(toSet)
   act('run', 'pnpm', convex('deploy', '--yes'), { ...inBackend, env: { CONVEX_DEPLOY_KEY: deployKey ?? '' } })
 
   step('Web app: Vercel preview')
@@ -179,7 +199,7 @@ try {
       `VITE_CONVEX_URL=${convexUrl}`,
       '--build-env',
       `VITE_CONVEX_SITE_URL=${convexSiteUrl}`,
-      // Tells scripts/vercel-build.mjs this is a preview, even when run from dev.
+      // Tells scripts/vercel-build.mjs this is a preview.
       '--build-env',
       `TRIODITIS_PREVIEW=${name}`,
       '--meta',
@@ -203,7 +223,7 @@ try {
   }
 
   step('Connecting sign-in to the preview URL')
-  act('run', 'pnpm', convexEnv('set', 'SITE_URL', url), inBackend)
+  setVariables({ SITE_URL: url })
 } finally {
   deleteKey()
 }
@@ -232,4 +252,5 @@ console.log(`
   Password  ${TESTER.password}
   Backend   https://dashboard.convex.dev/d/${deploymentName}
 
-Demo data only: the fake network, no bridge host. Convex removes the backend after a few days.`)
+Demo data only: the fake network, no bridge host, and no invitations. Convex removes the backend
+after a few days.`)

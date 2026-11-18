@@ -82,7 +82,10 @@ this machine, in this checkout's `.data/`.
 
 Every checkout of the repository, the main one and each git worktree, gets its own backend,
 data and ports, so several branches run at the same time without touching each other. A
-checkout's slot is in `.data/dev.json`.
+checkout's slot is in `.data/dev.json`, and it holds the slot in a registry every checkout on
+the machine shares, `~/.local/state/trioditis/slots/<n>.lock`, which names the checkout. A lock
+is created only if it doesn't exist, so two worktrees setting up at once never get the same
+slot.
 
 |                                    | Slot 0 (main checkout) | Slot n (a worktree)        |
 | ---------------------------------- | ---------------------- | -------------------------- |
@@ -93,13 +96,37 @@ checkout's slot is in `.data/dev.json`.
 | Fake network control               | `8709`                 | `8709 + 10n`               |
 
 A worktree claims the first free slot the first time it is set up and keeps it while it
-exists, even when it isn't running. These ports stay clear of Convex's defaults, so a backend
+exists, even when it isn't running. On every start the saved slot is checked against the
+registry; a slot whose lock names another checkout is given up for a new one, and a lock whose
+checkout no longer exists is released. These ports stay clear of Convex's defaults, so a backend
 started by hand never takes a checkout's ports.
 
 In T3 Code, the Trioditis project should run `pnpm install && pnpm dev --setup` for every new
 worktree, so a branch's instance is ready before its first change. `--setup` does the slow
 part (creating the backend, building the bridge host, creating the test account) and stops,
 so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
+
+### Only this checkout's backend
+
+`pnpm dev` never acts on any backend but this checkout's own local one:
+
+- Every Convex command it runs has the variables that choose a deployment removed from its
+  environment (`CONVEX_DEPLOY_KEY`, `CONVEX_DEPLOYMENT`, `CONVEX_URL`, `CONVEX_SELF_HOSTED_URL`,
+  `CONVEX_SELF_HOSTED_ADMIN_KEY` and every other `CONVEX_` variable), so a key in your shell
+  can't send its pushes anywhere.
+- Before it pushes functions or changes a setting, it checks that `packages/backend/.env.local`
+  names an anonymous local deployment and that no other dotenv file there sets a `CONVEX_`
+  variable. Otherwise it stops and says why.
+- Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
+  a process list. `packages/backend/.convex` and `.data/` are readable only by you.
+
+The local backend listens on all of the machine's network interfaces: the Convex CLI has no
+option to bind it to `127.0.0.1`. Its admin API needs the admin key in `.convex`, but its HTTP
+actions (sign-in) can be reached from your network. Use a firewall on a shared network.
+
+The gateway is restarted when its code, or `packages/core` or `packages/crypto`, changes, and
+after a crash; if it stops three times in a minute, `pnpm dev` stops everything and says so.
+If the gateway or the web app doesn't come up, `pnpm dev` says which.
 
 ### What the web app is given
 
@@ -149,7 +176,9 @@ This deploys the code in your working tree, committed or not, as a demo instance
 preview backend of its own and a Vercel preview of the web app. It prints the URL and the test
 account when it finishes. `pnpm preview --dry-run` prints every step and does nothing.
 
-**A preview is demo-only.** It offers only the fake network, runs no gateway or bridge host,
+**A preview is demo-only.** It sets `TRIODITIS_NETWORKS=fake` and `TRIODITIS_DEMO=1` on every
+run. The backend then refuses events for any other network and refuses invitations, so the
+test account can't invite anyone. It runs no gateway or bridge host,
 and its data is made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to
 the test account's own key exactly as real data would be. No real account or real message
 ever goes to Convex's cloud.
@@ -157,16 +186,23 @@ ever goes to Convex's cloud.
 Previews are short-lived and per branch, so each gets the known test account. It signs in with
 the password the app derives from `trioditis-dev-tester` (`authPassword` in packages/crypto),
 not the typed one, and its key is set up the way the app's first device does it, with the
-recovery key printed at the end. Running `pnpm preview` needs packages/crypto's client API
-functions; it stops before creating anything if they're missing.
+recovery key printed at the end.
 
-|              |                                                                                      |
-| ------------ | ------------------------------------------------------------------------------------ |
-| Name         | The current git branch, or `pnpm preview my-name`                                    |
-| Test account | `tester@trioditis.test` / `trioditis-dev-tester`, the preview's admin                |
-| Data         | Each name has its own backend. Running again keeps its data; `--fresh` starts empty. |
-| URL          | Every run prints a new URL. Sign-in works on the newest one only.                    |
-| Lifetime     | Convex removes a preview backend a few days after it is created                      |
+Before it creates or changes anything on either service, `pnpm preview` checks everything it
+needs and lists what's missing: the Vercel project's IDs in `scripts/lib.mjs`, the web app
+(`@trioditis/desktop` with a build script), and the client API from `api/client-contract`:
+packages/crypto's `authPassword`, `generateKeyPair` and `makeKeySetup`, and the backend's
+`keys.setup`, `keys.identity` and `demo.seedForMe`. `--dry-run` shows the same list, then the
+steps.
+
+|              |                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------ |
+| Name         | The current git branch, or `pnpm preview my-name`                                                |
+| Test account | `tester@trioditis.test` / `trioditis-dev-tester`, the preview's admin                            |
+| Data         | Each name has its own backend. Running again keeps its data and secrets; `--fresh` starts empty. |
+| Runs         | One at a time per name: a second `pnpm preview <name>` stops until the first has finished.       |
+| URL          | Every run prints a new URL. Sign-in works on the newest one only.                                |
+| Lifetime     | Convex removes a preview backend a few days after it is created                                  |
 
 You need to have run `npx convex login` and `npx vercel login` once. The web app deploys to
 the Vercel project `trioditis-web` in `notakerbals-projects`, and the backend to the Convex
@@ -178,16 +214,17 @@ How it works:
 1. Creates the Convex preview deployment `isaac-cochran:trioditis:preview/<name>`, unless it
    exists (or with `--fresh`).
 2. Makes a temporary deploy key, and deletes it however the script ends.
-3. Sets the backend's variables: `BETTER_AUTH_SECRET`, `SITE_URL`, `TRIODITIS_NETWORKS=fake`,
-   and a gateway secret, setup token and public keys that nothing outside the backend ever
-   holds, since no bridge host connects to a preview.
+3. Sets the backend's variables that are missing: `BETTER_AUTH_SECRET`, `SITE_URL`, and a
+   gateway secret, setup token and public keys that nothing outside the backend ever
+   holds, since no bridge host connects to a preview. `TRIODITIS_NETWORKS=fake` and
+   `TRIODITIS_DEMO=1` are set on every run, whatever the backend held before.
 4. Deploys the backend functions.
 5. Deploys the web app to a Vercel preview, with `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and
    `TRIODITIS_PREVIEW` as build variables, and without git details, so a preview made from
    `dev`'s tip can't take over nightly's domain.
 6. Points `SITE_URL` at the preview's URL, creates the test account through it, sets up its
-   key (`keys.setup`), and asks the backend for its demo data (`demo.seedForMe`) as that
-   account.
+   key (`makeKeySetup`, then `keys.setup`), and asks the backend for its demo data
+   (`demo.seedForMe`) as that account.
 
 On Vercel, `scripts/vercel-build.mjs` builds the web app and writes Vercel's Build Output
 itself: the app's files, plus routes that send `/api/auth`, `/mcp` and the OAuth discovery
@@ -199,49 +236,59 @@ other path to `index.html`.
 A push to `dev` deploys nightly, a demo-only instance on its own Convex deployment. Nobody
 deploys it by hand.
 
-|          | Nightly                                                          |
-| -------- | ---------------------------------------------------------------- |
-| Branch   | `dev`                                                            |
-| Backend  | The `nightly` deployment in the `trioditis` Convex project       |
-| Networks | The fake network only; no bridge host                            |
-| Accounts | None to start with: the first admin signs up with the setup link |
-| Data     | Demo data for whoever signs up, sealed to their own key          |
+|          | Nightly                                                    |
+| -------- | ---------------------------------------------------------- |
+| Branch   | `dev`                                                      |
+| Backend  | The `nightly` deployment in the `trioditis` Convex project |
+| Networks | The fake network only; no bridge host                      |
+| Accounts | One: the first admin, who signs up with the setup link     |
+| Data     | Demo data for whoever signs up, sealed to their own key    |
 
 **Nightly gets no test account, ever.** Its first admin signs up with the setup link,
-`<nightly>/setup?token=<token>`, and invites anyone else. The deploy that creates the token
+`<nightly>/setup?token=<token>`. `TRIODITIS_DEMO=1` turns invitations off, so that is the only
+account nightly has. The deploy that creates the token
 prints the link in its Vercel build log, once; after that, get the token with:
 
 ```sh
 cd packages/backend && npx convex env get TRIODITIS_SETUP_TOKEN --deployment isaac-cochran:trioditis:nightly
 ```
 
-Nightly sets `TRIODITIS_DEMO=1`, so whoever signs up gets demo data from the backend
-(`demo.seedForMe`), sealed to their own key. No known password is involved.
+Nightly sets `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` on every deploy: the backend
+refuses events for any other network and refuses invitations, and the admin gets demo data
+from the backend (`demo.seedForMe`), sealed to their own key. No known password is involved.
 
 There is no production site on Vercel. Trioditis's production is a server people run
-themselves (`deploy/`). `main` is enabled for Git deploys so a production site can be added
-later, but `scripts/vercel-ignore.mjs` skips its builds until `environments.production` is
-set in `scripts/lib.mjs`.
+themselves (`deploy/`). Only `dev` deploys from Git; `vercel.json` turns `main` off, and
+`scripts/vercel-ignore.mjs` skips it too in case it is ever turned back on.
 
 ### How a deploy works
 
-`vercel.json` turns off Git deploys for every branch except `main` and `dev`, and replaces the
-build command with `scripts/vercel-build.mjs`. For a push to `dev`, that script:
+`vercel.json` turns off Git deploys for every branch except `dev`, and replaces the build
+command with `scripts/vercel-build.mjs`. For a push to `dev`, that script:
 
-1. Reads `CONVEX_DEPLOY_KEY`, which Vercel holds for the `dev` branch, and refuses to go on if
-   it is missing, not a production key, or for a deployment other than nightly's.
+1. Checks everything before changing anything, and lists what's missing: `environments.nightly`
+   in `scripts/lib.mjs`, the web app and its build script, the backend's `demo.seedForMe`, and
+   `CONVEX_DEPLOY_KEY`, which Vercel holds for the `dev` branch and must be a production key
+   for nightly's deployment.
 2. Checks the backend's variables. It sets `SITE_URL` to nightly's address the first time and
    stops the build if it holds a different one. It sets `TRIODITIS_NETWORKS=fake` the first
    time and stops the build if it holds anything else. It sets `TRIODITIS_DEMO=1`. It creates
-   the secrets it needs if they're missing, and creates `TRIODITIS_SETUP_TOKEN` once, printing
-   the setup link on that run only.
+   the secrets it needs if they're missing (through stdin, never in the build log), and creates
+   `TRIODITIS_SETUP_TOKEN` once, printing the setup link on that run only.
 3. Runs `convex deploy`, which pushes the backend functions and builds the web app with
    `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and `VITE_TRIODITIS_ENVIRONMENT=nightly`. Nightly
    is a Vercel preview build deploying to a production Convex deployment on purpose, so it
    passes `--check-build-environment disable`.
 4. Writes the Build Output, as for a preview. It creates no account.
 
-If any step fails, the deployment fails and the site keeps serving the last good one.
+If any step fails, the deployment fails and the site keeps serving the last good one. The
+backend functions are pushed before the web app is built, so a failed web build can leave the
+backend one version ahead of the site until the next good deploy.
+
+The Build Output's routes send `/api/auth`, `/mcp`, and the discovery documents
+(`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server` and
+`/.well-known/openid-configuration`) to the backend; every other path that isn't a file gets
+`index.html`.
 
 ### Which commits deploy
 
@@ -270,6 +317,8 @@ Done once, by someone with access to both accounts. Nothing here exists yet.
    `environments.nightly` in `scripts/lib.mjs`.
 
 **Vercel**, in `notakerbals-projects`:
+
+Git deploys are limited to `dev` by `vercel.json`.
 
 1. Create the project `trioditis-web`, linked to `NotAKerbal/trioditis`, with the repository
    root as its root directory and the build settings from `vercel.json`.
@@ -364,6 +413,10 @@ with the shared test vectors or fixtures updated.
   Sign in with that one, or start over.
 - **`convex dev` refuses to push a schema change.** The backend holds data the new schema
   doesn't allow. Start over (see [Starting over](#starting-over)).
+- **"pnpm dev only works with this checkout's own local backend."** `packages/backend` points
+  at another backend (a `CONVEX_DEPLOYMENT` in `.env.local` that isn't `anonymous:…`, or a
+  `CONVEX_` variable in another dotenv file). Move those files aside, or start over.
+- **"Another run holds preview-<name>."** A `pnpm preview` with that name is still running.
 - **The bridge host won't build.** It needs Go 1.27 on `PATH` or in `~/.local/go`.
 - **The fake network refuses a message (409).** The username must be the one you connected
   the fake network with.

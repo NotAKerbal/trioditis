@@ -1,19 +1,17 @@
-// The build command Vercel runs for the web app (set in vercel.json).
+// The build command Vercel runs for the web app (set in vercel.json). Only `dev` deploys from
+// Git, as nightly, a demo-only instance on the `nightly` Convex deployment. There is no Vercel
+// production site: Trioditis's production is a server people run themselves (deploy/).
 //
-//   dev   → nightly, a demo-only instance on the `nightly` Convex deployment
-//   main  → nothing yet: Trioditis's production is a self-hosted server (deploy/), and
-//           vercel-ignore.mjs skips main until a Vercel production site is set up
-//
-// For nightly it deploys the Convex functions with the CONVEX_DEPLOY_KEY that Vercel holds
-// for the `dev` branch and builds the web app against that backend. Nightly gets no test
-// account, ever: its first admin signs up with the setup link, printed once, and anyone who
-// signs up gets demo data sealed to their own key (TRIODITIS_DEMO=1). A build started by
-// `pnpm preview` is given its backend already and only builds the web app.
+// For nightly it deploys the Convex functions with the CONVEX_DEPLOY_KEY that Vercel holds for
+// the `dev` branch and builds the web app against that backend. Nightly gets no test account,
+// ever: its first admin signs up with the setup link, printed once, and anyone who signs up
+// gets demo data sealed to their own key (TRIODITIS_DEMO=1). A build started by `pnpm preview`
+// is given its backend already and only builds the web app.
 //
 // Either way it writes Vercel's Build Output (.vercel/output): the app's static files, and
-// routes that send sign-in (/api/auth), the MCP server and its OAuth discovery documents to
-// the backend, so the browser signs in on the site's own address, and every other path to the
-// app's index.html.
+// routes that send sign-in (/api/auth), the MCP server and its OAuth and OpenID discovery
+// documents to the backend, so the browser signs in on the site's own address, and every other
+// path to the app's index.html.
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -22,11 +20,13 @@ import {
   DESKTOP_PACKAGE,
   backendDir,
   capture,
+  cloudPrerequisites,
   convexRef,
   desktopDir,
   environments,
   root,
   run,
+  setConvexEnv,
   step,
   x25519,
 } from './lib.mjs'
@@ -52,7 +52,7 @@ export function writeBuildOutput(convexSiteUrl) {
           { src: '^/api/auth(/.*)?$', dest: `${backend}/api/auth$1` },
           { src: '^/mcp(/.*)?$', dest: `${backend}/mcp$1` },
           {
-            src: '^/\\.well-known/(oauth-protected-resource|oauth-authorization-server)(/.*)?$',
+            src: '^/\\.well-known/(oauth-protected-resource|oauth-authorization-server|openid-configuration)(/.*)?$',
             dest: `${backend}/.well-known/$1$2`,
           },
           { handle: 'filesystem' },
@@ -80,20 +80,26 @@ if (!name) {
   process.exit(0)
 }
 
+// Everything is checked before anything on the backend changes.
 const target = environments[name]
+const missing = cloudPrerequisites()
 if (!target?.deployment || !target.siteUrl) {
-  fail(
-    `The ${name} site isn't set up yet: fill in environments.${name} in scripts/lib.mjs (docs/CONTRIBUTING.md, "Setting it up").`,
-  )
+  missing.push(`environments.${name} in scripts/lib.mjs (docs/CONTRIBUTING.md, "Setting it up")`)
 }
-if (!CONVEX_DEPLOY_KEY)
-  fail(`CONVEX_DEPLOY_KEY is not set for ${name}. Add the ${name} backend's deploy key to the Vercel project.`)
-if (!CONVEX_DEPLOY_KEY.startsWith('prod:')) fail(`The CONVEX_DEPLOY_KEY for ${name} is not a production deploy key.`)
-// A deploy key starts `prod:<deployment name>|`.
-const keyDeployment = CONVEX_DEPLOY_KEY.slice('prod:'.length, CONVEX_DEPLOY_KEY.indexOf('|'))
-if (keyDeployment !== target.deployment) {
-  fail(`The CONVEX_DEPLOY_KEY for ${name} belongs to ${keyDeployment}, not ${target.deployment}.`)
+if (!CONVEX_DEPLOY_KEY) {
+  missing.push(`CONVEX_DEPLOY_KEY for the dev branch in the Vercel project: the ${name} backend's deploy key`)
+} else if (!CONVEX_DEPLOY_KEY.startsWith('prod:')) {
+  missing.push(`a production deploy key: the CONVEX_DEPLOY_KEY for ${name} is another kind`)
+} else if (target?.deployment) {
+  // A deploy key starts `prod:<deployment name>|`.
+  const keyDeployment = CONVEX_DEPLOY_KEY.slice('prod:'.length, CONVEX_DEPLOY_KEY.indexOf('|'))
+  if (keyDeployment !== target.deployment) {
+    missing.push(
+      `${name}'s deploy key: CONVEX_DEPLOY_KEY belongs to ${keyDeployment}, not ${String(target.deployment)}`,
+    )
+  }
 }
+if (missing.length > 0) fail(`The ${name} deploy can't go ahead. Missing:\n  - ${missing.join('\n  - ')}`)
 const convexSiteUrl = `https://${target.deployment}.convex.site`
 
 // With CONVEX_DEPLOY_KEY in the environment, every convex command acts on that key's backend.
@@ -103,26 +109,29 @@ const inBackend = { cwd: backendDir, quiet: true }
 step(`Backend settings: ${name}`)
 const names = capture('pnpm', convex('env', 'list', '--names-only'), inBackend).split(/\s+/)
 const get = (variable) => capture('pnpm', convex('env', 'get', variable), inBackend)
-const set = (variable, value) => capture('pnpm', convex('env', 'set', variable, value), inBackend)
+// Values go through stdin, so secrets never appear in a process list or the build log.
+const set = (variable, value) => setConvexEnv({ [variable]: value }, { cwd: backendDir })
 
 // A key from the wrong environment would point sign-in at the wrong site, so an existing
 // SITE_URL is checked, never overwritten.
 if (names.includes('SITE_URL')) {
-  if (get('SITE_URL') !== target.siteUrl)
+  if (get('SITE_URL') !== target.siteUrl) {
     fail(`This backend's SITE_URL is not ${target.siteUrl}. Check that CONVEX_DEPLOY_KEY belongs to ${name}.`)
+  }
 } else {
   set('SITE_URL', target.siteUrl)
 }
 // Nightly is demo-only: it never offers a real network, so no real account or message can
-// reach it. No bridge host connects to it either; the gateway secret and the bridge key exist
+// reach it, and TRIODITIS_DEMO=1 stops invitations and gives whoever signs up demo data sealed
+// to their own key. No bridge host connects to it; the gateway secret and the bridge key exist
 // only because the backend expects them, and nothing outside it ever holds them.
 if (names.includes('TRIODITIS_NETWORKS')) {
-  if (get('TRIODITIS_NETWORKS') !== CLOUD_NETWORKS)
+  if (get('TRIODITIS_NETWORKS') !== CLOUD_NETWORKS) {
     fail(`TRIODITIS_NETWORKS on ${name} must be "${CLOUD_NETWORKS}": a backend on Convex's cloud is demo-only.`)
+  }
 } else {
   set('TRIODITIS_NETWORKS', CLOUD_NETWORKS)
 }
-// Demo data for whoever signs up, made by the backend and sealed to their own key.
 if (!names.includes('TRIODITIS_DEMO') || get('TRIODITIS_DEMO') !== '1') set('TRIODITIS_DEMO', '1')
 const secret = () => randomBytes(32).toString('base64url')
 const defaults = {
@@ -149,7 +158,8 @@ if (!names.includes('TRIODITIS_SETUP_TOKEN')) {
 // `--cmd` builds the web app with VITE_CONVEX_URL set to this backend. Nightly is a Vercel
 // preview build that deploys to a production Convex deployment on purpose; `convex deploy`
 // refuses that unless its build environment check is turned off, which is done only after the
-// key and SITE_URL checks above.
+// key and SITE_URL checks above. The functions go first: if the web build then fails, the
+// backend is one version ahead of the site until the next good deploy.
 step(`Backend and web app: deploying ${name}`)
 run(
   'pnpm',

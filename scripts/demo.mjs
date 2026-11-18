@@ -8,16 +8,17 @@ import { ConvexHttpClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
 import { TESTER } from './lib.mjs'
 
-/** packages/crypto, once it has what signing in and key setup need (the client API work). */
+/**
+ * packages/crypto, once it has what signing in and key setup need (the client API work,
+ * `api/client-contract`).
+ */
 export async function clientCrypto() {
   const crypto = await import('@trioditis/crypto')
-  const missing = ['authPassword', 'newPasswordParams', 'passwordKey', 'generateRecoveryKey', 'wrapIdentityKey'].filter(
+  const missing = ['authPassword', 'makeKeySetup', 'generateKeyPair'].filter(
     (name) => typeof crypto[name] !== 'function',
   )
   if (missing.length > 0) {
-    throw new Error(
-      `packages/crypto doesn't have ${missing.join(', ')} yet (the client API work), so a preview's test account can't be set up.`,
-    )
+    throw new Error(`packages/crypto's ${missing.join(', ')} (the client API, api/client-contract)`)
   }
   await crypto.ready()
   return crypto
@@ -55,21 +56,9 @@ export async function setUpTesterKeys(crypto, client, userId) {
     return
   }
   const identity = crypto.generateKeyPair()
-  const kid = crypto.keyId(identity.publicKey)
-  const params = crypto.newPasswordParams()
-  const recovery = crypto.generateRecoveryKey()
-  const password = crypto.wrapIdentityKey(identity.privateKey, crypto.passwordKey(TESTER.password, params), {
-    userId,
-    kid,
-    kind: 'password',
-  })
-  const recoveryWrap = crypto.wrapIdentityKey(identity.privateKey, recovery.bytes, { userId, kid, kind: 'recovery' })
-  await client.mutation(anyApi.keys.setup, {
-    publicKey: crypto.toBase64Url(identity.publicKey),
-    password: { ...password, params },
-    recovery: recoveryWrap,
-  })
-  console.log(`Set up. Its recovery key: ${recovery.text}`)
+  const { args, recoveryText } = crypto.makeKeySetup(identity.privateKey, TESTER.password, userId)
+  await client.mutation(anyApi.keys.setup, args)
+  console.log(`Set up. Its recovery key: ${recoveryText}`)
 }
 
 /** Asks the backend for demo data for the signed-in test account. */

@@ -1,8 +1,19 @@
 // Shared helpers for the repo scripts: running commands, the per-checkout dev instance's
-// ports and secrets, the test account, and the accounts previews and nightly deploy to.
+// backend, ports and secrets, the test account, and the accounts previews and nightly deploy to.
 import { spawn, spawnSync } from 'node:child_process'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
@@ -17,6 +28,8 @@ export const desktopDir = resolve(root, 'apps/desktop')
 export const DESKTOP_PACKAGE = '@trioditis/desktop'
 /** Everything a checkout's dev instance keeps: secrets, ports, bridge host data. Git ignores it. */
 export const dataDir = resolve(root, '.data')
+/** State shared by every checkout on this machine: which checkout holds which dev slot. */
+export const stateDir = resolve(process.env.XDG_STATE_HOME ?? resolve(homedir(), '.local/state'), 'trioditis')
 
 /**
  * The Convex team and project, and the Vercel account and project, that previews and nightly
@@ -40,13 +53,10 @@ export const convexRef = (deployment) => `${accounts.convexTeam}:${accounts.conv
 
 /**
  * The one long-lived Vercel site: a push to `dev` deploys nightly, a demo-only instance. There
- * is no production site on Vercel: production is a self-hosted server (deploy/).
+ * is no production site on Vercel: production is a server people run themselves (deploy/).
  */
 export const environments = {
   nightly: { siteUrl: null, deployment: null },
-  // A Vercel production site for main, if there is ever one. Until then vercel-ignore.mjs
-  // skips main's builds.
-  production: null,
 }
 
 /**
@@ -55,17 +65,19 @@ export const environments = {
  */
 export const CLOUD_NETWORKS = 'fake'
 
-// Every dev instance, preview and nightly gets this account, so there is something to sign in
-// with straight away. Those backends hold throwaway data only.
+// Every dev instance and preview gets this account, so there is something to sign in with
+// straight away. Those backends hold throwaway data only. Nightly never gets it.
 export const TESTER = { name: 'Dev Tester', email: 'tester@trioditis.test', password: 'trioditis-dev-tester' }
 
-export function env(extra = {}) {
-  return { ...process.env, ...extra }
+/** The environment for a child: ours, with `extra` added and the names in `unset` removed. */
+export function env(extra = {}, unset = []) {
+  const result = { ...process.env, ...extra }
+  for (const name of unset) delete result[name]
+  return result
 }
 
 /**
- * Names a command for an error message without its later arguments, which can hold secrets
- * such as a generated key being passed to `convex env set`.
+ * Names a command for an error message without its later arguments, which can hold secrets.
  */
 function describe(cmd, args) {
   const shown = args.slice(0, 4).join(' ')
@@ -76,9 +88,10 @@ function describe(cmd, args) {
 export function capture(cmd, args, options = {}) {
   const result = spawnSync(cmd, args, {
     cwd: options.cwd ?? root,
-    env: env(options.env),
+    env: env(options.env, options.unset),
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', options.quiet ? 'pipe' : 'inherit'],
+    input: options.input,
+    stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', options.quiet ? 'pipe' : 'inherit'],
     maxBuffer: 64 * 1024 * 1024,
   })
   if (result.error) throw new Error(`${describe(cmd, args)} failed: ${result.error.message}`)
@@ -91,7 +104,12 @@ export function capture(cmd, args, options = {}) {
 
 /** Runs a command with its output shown. Throws on failure. */
 export function run(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, { cwd: options.cwd ?? root, env: env(options.env), stdio: 'inherit' })
+  const result = spawnSync(cmd, args, {
+    cwd: options.cwd ?? root,
+    env: env(options.env, options.unset),
+    stdio: 'inherit',
+  })
+  if (result.error) throw new Error(`${describe(cmd, args)} failed: ${result.error.message}`)
   if (result.status !== 0) throw new Error(`${describe(cmd, args)} failed with exit code ${result.status}`)
 }
 
@@ -103,7 +121,7 @@ export function run(cmd, args, options = {}) {
 export function start(name, cmd, args, options = {}) {
   const child = spawn(cmd, args, {
     cwd: options.cwd ?? root,
-    env: env(options.env),
+    env: env(options.env, options.unset),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   })
@@ -122,13 +140,16 @@ export function start(name, cmd, args, options = {}) {
   return child
 }
 
-/** Stops a process started with `start`, and everything it started. */
+/**
+ * Stops a process started with `start` and everything in its process group: even after the
+ * leader has exited, what it started can still be running.
+ */
 export function stopGroup(child, signal = 'SIGTERM') {
-  if (child.exitCode !== null || child.signalCode !== null) return
+  if (!child.pid) return
   try {
     process.kill(-child.pid, signal)
   } catch {
-    // Already gone.
+    // The group is gone.
   }
 }
 
@@ -168,47 +189,82 @@ export const portsFor = (slot) => ({
   fakeControl: 8709 + 10 * slot,
 })
 
-const instanceFile = (checkout) => resolve(checkout, '.data/dev.json')
+const allPorts = (ports) => [
+  ports.web,
+  ports.convexCloud,
+  ports.convexSite,
+  ports.gateway,
+  ...Object.values(ports.bridge),
+  ports.fakeControl,
+]
 
-function readInstance(checkout) {
+const slotsDir = resolve(stateDir, 'slots')
+const slotLock = (slot) => resolve(slotsDir, `${slot}.lock`)
+const instanceFile = resolve(dataDir, 'dev.json')
+
+function lockHolder(slot) {
   try {
-    return JSON.parse(readFileSync(instanceFile(checkout), 'utf8'))
+    return readFileSync(slotLock(slot), 'utf8').trim()
   } catch {
     return null
   }
 }
 
-/** This checkout's slot: the one it already has, or the first no other checkout has claimed. */
+/**
+ * Takes a slot for this checkout, atomically: the lock file is created only if it doesn't
+ * exist (O_EXCL), so two checkouts setting up at once can't both get it.
+ */
+function tryLock(slot) {
+  mkdirSync(slotsDir, { recursive: true })
+  let fd
+  try {
+    fd = openSync(slotLock(slot), 'wx', 0o600)
+  } catch (error) {
+    if (error.code === 'EEXIST') return false
+    throw error
+  }
+  writeSync(fd, `${root}\n`)
+  closeSync(fd)
+  return true
+}
+
+/** Releases slots held by checkouts that no longer exist on this machine. */
+function releaseStaleSlots() {
+  if (!existsSync(slotsDir)) return
+  for (const file of readdirSync(slotsDir)) {
+    const holder = lockHolder(Number.parseInt(file, 10))
+    if (holder && !existsSync(resolve(holder, '.git'))) rmSync(resolve(slotsDir, file), { force: true })
+  }
+}
+
+/**
+ * This checkout's slot. The one it saved is used only if its lock still names this checkout;
+ * otherwise it takes the first free one. The main checkout's slot is 0; worktrees start at 1.
+ */
 export async function claimSlot() {
-  const own = readInstance(root)
-  if (own) return own.slot
-  const [main, ...worktrees] = capture('git', ['worktree', 'list', '--porcelain'], { quiet: true })
+  releaseStaleSlots()
+  let saved = null
+  try {
+    saved = JSON.parse(readFileSync(instanceFile, 'utf8')).slot
+  } catch {}
+  if (Number.isInteger(saved)) {
+    if (lockHolder(saved) === root) return saved
+    if (lockHolder(saved) === null && tryLock(saved)) return saved
+    console.log(`Slot ${saved} now belongs to ${lockHolder(saved) ?? 'another checkout'}: taking a new one.`)
+  }
+  const main = capture('git', ['worktree', 'list', '--porcelain'], { quiet: true })
     .split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => line.slice('worktree '.length))
-  const claimed = new Set(
-    [main, ...worktrees]
-      .filter((path) => path !== root)
-      .map(readInstance)
-      .filter(Boolean)
-      .map((i) => i.slot),
-  )
+    .find((line) => line.startsWith('worktree '))
+    ?.slice('worktree '.length)
   for (let slot = main === root ? 0 : 1; slot < 100; slot++) {
-    if (claimed.has(slot)) continue
-    const ports = portsFor(slot)
-    const all = [
-      ports.web,
-      ports.convexCloud,
-      ports.convexSite,
-      ports.gateway,
-      ...Object.values(ports.bridge),
-      ports.fakeControl,
-    ]
-    if ((await Promise.all(all.map(isFree))).every(Boolean)) {
-      mkdirSync(dataDir, { recursive: true })
-      writeFileSync(instanceFile(root), JSON.stringify({ slot }, null, 2) + '\n')
-      return slot
+    if (!tryLock(slot)) continue
+    if (!(await Promise.all(allPorts(portsFor(slot)).map(isFree))).every(Boolean)) {
+      rmSync(slotLock(slot), { force: true })
+      continue
     }
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(instanceFile, JSON.stringify({ slot }, null, 2) + '\n')
+    return slot
   }
   throw new Error('Every dev slot is taken by another checkout or program.')
 }
@@ -255,7 +311,7 @@ export function devSecrets() {
 
 /** Writes .data/dev.env: the secrets plus this instance's addresses, for the dev scripts and tools. */
 export function writeDevEnv(values) {
-  mkdirSync(dataDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
   const file = resolve(dataDir, 'dev.env')
   writeFileSync(
     file,
@@ -267,9 +323,89 @@ export function writeDevEnv(values) {
   chmodSync(file, 0o600)
 }
 
-/** Runs the Convex CLI in packages/backend against this checkout's local backend. */
 export const convex = (...args) => ['exec', 'convex', ...args]
-export const localConvex = { cwd: backendDir, env: { CONVEX_AGENT_MODE: 'anonymous' } }
+
+/**
+ * The environment variables the Convex CLI reads to choose a deployment, or that point it at
+ * one (convex 1.50, from its CLI source). Every one is removed for the local backend's commands,
+ * so a `CONVEX_DEPLOY_KEY` or `CONVEX_DEPLOYMENT` in your shell can never send `pnpm dev`'s
+ * pushes and settings to a cloud or shared backend. Any other `CONVEX_` variable goes too.
+ */
+const CONVEX_SELECTORS = [
+  'CONVEX_DEPLOY_KEY',
+  'CONVEX_DEPLOYMENT_TOKEN',
+  'CONVEX_DEPLOYMENT',
+  'CONVEX_URL',
+  'CONVEX_SITE_URL',
+  'CONVEX_CLOUD_URL',
+  'CONVEX_SELF_HOSTED_URL',
+  'CONVEX_SELF_HOSTED_ADMIN_KEY',
+  'CONVEX_ACCOUNT',
+  'CONVEX_OVERRIDE_ACCESS_TOKEN',
+  'CONVEX_PROVISION_HOST',
+]
+export const localConvex = {
+  cwd: backendDir,
+  env: { CONVEX_AGENT_MODE: 'anonymous' },
+  unset: [
+    ...new Set([
+      ...CONVEX_SELECTORS,
+      ...Object.keys(process.env).filter((name) => name.startsWith('CONVEX_') && name !== 'CONVEX_AGENT_MODE'),
+    ]),
+  ],
+}
+
+/**
+ * Refuses unless the Convex CLI, run in packages/backend, can only reach this checkout's own
+ * local backend: `.env.local` (if any) names an anonymous local deployment, and no other dotenv
+ * file there sets a `CONVEX_` variable. Checked before every push or settings change.
+ */
+export function assertLocalBackend({ requireConfigured = true, dir = backendDir } = {}) {
+  const problems = []
+  const envLocal = resolve(dir, '.env.local')
+  if (existsSync(envLocal)) {
+    const deployment = parseEnv(readFileSync(envLocal, 'utf8')).get('CONVEX_DEPLOYMENT')
+    if (!deployment?.startsWith('anonymous:')) {
+      problems.push(
+        `packages/backend/.env.local names ${deployment ? `the deployment "${deployment}"` : 'no deployment'}, not this checkout's local backend`,
+      )
+    }
+  } else if (requireConfigured) {
+    problems.push('packages/backend/.env.local is missing')
+  }
+  for (const file of ['.env', '.env.development', '.env.development.local']) {
+    const path = resolve(dir, file)
+    if (existsSync(path) && /^CONVEX_/m.test(readFileSync(path, 'utf8')))
+      problems.push(`packages/backend/${file} sets a CONVEX_ variable`)
+  }
+  if (requireConfigured && !existsSync(resolve(dir, '.convex/local/default/config.json'))) {
+    problems.push('this checkout has no local backend in packages/backend/.convex/local')
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `pnpm dev only works with this checkout's own local backend, and won't touch any other:\n  - ${problems.join('\n  - ')}\n` +
+        'Move those files aside, or start over (docs/CONTRIBUTING.md, "Starting over").',
+    )
+  }
+}
+
+/**
+ * Sets variables on a backend through stdin, so their values never appear in a process list.
+ * `options` says which backend (the Convex CLI's options and environment).
+ */
+export function setConvexEnv(values, options) {
+  const entries = Object.entries(values)
+  if (entries.length === 0) return
+  capture(
+    'pnpm',
+    convex('env', 'set', '--force', ...(options.deployment ? ['--deployment', options.deployment] : [])),
+    {
+      ...options,
+      quiet: true,
+      input: entries.map(([name, value]) => `${name}=${value}`).join('\n') + '\n',
+    },
+  )
+}
 
 /** The Go toolchain: on PATH, or where the dev VM keeps it. */
 export function goEnv() {
@@ -286,14 +422,42 @@ export function buildBridgeHost() {
   return resolve(bridgeDir, 'bin/bridge-host')
 }
 
-/** The desktop and web app's package, if this checkout has it and it can be run. */
+/** The desktop and web app's package, if this checkout has it. */
 export function desktopPackage() {
   try {
-    const pkg = JSON.parse(readFileSync(resolve(desktopDir, 'package.json'), 'utf8'))
-    return pkg.scripts?.dev ? pkg : null
+    return JSON.parse(readFileSync(resolve(desktopDir, 'package.json'), 'utf8'))
   } catch {
     return null
   }
+}
+
+/**
+ * What a deploy to Convex's cloud (a preview or nightly) needs from this checkout, as a list
+ * of what's missing: the web app and its build, and the backend's demo and key functions.
+ * Checked before anything is created or changed in the cloud.
+ */
+export function cloudPrerequisites() {
+  const missing = []
+  const desktop = desktopPackage()
+  if (!desktop) missing.push(`the web app (${DESKTOP_PACKAGE} in apps/desktop)`)
+  else if (desktop.name !== DESKTOP_PACKAGE)
+    missing.push(`apps/desktop is named ${desktop.name}, not ${DESKTOP_PACKAGE}`)
+  else if (!desktop.scripts?.build) missing.push(`a build script in apps/desktop/package.json`)
+  const source = (file) => {
+    try {
+      return readFileSync(resolve(backendDir, 'convex', file), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+  // The client API (api/client-contract): the key setup and demo data the test account uses.
+  if (!/export const seedForMe\b/.test(source('demo.ts'))) {
+    missing.push('the backend function demo.seedForMe (the client API, api/client-contract)')
+  }
+  if (!/export const setup\b/.test(source('keys.ts')) || !/export const identity\b/.test(source('keys.ts'))) {
+    missing.push('the backend functions keys.setup and keys.identity (the client API, api/client-contract)')
+  }
+  return missing
 }
 
 /**
@@ -308,10 +472,9 @@ export async function signInPassword(typed, email) {
 
 /**
  * Creates the test account on a backend unless it is already there, and returns its user ID.
- * `password` is what the app sends at sign-in (`signInPassword`).
  * The first account on a server is its admin and needs the setup token; on a backend that
  * already has an admin who isn't the test account, it says so instead. Requests go to
- * `authUrl` as if sent from `origin`.
+ * `authUrl` as if sent from `origin`. `password` is what the app sends at sign-in.
  */
 export async function ensureTester({ authUrl, origin, setupToken, password = TESTER.password }) {
   const post = (path, body, headers = {}) =>
@@ -336,4 +499,34 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
     )
   }
   throw new Error(`Creating the test account failed (${signUp.status}): ${await signUp.text()}`)
+}
+
+/**
+ * Holds a lock named `name` for as long as this process runs, so two runs of the same thing
+ * (`pnpm preview <name>`) can't overlap. A lock left by a process that died is taken over.
+ */
+export function holdLock(name) {
+  const dir = resolve(stateDir, 'locks')
+  mkdirSync(dir, { recursive: true })
+  const path = resolve(dir, `${name}.lock`)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(path, 'wx', 0o600)
+      writeSync(fd, `${process.pid}\n`)
+      closeSync(fd)
+      process.on('exit', () => rmSync(path, { force: true }))
+      return
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      const pid = Number.parseInt(readFileSync(path, 'utf8'), 10)
+      let alive = false
+      try {
+        process.kill(pid, 0)
+        alive = true
+      } catch {}
+      if (alive) throw new Error(`Another run (process ${pid}) holds ${name}. Wait for it to finish.`)
+      rmSync(path, { force: true })
+    }
+  }
+  throw new Error(`Could not take the lock ${name}.`)
 }

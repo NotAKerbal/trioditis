@@ -1,6 +1,5 @@
 // Starts a working local instance of this checkout: its own Convex backend running on this
-// machine, the gateway, a bridge host for each network, and the web app once apps/desktop
-// exists.
+// machine, the gateway, a bridge host for each network, and the web app from apps/desktop.
 //
 //   pnpm dev                       set up if needed, then start, with the fake network
 //   pnpm dev --network whatsapp    a real WhatsApp bridge host instead (needs your phone)
@@ -9,13 +8,15 @@
 //
 // Every checkout of the repository, the main one and each git worktree, has its own backend,
 // data and ports, so branches run side by side without touching each other (scripts/lib.mjs,
-// `portsFor`). The backend is a Convex local deployment that needs no Convex account: its data
-// lives in packages/backend/.convex/local, and everything else this instance keeps (secrets,
-// bridge host databases) in .data/. Git ignores both.
-import { existsSync, readFileSync } from 'node:fs'
+// `portsFor` and `claimSlot`). The backend is a Convex local deployment that needs no Convex
+// account: its data lives in packages/backend/.convex/local, and everything else this instance
+// keeps (secrets, bridge host databases) in .data/. Git ignores both. It never acts on any
+// other backend: see `assertLocalBackend`.
+import { chmodSync, existsSync, readFileSync, watch } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   TESTER,
+  assertLocalBackend,
   backendDir,
   bridgeDir,
   buildBridgeHost,
@@ -31,6 +32,7 @@ import {
   portsFor,
   root,
   run,
+  setConvexEnv,
   signInPassword,
   start,
   step,
@@ -56,9 +58,22 @@ for (const name of networks) {
   }
 }
 
+const fail = (message) => {
+  console.error(`\n\x1b[1m${message}\x1b[0m`)
+  process.exit(1)
+}
+
+// Before anything: the Convex CLI must only be able to reach this checkout's own backend.
+try {
+  assertLocalBackend({ requireConfigured: false })
+} catch (error) {
+  fail(error.message)
+}
+
 const slot = await claimSlot()
 const ports = portsFor(slot)
-const web = desktopPackage()
+const desktop = desktopPackage()
+const web = desktop?.scripts?.dev ? desktop : null
 const convexUrl = `http://127.0.0.1:${ports.convexCloud}`
 const convexSiteUrl = `http://127.0.0.1:${ports.convexSite}`
 // Sign-in's address: the web app's when there is one (it is where people sign in), otherwise
@@ -91,51 +106,54 @@ function backendPorts() {
   }
 }
 
-function isConfigured() {
+const configured = () => {
   const current = backendPorts()
-  const envFile = resolve(backendDir, '.env.local')
   return (
     current?.cloud === ports.convexCloud &&
     current?.site === ports.convexSite &&
-    existsSync(envFile) &&
-    /^CONVEX_DEPLOYMENT=anonymous:/m.test(readFileSync(envFile, 'utf8'))
+    existsSync(resolve(backendDir, '.env.local'))
   )
 }
 
-if (!isConfigured()) {
-  step(`Creating a local backend for this checkout on ports ${ports.convexCloud} and ${ports.convexSite}`)
-  run('pnpm', convex('dev', '--once', '--typecheck', 'disable', '--tail-logs', 'disable', ...portArgs), localConvex)
+try {
+  if (!configured()) {
+    step(`Creating a local backend for this checkout on ports ${ports.convexCloud} and ${ports.convexSite}`)
+    run('pnpm', convex('dev', '--once', '--typecheck', 'disable', '--tail-logs', 'disable', ...portArgs), localConvex)
+  }
+  // The backend's data, keys and admin key: yours only.
+  chmodSync(resolve(backendDir, '.convex'), 0o700)
+  assertLocalBackend()
+
+  step('Checking backend settings')
+  const wanted = {
+    SITE_URL: siteUrl,
+    BETTER_AUTH_SECRET: secrets.BETTER_AUTH_SECRET,
+    GATEWAY_SECRET: secrets.GATEWAY_SECRET,
+    TRIODITIS_SETUP_TOKEN: secrets.TRIODITIS_SETUP_TOKEN,
+    TRIODITIS_NETWORKS: instance.TRIODITIS_NETWORKS,
+    BRIDGE_PUBLIC_KEY: secrets.BRIDGE_PUBLIC_KEY,
+    AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
+  }
+  const existing = new Map(
+    capture('pnpm', convex('env', 'list'), { ...localConvex, quiet: true })
+      .split('\n')
+      .map((line) => line.match(/^([A-Z0-9_]+)=(.*)$/))
+      .filter(Boolean)
+      .map((match) => [match[1], match[2]]),
+  )
+  const changed = Object.fromEntries(Object.entries(wanted).filter(([name, value]) => existing.get(name) !== value))
+  setConvexEnv(changed, localConvex)
+  for (const name of Object.keys(changed)) console.log(`Set ${name}.`)
+
+  if (hasBridgeHost) {
+    step('Building the bridge host')
+    buildBridgeHost()
+  }
+} catch (error) {
+  fail(error.message)
 }
 
-step('Checking backend settings')
-const forConvex = {
-  SITE_URL: siteUrl,
-  BETTER_AUTH_SECRET: secrets.BETTER_AUTH_SECRET,
-  GATEWAY_SECRET: secrets.GATEWAY_SECRET,
-  TRIODITIS_SETUP_TOKEN: secrets.TRIODITIS_SETUP_TOKEN,
-  TRIODITIS_NETWORKS: instance.TRIODITIS_NETWORKS,
-  BRIDGE_PUBLIC_KEY: secrets.BRIDGE_PUBLIC_KEY,
-  AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
-}
-const existing = new Map(
-  capture('pnpm', convex('env', 'list'), { ...localConvex, quiet: true })
-    .split('\n')
-    .map((line) => line.match(/^([A-Z0-9_]+)=(.*)$/))
-    .filter(Boolean)
-    .map((match) => [match[1], match[2]]),
-)
-for (const [name, value] of Object.entries(forConvex)) {
-  if (existing.get(name) === value) continue
-  capture('pnpm', convex('env', 'set', name, value), { ...localConvex, quiet: true })
-  console.log(`Set ${name}.`)
-}
-
-if (hasBridgeHost) {
-  step('Building the bridge host')
-  buildBridgeHost()
-}
-
-const children = []
+const children = new Set()
 let stopping = false
 function stop(code) {
   if (stopping) return
@@ -147,18 +165,33 @@ function stop(code) {
     process.exit(code)
   }, 3000).unref()
   void Promise.all(
-    children.map((child) => new Promise((done) => (child.exitCode !== null ? done() : child.once('exit', done)))),
-  ).then(() => process.exit(code))
-}
-function launch(name, cmd, cmdArgs, options) {
-  const child = start(name, cmd, cmdArgs, options)
-  child.on('exit', (code) => {
-    if (!stopping) {
-      console.error(`\n${name} stopped (exit code ${code ?? 'none'}). Stopping the rest.`)
-      stop(code || 1)
-    }
+    [...children].map(
+      (child) =>
+        new Promise((done) =>
+          child.exitCode !== null || child.signalCode !== null ? done() : child.once('exit', done),
+        ),
+    ),
+  ).then(() => {
+    // Exited leaders can leave children in their groups: stop those too.
+    for (const child of children) stopGroup(child, 'SIGKILL')
+    process.exit(code)
   })
-  children.push(child)
+}
+
+/** Starts a process; if it stops or can't start, everything stops, unless `onExit` handles it. */
+function launch(name, cmd, cmdArgs, options = {}) {
+  const child = start(name, cmd, cmdArgs, options)
+  children.add(child)
+  child.on('error', (error) => {
+    console.error(`\n${name} couldn't start: ${error.message}. Stopping the rest.`)
+    stop(1)
+  })
+  child.on('exit', (code, signal) => {
+    if (stopping) return
+    if (options.onExit) return options.onExit(code, signal)
+    console.error(`\n${name} stopped (${signal ?? `exit code ${code}`}). Stopping the rest.`)
+    stop(code || 1)
+  })
   return child
 }
 process.on('SIGINT', () => stop(0))
@@ -178,8 +211,8 @@ try {
   await waitFor(`${convexSiteUrl}/api/auth/ok`, 120)
   await Promise.race([
     pushed,
-    new Promise((_, fail) =>
-      setTimeout(() => fail(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000),
+    new Promise((_, failWait) =>
+      setTimeout(() => failWait(new Error('The backend’s functions were not pushed within 3 minutes.')), 180_000),
     ),
   ])
   step('Creating the test account')
@@ -194,6 +227,75 @@ try {
   stop(1)
 }
 
+/** Warns, loudly, when something didn't come up. */
+async function ready(name, url, seconds) {
+  try {
+    await waitFor(url, seconds)
+    return true
+  } catch {
+    console.error(`\n\x1b[1m${name} didn't answer at ${url} within ${seconds} seconds.\x1b[0m Check its output above.`)
+    return false
+  }
+}
+
+/**
+ * Runs the gateway, restarting it when its code (or the packages it uses) changes, and after a
+ * crash. A gateway that keeps crashing stops everything rather than leaving the stack half up.
+ */
+function superviseGateway() {
+  const gatewayEnv = {
+    CONVEX_URL: convexUrl,
+    GATEWAY_SECRET: secrets.GATEWAY_SECRET,
+    TRIODITIS_INTERNAL_TOKEN: secrets.TRIODITIS_INTERNAL_TOKEN,
+    GATEWAY_INTERNAL_ADDR: instance.GATEWAY_INTERNAL_ADDR,
+    AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
+    BRIDGE_HOSTS: instance.BRIDGE_HOSTS,
+  }
+  let current = null
+  let restarting = false
+  const crashes = []
+  const begin = () => {
+    current = launch('gateway', 'node', ['src/main.ts'], {
+      cwd: gatewayDir,
+      env: gatewayEnv,
+      onExit: (code, signal) => {
+        children.delete(current)
+        if (restarting) {
+          restarting = false
+          begin()
+          return
+        }
+        const now = Date.now()
+        crashes.push(now)
+        while (crashes.length > 0 && now - crashes[0] > 60_000) crashes.shift()
+        if (crashes.length >= 3) {
+          console.error(
+            `\n\x1b[1mThe gateway keeps stopping (${signal ?? `exit code ${code}`}). Stopping the rest.\x1b[0m`,
+          )
+          stop(1)
+          return
+        }
+        console.error(`\n\x1b[1mThe gateway stopped (${signal ?? `exit code ${code}`}). Restarting it.\x1b[0m`)
+        setTimeout(begin, 1000)
+      },
+    })
+  }
+  begin()
+  let timer = null
+  const restart = () => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      if (stopping || !current) return
+      console.log('\nGateway code changed: restarting it.')
+      restarting = true
+      stopGroup(current)
+    }, 300)
+  }
+  for (const dir of ['apps/gateway/src', 'packages/core/src', 'packages/crypto/src']) {
+    if (existsSync(resolve(root, dir))) watch(resolve(root, dir), { recursive: true }, restart)
+  }
+}
+
 if (stopping) {
   // Stopping after a failure above: nothing else starts.
 } else if (setupOnly) {
@@ -201,18 +303,8 @@ if (stopping) {
   stop(0)
 } else {
   step('Starting the gateway')
-  launch('gateway', 'node', ['--watch', 'src/main.ts'], {
-    cwd: gatewayDir,
-    env: {
-      CONVEX_URL: convexUrl,
-      GATEWAY_SECRET: secrets.GATEWAY_SECRET,
-      TRIODITIS_INTERNAL_TOKEN: secrets.TRIODITIS_INTERNAL_TOKEN,
-      GATEWAY_INTERNAL_ADDR: instance.GATEWAY_INTERNAL_ADDR,
-      AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
-      BRIDGE_HOSTS: instance.BRIDGE_HOSTS,
-    },
-  })
-  await waitFor(`${instance.GATEWAY_URL}/healthz`, 30).catch(() => {})
+  superviseGateway()
+  await ready('The gateway', `${instance.GATEWAY_URL}/healthz`, 30)
 
   if (hasBridgeHost) {
     for (const network of networks) {
@@ -237,7 +329,7 @@ if (stopping) {
 
   if (web) {
     step('Starting the web app')
-    // apps/desktop's dev server takes its port from PORT and proxies sign-in (/api/auth) and
+    // apps/desktop's dev server takes its port from PORT and forwards sign-in (/api/auth) and
     // the MCP server to VITE_CONVEX_SITE_URL, so the browser signs in on the page's own origin,
     // the SITE_URL set above, as it does behind Caddy and on Vercel.
     launch('web', 'pnpm', ['--filter', web.name, 'run', 'dev'], {
@@ -248,10 +340,11 @@ if (stopping) {
         VITE_TRIODITIS_ENVIRONMENT: 'development',
       },
     })
-    await waitFor(siteUrl, 120).catch(() => {})
+    await ready('The web app', siteUrl, 120)
   }
 
-  console.log(`
+  if (!stopping) {
+    console.log(`
 \x1b[1mTrioditis is running\x1b[0m
   URL        ${web ? siteUrl : `${siteUrl} (no web app in this checkout yet: apps/desktop)`}
   Email      ${TESTER.email}
@@ -260,4 +353,5 @@ if (stopping) {
   Data       packages/backend/.convex/local and .data/, this checkout only
 
 Ctrl+C stops everything.`)
+  }
 }

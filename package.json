@@ -17,7 +17,8 @@
     "test": "turbo run test",
     "lint": "oxlint",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:scripts": "node --test scripts/test/*.test.mjs"
   },
   "devDependencies": {
     "@convex-dev/eslint-plugin": "5.0.1",
