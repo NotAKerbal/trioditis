@@ -2,7 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
 import { audit } from './lib/audit'
-import { isEnvelope } from './lib/envelope'
+import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
 import { envelope, network } from './validators'
@@ -78,7 +78,8 @@ export const submit = mutation({
     if (session.state !== 'active' || session.step?.stepId !== args.stepId) {
       throw new ConvexError('That step of the login is over. Start again if it didn’t finish.')
     }
-    if (!isEnvelope(args.sealed)) throw new ConvexError('That input isn’t sealed.')
+    if (!isEnvelope(args.sealed, MAX_CLIENT_SEALED_BYTES))
+      throw new ConvexError('That input isn’t sealed, or is too long.')
     const now = Date.now()
     await queueCommand(
       ctx,

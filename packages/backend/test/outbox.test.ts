@@ -261,6 +261,7 @@ describe('sending', () => {
   it('never moves delivery backwards', async () => {
     const { t, as } = await ready()
     await send(as, await aChat(t, 'user_a'), 1)
+    await claim(t)
     await status(t, id(1), 'sent')
     await status(t, id(1), 'submitted')
     expect(await delivery(t, id(1))).toBe('sent')
@@ -345,6 +346,7 @@ describe('sending', () => {
   it('lets the person discard a send that may not have gone out', async () => {
     const { t, as } = await ready()
     await send(as, await aChat(t, 'user_a'), 1)
+    await claim(t)
     await expect(as.mutation(api.messages.discardSend, { clientMessageId: id(1) })).rejects.toThrow()
     await status(t, id(1), 'unknown')
     await as.mutation(api.messages.discardSend, { clientMessageId: id(1) })
@@ -445,5 +447,136 @@ describe('sending', () => {
     await expect(reply(1, 'in_there')).rejects.toThrow(/replied to/)
     await expect(reply(2, 'nowhere')).rejects.toThrow(/replied to/)
     await reply(3, 'in_here')
+  })
+
+  it('refuses a status or echo for a send no host has been handed yet', async () => {
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    await status(t, id(1), 'failed')
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'queued', delivery: 'queued' })
+    expect(await payloadOf(t, id(1))).not.toBeNull()
+  })
+
+  it('refuses an echo from the wrong host, so the right host’s echo still settles the send', async () => {
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    await claim(t)
+    const echo = (hostId: string, n: number) =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId,
+        network: 'whatsapp',
+        events: [
+          {
+            seq: n,
+            type: 'message',
+            userId: 'user_a',
+            loginId: 'login_a',
+            at: 1,
+            portalId: 'portal_1',
+            eventId: 'net_1',
+            networkTs: 5_000,
+            sender: { self: true },
+            sealed: sealed('echo'),
+            historical: false,
+            clientMessageId: id(1),
+          },
+        ],
+      })
+    await echo('whatsapp-2', 1)
+    expect(await t.run(async (ctx) => await ctx.db.query('messages').collect())).toMatchObject([
+      { eventId: `pending:${id(1)}` },
+    ])
+    await echo('whatsapp-1', ++seq)
+    const rows = await t.run(async (ctx) => await ctx.db.query('messages').collect())
+    expect(rows).toMatchObject([{ eventId: 'net_1', delivery: 'sent' }])
+  })
+
+  it('refuses sends and login input bigger than the limit', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const big = { ...sealed(), ct: 'A'.repeat(Math.ceil(((64 * 1024 + 1) * 4) / 3)) }
+    await expect(
+      as.mutation(api.messages.send, { chatId, clientMessageId: id(1), forBridge: big, copy: sealed() }),
+    ).rejects.toThrow(/too long/)
+  })
+
+  it('expires a bounded number of commands per claim', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    for (let n = 1; n <= 60; n++) await send(as, await aChat(t, 'user_a', `p${n}`), n)
+    vi.advanceTimersByTime(25 * 60 * 60 * 1000)
+    await loginOn(t, 'whatsapp-1')
+    await claim(t)
+    const expired = async () =>
+      (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter((row) => row.state === 'expired')
+        .length
+    expect(await expired()).toBe(50)
+    await claim(t)
+    expect(await expired()).toBe(60)
+  })
+
+  it('keeps a login with the host that last reported it connected', async () => {
+    const { t, as } = await ready()
+    const report = (hostId: string, at: number, state: 'CONNECTED' | 'TRANSIENT_DISCONNECT') =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId,
+        network: 'whatsapp',
+        events: [
+          {
+            seq: hostId === 'whatsapp-1' ? ++seq : 1,
+            type: 'loginState',
+            userId: 'user_a',
+            loginId: 'login_a',
+            at,
+            state,
+          },
+        ],
+      })
+    await report('whatsapp-2', Date.now() + 1_000, 'CONNECTED')
+    // A delayed report from the host that ran it before doesn't take it back.
+    await report('whatsapp-1', Date.now(), 'TRANSIENT_DISCONNECT')
+    await send(as, await aChat(t, 'user_a'), 1)
+    expect(await claim(t)).toMatchObject([{ hostId: 'whatsapp-2' }])
+  })
+
+  it('lets only the host running a login report its steps, and doesn’t let an old submission end a newer step', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await claim(t)
+    const step = (hostId: string, n: number, stepId: string) =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId,
+        network: 'whatsapp',
+        events: [
+          {
+            seq: n,
+            type: 'loginStep',
+            userId: 'user_a',
+            loginId: '',
+            at: Date.now(),
+            loginSessionId,
+            step: { stepId, type: 'userInput' },
+          },
+        ],
+      })
+    await step('whatsapp-2', 1, 'spoofed')
+    expect((await as.query(api.logins.session, { loginSessionId }))!.state).toBe('pending')
+    await step('whatsapp-1', 1, 's1')
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('a') })
+    await step('whatsapp-1', 2, 's2')
+    vi.advanceTimersByTime(11 * 60 * 1000)
+    await heartbeat(t)
+    await claim(t)
+    expect(await as.query(api.logins.session, { loginSessionId })).toMatchObject({
+      state: 'active',
+      step: { stepId: 's2' },
+    })
   })
 })

@@ -224,17 +224,22 @@ describe('ingest', () => {
   it('doesn’t bring back a removed reaction when its event is replayed, but does for a new one', async () => {
     seq = 0
     const t = setup()
-    const add = (eventId: string) =>
-      event('reaction', {
+    let clock = 1_000
+    const add = (eventId: string) => ({
+      ...event('reaction', {
         portalId: 'portal_1',
         eventId,
         targetEventId: 'e1',
         sender: { ghostId: 'g' },
         key: '❤️',
         networkTs: 1,
-      })
-    const remove = () =>
-      event('reactionRemove', { portalId: 'portal_1', targetEventId: 'e1', sender: { ghostId: 'g' }, key: '❤️' })
+      }),
+      at: ++clock,
+    })
+    const remove = () => ({
+      ...event('reactionRemove', { portalId: 'portal_1', targetEventId: 'e1', sender: { ghostId: 'g' }, key: '❤️' }),
+      at: ++clock,
+    })
     const active = async () =>
       (await t.run(async (ctx) => await ctx.db.query('reactions').collect())).filter((r) => r.removedAt === undefined)
     await ingest(t, [message('e1'), add('r1'), remove(), add('r1')])
@@ -263,7 +268,7 @@ describe('ingest', () => {
       ...event('reactionRemove', { portalId: 'portal_1', targetEventId: 'e1', sender: { ghostId: 'g' }, key: '❤️' }),
       at,
     })
-    await ingest(t, [message('e1'), add(10), remove(20), add(30), remove(20)])
+    await ingest(t, [message('e1'), add(10), remove(20), add(30), remove(20), remove(30)])
     const reactions = await t.run(async (ctx) => await ctx.db.query('reactions').collect())
     expect(reactions).toMatchObject([{ eventId: 'r30' }])
     expect(reactions[0]!.removedAt).toBeUndefined()

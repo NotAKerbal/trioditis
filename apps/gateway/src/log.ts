@@ -1,16 +1,31 @@
+import { ConvexError } from 'convex/values'
+
 /**
- * An error as one short line, for logs. Errors can quote the values they refused, which can
- * include sealed payloads or IDs, so only the first line is kept, everything from "Value:" on
- * is dropped, quoted strings and JSON are replaced by "…", and the line is cut short. Nothing
- * a person typed should reach a log.
+ * Phrases an error may be logged by. Errors can quote what they refused (field names, values,
+ * sealed payloads), and nothing a person typed should reach a log, so a log line names the
+ * kind of error and which of these it matched, and nothing else from its message.
  */
+const KNOWN = [
+  'fetch failed',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'timeout',
+  'aborted',
+  'ArgumentValidationError',
+  'Not the gateway',
+  'Server Error',
+  'Body too large',
+] as const
+
 export function describeError(error: unknown): string {
-  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  const firstLine = text.split('\n')[0] ?? ''
-  const withoutValue = firstLine.split(/\bValue:/)[0] ?? ''
-  const withoutQuotes = withoutValue
-    .replace(/"(?:[^"\\]|\\.)*"/g, '…')
-    .replace(/'(?:[^'\\]|\\.)*'/g, '…')
-    .replace(/[{[].*[}\]]/g, '…')
-  return withoutQuotes.slice(0, 200).trim()
+  if (error instanceof ConvexError && typeof error.data === 'string' && error.data.length <= 80) {
+    // Our own backend's messages: fixed strings, never content.
+    return `ConvexError: ${error.data}`
+  }
+  const name = error instanceof Error ? error.name : typeof error
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined
+  const text = [error instanceof Error ? error.message : '', cause instanceof Error ? cause.message : ''].join(' ')
+  const matched = KNOWN.filter((phrase) => text.includes(phrase))
+  return matched.length > 0 ? `${name}: ${matched.join(', ')}` : name
 }

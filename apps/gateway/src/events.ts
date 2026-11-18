@@ -1,5 +1,6 @@
 import type { BridgeEvent } from '@trioditis/core/bridge-protocol'
 import { NETWORKS, type Network } from '@trioditis/core'
+import { convexToJson, type Value } from 'convex/values'
 import type { Backend } from './backend.ts'
 
 // POST /v1/events: a bridge host's events, applied in order. The answer acknowledges a
@@ -36,19 +37,25 @@ export function parseBatch(value: unknown): Batch | null {
   return { hostId: batch.hostId as string, network: batch.network as Network, events: batch.events as BridgeEvent[] }
 }
 
-/**
- * Whether the event itself is the problem: the backend's validators refused it, or the Convex
- * client couldn't encode it. Anything else (the backend is down) is not the event's fault, and
- * nothing is quarantined for it.
- */
+/** Whether the backend's validators refused the event itself (rather than being down). */
 function isValidationError(error: unknown) {
-  const text = String(error)
-  return (
-    text.includes('ArgumentValidationError') ||
-    text.includes('is not a supported Convex type') ||
-    /Field name .* (starts with|must only contain|is too long)/.test(text) ||
-    text.includes('is not a valid Convex value')
-  )
+  return error instanceof Error && error.message.includes('ArgumentValidationError')
+}
+
+/** Whether the Convex client can encode the event at all. */
+function encodable(event: unknown) {
+  try {
+    convexToJson(event as Value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The event's type for quarantine, without trusting it to be a string. */
+function typeOf(event: BridgeEvent) {
+  const type = (event as { type?: unknown }).type
+  return typeof type === 'string' ? type : 'unknown'
 }
 
 type Outcome = { ackedThrough: number } | { expectedSeq: number }
@@ -59,19 +66,27 @@ type Outcome = { ackedThrough: number } | { expectedSeq: number }
  */
 async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[]): Promise<Outcome> {
   const target = { hostId: batch.hostId, network: batch.network }
-  try {
-    return await backend.ingest({ ...target, events: events as never })
-  } catch (error) {
-    if (!isValidationError(error) || events.length === 0) throw error
+  // An event the Convex client can't even encode would fail the whole chunk without reaching
+  // the backend's validators, so those go one at a time from the start.
+  if (events.every(encodable)) {
+    try {
+      return await backend.ingest({ ...target, events: events as never })
+    } catch (error) {
+      if (!isValidationError(error) || events.length === 0) throw error
+    }
   }
   let outcome: Outcome = { ackedThrough: 0 }
   for (const event of events) {
-    try {
-      outcome = await backend.ingest({ ...target, events: [event] as never })
-    } catch (error) {
-      if (!isValidationError(error)) throw error
-      outcome = await backend.quarantineInvalid({ ...target, seq: event.seq, type: String(event.type ?? 'unknown') })
+    let invalid = !encodable(event)
+    if (!invalid) {
+      try {
+        outcome = await backend.ingest({ ...target, events: [event] as never })
+      } catch (error) {
+        if (!isValidationError(error)) throw error
+        invalid = true
+      }
     }
+    if (invalid) outcome = await backend.quarantineInvalid({ ...target, seq: event.seq, type: typeOf(event) })
     if ('expectedSeq' in outcome) return outcome
   }
   return outcome

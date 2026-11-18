@@ -51,11 +51,17 @@ const KEY_ID_BYTES = 16
 const SEALED_KEY_BYTES = 32 + 32 + 16
 const MAX_RECIPIENTS = 8
 
-export function isEnvelope(value: Infer<typeof envelope>): boolean {
+/**
+ * The most a client may seal into one send or login input. It keeps every outbox read small,
+ * so a claim's transaction stays well inside Convex's read limit. Files travel separately.
+ */
+export const MAX_CLIENT_SEALED_BYTES = 64 * 1024
+
+export function isEnvelope(value: Infer<typeof envelope>, maxBytes = Infinity): boolean {
   if (value.keys.length === 0 || value.keys.length > MAX_RECIPIENTS) return false
   if (decodedLength(value.nonce) !== NONCE_BYTES) return false
   const ct = decodedLength(value.ct)
-  if (ct === null || ct < TAG_BYTES) return false
+  if (ct === null || ct < TAG_BYTES || ct > maxBytes) return false
   return value.keys.every(
     (key) => decodedLength(key.kid) === KEY_ID_BYTES && decodedLength(key.sk) === SEALED_KEY_BYTES,
   )
