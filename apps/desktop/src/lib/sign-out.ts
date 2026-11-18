@@ -16,13 +16,14 @@ export const SIGN_OUT_FAILED = 'You’re still signed in: the server couldn’t 
  */
 export async function signOut(
   userId?: string,
-  { waitFor, onlyKid }: { waitFor?: Promise<unknown> | null; onlyKid?: string } = {},
+  { waitFor, onlyKid }: { waitFor?: Promise<unknown> | null; onlyKid?: string | null } = {},
 ) {
   await waitFor?.catch(() => undefined)
   let unconfirmed = false
   if (userId) {
     try {
-      // With `onlyKid`, only that key is forgotten: a different one here isn't known to be backed up.
+      // With `onlyKid`, only that key is forgotten: a different one here isn't known to be backed
+      // up. With null, none is, but saves still under way anywhere are stopped.
       await forgetIdentity(userId, onlyKid)
     } catch {
       unconfirmed = true

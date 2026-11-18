@@ -90,7 +90,21 @@ function MemberGate({ children }: { children: ReactNode }) {
 
 function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | 'member'; children: ReactNode }) {
   const remote = useQuery(convexQuery(api.keys.identity, {}))
-  const local = useQuery({ queryKey: ['identity', userId], queryFn: () => loadIdentity(userId), staleTime: Infinity })
+  // Not kept once the gate is gone (gcTime 0): after a sign-out, in any tab, the next session
+  // reads storage afresh rather than reusing a key that may have been forgotten since.
+  const local = useQuery({
+    queryKey: ['identity', userId],
+    queryFn: () => loadIdentity(userId),
+    staleTime: Infinity,
+    gcTime: 0,
+  })
+  // Taken once, as the gate opens for this session, before any setup or unlock: a key worked out
+  // here is kept only if no sign-out, in any tab, has happened since (lib/keys.ts saveToken). If
+  // it can't be read, nothing is kept here: saving fails closed.
+  const [token, setToken] = useState<number | 'failed' | null>(null)
+  useEffect(() => {
+    saveToken(userId).then(setToken, () => setToken('failed'))
+  }, [userId])
   // While setup is saving, the server's state turns `ready` before this device has kept the key.
   // Holding the setup screen until it's done keeps its progress, errors and retry on screen.
   const [held, setHeld] = useState<SetupFor | null>(null)
@@ -129,8 +143,9 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     const server = remoteNow.current
     const backedUp =
       keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
-    // Only that key is forgotten, and only if it's the one here (checked as it's removed).
-    if (await signOut(backedUp ? userId : undefined, backedUp ? { onlyKid: keyKid } : {})) return
+    // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
+    // none is, but saves still under way in any tab are stopped all the same.
+    if (await signOut(userId, { onlyKid: backedUp ? keyKid : null })) return
     setLeaving('failed')
   }
   const isLeaving = () => leavingRef.current
@@ -160,6 +175,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       onRecoveryUntracked={() => {
         backup.current.untracked = true
       }}
+      token={token}
       onRecoveryLost={(lost) => {
         backup.current.lost = lost
       }}
@@ -181,7 +197,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     const session: Session = { userId, role, kid: local.data.kid, keyPair: local.data.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
-  if (remote.isPending || local.isPending || !remote.data) return <Splash />
+  if (remote.isPending || local.isPending || !remote.data || token === null) return <Splash />
   const { state, publicKey, kid, backups } = remote.data
   const here = local.data && local.data.kid === kid ? local.data : null
   const setupFor: SetupFor | null =
@@ -245,6 +261,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       publicKey={publicKey!}
       backups={backups}
       isLeaving={isLeaving}
+      token={token}
       onSignOut={() => void signOutHere(kid ?? null)}
       onDone={() => void local.refetch()}
     />
@@ -306,6 +323,7 @@ function KeySetup({
   onBackup,
   onRecoveryLost,
   onRecoveryUntracked,
+  token,
   onDone,
 }: {
   userId: string
@@ -325,6 +343,8 @@ function KeySetup({
   onRecoveryLost: (lost: boolean) => void
   /** The recovery key shown here couldn't be noted for checking after a reload. */
   onRecoveryUntracked: () => void
+  /** The session's save token (see KeyGate), or 'failed' when it couldn't be read. */
+  token: number | 'failed' | null
   /** Setup is done and the key is kept here, as `kid`. */
   onDone: (kid: string) => Promise<void>
 }) {
@@ -351,8 +371,6 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
-  // The save token taken when finishing began (lib/keys.ts saveToken).
-  const saving = useRef<number | undefined>(undefined)
   // Signing out is the gate's (KeyGate); this names the key it's for, to decide whether its
   // backups are known to exist.
   const signOutButton = (label = 'Sign out') => (
@@ -440,8 +458,6 @@ function KeySetup({
     if (!job || isLeaving()) return
     setBusy(true)
     setError(null)
-    // A sign-out in another tab from here on stops keeping the key (see keep).
-    saving.current = await saveToken(userId).catch(() => undefined)
     const fail = (message: string) => {
       setError(message)
       setBusy(false)
@@ -508,7 +524,8 @@ function KeySetup({
     setBusy(true)
     setError(null)
     try {
-      await storeIdentity(userId, kid, keyPair, saving.current)
+      if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
+      await storeIdentity(userId, kid, keyPair, token)
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
@@ -706,6 +723,7 @@ function Unlock({
   publicKey,
   backups,
   isLeaving,
+  token,
   onSignOut,
   onDone,
 }: {
@@ -715,6 +733,8 @@ function Unlock({
   backups: Backup[]
   /** Signing out (the gate's) has begun: an unlock that finishes after it doesn't open the app. */
   isLeaving: () => boolean
+  /** The session's save token (see KeyGate), or 'failed' when it couldn't be read. */
+  token: number | 'failed' | null
   onSignOut: () => void
   onDone: () => void
 }) {
@@ -732,8 +752,6 @@ function Unlock({
       )
     setBusy(true)
     setError(null)
-    // Taken before any waiting: a sign-out in another tab from here on stops the save below.
-    const token = await saveToken(userId).catch(() => undefined)
     await nextFrame()
     const fail = (message: string) => {
       setError(message)
@@ -764,6 +782,7 @@ function Unlock({
     }
     if (isLeaving()) return
     try {
+      if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
       await storeIdentity(userId, kid, keyPair, token)
     } catch (e) {
       return fail(

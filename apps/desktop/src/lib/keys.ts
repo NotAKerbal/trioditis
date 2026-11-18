@@ -115,10 +115,10 @@ export function saveToken(userId: string): Promise<number> {
   return inTransaction<number>('readonly', (store, answer) => forgetCount(store, userId, answer))
 }
 
-/** Keeps an unwrapped identity key on this device, unless it's forgotten since `token` (or since now). */
-export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair, token?: number): Promise<void> {
+/** Keeps an unwrapped identity key on this device, unless it's been forgotten since `token`. */
+export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair, token: number): Promise<void> {
   if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
-  const asked = token ?? (await saveToken(userId))
+  const asked = token
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
@@ -133,14 +133,16 @@ export async function storeIdentity(userId: string, kid: string, keyPair: KeyPai
 }
 
 /**
- * Forgets this device's key, as signing out does, and stops any save asked for before it. With
- * `onlyKid`, it removes the stored key only if it's that one: a different key here is someone
- * else's evidence to keep.
+ * Forgets this device's key, as signing out does, and stops any save asked for before it, in
+ * any tab. With `onlyKid`, it removes the stored key only if it's that one: a different key here
+ * is someone else's evidence to keep. With `onlyKid` null it removes nothing, and only stops
+ * those saves: signing out while a key's backups aren't known to exist.
  */
-export async function forgetIdentity(userId: string, onlyKid?: string): Promise<void> {
+export async function forgetIdentity(userId: string, onlyKid?: string | null): Promise<void> {
   await inTransaction<void>('readwrite', (store) =>
     forgetCount(store, userId, (count) => {
       store.put({ userId: forgetsKey(userId), count: count + 1 })
+      if (onlyKid === null) return
       if (onlyKid === undefined) return void store.delete(userId)
       const stored = store.get(userId)
       stored.onsuccess = () => {

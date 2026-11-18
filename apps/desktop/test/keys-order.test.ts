@@ -71,7 +71,7 @@ describe('keeping and forgetting the key on this device', () => {
 
   it('forgets a key whose save was still getting ready, so it never comes back', async () => {
     const keyPair = generateKeyPair()
-    const save = storeIdentity('u1', keyId(keyPair.publicKey), keyPair)
+    const save = storeIdentity('u1', keyId(keyPair.publicKey), keyPair, await saveToken('u1'))
     // Signing out while the save is still encrypting.
     await forgetIdentity('u1')
     await expect(save).rejects.toThrow('signed out of meanwhile')
@@ -81,7 +81,7 @@ describe('keeping and forgetting the key on this device', () => {
 
   it('forgets a key that was saved first', async () => {
     const keyPair = generateKeyPair()
-    await storeIdentity('u2', keyId(keyPair.publicKey), keyPair)
+    await storeIdentity('u2', keyId(keyPair.publicKey), keyPair, await saveToken('u2'))
     expect((await loadIdentity('u2'))?.kid).toBe(keyId(keyPair.publicKey))
     await forgetIdentity('u2')
     expect(await loadIdentity('u2')).toBeNull()
@@ -89,7 +89,7 @@ describe('keeping and forgetting the key on this device', () => {
 
   it('forgets only the named key, leaving another one here alone', async () => {
     const keyPair = generateKeyPair()
-    await storeIdentity('u4', keyId(keyPair.publicKey), keyPair)
+    await storeIdentity('u4', keyId(keyPair.publicKey), keyPair, await saveToken('u4'))
     await forgetIdentity('u4', 'some-other-key')
     expect((await loadIdentity('u4'))?.kid).toBe(keyId(keyPair.publicKey))
     await forgetIdentity('u4', keyId(keyPair.publicKey))
@@ -108,10 +108,22 @@ describe('keeping and forgetting the key on this device', () => {
     expect(await loadIdentity('u5')).toBeNull()
   })
 
+  it('stops saves under way without removing anything, for a sign-out unsure of the backups', async () => {
+    const kept = generateKeyPair()
+    await storeIdentity('u6', keyId(kept.publicKey), kept, await saveToken('u6'))
+    const token = await saveToken('u6')
+    await forgetIdentity('u6', null)
+    // The key already here stays; a save from before the sign-out doesn't land.
+    expect((await loadIdentity('u6'))?.kid).toBe(keyId(kept.publicKey))
+    const other = generateKeyPair()
+    await expect(storeIdentity('u6', keyId(other.publicKey), other, token)).rejects.toThrow('signed out of meanwhile')
+    expect((await loadIdentity('u6'))?.kid).toBe(keyId(kept.publicKey))
+  })
+
   it('keeps a key saved after forgetting, as signing in again does', async () => {
     const keyPair = generateKeyPair()
     await forgetIdentity('u3')
-    await storeIdentity('u3', keyId(keyPair.publicKey), keyPair)
+    await storeIdentity('u3', keyId(keyPair.publicKey), keyPair, await saveToken('u3'))
     expect((await loadIdentity('u3'))?.kid).toBe(keyId(keyPair.publicKey))
   })
 })
