@@ -105,8 +105,14 @@ and on login commands, and may be on others.
   are accepted only from the host its start command was handed to.
 - **Sizes:** a sealed message or edit in an event may be at most 256 KiB; files travel
   separately. Chat and contact metadata (`chat`, `contact`) may be at most **8 KiB** sealed:
-  a name, a topic and an avatar's file reference. A bridge host with longer metadata
-  truncates the name or topic to fit; anything over the limit is quarantined as `too_large`.
+  a name, a topic and an avatar's file reference. Anything over the limit is quarantined as
+  `too_large`, so the bridge host measures what it seals (JSON escaping can make text several
+  times longer): longer metadata has its topic (a contact's handle), then its name, cut to
+  fit. A message or edit over 256 KiB loses its formatted body, then has its body cut short
+  at a character boundary, and its plaintext says `truncated: true`. No event the bridge host
+  sends is over 1 MiB of JSON; a journal event from an older host that is goes as a stand-in
+  with only `seq`, `type`, `userId`, `loginId` and `at`, which the gateway quarantines, so
+  it can't hold up the events after it.
   A login step may be at most 64 KiB (UTF-8), and a `hostId` at most 64 characters.
   Clients may seal at most 64 KiB into a send or login input.
 - **Routing:** a command for a connected login goes to the host that reported that login's
@@ -114,7 +120,8 @@ and on login commands, and may be on others.
   gateway's `BRIDGE_HOSTS` and heard from recently are used.
 - **Deadlines:** sends carry `notAfter` (24 hours). Login commands carry one too, 10 minutes
   out: undelivered by then, they expire, ending the login with error `expired`, so
-  credentials don't wait for a host that never returns.
+  credentials don't wait for a host that never returns. How far the bridge host can enforce
+  a send's deadline is under Delivery rules for `send`.
 - A status or echo for a send proves the host has the command, even if its `202` was lost;
   the backend then never delivers it again.
 - Once a command has run (sent, failed or expired), the bridge host keeps only its IDs and
@@ -161,11 +168,23 @@ and on login commands, and may be on others.
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- The bridge host keeps a safety margin (currently 11 minutes) before `notAfter` for the
-  connector's own waits, so a send can be refused as `expired` before `notAfter`. Phase 0
-  limit: a send already handed to the connector can still go out after `notAfter` if it waits
-  behind more than two incoming events that each hit bridgev2's 5-minute handler limit;
-  closing that needs a pre-send hook in bridgev2 (bridge host README, Known follow-ups).
+- `notAfter` is checked when the send starts and again as the bridge host's last step before
+  handing it to bridgev2, both with an 11-minute margin for what bridgev2 may still wait on,
+  and once more, with a 2-minute margin, if the connector reads the send's attachment (the
+  last code of the bridge host's that runs before a media send is uploaded and transmitted).
+  A send refused at any of these never reaches the network: `failed` with `expired`. So a
+  send can be refused as `expired` before `notAfter`.
+- **Limit:** past those checks the bridge host can't stop a send, and it can go out after
+  `notAfter`. bridgev2 calls the connector with its own context, which carries no deadline,
+  and for a text send no code of the bridge host's runs between the hand-off and the
+  transmission. What can delay it: waiting behind more than two incoming events that each
+  hit bridgev2's 5-minute handler limit, a slow media upload, and (WhatsApp) whatsmeow's send
+  lock, one per login, which every send in all of the person's chats takes in turn: a send
+  stalled in another chat holds it while each of its network requests waits up to 75
+  seconds, with no bound on how many are queued ahead. A late transmission is reported as
+  what happened, never as `expired`: `sent` once the network confirms it (even after the send
+  was marked `unknown`), or `unknown` if no outcome arrives. Closing this needs a pre-send hook
+  in bridgev2 or the connector (bridge host README, Known follow-ups).
 - A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
   the bridge host emits `failed` with error `expired`, and the person decides.
 

@@ -56,8 +56,9 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
-	// busy holds chats (by opaque portal ID) with a send in flight; the worker runs their
-	// next command once it settles.
+	// busy holds chats (by opaque portal ID) with a command (a send, edit, reaction or
+	// redaction) still out with bridgev2 or the network; the worker runs their next command
+	// once it settles, or once the hold is released (see holdLimit).
 	busy sync.Map // portal ID → id.EventID
 	// lanes holds chats (by opaque portal ID) whose command is running on its own goroutine.
 	lanes        sync.Map // portal ID → struct{}

@@ -181,6 +181,13 @@ func (s *Store) Append(ctx context.Context, events ...*protocol.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
+	// An event the backend would refuse (a field missing, over a size limit) is never
+	// journaled: it could only be quarantined, and one too large could hold up the journal.
+	for _, evt := range events {
+		if err := evt.Validate(); err != nil {
+			return fmt.Errorf("refusing to journal an invalid event: %w", err)
+		}
+	}
 	err := s.Txn(ctx, func(ctx context.Context) error {
 		next, err := s.lockCounters(ctx, "next_seq")
 		if err != nil {

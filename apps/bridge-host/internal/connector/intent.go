@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/util/variationselector"
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
@@ -173,14 +176,14 @@ func (c *Connector) emitContent(ctx context.Context, o *owner, s sender, eventTy
 			if newContent == nil {
 				newContent = msg
 			}
-			sealed, err := c.seal(ctx, o, seal.KindMessage, string(eventID), c.messagePlaintext(ctx, o, eventType, newContent))
+			sealed, err := c.seal(ctx, o, seal.KindMessage, string(eventID), fitMessage(c.messagePlaintext(ctx, o, eventType, newContent)))
 			if err != nil {
 				return err
 			}
 			base.Type, base.EventID, base.TargetEventID, base.Sealed = protocol.EventEdit, string(eventID), string(target), sealed
 			return c.emit(ctx, &base)
 		}
-		sealed, err := c.seal(ctx, o, seal.KindMessage, string(eventID), c.messagePlaintext(ctx, o, eventType, msg))
+		sealed, err := c.seal(ctx, o, seal.KindMessage, string(eventID), fitMessage(c.messagePlaintext(ctx, o, eventType, msg)))
 		if err != nil {
 			return err
 		}
@@ -373,6 +376,11 @@ func (in *Intent) MarkTyping(ctx context.Context, roomID id.RoomID, typingType b
 }
 
 func (in *Intent) DownloadMedia(ctx context.Context, uri id.ContentURIString, file *event.EncryptedFileInfo) ([]byte, error) {
+	// A connector reads a send's attachment just before uploading and transmitting it, the
+	// latest point a send's deadline can be checked.
+	if err := in.c.checkTransmitDeadline(ctx); err != nil {
+		return nil, err
+	}
 	if file != nil {
 		uri = file.URL
 	}
@@ -502,6 +510,11 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 }
 
 func (in *Intent) DeleteRoom(ctx context.Context, roomID id.RoomID, puppetsOnly bool) error {
+	// bridgev2 reports no outcome for a command in a chat it has deleted, so a command still
+	// out there must not hold the chat any longer. Found by room alone: the login may be gone.
+	if portalID, err := in.c.portalOpaqueForRoom(ctx, roomID); err == nil {
+		in.c.releaseDeletedChat(portalID)
+	}
 	o, err := in.c.owner(ctx, roomID)
 	if errors.Is(err, errNotPortal) {
 		return nil
@@ -621,7 +634,7 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			plain.AvatarUnchanged = true
 		}
 	}
-	plain.Name, plain.Topic = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Topic, maxTopicBytes)
+	fitChat(&plain)
 	sealed, err := c.seal(ctx, o, seal.KindChat, o.portalID, plain)
 	if err != nil {
 		return err
@@ -687,7 +700,7 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	// agent-access key granted for one chat.
 	contactOwner := *o
 	contactOwner.portalID = ""
-	plain.Name, plain.Handle = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Handle, maxNameBytes)
+	fitContact(&plain)
 	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID, plain)
 	if err != nil {
 		return err
@@ -748,7 +761,9 @@ func (c *Connector) anyOwnerFor(ctx context.Context, userID string, ghost networ
 }
 
 // Chat and contact metadata is sealed into at most 8 KiB (the backend quarantines more), so
-// a name, handle or topic that long is cut short, at a character boundary.
+// a name, handle or topic that long is cut short, at a character boundary. These caps come
+// first; then what is actually sealed is measured, since JSON escaping can make a short
+// string several times longer (a control character takes six bytes).
 const (
 	maxNameBytes  = 512
 	maxTopicBytes = 4096
@@ -763,4 +778,88 @@ func truncateUTF8(s string, maxBytes int) string {
 		cut--
 	}
 	return s[:cut]
+}
+
+// sealedSize is how many bytes of ciphertext v seals to: its JSON (as seal.SealJSON encodes
+// it) plus the authentication tag.
+func sealedSize(v any) int {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return math.MaxInt
+	}
+	n := len(data)
+	clear(data)
+	return n + chacha20poly1305.Overhead
+}
+
+// longestFitting is the longest prefix of s, cut at a character boundary, that fits says
+// fits. A longer prefix never serializes shorter, so a binary search finds it.
+func longestFitting(s string, fits func(string) bool) string {
+	if fits(s) {
+		return s
+	}
+	lo, hi := 0, len(s)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if fits(truncateUTF8(s, mid)) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return truncateUTF8(s, lo)
+}
+
+// fitMessage cuts a message down until it seals within the backend's limit for a message
+// or edit, so it is stored rather than quarantined: first the formatted body goes, then
+// over-long attachment names, then the body is cut short, and last the mentions. Anything
+// cut is marked `truncated` in the plaintext.
+func fitMessage(plain *protocol.MessagePlaintext) *protocol.MessagePlaintext {
+	fits := func() bool { return sealedSize(plain) <= protocol.MaxMessageSealedBytes }
+	if fits() {
+		return plain
+	}
+	plain.Truncated, plain.HTML = true, ""
+	for i := range plain.Attachments {
+		plain.Attachments[i].Name = truncateUTF8(plain.Attachments[i].Name, maxNameBytes)
+	}
+	if fits() {
+		return plain
+	}
+	plain.Body = longestFitting(plain.Body, func(body string) bool { plain.Body = body; return fits() })
+	if !fits() {
+		plain.Mentions = nil
+	}
+	return plain
+}
+
+// fitChat cuts a chat's metadata until it seals within 8 KiB: the topic first, then the name.
+func fitChat(plain *protocol.ChatPlaintext) {
+	plain.Name, plain.Topic = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Topic, maxTopicBytes)
+	if plain.Avatar != nil {
+		plain.Avatar.Name = truncateUTF8(plain.Avatar.Name, maxNameBytes)
+	}
+	fits := func() bool { return sealedSize(plain) <= protocol.MaxMetadataSealedBytes }
+	if !fits() {
+		plain.Topic = longestFitting(plain.Topic, func(topic string) bool { plain.Topic = topic; return fits() })
+	}
+	if !fits() {
+		plain.Name = longestFitting(plain.Name, func(name string) bool { plain.Name = name; return fits() })
+	}
+}
+
+// fitContact cuts a contact's profile until it seals within 8 KiB: the handle first, then
+// the name.
+func fitContact(plain *protocol.ContactPlaintext) {
+	plain.Name, plain.Handle = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Handle, maxNameBytes)
+	if plain.Avatar != nil {
+		plain.Avatar.Name = truncateUTF8(plain.Avatar.Name, maxNameBytes)
+	}
+	fits := func() bool { return sealedSize(plain) <= protocol.MaxMetadataSealedBytes }
+	if !fits() {
+		plain.Handle = longestFitting(plain.Handle, func(handle string) bool { plain.Handle = handle; return fits() })
+	}
+	if !fits() {
+		plain.Name = longestFitting(plain.Name, func(name string) bool { plain.Name = name; return fits() })
+	}
 }

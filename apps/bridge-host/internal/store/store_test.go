@@ -53,11 +53,15 @@ func TestMigratesPortalValues(t *testing.T) {
 func TestJournalHasNoGaps(t *testing.T) {
 	s := openStore(t)
 	ctx := context.Background()
-	if err := s.Append(ctx, &protocol.Event{Type: "typing"}); err != nil {
+	typing := func() *protocol.Event {
+		on, timeout := true, int64(1000)
+		return &protocol.Event{Type: protocol.EventTyping, UserID: "alice", LoginID: "l", PortalID: "p", Sender: &protocol.SelfSender, Typing: &on, TimeoutMS: &timeout}
+	}
+	if err := s.Append(ctx, typing()); err != nil {
 		t.Fatal(err)
 	}
 	failed := s.Txn(ctx, func(ctx context.Context) error {
-		if err := s.Append(ctx, &protocol.Event{Type: "typing"}); err != nil {
+		if err := s.Append(ctx, typing()); err != nil {
 			return err
 		}
 		return context.Canceled // roll the append back
@@ -65,7 +69,7 @@ func TestJournalHasNoGaps(t *testing.T) {
 	if failed == nil {
 		t.Fatal("expected the transaction to fail")
 	}
-	batch := []*protocol.Event{{Type: "typing"}, {Type: "typing"}}
+	batch := []*protocol.Event{typing(), typing()}
 	if err := s.Append(ctx, batch...); err != nil {
 		t.Fatal(err)
 	}

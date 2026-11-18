@@ -125,30 +125,46 @@ identity keys kept in the data directory (never do that in production):
   ID rows in opposite orders and deadlock on PostgreSQL.
 - **Sends, one at a time per chat, in order.** Only a chat's earliest waiting command is
   ever started, so commands for one chat can't overtake each other, and the next command
-  waits until a send has an outcome. `notAfter` (required on every send) is checked when the
-  send starts and again right before it is handed to bridgev2, after sealing and recording,
-  with a margin (`HandoffMargin`, 11 minutes) for what bridgev2 may still wait on before the
-  connector transmits: the chat's lock, which an incoming event holds for at most bridgev2's
-  handler limit (5 minutes) before it is backgrounded, behind up to two such events, and a
-  reconnecting login (`SendReconnectWait`, 30 seconds). Nothing of ours runs between
+  waits until a send, edit, reaction or redaction has an outcome. `notAfter` (required on
+  every send) is checked when the send starts and again as the last step before it is
+  handed to bridgev2, after sealing and recording, with a margin (`HandoffMargin`, 11
+  minutes) for what bridgev2 may still wait on before the connector transmits: the chat's
+  lock, which an incoming event holds for at most bridgev2's handler limit (5 minutes) before
+  it is backgrounded, behind up to two such events, and a reconnecting login
+  (`SendReconnectWait`, 30 seconds). It is checked once more, with `TransmitMargin` (2
+  minutes), when the connector reads a send's attachment through the bridge host, the last
+  code of ours a media send passes through; refused there, the connector can't send the
+  media and the send fails as `expired`. For a text send nothing of ours runs between
   bridgev2 taking the lock and the connector transmitting: bridgev2 calls the connector
-  directly, and the WhatsApp connector relies on its own client type (`login.Client.(*WhatsAppClient)`),
-  so its client can't be wrapped to check later. The hand-off records `submitted`; bridgev2's
+  directly, with its own context for the chat (no deadline of ours reaches it), and the
+  WhatsApp connector relies on its own client type (`login.Client.(*WhatsAppClient)`), so its
+  client can't be wrapped to check later. The hand-off records `submitted`; bridgev2's
   message status then records `sent` with the person's own copy (sealed at hand-off),
   `failed` (only if bridgev2 is certain) or `unknown`, each status committed together with
   the events reporting it, retried until it commits. No outcome within the send timeout is
   `unknown`, except that while bridgev2 still holds the send (it may be waiting for the
   chat's lock behind a slow incoming event, so may not have started) it is only marked
-  unknown after three timeouts (9 minutes by default). The chat's next command never starts
-  before the send's handler has finished: if bridgev2 stops waiting on it (after five
-  minutes it backgrounds the handler and returns), the chat stays held, even once the send
-  is marked unknown, until bridgev2 reports its outcome. Outcomes are written with a fresh
-  context per attempt from the bridge's lifetime, not the chat's, so a chat deleted while
-  its send is out doesn't stop the outcome being recorded; one still unwritten when the
-  bridge stops stays `submitted` and becomes `unknown` at the next start. The send is remembered for an hour, so an outcome that arrives later is still
-  recorded. A send in flight at a restart becomes `unknown`. Nothing is ever retried. A repeated
-  `clientMessageId` repeats the last status. Relations (replies, edit, reaction and read
-  targets) must belong to the command's chat.
+  unknown after three timeouts (9 minutes by default). The chat's next command doesn't start
+  before a command's handler has finished: if bridgev2 stops waiting on a send, edit,
+  reaction or redaction (after five minutes it backgrounds the handler and returns), the
+  chat stays held, even once a send is marked unknown, until bridgev2 reports the outcome.
+  The hold always ends, though: when bridgev2 deletes the chat (it reports no outcome for a
+  deleted chat, so a send still out is marked `unknown` then), when the handler returns, or
+  at the latest ten send timeouts after it was due (`holdLimit`, 30 more minutes by default),
+  for a connector that never returns. A command whose chat was released without an outcome
+  is remembered for an hour, so an outcome that arrives later is still recorded (a reaction
+  that finally goes through is reported then). Outcomes are written with a fresh context per
+  attempt from the bridge's lifetime, not the chat's, so a chat deleted while its send is out
+  doesn't stop the outcome being recorded; one still unwritten when the bridge stops stays
+  `submitted` and becomes `unknown` at the next start. A send in flight at a restart becomes
+  `unknown`. Nothing is ever retried. A repeated `clientMessageId` repeats the last status.
+  Relations (replies, edit, reaction and read targets) must belong to the command's chat.
+- **Sizes.** Every event is checked against the backend's validator before it is journaled
+  (`Event.Validate`; the JSON carries exactly its type's fields), and what is sealed is
+  measured as sealed: chat and contact metadata fits 8 KiB (topic or handle cut first, then
+  the name), and a message or edit fits 256 KiB (formatted body dropped, then the body cut at
+  a character boundary, marked `truncated`). The pusher never sends an event over 1 MiB; an
+  older journal row that big goes as a bare stand-in the gateway quarantines.
 - **Errors are codes.** Events and 4xx bodies carry only protocol error codes. Details are
   logged locally.
 - **Logins** follow bridgev2's login process API, emitting `loginStep` events; input
@@ -184,7 +200,12 @@ The conformance suite (`internal/host/conformance_test.go`) runs a real bridge h
 - network resend deduplication
 - edits, reactions, reaction removal, redactions, receipts and typing
 - the send states (`sent`, `unknown`, `failed`, expired), repeated sends and idempotent command IDs
-- `notAfter` required, and checked at hand-off behind a slow send in the same chat
+- `notAfter` required, checked at hand-off behind a slow send in the same chat, and again
+  when the connector reads an attachment
+- a reaction still running after bridgev2 stops waiting holding its chat, with its late
+  outcome recorded
+- a send in a chat deleted while it runs (no outcome from bridgev2) ending `unknown` and
+  releasing the chat; a connector that never returns releasing it after `holdLimit`
 - a late outcome after a timeout still recorded as `sent`
 - replies refused into another chat
 - a send in flight at a restart ends `unknown` and is never sent
@@ -201,6 +222,9 @@ handed-off send settled as `unknown`, IDs surviving a new bridge key, a portal k
 ID through a re-ID, and login codes scrubbed once acknowledged. `TestPostgres` runs the
 core flow on PostgreSQL when `TRIODITIS_TEST_POSTGRES_URI` names a scratch database.
 `internal/store` tests the portal-value migration, the gap-free journal and the ID key.
+`internal/protocol` tests each event type's exact JSON fields and the checks before
+journaling; `internal/connector` that escaped metadata and oversized messages seal within
+their limits; `internal/gateway` that an event too large to send goes as a stand-in.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
@@ -245,10 +269,22 @@ suite. WhatsApp additionally uses:
   (`unsupported`) for WhatsApp: its connector treats an empty result for the requested range
   as the end of history and deletes every cached history row for the chat, including newer
   ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
-- A send can still reach the network after `notAfter` only if bridgev2 holds it past the
-  11-minute margin: behind more than two incoming events that each hit bridgev2's 5-minute
-  handler limit. Closing that needs a hook in bridgev2 or the connector right before it
-  transmits (see Known follow-ups).
+- A send handed to bridgev2 can still reach the network after `notAfter` (bridge-protocol.md,
+  Deadlines and Delivery rules): behind more than two incoming events that each hit
+  bridgev2's 5-minute handler limit, after a slow media upload, or, on WhatsApp, behind
+  whatsmeow's send lock. That lock is one per login (`go.mau.fi/whatsmeow` `send.go`,
+  `messageSendLock`), taken by every send in all of the person's chats, and doesn't honour a
+  context; a send stalled in another chat holds it while each of its requests waits up to 75
+  seconds. A late send is reported truthfully: `sent` when the network confirms it, else
+  `unknown`, never `expired`.
+- **whatsmeow resends a frame after a disconnect.** If the connection drops after a message
+  frame went out but before WhatsApp acknowledged it, whatsmeow waits up to 5 seconds for a
+  reconnect and sends the same frame again, with the same message ID, inside the same
+  connector call (`request.go`, `retryFrame`). So one send can be transmitted twice at the
+  transport level; WhatsApp deduplicates by message ID, so recipients should see it once.
+  This is why a connector error after the hand-off is `unknown`, not `failed`: the first
+  frame, the repeat, or both may have been delivered. The bridge host itself never sends
+  again.
 - Outbound attachments expect the client's ciphertext already at
   `<data>/media/<network>/<mediaId>`. Nothing puts it there yet; that is the gateway's
   media path.
@@ -300,11 +336,14 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   can't prune outside it (an upstream change, or a guard around its history store).
 - **Live checks.** WhatsApp pairing, messaging and history, and the conformance suite on
   PostgreSQL (`TRIODITIS_TEST_POSTGRES_URI`), haven't been run.
-- **Deadline at transmission.** `notAfter` is enforced at hand-off with an 11-minute margin.
-  Enforcing it at the moment of transmission needs a pre-send hook in bridgev2 (or a
-  connector that tolerates a wrapped client); propose one upstream.
-- **A chat held forever.** A send whose handler never returns (a connector stuck for good)
-  holds its chat until the bridge host restarts. Add an operator command to release it.
+- **Deadline at transmission.** `notAfter` is enforced at hand-off with an 11-minute margin,
+  and for media again when the attachment is read. Enforcing it at the moment of
+  transmission needs a pre-send hook in bridgev2 that takes a deadline (or a connector that
+  tolerates a wrapped client, or whatsmeow honouring a context while it waits for its send
+  lock); propose one upstream.
+- **A chat held by a stuck connector.** A command whose handler never returns holds its chat
+  for up to `holdLimit` (about 40 minutes from the hand-off by default) before the chat is
+  released. Add an operator command to release one sooner, and a metric for it.
 - **Login recovery edge cases.** A submit for a login that recovery already ended gets
   `invalid_command` rather than `login_failed`, and a login started before the v3 migration
   has no row to recover, so it isn't ended with an error.

@@ -64,6 +64,7 @@ type Network struct {
 	incomingDelay atomic.Int64
 	delay         atomic.Int64
 	counter       atomic.Int64
+	reactions     atomic.Int64
 
 	lock    sync.Mutex
 	sent    []Sent
@@ -246,12 +247,13 @@ func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *
 // handling of the chat, as a connector downloading a large file does.
 func (n *Network) SetIncomingDelay(d time.Duration) { n.incomingDelay.Store(int64(d)) }
 
-// SetSendDelay makes each send wait this long before the network answers, holding the
-// chat's queue like a slow network does. A delay ends early, with an error, if the bridge
+// SetSendDelay makes each send (and reaction) wait this long before the network answers,
+// holding the chat's queue like a slow network does. A delay ends early, with an error, if the bridge
 // stops.
 func (n *Network) SetSendDelay(d time.Duration) { n.delay.Store(int64(d)) }
 
-func (c *Client) sendResult(ctx context.Context) error {
+// wait holds a send, reaction or removal for the send delay.
+func (c *Client) wait(ctx context.Context) error {
 	if d := time.Duration(c.n.delay.Load()); d > 0 {
 		timer := time.NewTimer(d)
 		select {
@@ -260,6 +262,13 @@ func (c *Client) sendResult(ctx context.Context) error {
 			timer.Stop()
 			return ctx.Err()
 		}
+	}
+	return nil
+}
+
+func (c *Client) sendResult(ctx context.Context) error {
+	if err := c.wait(ctx); err != nil {
+		return err
 	}
 	switch SendMode(c.n.mode.Load()) {
 	case SendAmbiguous:
@@ -307,8 +316,15 @@ func (c *Client) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.Matr
 }
 
 func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
+	if err := c.wait(ctx); err != nil {
+		return nil, err
+	}
+	c.n.reactions.Add(1)
 	return &database.Reaction{}, nil
 }
+
+// Reactions is how many reactions the fake network has taken.
+func (n *Network) Reactions() int64 { return n.reactions.Load() }
 
 func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
 	return nil
@@ -496,6 +512,18 @@ func (n *Network) Remove(loginID networkid.UserLoginID, chatID networkid.PortalI
 	res := ul.QueueRemoteEvent(&simplevent.MessageRemove{
 		EventMeta: meta(bridgev2.RemoteEventMessageRemove, ul, chatID, senderID, time.Time{}), TargetMessage: target,
 	})
+	return resultError(res)
+}
+
+// DeleteChat deletes a chat, as when the person deletes it on their phone.
+func (n *Network) DeleteChat(loginID networkid.UserLoginID, chatID networkid.PortalID) error {
+	ul, err := n.login(loginID)
+	if err != nil {
+		return err
+	}
+	evtMeta := meta(bridgev2.RemoteEventChatDelete, ul, chatID, networkid.UserID(ul.ID), time.Time{})
+	evtMeta.CreatePortal = false
+	res := ul.QueueRemoteEvent(&simplevent.ChatDelete{EventMeta: evtMeta, OnlyForMe: true})
 	return resultError(res)
 }
 

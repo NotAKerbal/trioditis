@@ -130,7 +130,7 @@ const opened = openJson<{ body: string }>(received.sealed!, userIdentity, {
   ownerUserId: me.userId,
   objectId: received.sealedObjectId,
 })
-if (opened.body !== secretText) throw new Error(`Decrypted ${JSON.stringify(opened.body)}`)
+if (opened.body !== secretText) throw new Error("The incoming message didn't decrypt to what was sent")
 // Read the chat again: the snapshot above can be from before the message was counted.
 const unread = (await findChat())?.unreadCount
 if (unread !== 1) throw new Error(`Unread count ${unread}`)
@@ -155,7 +155,7 @@ const echoOpened = openJson<{ body: string }>(echoed.sealed!, userIdentity, {
   ownerUserId: me.userId,
   objectId: echoed.sealedObjectId,
 })
-if (echoOpened.body !== reply.body) throw new Error(`Echo decrypted ${JSON.stringify(echoOpened.body)}`)
+if (echoOpened.body !== reply.body) throw new Error("The sent message's echo didn't decrypt to what was sent")
 const all = await client.query(api.messages.list, { chatId: chat._id, paginationOpts: { numItems: 10, cursor: null } })
 if (all.page.length !== 2) throw new Error(`Expected 2 messages, found ${all.page.length}`)
 step('Reply sent, echoed once, delivery "sent", and its sealed copy opens')
@@ -163,7 +163,7 @@ step('Reply sent, echoed once, delivery "sent", and its sealed copy opens')
 // Nothing a person wrote is readable in what Convex returned.
 const everything = JSON.stringify([await inbox(), all, await client.query(api.logins.accounts, {})])
 for (const plaintext of [secretText, reply.body, loginUser, 'alice']) {
-  if (everything.includes(plaintext)) throw new Error(`Plaintext "${plaintext}" reached Convex`)
+  if (everything.includes(plaintext)) throw new Error('Plaintext content or a name reached Convex')
 }
 step('No plaintext in chats, messages or accounts')
 console.log('End to end: passed')

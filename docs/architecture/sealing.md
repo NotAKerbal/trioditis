@@ -113,9 +113,13 @@ file.
       "durationMs": 0
     }
   ],
-  "mentions": ["<contact id>"]
+  "mentions": ["<contact id>"],
+  "truncated": true
 }
 ```
+
+`truncated` is set only when the bridge host cut a message down to fit the 256 KiB sealed
+limit (see bridge-protocol.md, Sizes): its `html` was dropped and its `body` may end early.
 
 Chat and contact metadata carry their avatar as an attachment (with its key and nonce)
 in `avatar`, for the same reason. When the avatar is unchanged but the bridge host can't

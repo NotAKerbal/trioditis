@@ -140,7 +140,8 @@ const (
 	HeartbeatInterval = 30 * time.Second
 	maxBackoff        = 30 * time.Second
 	// MaxBatchBytes caps a batch's JSON, as the gateway requires. A batch holds at least one
-	// event however large it is; the gateway quarantines one too big to be valid.
+	// event, and no event is sent larger than protocol.MaxEventBytes, so even a batch of one
+	// stays far inside the gateway's 32 MiB body limit.
 	MaxBatchBytes = 8 * 1024 * 1024
 )
 
@@ -300,7 +301,7 @@ func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 	if err != nil || len(events) == 0 {
 		return false, err
 	}
-	events = capBytes(events, MaxBatchBytes)
+	events = p.capBytes(events, MaxBatchBytes)
 	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(events))
 	if err != nil {
 		return false, err
@@ -314,11 +315,20 @@ func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// capBytes keeps the leading events whose JSON fits in limit, and always at least one.
-func capBytes(events []*protocol.Event, limit int) []*protocol.Event {
+// capBytes keeps the leading events whose JSON fits in limit, and always at least one. An
+// event over protocol.MaxEventBytes (only a journal row from before the host enforced the
+// limit can be) goes as a bare stand-in: the gateway quarantines it, as it would the whole
+// event, and the journal moves on instead of being stuck behind a body it refuses.
+func (p *Pusher) capBytes(events []*protocol.Event, limit int) []*protocol.Event {
 	total := 0
 	for i, evt := range events {
 		data, err := json.Marshal(evt)
+		if err == nil && len(data) > protocol.MaxEventBytes {
+			p.Log.Warn().Int64("seq", evt.Seq).Str("event_type", evt.Type).Int("bytes", len(data)).
+				Msg("Journal event is too large to send; sending a stand-in for the gateway to quarantine")
+			events[i] = protocol.Bare(evt)
+			data, err = json.Marshal(events[i])
+		}
 		if err != nil {
 			return events[:max(i, 1)]
 		}
