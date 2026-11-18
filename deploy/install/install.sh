@@ -41,8 +41,9 @@ Options (each one is kept for later reruns):
   --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
-                       from, as Caddy ranges (default private_ranges on a loopback bind;
-                       required with any other --bind: the proxy's address)
+                       from, as Caddy ranges (default on a loopback bind: the loopback and
+                       the server network's gateway; required with any other --bind: the
+                       proxy's address)
   --new-server-keys    Only when the server's private keys are lost: make new key pairs.
                        Sends sealed to the old bridge key then fail, and agent access must
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
@@ -117,13 +118,13 @@ if ! encrypted_volume "$docker_root"; then
   warn "Docker's data ($docker_root) doesn't look like it's on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. If it's encrypted in a way this can't see, such as on the VM host, ignore this. See docs/deploy.md, Encryption at rest."
 fi
 
-# One install, backup or restore of this install at a time (deploy/trioditis takes the same
-# lock): they stop and start the server under each other.
+# One install, backup or other write command for this install at a time (deploy/trioditis
+# takes the same lock): they stop and start the server under each other.
 if command -v flock >/dev/null; then
   exec 9>"$here/.operation.lock"
-  flock -n 9 || die "Another install, backup or restore of this install is running."
+  flock -n 9 || die "Another backup, install or change to this install is running."
 else
-  warn "flock (util-linux) isn't installed, so nothing stops a backup or restore running during this install."
+  warn "flock (util-linux) isn't installed, so nothing stops a backup running during this install."
 fi
 
 # --- Settings -----------------------------------------------------------------------------
@@ -137,6 +138,20 @@ if [ -e "$env_file" ] || [ -L "$env_file" ]; then
   existing_install=1
   if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then die "deploy/.env isn't a regular file. Put the install's .env back there."; fi
   env_text=$(cat "$env_file") || die "Couldn't read deploy/.env, which holds this install's settings and secrets."
+  # It's kept in the one form this writes (NAME=value, unquoted, each name once), which
+  # backup relies on to leave the private keys out; anything else is for the operator to fix.
+  if ! problems=$(printf '%s\n' "$env_text" | awk '
+    /^[[:space:]]*$/ || /^#/ { next }
+    !/^[A-Za-z_][A-Za-z0-9_]*=/ { print "line " NR " isn'"'"'t NAME=value"; bad = 1; next }
+    {
+      name = $0; sub(/=.*/, "", name)
+      value = $0; sub(/^[^=]*=/, "", value)
+      if (value ~ /^["\047`]/) { print "line " NR " (" name ") has a quoted value"; bad = 1 }
+      if (seen[name]++) { print "line " NR " sets " name " again"; bad = 1 }
+    }
+    END { exit bad }'); then
+    die "deploy/.env has lines not in the form this writes (NAME=value, unquoted, each name once): $(echo "$problems" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). Fix them and run this again."
+  fi
 fi
 
 get() { printf '%s\n' "$env_text" | grep -E "^$1=" | tail -1 | cut -d= -f2- || true; }
@@ -288,12 +303,14 @@ elif [ -n "$proxy_url" ]; then
   # Requests arrive through the proxy, so the scheme and client address are in its
   # X-Forwarded-* headers, which Caddy takes only from --trusted-proxies. On a loopback
   # bind only this machine can connect, and the proxy arrives through Docker from the
-  # network's gateway, so private addresses are trusted by default (a gateway that changes
-  # when the network is made again stays covered). With the port reachable from other
-  # machines, any of them could send its own X-Forwarded-For, so the proxy's address must be
-  # given.
+  # network's gateway, so by default only those hops are trusted: the loopback here, and
+  # the gateway once the network exists (below, on every run, since a run can make the
+  # network again). Trusting more (any private address, say) would let a client of the
+  # proxy whose address is in that range pick the address Caddy uses. With the port
+  # reachable from other machines, any of them could send its own X-Forwarded-For, so the
+  # proxy's address must be given.
   case "$http_bind" in
-    127.* | localhost | ::1) trusted_proxies=${trusted:-private_ranges} ;;
+    127.* | localhost | ::1) trusted_proxies=${trusted:-127.0.0.1/32 ::1/128} ;;
     *)
       [ -n "$trusted" ] || die "With --bind $http_bind, other machines can reach the port directly and send their own X-Forwarded-For. Pass --trusted-proxies <the proxy's address>/32 (and let only the proxy reach the port)."
       trusted_proxies=$trusted
@@ -537,6 +554,22 @@ if [ -z "$(get CONVEX_ADMIN_KEY)" ]; then
 fi
 
 # --- Everything else ----------------------------------------------------------------------
+
+# Behind a proxy on the loopback with the default trust, the network's gateway (where the
+# proxy arrives from, through Docker) is trusted too, read now that the network exists.
+if [ "$mode" = local ] && [ -n "$proxy_url" ] && [ -z "$trusted" ]; then
+  case "$http_bind" in
+    127.* | localhost | ::1)
+      gateways=$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' "${project}_default")
+      ranges="127.0.0.1/32 ::1/128"
+      for gateway in $gateways; do
+        case "$gateway" in *:*) ranges="$ranges $gateway/128" ;; *) ranges="$ranges $gateway/32" ;; esac
+      done
+      [ -n "$gateways" ] || die "Couldn't read the server network's gateway, which Caddy must trust behind the proxy."
+      set_var CADDY_TRUSTED_PROXIES "$ranges"
+      ;;
+  esac
+fi
 
 say "Deploying the functions and starting the server"
 if ! compose up -d --remove-orphans; then

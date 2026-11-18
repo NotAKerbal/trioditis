@@ -104,8 +104,21 @@ install --public-url https://proxy.invalid:8443 --bind 192.168.0.96 --trusted-pr
   check fail "and trusts only the proxy given ($(value CADDY_TRUSTED_PROXIES))"
 checkout
 install --public-url https://proxy.invalid:8443 || true
-[ "$(value CADDY_TRUSTED_PROXIES)" = private_ranges ] && [ "$(value HTTP_BIND)" = 127.0.0.1 ] &&
-  check ok "on the loopback, private addresses are trusted by default" || check fail "on the loopback, private addresses are trusted by default"
+[ "$(value CADDY_TRUSTED_PROXIES)" = "127.0.0.1/32 ::1/128" ] && [ "$(value HTTP_BIND)" = 127.0.0.1 ] &&
+  check ok "on the loopback, only the loopback is trusted until the network's gateway is known" ||
+  check fail "on the loopback, only the loopback is trusted until the network's gateway is known ($(value CADDY_TRUSTED_PROXIES))"
+
+# A .env not in the form the installer writes stops it, unchanged.
+for line in 'export POSTGRES_PASSWORD=keep-me' 'POSTGRES_PASSWORD = keep-me' 'POSTGRES_PASSWORD="keep-me"' 'POSTGRES_PASSWORD=keep-me
+POSTGRES_PASSWORD=again'; do
+  checkout
+  printf '%s\nCOMPOSE_PROJECT_NAME=trioditis-test\n' "$line" >"$work/checkout/deploy/.env"
+  before=$(cat "$work/checkout/deploy/.env")
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "not in the form this writes" "$work/out" && [ "$(cat "$work/checkout/deploy/.env")" = "$before" ] &&
+    check ok "a .env with '$(echo "$line" | head -1)…' stops the install, unchanged" ||
+    check fail "a .env with '$(echo "$line" | head -1)…' stops the install, unchanged"
+done
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

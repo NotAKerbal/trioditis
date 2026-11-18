@@ -3,9 +3,11 @@
 # backup (nothing running) works and starts nothing, and its secrets.env and archive hold
 # neither private key; one whose name is taken (by a file, a directory or a symlink) goes to
 # the next free name and leaves what was there alone; one whose rename silently does nothing
-# (a stub mv that exits 0) fails instead of reporting success; and one interrupted (SIGINT
-# to its process group, as Ctrl-C sends) while the archive is streaming publishes nothing and
-# leaves nothing behind.
+# (a stub mv that exits 0) fails instead of reporting success; one interrupted (SIGINT to
+# its process group, as Ctrl-C sends) while the archive is streaming, or after it reserved
+# its name, publishes nothing and leaves nothing behind; and one with a deploy/.env not in
+# the form the installer writes (export, spaces around =, a quoted value, a name twice),
+# which could hide a private key from the filter, is refused.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 # shellcheck source=deploy/test/lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -70,10 +72,44 @@ PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 
   check ok "a rename that does nothing fails the backup and leaves nothing" ||
   { check fail "a rename that does nothing fails the backup and leaves nothing"; cat "$root/out" >&2; entries >&2; }
 
+# Interrupted after reserving its name: a stub mv that ignores the interrupt and does nothing
+# holds it there; the interrupt is acted on once mv returns.
+rm -rf "${backups:?}"/*
+printf '#!/bin/sh\ntrap "" INT\nsleep 3\nexit 0\n' >"$root/stub/mv"
+# A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: reset here.
+PATH="$root/stub:$PATH" setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
+for _ in $(seq 600); do
+  pgrep -f "^/bin/sh $root/stub/mv" >/dev/null && break
+  sleep 0.1
+done
+stub=$(pgrep -f "^/bin/sh $root/stub/mv" | head -1)
+if [ -n "$stub" ]; then
+  /bin/kill -s INT -- "-$(ps -o pgid= -p "$stub" | tr -d ' ')"
+  wait || true
+  [ -z "$(entries)" ] && check ok "interrupted after reserving its name, it leaves nothing" ||
+    check fail "interrupted after reserving its name, it leaves nothing ($(entries))"
+else
+  wait || true
+  check fail "the backup was caught after reserving its name"
+fi
+
+# A deploy/.env in forms Compose reads but the filter wouldn't see: each is refused, nothing
+# is published, and the server is left as it was.
+cp "$root/deploy/.env" "$root/env.good"
+for form in 'export BRIDGE_PRIVATE_KEY=test-BRIDGE_PRIVATE_KEY' 'BRIDGE_PRIVATE_KEY = test-BRIDGE_PRIVATE_KEY' \
+  'BRIDGE_PRIVATE_KEY="test-BRIDGE_PRIVATE_KEY"' 'GATEWAY_SECRET=again'; do
+  rm -rf "${backups:?}"/*
+  { grep -v '^BRIDGE_PRIVATE_KEY=' "$root/env.good"; echo "$form"; } >"$root/deploy/.env"
+  trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+  [ "$status" != 0 ] && grep -q "isn't all in the form the installer writes" "$root/out" && [ -z "$(entries)" ] &&
+    check ok "a .env with '$form' is refused" || { check fail "a .env with '$form' is refused"; cat "$root/out" >&2; }
+done
+cp "$root/env.good" "$root/deploy/.env"
+
 # Interrupted while streaming: a large, incompressible volume keeps tar busy.
 rm -rf "${backups:?}"/*
 fill bridge-fake 'head -c 600000000 /dev/urandom >/v/big'
-# A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: restored here.
+# A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: reset here.
 setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
 for _ in $(seq 600); do
   part=$(find "$backups" -path '*/.*/archive.tgz' -size +1M 2>/dev/null | head -1)

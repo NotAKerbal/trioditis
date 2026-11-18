@@ -104,7 +104,14 @@ so it's only reachable through the proxy.
 Caddy takes the client's address and scheme from the proxy's `X-Forwarded-For` and
 `X-Forwarded-Proto` headers in this mode, from the addresses in `--trusted-proxies`. On the
 default loopback bind only this machine can connect, and the proxy arrives through Docker
-from the network's gateway, so private addresses (`private_ranges`) are trusted by default.
+from the network's gateway, so by default only those hops are trusted: the loopback and the
+server network's gateway. The installer reads the gateway on every run, since a run can make
+the network again; if you make it again yourself (`deploy/trioditis down`, then `up`), run
+the installer again, or requests through the proxy count as the gateway's until you do.
+Caddy takes the rightmost address in `X-Forwarded-For` that it doesn't trust, so the proxy
+in front (Tailscale Serve, or another) should overwrite any `X-Forwarded-For` its clients
+send if their addresses could fall in a trusted range; Tailscale clients' `100.64.0.0/10`
+addresses don't.
 For a proxy on another machine, pass `--bind` with an address that proxy can reach, and
 then:
 
@@ -214,7 +221,9 @@ What Caddy takes as the client's address, as observed with Docker 29 (`deploy/te
 |                                                 | from an IPv6 client, on a machine with IPv6                               | its own address: the network has IPv6 on (`compose.ipv6.yml`); without it, Docker's proxy would bring every IPv6 client in from the gateway |
 
 Behind a proxy, every request without `X-Forwarded-For` (only this machine can send one)
-counts as the gateway's.
+counts as the gateway's. Before the default trust was narrowed to those hops,
+`X-Forwarded-For: 7.7.7.7, 192.168.23.45` from the proxy gave `7.7.7.7` (a client with a
+private address chose its own); now it gives `192.168.23.45`.
 
 Caddy also listens on `127.0.0.1:8090` inside its container, for its healthcheck only: the
 site itself may only answer HTTPS for its domain.
@@ -269,7 +278,7 @@ Proxmox, use encrypted storage for the VM. Encrypting those connector tables wit
 
 ## Backup and restore
 
-Fuller `backup` and `restore` commands (online, encrypted, scheduled) are Phase 1. For now,
+Fuller backup commands (online, encrypted, scheduled) are Phase 1. For now,
 `deploy/trioditis` takes a consistent backup while the server is stopped:
 
 ```sh
@@ -277,66 +286,40 @@ deploy/trioditis backup ~/trioditis-backups
 ```
 
 A backup is a directory, `<project>-<date>-<time>` (with `-2`, `-3`… added rather than
-replace an earlier one), readable only by you, holding `archive.tgz` (every Docker volume of
-this install's Compose project, found by the label Compose gives them, so never another
-install's, and including the volume of a network you've dropped) and `secrets.env`
-(`deploy/.env` without the server's private keys: see [The server's keys](#the-servers-keys)).
-The archive's last entry is a manifest of every volume with its number of
-entries and bytes. The backup stops the server, writes both files in a private directory
-beside the destination, reserves the name with `mkdir` (which fails if anything is there, so
-it moves on to the next suffix), renames the private directory onto it in one step, checks
-both files are there, and starts again what was running. So there's either a whole backup at the
-name or none: an interrupted backup (Ctrl-C), even while the server is still stopping,
-leaves nothing behind, and if the server doesn't start again the backup counts as failed. The
-destination must be outside the checkout (symlinks resolved): image builds copy the checkout.
+replace an earlier one), 0700, holding two 0600 files, readable only by you: `archive.tgz`
+(every Docker volume of this install's Compose project, found by the label Compose gives
+them, so never another install's, and including the volume of a network you've dropped) and
+`secrets.env` (`deploy/.env` without the server's private keys: see
+[The server's keys](#the-servers-keys)). The archive's last entry is a manifest of every
+volume with its number of entries and bytes. The backup stops the server, writes both files
+in a private directory beside the destination, reserves the name with `mkdir` (which fails
+if anything is there, so it moves on to the next suffix), renames the private directory onto
+it in one step, checks both files are there, and starts again what was running. So there's
+either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
+server is still stopping, leaves nothing behind, and if the server doesn't start again the
+backup counts as failed. The destination must be outside the checkout (symlinks resolved):
+image builds copy the checkout. It refuses a `deploy/.env` that isn't in the form the
+installer writes (`NAME=value` lines), since it can only leave the private keys out of that.
 
-To restore on the same server, keep its `deploy/.env` (its private keys are still there),
-and run:
+Keep backups encrypted: they contain the connector state above, and `secrets.env` holds every
+other secret the server has. Keep the private keys apart from them, with
+`deploy/trioditis keys export` (below).
 
-```sh
-deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>
-deploy/install/install.sh
-```
+**Restoring comes in a later version.** `deploy/trioditis restore` says so and changes
+nothing; keep your backups, which that version restores. Until then, these are the steps it
+will take, and they need that version:
 
-To restore after losing the server, in a checkout of the same version, put the backup's
-`secrets.env` back as `deploy/.env`, then bring back the keys you exported, then restore:
+- on the same server, keep its `deploy/.env` (its private keys are still there), restore the
+  backup, and run the installer;
+- after losing the server, in a checkout of the same version, put the backup's `secrets.env`
+  back as `deploy/.env`, bring back the keys you exported with
+  `deploy/trioditis keys import <key file>`, restore the backup, and run the installer.
+  Until the keys are imported, the installer stops and says so.
 
-```sh
-cp ~/trioditis-backups/<project>-<date>-<time>/secrets.env deploy/.env
-deploy/trioditis keys import <key file>
-deploy/trioditis restore ~/trioditis-backups/<project>-<date>-<time>
-deploy/install/install.sh
-```
-
-Until the keys are imported, the installer stops and says so.
-
-`restore` (which also takes an `archive.tgz` directly) reads the archive once and streams it
-into a volume of its own, and works only from that copy. It checks the whole copy before
-anything changes, and refuses one that's damaged or cut short (its manifest must be its last
-entry), one whose volumes belong to another project, or one that would overwrite a volume
-Compose didn't label as this install's. It creates any missing volume itself. Before it
-checks any volume, one worker container already holds them all (Docker won't remove or
-replace a volume a container uses), so the volumes it checks are the ones it writes. It asks
-before it stops the server (`--yes` skips the question). Then the worker extracts into
-temporary volumes, checks every volume against the manifest, saves a copy of each volume's
-current contents, and only then replaces them. If replacing any of them fails (a full or
-read-only disk) or is interrupted (Ctrl-C), it puts every volume's previous contents back,
-and further interrupts don't cut that short. Each copy is checked against what it copied
-before anything is replaced, and marked complete; if putting them back fails too, it keeps
-the marked copies and prints, for each, a command that puts it back and refuses a copy that
-isn't complete. If the restore stopped before every copy was complete, nothing was
-replaced, and it says so instead. If it can't tell how its worker ended, it removes nothing,
-and lists what's left and how to finish.
-That needs free space for three more copies of the data while it runs (the archive's, the
-extracted one, and the copy of what's there). It removes only volumes labelled with a key of
-its own (`trioditis.restore.<nonce>.…`). Archives from before the manifest can't be restored
-this way. Keep backups encrypted: they contain the connector state above, and `secrets.env`
-holds every other secret the server has.
-
-Backup, restore, the installer, `create-admin`, `keys import`, and every `deploy/trioditis`
-Compose command that can start, stop or change services take a lock in `deploy/`, so only
-one of them runs at a time for an install. Only read-only commands (`ps`, `logs`, `config`,
-`top`, `images`, `ls`, `port`, `version`, `events`) run beside them.
+Backup, the installer, `create-admin`, `keys import`, and every `deploy/trioditis` Compose
+command that can start, stop or change services take a lock in `deploy/`, so only one of
+them runs at a time for an install. Only read-only commands (`ps`, `logs`, `config`, `top`,
+`images`, `ls`, `port`, `version`, `events`) run beside them.
 
 ### The server's keys
 
@@ -355,8 +338,10 @@ deploy/trioditis keys export ~/trioditis-server-keys.env
 It writes the two pairs to a new file, readable only by you, and never over an existing one
 or inside the checkout. Keep that file somewhere the backups aren't, such as a password
 manager or offline media, and delete the copy on the server. `keys import <file>` puts the
-private keys back into a `deploy/.env` that has only the public ones, and refuses a pair whose
-public key isn't the one there. Neither command prints a key.
+private keys back into a `deploy/.env` that has only the public ones. It refuses a pair whose
+public key isn't the one there, and one whose private key isn't that public key's private
+half (it derives each, in the bundle's Node image with no network). Neither command prints a
+key.
 
 **If the keys are lost**, run the installer with `--new-server-keys`. It makes a new pair for
 each key whose private half is missing, and is the only way it ever replaces a key. What it
@@ -376,21 +361,21 @@ installer does.
 their `.env`, and by 15f1f45, in `secrets.env`) contain both private keys. Keep them as
 carefully as the server itself, or replace them with new backups and delete them.
 
-### What backup and restore guard against
+### What backup guards against
 
 The checkout and the backup directory must be writable only by you, the operator. Within
-that, backup and restore are built to stay safe through your own mistakes, a second
-`deploy/trioditis` or installer run at the same time, other Compose projects on the same
-Docker, interrupts, full disks and read-only filesystems, and steps that fail partway. They
-don't guard against a hostile process running as your user that rewrites paths while they
-run: anything that can do that can already read and change the install.
+that, backup is built to stay safe through your own mistakes, a second `deploy/trioditis` or
+installer run at the same time, other Compose projects on the same Docker, interrupts, full
+disks and read-only filesystems, and steps that fail partway. It doesn't guard against a
+hostile process running as your user that rewrites paths while it runs: anything that can do
+that can already read and change the install.
 
 ### Testing the bundle
 
 `deploy/test/` checks the guarantees above, and the installer's file handling:
 
 ```sh
-deploy/test/run.sh          # all of them, about five minutes; or one, e.g. deploy/test/restore-failure.sh
+deploy/test/run.sh          # all of them, about five minutes; or one, e.g. deploy/test/backup-publish.sh
 ```
 
 Each test makes its own throwaway install directory and Compose project
@@ -400,18 +385,15 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
 `docker` and needs none of that.
 
-| Test                   | What it checks                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `restore-failure.sh`   | A restore that fails replacing the second volume (too small; read-only) leaves every volume byte-identical to before, or keeps checked copies with commands that refuse an incomplete one; one whose worker can't start prints no such command and says nothing was touched                                             |
-| `restore-interrupt.sh` | Two interrupts during a restore: the first makes it put everything back, the second doesn't cut that short, and every volume ends byte-identical                                                                                                                                                                        |
-| `restore-archive.sh`   | The archive is read once (it restores from a pipe); one cut short, one with no manifest and one that isn't an archive are refused and change nothing                                                                                                                                                                    |
-| `backup-publish.sh`    | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind |
-| `keys.sh`              | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys and refuses a pair that isn't this server's; neither prints a key                                                                                                                                  |
-| `lock.sh`              | While the lock is held, `start`, `up`, `create-admin` and `backup` are refused and `ps` and `config` run                                                                                                                                                                                                                |
-| `env-source.sh`        | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                               |
-| `caddy-headers.sh`     | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                  |
-| `ports.sh`             | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                  |
-| `install-settings.sh`  | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                               |
+| Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused |
+| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                             |
+| `lock.sh`             | While the lock is held, `start`, `up`, `create-admin`, `backup`, a command behind an option's value (`--profile ps stop`) and an unknown option are refused; `ps` and `config` run                                                                                                                                                                                                                                                                       |
+| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                |
+| `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                   |
+| `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                   |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                                                                                                                                                                |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).

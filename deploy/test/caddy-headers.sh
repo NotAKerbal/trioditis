@@ -9,9 +9,11 @@
 # - from a peer that isn't trusted, X-Forwarded-For is ignored.
 # Then, published as each mode publishes it and asked from this machine (a copy of the
 # Caddyfile with a route that answers "{client_ip} {remote_host}"):
-# - --public-url on the loopback (as behind Tailscale Serve): Caddy's peer is the network's
-#   gateway, and the client is the proxy's X-Forwarded-For (rightmost first), or the gateway
-#   without one;
+# - --public-url on the loopback (as behind Tailscale Serve), trusting what the installer
+#   trusts there (the loopback and the network's gateway): Caddy's peer is the gateway, and
+#   the client is the proxy's X-Forwarded-For (rightmost first), or the gateway without one;
+#   a client of the proxy can't pick its address, even with one in a private range (which
+#   trusting all private addresses, as before, let it do);
 # - direct, on every address: the client is the real address it came from, and an
 #   X-Forwarded-For is ignored;
 # - domain mode on a machine with IPv6 (an IPv6 network): an IPv6 client keeps its address.
@@ -105,14 +107,20 @@ published() {
 asked() { url=$1; shift; curl -s -m 5 "$@" "$url/__test/client"; }
 gateway=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$network")
 
-# --public-url on the loopback, trusting private addresses (the default there).
-port=$(published "$network" "127.0.0.1:PORT:80" private_ranges)
+# --public-url on the loopback, trusting the loopback and the network's gateway (the default
+# there, from the installer).
+port=$(published "$network" "127.0.0.1:PORT:80" "127.0.0.1/32 ::1/128 $gateway/32")
 expect "$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 100.64.1.2')" "100.64.1.2 $gateway" \
   "behind a proxy on the loopback, the client is its X-Forwarded-For (peer: the gateway)"
 expect "$(asked "http://127.0.0.1:$port")" "$gateway $gateway" "without X-Forwarded-For, it's the gateway"
 expect "$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 6.6.6.6, 100.64.1.2')" "100.64.1.2 $gateway" \
   "with a client's address put first, it's still the one the proxy added"
+expect "$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 7.7.7.7, 192.168.23.45')" "192.168.23.45 $gateway" \
+  "a client of the proxy with a private address can't pick its address"
 echo "  observed: loopback with X-Forwarded-For 100.64.1.2 -> '$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 100.64.1.2')'"
+echo "  observed: 'X-Forwarded-For: 7.7.7.7, 192.168.23.45' -> '$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 7.7.7.7, 192.168.23.45')' trusting the gateway"
+port=$(published "$network" "127.0.0.1:PORT:80" private_ranges)
+echo "  observed: the same -> '$(asked "http://127.0.0.1:$port" -H 'X-Forwarded-For: 7.7.7.7, 192.168.23.45')' trusting private_ranges (the default before)"
 
 # Direct, on every address, trusting no one; asked at this machine's LAN address.
 lan=$(ip -o -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
