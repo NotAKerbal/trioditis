@@ -30,10 +30,12 @@ origin**: in the self-hosted bundle Caddy proxies that path to the Convex site, 
 development the Vite dev server does. Cookies and passkeys then belong to the app's origin,
 and no cross-origin auth is configured or supported.
 
-Better Auth trusts only `SITE_URL`, the app's origin, so every auth request's `Origin` must
-be it: per-worktree `pnpm dev` sets `SITE_URL` to that worktree's own web app address. The
-Electron shell, when it comes, loads the app from `SITE_URL` with `loadURL`, never from
-`file://` or a custom scheme, which would send another `Origin` (or `null`) and be refused.
+Better Auth trusts only `SITE_URL`, the app's origin, and refuses a request from any other
+`Origin` (`/end-session` requires one even without a cookie). Per-worktree `pnpm dev` sets
+`SITE_URL` to that worktree's own web app address, or to the backend's HTTP address when
+there is no `apps/desktop`. The Electron shell, when it comes, loads the app from
+`SITE_URL` with `loadURL`, never from `file://` or a custom scheme, which would send another
+`Origin` (or `null`) and be refused.
 
 ```ts
 import { ConvexReactClient } from 'convex/react'
@@ -116,14 +118,14 @@ end may no longer be the cookie's, for example after another tab signed in as so
 Better Auth's own `revokeSession` can't do this: it acts only on the cookie's account and
 answers `status: true` even when it deleted nothing.
 
-| Status | Body                                                                       | Meaning                                                                                                                                                     |
-| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                            |
-| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                         |
-| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                            |
-| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status: Better Auth's own check answers first when a cookie comes without an `Origin` |
-| 429    | Better Auth's rate limit answer                                            | Over 10 requests in 10 seconds. Registered, but not enforced on Convex today, as for every Better Auth route: see below                                     |
-| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                 |
+| Status | Body                                                                       | Meaning                                                                                                                                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                                                |
+| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                                             |
+| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                                                |
+| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status, not the message: which one comes depends on whether a cookie, an `Origin` or a `Referer` was sent |
+| 429    | The rate limit answer, with `Retry-After`                                  | This address's bucket is empty: 10 at once, then one every six seconds. Only where the proxy gives the client address: see Rate limits                                          |
+| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                                     |
 
 Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
 any other answer means nothing was changed, or that it couldn't tell. The response never
@@ -131,9 +133,57 @@ sets or expires a cookie, so a late answer can't clear a sign-in made meanwhile 
 tab: the app clears its own state for the ended session itself. The `Origin` header is
 required even without a cookie.
 
-Better Auth's rate limiting is off unless `NODE_ENV` is `production`, and its default store
-is memory, which doesn't last from one Convex HTTP action to the next. So on Convex no auth
-route answers 429 yet; shared storage for it is a follow-up. Treat a 429 like a 5xx.
+### Rate limits
+
+Better Auth's rate limiting is on in every deployment, and its counts are kept in Convex (the
+`rateLimits` table), so they last from one request to the next. Better Auth's own store is
+memory, which a Convex HTTP action starts without. Each count is a token bucket that refills
+steadily, so a client that slows down gets through at the refill rate, and one that stops
+waits seconds, with no lockout to sit out.
+
+| Routes                                                                                                                                                                              | Limit, each             | Counted by            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | --------------------- |
+| `/sign-in/email`, `/sign-up/email` (which also redeems invitations and the setup token), `/passkey/generate-authenticate-options`, `/passkey/verify-authentication`, `/end-session` | 10 a minute, 10 at once | Client address        |
+| Every other auth route                                                                                                                                                              | 300 a minute            | Client address        |
+| `/sign-in/email`, `/sign-up/email`                                                                                                                                                  | 30 a minute, 30 at once | The email, lowercased |
+
+`/sign-in/email` and `/sign-up/email` take only JSON (`Content-Type: application/json`, as
+the app sends): Better Auth would also take a form, which the per-account limit can't read,
+so anything else is refused with 415. Better Auth's `/verify-password` is turned off (404);
+the current password is checked only by `account.changePassword`, which allows five checks a
+minute per account and otherwise throws `Too many password attempts. Try again in N
+seconds.` Requests to paths that aren't auth routes aren't counted.
+
+If counting a request fails, the request fails (a 500) rather than going through uncounted:
+a broken limiter keeps people from signing in instead of turning the limits off. Each such
+failure is logged as `[rate limit] Couldn't count a request to <path>, so it was refused`,
+with the error and never the key.
+
+Over a limit, the answer is 429 with `{ "message": "Too many requests. Please try again later." }`
+and `Retry-After` (and `X-Retry-After`) in whole seconds. Wait that long before trying again.
+
+**The per-address limits are on only where a trusted proxy in front of the backend sets
+`X-Trioditis-Client-IP`**, replacing any a client sent. The self-hosted bundle's Caddy will
+set it, from the connection or, behind a proxy it trusts, from that proxy's
+`X-Forwarded-For`, once that change lands in the install bundle. Until a proxy sets it,
+replacing what clients send, only the per-account limit is reliable: a proxy that passes the
+header through lets a client name any address it likes, or none. The client address is read
+only from this header. A client can
+send `X-Forwarded-For` and the like itself, so the backend reads none of them. IPv6 addresses
+count by their /64. Convex passes request headers through as they are and adds no client
+address of its own, so the header must come from the proxy, and the backend must be reachable
+only through it: anyone who reaches it directly can name any address.
+
+Without the header (in development, on previews and nightly, or behind a proxy that doesn't
+set it), the per-address limits are off and only the per-account one applies. The other
+choice, one bucket for every client, would let anyone keep everyone out by filling it.
+
+**The per-account limit** bounds guessing at one account from many addresses. It is a
+trade-off: anyone can use it up for someone else's email and keep them from signing in with
+a password. So it is loose: it refills at three times the per-address limit, so keeping an
+account refused takes requests from more than three addresses at once, and a passkey sign-in
+isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
+and buckets that have refilled are deleted every ten minutes.
 
 Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That

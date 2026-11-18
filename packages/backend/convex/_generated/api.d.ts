@@ -12,6 +12,7 @@ import type * as account from '../account.js'
 import type * as auth from '../auth.js'
 import type * as chats from '../chats.js'
 import type * as cleanup from '../cleanup.js'
+import type * as crons from '../crons.js'
 import type * as demo from '../demo.js'
 import type * as gateway from '../gateway.js'
 import type * as http from '../http.js'
@@ -36,6 +37,7 @@ import type * as messages from '../messages.js'
 import type * as migrations from '../migrations.js'
 import type * as networks from '../networks.js'
 import type * as preferences from '../preferences.js'
+import type * as rateLimits from '../rateLimits.js'
 import type * as scheduled from '../scheduled.js'
 import type * as server from '../server.js'
 import type * as validators from '../validators.js'
@@ -47,6 +49,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth
   chats: typeof chats
   cleanup: typeof cleanup
+  crons: typeof crons
   demo: typeof demo
   gateway: typeof gateway
   http: typeof http
@@ -71,6 +74,7 @@ declare const fullApi: ApiFromModules<{
   migrations: typeof migrations
   networks: typeof networks
   preferences: typeof preferences
+  rateLimits: typeof rateLimits
   scheduled: typeof scheduled
   server: typeof server
   validators: typeof validators

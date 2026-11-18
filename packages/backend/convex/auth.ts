@@ -1,4 +1,4 @@
-import { APIError, createAuthEndpoint } from 'better-auth/api'
+import { APIError, createAuthEndpoint, getIP } from 'better-auth/api'
 import type { BetterAuthPlugin } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
@@ -8,7 +8,7 @@ import { convex } from '@convex-dev/better-auth/plugins'
 import { ConvexError, v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
-import { internalMutation, query } from './_generated/server'
+import { internalMutation, query, type ActionCtx } from './_generated/server'
 import authConfig from './auth.config'
 import authSchema from './betterAuth/schema'
 import { sha256Hex } from './lib/hash'
@@ -72,7 +72,6 @@ const endSession = (ctx: GenericCtx<DataModel>) =>
         return endpoint.json({ result })
       }),
     },
-    rateLimit: [{ pathMatcher: (path) => path === '/end-session', window: 10, max: 10 }],
   }) satisfies BetterAuthPlugin
 
 /**
@@ -96,6 +95,158 @@ export const endSessionByToken = internalMutation({
 })
 
 /**
+ * The request header that carries the client's address, set by the proxy in front of the
+ * backend and by nothing else, replacing any a client sent (the self-hosted bundle's Caddy,
+ * once the install bundle sets it). Without it the per-address limits are off. Better Auth reads the address from this header only, since a
+ * client can send any of the usual ones (X-Forwarded-For and the like) itself.
+ */
+export const CLIENT_IP_HEADER = 'x-trioditis-client-ip'
+
+/** Per client address, on the routes that check a password, a passkey or a session token. */
+const STRICT_LIMIT = { window: 60, max: 10 }
+/** Per client address, on every other auth route. */
+const DEFAULT_LIMIT = { window: 60, max: 300 }
+/**
+ * Per account, by email, on password sign-in and on sign-up, whatever the address. It
+ * refills at three times the strict limit, so keeping someone's account refused takes
+ * requests from more than three addresses, while guessing at it stays bounded even from
+ * many. A passkey sign-in isn't counted here, so it still works for someone kept out this way.
+ */
+const ACCOUNT_LIMIT = { window: 60, max: 30 }
+
+const STRICT_PATHS = [
+  '/sign-in/email',
+  // Also how invitations and the setup token are redeemed.
+  '/sign-up/email',
+  '/passkey/generate-authenticate-options',
+  '/passkey/verify-authentication',
+  '/end-session',
+]
+const ACCOUNT_PATHS = ['/sign-in/email', '/sign-up/email']
+
+const ipOptions = { advanced: { ipAddress: { ipAddressHeaders: [CLIENT_IP_HEADER] } } } satisfies BetterAuthOptions
+
+/**
+ * A rule that applies only when the proxy said who the client is. Without the header (in
+ * development, on previews, or behind a proxy that doesn't set it) every request would share
+ * one bucket, and anyone could keep everyone out by filling it; then only the per-account
+ * limit applies.
+ */
+const perClient = (rule: { window: number; max: number }) => (request: Request) =>
+  request.headers.has(CLIENT_IP_HEADER) && getIP(request, ipOptions) ? rule : false
+
+/** Where Better Auth serves its routes: its default, which `registerRoutes` uses too. */
+const AUTH_BASE_PATH = '/api/auth'
+
+/**
+ * Better Auth's routes, as patterns (a `:name` segment matches any one segment), filled in by
+ * `createAuth`. Until then every path counts as one.
+ */
+let authRoutes: { template: string; pattern: RegExp }[] | null = null
+
+/** The route `path` is a request to, as Better Auth declares it (`/callback/:id`), or null. */
+function authRouteOf(path: string) {
+  if (!authRoutes) return path
+  return authRoutes.find((route) => route.pattern.test(path))?.template ?? null
+}
+
+function routePattern(path: string) {
+  const escaped = path
+    .split('/')
+    .map((segment) => (segment.startsWith(':') ? '[^/]+' : segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('/')
+  return new RegExp(`^${escaped}$`)
+}
+
+/** Better Auth's base URL, however `SITE_URL` ends. */
+export function authBaseUrl(site = siteUrl) {
+  return new URL(AUTH_BASE_PATH, site).toString()
+}
+
+/** The path under Better Auth's base path, as its rate limiter matches it. */
+function authPath(request: Request, baseURL: string) {
+  const base = new URL(baseURL).pathname.replace(/\/+$/, '')
+  const path = new URL(request.url).pathname.replace(/\/+$/, '')
+  return path.startsWith(`${base}/`) ? path.slice(base.length) : path
+}
+
+/** The email in a JSON request body, as Better Auth compares it, or null. */
+async function requestEmail(request: Request) {
+  try {
+    const email: unknown = ((await request.clone().json()) as { email?: unknown } | null)?.email
+    return typeof email === 'string' ? email.trim().toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
+/** Whether the request says its body is JSON, the only form the per-account limit can read. */
+function isJson(request: Request) {
+  return (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/json'
+}
+
+/**
+ * Takes a token, logging a failure clearly before passing it on. A failure fails the auth
+ * request (a 500) rather than letting it past the limit: a broken limiter keeps people from
+ * signing in, never turns the limits off. The key isn't logged: it can hold an address.
+ */
+async function consumeOrLog(
+  ctx: Pick<ActionCtx, 'runMutation'>,
+  path: string,
+  args: { key: string; max: number; window: number },
+) {
+  try {
+    return await ctx.runMutation(internal.rateLimits.consume, args)
+  } catch (error) {
+    console.error(`[rate limit] Couldn't count a request to ${path}, so it was refused:`, error)
+    throw error
+  }
+}
+
+/** Better Auth's 429, with the wait in both its header and HTTP's. */
+function tooManyRequests(retryAfter: number) {
+  return Response.json(
+    { message: 'Too many requests. Please try again later.' },
+    { status: 429, headers: { 'Retry-After': `${retryAfter}`, 'X-Retry-After': `${retryAfter}` } },
+  )
+}
+
+/** Better Auth's own 429 gives the wait only in X-Retry-After. */
+function withRetryAfter(response: Response) {
+  const retryAfter = response.headers.get('x-retry-after')
+  if (response.status !== 429 || !retryAfter || response.headers.has('retry-after')) return response
+  const headers = new Headers(response.headers)
+  headers.set('retry-after', retryAfter)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
+/**
+ * The per-account limit. It runs after Better Auth's per-address one, so requests that one
+ * refused don't use up the account's bucket.
+ */
+const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
+  ({
+    id: 'trioditis-account-rate-limit',
+    onRequest: async (request, auth) => {
+      const path = authPath(request, auth.baseURL)
+      if (!ACCOUNT_PATHS.includes(path) || !('runMutation' in ctx)) return
+      // Better Auth also takes these as forms, which this couldn't count: the app sends JSON,
+      // so anything else is refused rather than let past the limit.
+      if (!isJson(request)) {
+        return { response: Response.json({ message: 'Send this as JSON.' }, { status: 415 }) }
+      }
+      // Without an email Better Auth refuses the request itself, before any password check.
+      const email = await requestEmail(request)
+      if (!email) return
+      const { allowed, retryAfter } = await consumeOrLog(ctx, path, {
+        key: await sha256Hex(`account|${path}|${email}`),
+        ...ACCOUNT_LIMIT,
+      })
+      if (!allowed) return { response: tooManyRequests(retryAfter ?? ACCOUNT_LIMIT.window) }
+    },
+  }) satisfies BetterAuthPlugin
+
+/**
  * Better Auth's settings. Kept apart from `createAuth` so the component's adapter can read
  * them without starting Better Auth.
  */
@@ -104,6 +255,48 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
     baseURL: siteUrl,
     trustedOrigins: [siteUrl],
     database: authComponent.adapter(ctx),
+    advanced: ipOptions.advanced,
+    logger: {
+      log: (level, message, ...args) => {
+        // Said for every request without the client address header, since each HTTP action
+        // starts afresh, and untrue here: `perClient` turns the per-address limit off then
+        // rather than share one bucket.
+        if (message.startsWith('Rate limiting could not determine a client IP')) return
+        if (level === 'error') console.error(`[Better Auth]: ${message}`, ...args)
+        else if (level === 'warn') console.warn(`[Better Auth]: ${message}`, ...args)
+        else console.log(`[Better Auth]: ${message}`, ...args)
+      },
+    },
+    // On whatever NODE_ENV is, and kept in Convex (rateLimits.ts): Better Auth's default store
+    // is memory, which a Convex HTTP action starts without. Each request takes a token in one
+    // mutation, so concurrent ones can't all pass. Keys are hashed, so no address is stored.
+    rateLimit: {
+      enabled: true,
+      ...DEFAULT_LIMIT,
+      // The first match wins, so the catch-all comes last. These replace Better Auth's own
+      // rules for sign-in and sign-up.
+      customRules: {
+        ...Object.fromEntries(STRICT_PATHS.map((path) => [path, perClient(STRICT_LIMIT)])),
+        // Only Better Auth's own routes: a request to any other path would otherwise leave a
+        // bucket behind for each path made up.
+        '/**': (request: Request) =>
+          authRouteOf(authPath(request, authBaseUrl())) !== null ? perClient(DEFAULT_LIMIT)(request) : false,
+      },
+      customStorage: {
+        consume: async (key, rule) => {
+          // Only HTTP requests are rate limited, and HTTP actions can run mutations. In a
+          // query nothing can be written, so nothing could be counted either.
+          if (!('runMutation' in ctx)) return { allowed: true, retryAfter: null }
+          // Better Auth's key is `<address>|<path>`. Counted, and logged, by the route the path
+          // is to, so `/callback/a` and `/callback/b` share one bucket and a path's own
+          // segments (which a client chooses) never reach the log.
+          const split = key.indexOf('|')
+          const address = key.slice(0, split)
+          const route = authRouteOf(key.slice(split + 1)) ?? 'an unknown route'
+          return await consumeOrLog(ctx, route, { key: await sha256Hex(`client|${address}|${route}`), ...rule })
+        },
+      },
+    },
     // The password changes only through `account.changePassword`, which changes the key
     // backup with it; a change here would leave sign-in and unlocking on different
     // passwords. Resets need email, which servers don't send yet, and changing the email
@@ -115,6 +308,9 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       '/forget-password',
       '/reset-password',
       '/change-email',
+      // Checks a signed-in session's password, which only account.changePassword (rate
+      // limited) should do.
+      '/verify-password',
     ],
     emailAndPassword: {
       enabled: true,
@@ -182,12 +378,19 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       }),
       convex({ authConfig }),
       endSession(ctx),
+      accountRateLimit(ctx),
     ],
   } satisfies BetterAuthOptions
 }
 
 export const createAuth = (ctx: GenericCtx<DataModel>) => {
-  return betterAuth(createAuthOptions(ctx))
+  const auth = betterAuth(createAuthOptions(ctx))
+  // Only routes served over HTTP: Better Auth leaves out those marked server-only.
+  type Endpoint = { path?: unknown; options?: { metadata?: { SERVER_ONLY?: boolean } } }
+  authRoutes ??= Object.values(auth.api as Record<string, Endpoint>)
+    .filter((endpoint) => typeof endpoint.path === 'string' && !endpoint.options?.metadata?.SERVER_ONLY)
+    .map((endpoint) => ({ template: endpoint.path as string, pattern: routePattern(endpoint.path as string) }))
+  return { ...auth, handler: async (request: Request) => withRetryAfter(await auth.handler(request)) }
 }
 
 /**
