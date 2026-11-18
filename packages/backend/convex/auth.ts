@@ -419,6 +419,36 @@ export async function currentSession(
   return session ? { userId: identity.subject, sessionId } : null
 }
 
+/**
+ * What a call bound to a session is refused with when it runs as another one. `code` is for
+ * the app to act on; `message` is for the person.
+ */
+export const SESSION_CHANGED = {
+  code: 'sessionChanged',
+  message: 'This page’s session has changed. Reload the page.',
+} as const
+
+/**
+ * Refuses the call, before it writes anything, unless it runs as the Better Auth session
+ * `sessionId`. A page passes the session it opened with (`members.me`'s `sessionId`), because
+ * the Convex client it shares with other tabs can switch to another account's token while the
+ * page still shows the first: without this, a write the page meant for one account would land
+ * on the other. With `userId`, the session must also be that user's. Returns the session's
+ * user when `sessionId` is given; omitted, nothing is checked.
+ */
+export async function requireSessionIfGiven(
+  ctx: GenericCtx<DataModel>,
+  sessionId: string | undefined,
+  userId?: string,
+) {
+  if (sessionId === undefined) return
+  const session = await currentSession(ctx)
+  if (session?.sessionId !== sessionId || (userId !== undefined && session.userId !== userId)) {
+    throw new ConvexError(SESSION_CHANGED)
+  }
+  return session.userId
+}
+
 /** The signed-in user's ID, or null. */
 export async function currentUserId(ctx: GenericCtx<DataModel>): Promise<string | null> {
   return (await currentSession(ctx))?.userId ?? null

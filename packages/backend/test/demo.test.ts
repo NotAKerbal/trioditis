@@ -31,6 +31,22 @@ describe('demo data', () => {
     await expect(as.action(api.demo.seedForMe, {})).rejects.toThrow(/demo deployments/)
   })
 
+  it('seeds only for the page’s session when one is named', async () => {
+    const t = setup()
+    process.env.TRIODITIS_DEMO = '1'
+    process.env.TRIODITIS_NETWORKS = 'fake'
+    const as = await memberWithKey(t, generateKeyPair())
+    // Another account's page: its session isn't the one these calls run as.
+    const other = await signIn(t, 'other_user', 'member', false)
+    const { sessionId: otherPage } = (await other.query(api.members.me, {}))!
+    await expect(as.action(api.demo.seedForMe, { sessionId: otherPage })).rejects.toMatchObject({
+      data: { code: 'sessionChanged' },
+    })
+    expect(await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())).toEqual([])
+    const { sessionId } = (await as.query(api.members.me, {}))!
+    expect(await as.action(api.demo.seedForMe, { sessionId })).toEqual({ seeded: true })
+  })
+
   it('seeds once, sealed to the person’s key', async () => {
     const t = setup()
     process.env.TRIODITIS_DEMO = '1'

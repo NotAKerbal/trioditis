@@ -7,9 +7,12 @@ from `@trioditis/backend/api`; shared types come from `@trioditis/core`, and sea
 
 Every function needs a signed-in member of the server unless it says otherwise, and
 refuses anyone else's data with the same error as a missing row. Errors are `ConvexError`s
-whose `data` is a sentence the UI can show as it is. Any of those functions can also throw
-`You’re signed out. Sign in again to continue.` and `Your account isn’t a member of this
-server.`; each section lists the rest, word for word.
+whose `data` is one of two shapes: a sentence the UI can show as it is, or, for an error the
+app acts on rather than only shows, `{ code, message }`, where `message` is the sentence to
+show and `code` is what to branch on. So far the only code is `sessionChanged` (Keys, Key
+writes are bound to the page's session). Any of those functions can also throw `You’re
+signed out. Sign in again to continue.` and `Your account isn’t a member of this server.`;
+each section lists the rest, word for word.
 
 Nothing readable ever goes to the server: names, message bodies, label names and drafts are
 sealed on the device (`docs/architecture/sealing.md`) and opened on the device. Not even
@@ -97,7 +100,7 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
 | Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
 | Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                   |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
 | Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
@@ -214,9 +217,10 @@ const identity = generateKeyPair()
 // unless both give back this key: the server can't check them.
 const { args, recoveryText } = makeKeySetup(identity.privateKey, pw, userId) // show recoveryText once
 // Prove the device holds the key: the challenge is sealed to the key being set up.
-const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey })
+// sessionId: members.me's, from when the page opened (Key writes are bound to the page's session).
+const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey, sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
-await convex.mutation(api.keys.setup, { ...args, proof })
+await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
 ```
 
 - `makeKeySetup` runs `passwordKey`, which takes about a second; show progress. Building
@@ -247,7 +251,7 @@ so the first key is one a device can really use, and a stolen session can't repl
 someone's backups and lock them out:
 
 ```ts
-const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, {})
+const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, { sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
 ```
 
@@ -276,11 +280,11 @@ forgives case, spaces, dashes and look-alike letters, and its checksum catches t
 ### A new recovery key, or a passkey
 
 Wrap again and call `api.keys.putBackup({ kind: 'recovery' | 'passkey', nonce, ct,
-credentialId?, prfSalt?, proof, expectedRevision })`. It replaces that backup and returns
+credentialId?, prfSalt?, proof, expectedRevision, sessionId })`. It replaces that backup and returns
 its new `revision`. `expectedRevision` is the `revision` of the backup being replaced, as
 `keys.identity` showed it (0 for a new passkey). If another device changed it meanwhile, the
 call is refused: reload and try again. `api.keys.removePasskeyBackup({ credentialId,
-proof })` removes a passkey backup. Password and recovery backups are replaced, never
+proof, sessionId })` removes a passkey backup. Password and recovery backups are replaced, never
 removed.
 
 Revisions only go up and are never reused, across all of the person's backups: a new or
@@ -288,6 +292,28 @@ replaced backup takes the next one, which needn't be the old revision plus one, 
 passkey backup removed and made again gets a new one, so a device still holding the old
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
+
+### Key writes are bound to the page's session
+
+`keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
+`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
+take an optional `sessionId`: pass the `sessionId` from
+`members.me` that the page opened with. Tabs share the Convex client, so another tab
+signing in as someone else can switch the token the page's calls run as while the page still
+shows the first account; a key or backup meant for one account would then be written to the
+other, which can never open it, or a network connected to the other account, whose key then
+seals what it brings in, or a label or demo data sealed to the wrong key, or a setting or an
+invitation made as the wrong person, or an agent given the wrong account's chats. The others act only on an ID the page already holds,
+which each checks belongs to the caller, so a switched page finds nothing to change. With `sessionId`, the call is refused before it writes
+anything unless it runs as that same Better Auth session, with `ConvexError` data
+`{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
+A session that has ended is refused the same way. The actions, `account.changePassword` and
+`demo.seedForMe`, check again inside each transaction that writes, so a session that ends
+while one runs is refused there too. Reload the page then: it reads `members.me`
+again. Without `sessionId` the call isn't bound to a session, though it still needs a
+signed-in member as usual; it will become required once every client sends it. Pass it on
+every one of these calls.
 
 ### Changing the password
 
@@ -304,6 +330,7 @@ const { revision } = await convex.action(api.account.changePassword, {
   },
   proof,
   expectedRevision, // the password backup's current revision
+  sessionId,
 })
 ```
 
@@ -336,10 +363,10 @@ password settings.` (a defensive check: the arguments of `keys.setup` and
 
 ## Preferences
 
-| Function              | Arguments            | Returns                                                                                              |
-| --------------------- | -------------------- | ---------------------------------------------------------------------------------------------------- |
-| `api.preferences.get` | none                 | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
-| `api.preferences.set` | `{ sidebarLayout? }` | `null`. Changes only what it's given                                                                 |
+| Function              | Arguments                        | Returns                                                                                              |
+| --------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `api.preferences.get` | none                             | `{ sidebarLayout: 'simple' \| 'focused' }`. **`simple` is the default** for anyone who hasn't chosen |
+| `api.preferences.set` | `{ sidebarLayout?, sessionId? }` | `null`. Changes only what it's given                                                                 |
 
 `DEFAULT_PREFERENCES` and the `Preferences` type are in `@trioditis/core`.
 
@@ -553,12 +580,12 @@ sent: its chat is gone.` (`sendNow` on a failed one)
 Seal a label's plaintext, `{ name, color }`, to the person: kind `label`, object ID a
 `labelKey` the client picks (16 to 64 letters, digits, `-`, `_`).
 
-| Function        | Arguments            | Returns                                                       |
-| --------------- | -------------------- | ------------------------------------------------------------- |
-| `labels.list`   | none                 | `[{ _id, labelKey, sealed, createdAt }]`                      |
-| `labels.create` | `labelKey`, `sealed` | The label's ID (the same one again for a repeated `labelKey`) |
-| `labels.update` | `labelId`, `sealed`  | `null`. Seal with the same `labelKey`                         |
-| `labels.remove` | `labelId`            | `null`. Also takes it off every chat                          |
+| Function        | Arguments                          | Returns                                                       |
+| --------------- | ---------------------------------- | ------------------------------------------------------------- |
+| `labels.list`   | none                               | `[{ _id, labelKey, sealed, createdAt }]`                      |
+| `labels.create` | `labelKey`, `sealed`, `sessionId?` | The label's ID (the same one again for a repeated `labelKey`) |
+| `labels.update` | `labelId`, `sealed`                | `null`. Seal with the same `labelKey`                         |
+| `labels.remove` | `labelId`                          | `null`. Also takes it off every chat                          |
 
 At most 100 labels of up to 4 KiB each. `labels.remove` takes the label off its first 1,000
 chats at once and the rest in batches straight after; until then a chat may still list the
@@ -581,7 +608,7 @@ network with `termsRisk` (cookie or token logins can get an account banned).
 
 ### The login stepper
 
-1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId? })`.
+1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId?, sessionId })`.
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
@@ -650,7 +677,7 @@ when data changes, not when time passes, so recheck on focus.
 
 ## Demo data
 
-For previews and the nightly. `api.demo.seedForMe` (an action, no arguments) gives the
+For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
 signed-in person a connected fake-network account with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
@@ -661,7 +688,8 @@ that fails partway leaves no half-written chat, and calling again finishes the r
 everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
 available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
 
-- **Previews** create a known test account by script: sign up with
+- **Previews** create a known test account by script, on one account in one process, so it
+  can leave out `sessionId` (a page always passes it): sign up with
   `authPassword(password, email)` and the setup token, call `keys.challenge({ publicKey })`
   and open it with `keyPairFromPrivateKey(privateKey)`, call `keys.setup` with
   `{ ...makeKeySetup(privateKey, password, userId).args, proof }` (the same password backup

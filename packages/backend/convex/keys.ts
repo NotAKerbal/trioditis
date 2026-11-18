@@ -2,6 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import { components } from './_generated/api'
 import type { Doc } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { audit } from './lib/audit'
 import { decode, decodedLength, encode, isPublicKey, keyIdOf } from './lib/envelope'
@@ -172,9 +173,10 @@ export const identity = query({
  * for that key, so the key it stores is one the device can open boxes with.
  */
 export const challenge = mutation({
-  args: { publicKey: v.optional(v.string()) },
+  args: { publicKey: v.optional(v.string()), sessionId: v.optional(v.string()) },
   returns: v.object({ sealed: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
     const publicKey = member.identityPublicKey ?? args.publicKey
     if (!publicKey) throw new ConvexError('Set up this account’s key first.')
@@ -216,9 +218,11 @@ export const setup = mutation({
     password: v.object({ nonce: v.string(), ct: v.string(), params: passwordParams }),
     recovery: wrapped,
     proof: v.string(),
+    sessionId: v.optional(v.string()),
   },
   returns: v.object({ kid: v.string() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
     if (!isPublicKey(args.publicKey)) throw new ConvexError('That isn’t a valid public key.')
     if (member.identityPublicKey && member.identityPublicKey !== args.publicKey) {
@@ -305,9 +309,11 @@ export const putBackup = mutation({
     prfSalt: v.optional(v.string()),
     proof: v.string(),
     expectedRevision: v.number(),
+    sessionId: v.optional(v.string()),
   },
   returns: v.object({ revision: v.number() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
     checkWrapped(args)
     if (
@@ -339,9 +345,10 @@ export const putBackup = mutation({
  * removed. A backup made again for the same credential gets a new revision, never its old one.
  */
 export const removePasskeyBackup = mutation({
-  args: { credentialId: v.string(), proof: v.string() },
+  args: { credentialId: v.string(), proof: v.string(), sessionId: v.optional(v.string()) },
   returns: v.null(),
-  handler: async (ctx, { credentialId, proof }) => {
+  handler: async (ctx, { credentialId, proof, sessionId }) => {
+    await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
     await consumeKeyProof(ctx, member, proof)
     // Before a backup goes, the counter holds at least its revision, even for an account
@@ -357,7 +364,15 @@ export const removePasskeyBackup = mutation({
   },
 })
 
-const passwordWrap = { nonce: v.string(), ct: v.string(), params: passwordParams, expectedRevision: v.number() }
+const passwordWrap = {
+  nonce: v.string(),
+  ct: v.string(),
+  params: passwordParams,
+  expectedRevision: v.number(),
+  // `account.changePassword`'s `sessionId`, checked again here in the transaction that
+  // writes, since the session can end between the action's own check and this.
+  sessionId: v.optional(v.string()),
+}
 
 /**
  * `account.changePassword`, before anything else: the proof (used up here), the revision and
@@ -368,6 +383,7 @@ export const checkPasswordChange = internalMutation({
   args: { userId: v.string(), proof: v.string(), ...passwordWrap },
   returns: v.null(),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId, args.userId)
     const member = await memberById(ctx, args.userId)
     checkWrapped(args)
     await checkReplacement(ctx, member, {
@@ -403,6 +419,7 @@ export const commitPasswordChange = internalMutation({
   args: { userId: v.string(), previousHash: v.string(), newHash: v.string(), ...passwordWrap },
   returns: v.object({ revision: v.number() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId, args.userId)
     const member = await memberById(ctx, args.userId)
     checkWrapped(args)
     const replacing = await checkReplacement(ctx, member, {

@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
 import { DEFAULT_PREFERENCES } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
+import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 
 // The person's own settings for the app. Missing settings take their defaults
@@ -23,9 +24,10 @@ export const get = query({
 
 /** Changes the settings given; leaves the rest as they are. */
 export const set = mutation({
-  args: { sidebarLayout: v.optional(sidebarLayout) },
+  args: { sidebarLayout: v.optional(sidebarLayout), sessionId: v.optional(v.string()) },
   returns: v.null(),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
     const row = await ctx.db
       .query('preferences')

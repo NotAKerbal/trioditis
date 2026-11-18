@@ -3,8 +3,8 @@ import type { GenericCtx } from '@convex-dev/better-auth'
 import { v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
-import { internalQuery } from './_generated/server'
-import { currentUserId } from './auth'
+import { action, internalQuery, type ActionCtx } from './_generated/server'
+import { currentUserId, requireSessionIfGiven } from './auth'
 import { loginState, network } from './validators'
 
 // The Trioditis MCP server, at <site>/mcp, for the person's own agents (Dots, Grokbot, any
@@ -76,13 +76,44 @@ export const mcp: McpServer<string> = new McpServer<string>(components.mcp, {
 // For the consent page and Settings → Agents. A connection acts for the Better Auth user
 // whose live session approved it.
 // Only a member of this server can approve an agent.
-export const { getAuthRequest, authorize, listConnections, revokeConnection } = mcp.api({
+const consent = mcp.api({
   getUserId: async (ctx) => {
     // The component types `ctx` as only `auth`, but these run as Convex functions.
     const functionCtx = ctx as GenericCtx<DataModel>
     const userId = await currentUserId(functionCtx)
     if (!userId) return null
     return (await functionCtx.runQuery(internal.members.isMember, { userId })) ? userId : null
+  },
+})
+export const { getAuthRequest, listConnections, revokeConnection } = consent
+
+type AuthorizeArgs = { requestId: string; approve: boolean; userCode?: string }
+
+/**
+ * The component's `authorize`, bound to the consent page's session like the key writes
+ * (client-api.md, Key writes are bound to the page's session): approving grants an agent
+ * this account's chats, so a page another tab's sign-in has switched must not approve for
+ * the other account. The component's own handler does the rest; a test fails if an upgrade
+ * stops exposing it.
+ */
+export const authorize = action({
+  args: {
+    requestId: v.string(),
+    approve: v.boolean(),
+    userCode: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+  },
+  // As the component's: where to send the browser back to the agent, or null for a device
+  // request.
+  returns: v.object({ redirectUrl: v.union(v.string(), v.null()) }),
+  handler: async (ctx, { sessionId, ...args }): Promise<{ redirectUrl: string | null }> => {
+    await requireSessionIfGiven(ctx, sessionId)
+    const handler = (
+      consent.authorize as unknown as {
+        _handler: (ctx: ActionCtx, args: AuthorizeArgs) => Promise<{ redirectUrl: string | null }>
+      }
+    )._handler
+    return await handler(ctx, args)
   },
 })
 
