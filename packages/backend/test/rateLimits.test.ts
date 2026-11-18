@@ -250,6 +250,17 @@ describe('what is counted', () => {
     expect(await t.run(async (ctx) => (await ctx.db.query('rateLimits').collect()).length)).toBe(1)
   })
 
+  it('doesn’t count a request Better Auth turns away for its method or a trailing slash', async () => {
+    const t = setup()
+    const get = await t.fetch('/api/auth/end-session', {
+      headers: { origin: ORIGIN, [CLIENT_IP_HEADER]: '203.0.113.1' },
+    })
+    expect(get.status).toBe(404)
+    expect((await post(t, 'end-session/', { token: 'x' }, '203.0.113.1')).status).toBe(404)
+    expect((await post(t, 'sign-in/email/', { email: 'sam@example.com' }, '203.0.113.1')).status).toBe(404)
+    expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
+  })
+
   it('keeps no bucket for a route Better Auth serves only to the server', async () => {
     const t = setup()
     expect((await post(t, 'convex/latest-jwks', {}, '203.0.113.1')).status).toBe(404)

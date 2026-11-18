@@ -180,8 +180,9 @@ choice, one bucket for every client, would let anyone keep everyone out by filli
 
 **The per-account limit** bounds guessing at one account from many addresses. It is a
 trade-off: anyone can use it up for someone else's email and keep them from signing in with
-a password. So it is loose: it refills at three times the per-address limit, so keeping an
-account refused takes requests from more than three addresses at once, and a passkey sign-in
+a password. So it is loose: it refills at three times the per-address limit, so where a
+trusted proxy gives the client address, keeping an account refused takes requests from more
+than three addresses at once (without the per-address limit, one can do it), and a passkey sign-in
 isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
 and buckets that have refilled are deleted every ten minutes.
 
