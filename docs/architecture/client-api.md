@@ -7,13 +7,12 @@ from `@trioditis/backend/api`; shared types come from `@trioditis/core`, and sea
 
 Every function needs a signed-in member of the server unless it says otherwise, and
 refuses anyone else's data with the same error as a missing row. Errors are `ConvexError`s
-whose `data` is a sentence the UI can show as it is. Any of those functions can also throw
-`You’re signed out. Sign in again to continue.` and `Your account isn’t a member of this
-server.`; each section lists the rest, word for word.
-
-One error the app acts on rather than only shows has `data` as `{ code, message }`: the
-`message` is the sentence to show, and the `code` is what to branch on. So far that is
-`sessionChanged` (Keys, Key writes are bound to the page's session).
+whose `data` is one of two shapes: a sentence the UI can show as it is, or, for an error the
+app acts on rather than only shows, `{ code, message }`, where `message` is the sentence to
+show and `code` is what to branch on. So far the only code is `sessionChanged` (Keys, Key
+writes are bound to the page's session). Any of those functions can also throw `You’re
+signed out. Sign in again to continue.` and `Your account isn’t a member of this server.`;
+each section lists the rest, word for word.
 
 Nothing readable ever goes to the server: names, message bodies, label names and drafts are
 sealed on the device (`docs/architecture/sealing.md`) and opened on the device. Not even
@@ -168,9 +167,10 @@ const identity = generateKeyPair()
 // unless both give back this key: the server can't check them.
 const { args, recoveryText } = makeKeySetup(identity.privateKey, pw, userId) // show recoveryText once
 // Prove the device holds the key: the challenge is sealed to the key being set up.
-const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey })
+// sessionId: members.me's, from when the page opened (Key writes are bound to the page's session).
+const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey, sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
-await convex.mutation(api.keys.setup, { ...args, proof })
+await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
 ```
 
 - `makeKeySetup` runs `passwordKey`, which takes about a second; show progress. Building
@@ -201,7 +201,7 @@ so the first key is one a device can really use, and a stolen session can't repl
 someone's backups and lock them out:
 
 ```ts
-const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, {})
+const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, { sessionId })
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
 ```
 
@@ -230,11 +230,11 @@ forgives case, spaces, dashes and look-alike letters, and its checksum catches t
 ### A new recovery key, or a passkey
 
 Wrap again and call `api.keys.putBackup({ kind: 'recovery' | 'passkey', nonce, ct,
-credentialId?, prfSalt?, proof, expectedRevision })`. It replaces that backup and returns
+credentialId?, prfSalt?, proof, expectedRevision, sessionId })`. It replaces that backup and returns
 its new `revision`. `expectedRevision` is the `revision` of the backup being replaced, as
 `keys.identity` showed it (0 for a new passkey). If another device changed it meanwhile, the
 call is refused: reload and try again. `api.keys.removePasskeyBackup({ credentialId,
-proof })` removes a passkey backup. Password and recovery backups are replaced, never
+proof, sessionId })` removes a passkey backup. Password and recovery backups are replaced, never
 removed.
 
 Revisions only go up and are never reused, across all of the person's backups: a new or
@@ -245,19 +245,21 @@ characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 
 ### Key writes are bound to the page's session
 
-`keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup` and
-`account.changePassword` take an optional `sessionId`: pass the `sessionId` from
+`keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
+`account.changePassword` and `logins.start` take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
 signing in as someone else can switch the token the page's calls run as while the page still
 shows the first account; a key or backup meant for one account would then be written to the
-other, which can never open it. With `sessionId`, the call is refused before it writes
+other, which can never open it, or a network connected to the other account, whose key then
+seals what it brings in. With `sessionId`, the call is refused before it writes
 anything unless it runs as that same Better Auth session, with `ConvexError` data
 `{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
 A session that has ended is refused the same way. `account.changePassword`, an action,
 checks again inside each transaction that writes the backup or the password, so a session
 that ends while it runs is refused there too. Reload the page then: it reads `members.me`
-again. Without `sessionId` nothing is checked, as before; it will become required once every
-client sends it.
+again. Without `sessionId` the call isn't bound to a session, though it still needs a
+signed-in member as usual; it will become required once every client sends it. Pass it on
+every one of these calls.
 
 ### Changing the password
 
@@ -274,6 +276,7 @@ const { revision } = await convex.action(api.account.changePassword, {
   },
   proof,
   expectedRevision, // the password backup's current revision
+  sessionId,
 })
 ```
 
@@ -551,7 +554,7 @@ network with `termsRisk` (cookie or token logins can get an account banned).
 
 ### The login stepper
 
-1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId? })`.
+1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId?, sessionId })`.
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns

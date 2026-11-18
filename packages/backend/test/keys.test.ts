@@ -663,8 +663,21 @@ describe('key writes bound to a session', () => {
       }),
     ).rejects.toMatchObject(sessionChanged)
 
+    await expect(bob.mutation(api.logins.start, { network: 'whatsapp', sessionId: alicePage })).rejects.toMatchObject(
+      sessionChanged,
+    )
+
     expect(await rows(t, 'bob')).toEqual(before)
     expect((await rows(t, 'alice')).challenges).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('loginSessions').collect())).toEqual([])
+  })
+
+  it('starts a network login with the page’s session named', async () => {
+    const t = setup()
+    const carol = await signIn(t, 'carol')
+    const { sessionId } = (await carol.query(api.members.me, {}))!
+    const loginSessionId = await carol.mutation(api.logins.start, { network: 'whatsapp', sessionId })
+    expect(await carol.query(api.logins.session, { loginSessionId })).toMatchObject({ state: 'pending' })
   })
 
   it('refuses a page whose session has ended', async () => {

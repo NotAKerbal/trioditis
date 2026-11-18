@@ -45,8 +45,9 @@ export const changePassword = action({
   },
   returns: v.object({ revision: v.number() }),
   handler: async (ctx, args): Promise<{ revision: number }> => {
-    await requireSessionIfGiven(ctx, args.sessionId)
-    const userId = await requireUserId(ctx)
+    // With `sessionId`, the user is the one that check found, so a session ending just after
+    // it is refused as `sessionChanged` (by the mutations below), not as signed out.
+    const userId = (await requireSessionIfGiven(ctx, args.sessionId)) ?? (await requireUserId(ctx))
     const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision, sessionId: args.sessionId }
     await ctx.runMutation(internal.keys.checkPasswordChange, { userId, proof: args.proof, ...wrap })
     const current = await ctx.runQuery(internal.account.credential, { userId })

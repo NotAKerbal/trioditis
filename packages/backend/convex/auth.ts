@@ -230,8 +230,8 @@ export const SESSION_CHANGED = {
  * `sessionId`. A page passes the session it opened with (`members.me`'s `sessionId`), because
  * the Convex client it shares with other tabs can switch to another account's token while the
  * page still shows the first: without this, a write the page meant for one account would land
- * on the other. With `userId`, the session must also be that user's. Omitted, nothing is
- * checked.
+ * on the other. With `userId`, the session must also be that user's. Returns the session's
+ * user when `sessionId` is given; omitted, nothing is checked.
  */
 export async function requireSessionIfGiven(
   ctx: GenericCtx<DataModel>,
@@ -243,6 +243,7 @@ export async function requireSessionIfGiven(
   if (session?.sessionId !== sessionId || (userId !== undefined && session.userId !== userId)) {
     throw new ConvexError(SESSION_CHANGED)
   }
+  return session.userId
 }
 
 /** The signed-in user's ID, or null. */
