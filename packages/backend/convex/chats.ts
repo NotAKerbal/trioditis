@@ -14,8 +14,8 @@ import { chatKind, chatView, envelope, network } from './validators'
 // client opens `sealedMeta`. Each chat's list (`view`) is kept by lib/chatView.ts, so every
 // list here is an index range. See docs/architecture/client-api.md, Chats.
 
-/** The longest a chat can be snoozed or muted for, short of "until I unmute". */
-const MAX_UNTIL_MS = 400 * 24 * 60 * 60 * 1000
+/** The longest a chat can be snoozed or muted for, short of "until I unmute": a year. */
+const MAX_UNTIL_MS = 365 * 24 * 60 * 60 * 1000
 /** The most chats one page holds, and the most it reads, well under a query's limits. */
 const MAX_PAGE_ITEMS = 50
 const MAX_PAGE_BYTES = 8 * 1024 * 1024

@@ -1,5 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
+import { removeAssignments } from './cleanup'
 import { requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
 import { envelope } from './validators'
@@ -59,7 +60,11 @@ export const update = mutation({
   },
 })
 
-/** Deletes a label and takes it off every chat. */
+/**
+ * Deletes a label and takes it off every chat. A label can be on any number of chats, so it
+ * comes off the first thousand here and the rest in batches straight after; until then a chat
+ * may still list the label's ID, which isn't in `labels.list` any more.
+ */
 export const remove = mutation({
   args: { labelId: v.id('labels') },
   returns: v.null(),
@@ -67,12 +72,8 @@ export const remove = mutation({
     const member = await requireMember(ctx)
     const label = await ctx.db.get(labelId)
     if (!label || label.userId !== member.userId) throw new ConvexError('That label doesn’t exist.')
-    const assigned = await ctx.db
-      .query('chatLabels')
-      .withIndex('by_label', (q) => q.eq('labelId', labelId))
-      .take(5000)
-    for (const row of assigned) await ctx.db.delete(row._id)
     await ctx.db.delete(labelId)
+    await removeAssignments(ctx, labelId)
     return null
   },
 })

@@ -214,6 +214,13 @@ describe('chat actions', () => {
     await a.mutation(api.chats.setMuted, { chatId, muted: false })
     expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBeNull()
     await expect(a.mutation(api.chats.snooze, { chatId, until: Date.now() - 1 })).rejects.toThrow(/future/)
+    // Within a year, as for scheduled sends.
+    const day = 24 * 60 * 60 * 1000
+    await a.mutation(api.chats.snooze, { chatId, until: Date.now() + 364 * day })
+    await expect(a.mutation(api.chats.snooze, { chatId, until: Date.now() + 366 * day })).rejects.toThrow(/year/)
+    await expect(a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day })).rejects.toThrow(
+      /year/,
+    )
   })
 })
 
@@ -365,6 +372,23 @@ describe('labels', () => {
     await a.mutation(api.labels.remove, { labelId: work })
     expect((await a.query(api.chats.get, { chatId: tagged })).labelIds).toEqual([])
     await expect(a.mutation(api.labels.create, { labelKey: 'short', sealed: sealed() })).rejects.toThrow(/label ID/)
+  })
+})
+
+describe('removing a label from many chats', () => {
+  it('takes it off every chat, in batches after the first thousand', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const work = await a.mutation(api.labels.create, { labelKey: 'label-key-work-0001', sealed: sealed('work') })
+    const chatId = await aChat(t, 'user_a', 'p')
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 2500; i++) await ctx.db.insert('chatLabels', { userId: 'user_a', chatId, labelId: work })
+    })
+    await a.mutation(api.labels.remove, { labelId: work })
+    expect(await a.query(api.labels.list, {})).toHaveLength(0)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.query('chatLabels').collect())).toHaveLength(0)
   })
 })
 

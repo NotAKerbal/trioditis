@@ -619,11 +619,17 @@ describe('sending', () => {
     expect((await as.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
   })
 
-  it('refuses a login flow ID that isn’t one', async () => {
+  it('takes only a login flow the network offers', async () => {
     const { as } = await ready()
     await expect(as.mutation(api.logins.start, { network: 'whatsapp', flowId: 'x'.repeat(1000) })).rejects.toThrow(
       /login method/,
     )
+    // A real flow, but another network's.
+    await expect(as.mutation(api.logins.start, { network: 'whatsapp', flowId: 'cookies' })).rejects.toThrow(
+      /login method/,
+    )
+    await as.mutation(api.logins.start, { network: 'whatsapp', flowId: 'phone' })
+    await as.mutation(api.logins.start, { network: 'whatsapp' })
   })
 
   it('keeps a retried send idempotent even if what it replied to was deleted since', async () => {
