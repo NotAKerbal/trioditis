@@ -35,7 +35,7 @@ import {
   useSidebarLayout,
 } from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -603,13 +603,16 @@ function Keys() {
       await putBackup({
         kind: 'recovery',
         ...wrap,
-        proof: await proveKey(session.keyPair),
+        proof: await proveKey(session.keyPair, session.sessionId),
         expectedRevision: revisionOf('recovery'),
+        sessionId: session.sessionId,
       })
       toast('Your new recovery key is saved. The old one no longer works.')
       setRecovery(null)
       setSaved(false)
     } catch (e) {
+      // This page's session isn't the browser's any more: start again as whoever's signed in.
+      if (sessionChanged(e)) return window.location.reload()
       toast(
         e instanceof SealError
           ? 'The new recovery key didn’t check out on this device, so nothing changed. Try again.'
@@ -648,13 +651,15 @@ function Keys() {
         currentAuthPassword,
         newAuthPassword,
         newWrap,
-        proof: await proveKey(session.keyPair),
+        proof: await proveKey(session.keyPair, session.sessionId),
         expectedRevision: revisionOf('password'),
+        sessionId: session.sessionId,
       })
       toast('Password changed.')
       setCurrent('')
       setNext('')
     } catch (err) {
+      if (sessionChanged(err)) return window.location.reload()
       // The backend's sentence says exactly what state things are in (another device changed
       // it first, or there's no password to change); show it as it is.
       toast(

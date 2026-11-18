@@ -30,7 +30,7 @@ import { currentSessionId, rememberSession, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
 
 /**
@@ -575,8 +575,10 @@ function KeySetup({
     // Taken now, not when the recovery key was shown: a proof expires after five minutes.
     let proof: string
     try {
-      proof = await proveKey(job.keyPair)
+      proof = await proveKey(job.keyPair, sessionId)
     } catch (e) {
+      // This page's session isn't the browser's any more: start again as whoever's signed in.
+      if (sessionChanged(e)) return window.location.reload()
       if (await takenElsewhere(job)) return
       return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
     }
@@ -599,10 +601,11 @@ function KeySetup({
     let kid: string
     onSaving()
     try {
-      const call = setup({ ...job.setup.args, proof })
+      const call = setup({ ...job.setup.args, proof, sessionId })
       onBackup(call)
       kid = (await call).kid
     } catch (e) {
+      if (sessionChanged(e)) return window.location.reload()
       if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
