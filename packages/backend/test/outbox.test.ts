@@ -802,3 +802,139 @@ describe('sending', () => {
     ).rejects.toThrow(/email/)
   })
 })
+
+describe('staying inside limits that a stuck host or a big chat could break', () => {
+  it('records a read receipt over many large messages without stalling the host', async () => {
+    const { t } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+    for (let i = 0; i < 60; i++) {
+      await t.run(async (ctx) => {
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId: `m${i}`,
+          networkTs: i,
+          sortKey: `${String(i).padStart(16, '0')}:m${i}`,
+          sender: { ghostId: 'g' },
+          sealed: big(`m${i}`),
+          sealedObjectId: `m${i}`,
+          sealedEdit: big(`e${i}`),
+          editEventId: `e${i}`,
+          historical: false,
+        })
+      })
+    }
+    await t.run(async (ctx) => await ctx.db.patch(chatId, { unreadCount: 60 }))
+    const outcome = await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      ...HOST,
+      events: [
+        {
+          seq: 2,
+          type: 'receipt',
+          userId: 'user_a',
+          loginId: 'login_a',
+          at: Date.now(),
+          portalId: 'portal_1',
+          sender: { self: true },
+          upToEventId: 'm0',
+          networkTs: 0,
+        },
+      ],
+    })
+    expect(outcome).toEqual({ ackedThrough: 2 })
+    // Too many newer messages to check in one go: the count isn't lowered past what was seen.
+    expect((await t.run(async (ctx) => await ctx.db.get(chatId)))!.unreadCount).toBe(60)
+  })
+
+  it('reaches an expired lease behind a window of leases for a host that’s down', async () => {
+    const { t } = await ready()
+    const expiredLease = (hostId: string, leaseUntil: number) => ({
+      userId: 'user_a',
+      network: 'whatsapp' as const,
+      loginId: 'login_a',
+      hostId,
+      payload: { type: 'markRead' as const, portalId: 'p', upToEventId: 'e' },
+      state: 'claimed' as const,
+      leaseUntil,
+      attempts: 1,
+      createdAt: 1,
+    })
+    await t.run(async (ctx) => {
+      for (let i = 1; i <= 200; i++) await ctx.db.insert('outbox', expiredLease('whatsapp-9', i))
+      await ctx.db.insert('outbox', expiredLease('whatsapp-1', 300))
+    })
+    let reached = false
+    for (let sweep = 0; sweep < 3 && !reached; sweep++) reached = (await claim(t)).length > 0
+    expect(reached).toBe(true)
+  })
+
+  it('settles every overdue send, however many were settled before it', async () => {
+    const { t } = await ready()
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 25; i++) {
+        await ctx.db.insert('outbox', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          loginId: 'login_a',
+          hostId: 'whatsapp-1',
+          clientMessageId: id(i),
+          payload: { type: 'send', portalId: 'p', clientMessageId: id(i) },
+          state: 'dispatched',
+          delivery: 'submitted',
+          expiresAt: 1 + i,
+          attempts: 1,
+          createdAt: 1,
+        })
+      }
+    })
+    for (let sweep = 0; sweep < 3; sweep++) await claim(t)
+    const rows = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(rows.map((row) => row.delivery)).toEqual(Array(25).fill('unknown'))
+  })
+
+  it('doesn’t let a refused duplicate of an old step end a login that moved on', async () => {
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await claim(t)
+    const step = (n: number, stepId: string) =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        ...HOST,
+        events: [
+          {
+            seq: n,
+            type: 'loginStep',
+            userId: 'user_a',
+            loginId: '',
+            at: Date.now(),
+            loginSessionId,
+            step: { stepId, type: 'userInput' },
+          },
+        ],
+      })
+    await step(1, 's1')
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('a') })
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('b') })
+    const submits = (await claim(t)).filter((command) => command.payload.type === 'loginSubmit')
+    expect(submits).toHaveLength(2)
+    await accept(t, submits[0]!)
+    await step(2, 's2')
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: submits[1]!.commandId,
+      lease: submits[1]!.lease,
+      accepted: false,
+      error: 'invalid_command',
+    })
+    expect(await as.query(api.logins.session, { loginSessionId })).toMatchObject({
+      state: 'active',
+      step: { stepId: 's2' },
+    })
+  })
+})
