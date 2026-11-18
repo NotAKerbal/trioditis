@@ -134,7 +134,9 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   (edit, react, unreact, redact), `upToEventId` (markRead) and `beforeEventId` (backfill).
   A `pending:` ID, a deleted message or a message from another chat is refused
   (`409 invalid_command`).
-- Backfill `limit` is 1 to 500.
+- Backfill `limit` is 1 to 500. A network whose connector can't import a bounded range
+  without pruning history it hasn't imported (WhatsApp, for now) answers an explicit
+  `backfill` with `409 unsupported`; its history arrives through the connector's own sync.
 - A repeated `commandId` always gets `202`, even if checking it again would now fail: it was
   accepted once.
 - A command accepted with `202` that then fails when run is reported as a send `failed`, or
@@ -152,6 +154,8 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
+- The bridge host keeps a safety margin (currently 2 minutes) before `notAfter` for the
+  connector's own waits, so a send can be refused as `expired` slightly before `notAfter`.
 - A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
   the bridge host emits `failed` with error `expired`, and the person decides.
 
