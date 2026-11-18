@@ -267,6 +267,19 @@ describe('what is counted', () => {
     expect(await t.run(async (ctx) => await ctx.db.query('rateLimits').collect())).toEqual([])
   })
 
+  it('matches paths as Better Auth’s router does, under its own base', async () => {
+    const { routePattern, routedPath } = await import('../convex/auth')
+    expect(routedPath('https://x.test/api/auth/nested/ok', 'https://x.test/api/auth/nested')).toBe('/ok')
+    expect(routedPath('https://x.test/api/auth/nested/ok', 'https://x.test/api/auth/nested/')).toBe('/ok')
+    expect(routedPath('https://x.test/api/auth/ok', 'https://x.test/api/auth/nested')).toBeNull()
+    expect(routedPath('https://x.test/api/auth/end-session/', 'https://x.test/api/auth')).toBe('/end-session/')
+    expect(routePattern('/callback/:id').test('/callback/abc')).toBe(true)
+    expect(routePattern('/single/*').test('/single/child')).toBe(true)
+    expect(routePattern('/single/*').test('/single/child/grandchild')).toBe(false)
+    expect(routePattern('/multi/**').test('/multi/child/grandchild')).toBe(true)
+    expect(routePattern('/end-session').test('/end-session/')).toBe(false)
+  })
+
   it('finds Better Auth’s routes however SITE_URL ends', async () => {
     const { authBaseUrl } = await import('../convex/auth')
     expect(authBaseUrl('https://trioditis.example/')).toBe('https://trioditis.example/api/auth')
