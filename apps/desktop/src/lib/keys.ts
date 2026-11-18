@@ -100,18 +100,18 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
 // - Each forget bumps a per-person count, in the same transaction as its delete, and a save
 //   checks the count it was given (its token) in the same transaction as its write. So work begun
 //   before a sign-out never lands after it.
-// - Signing out also notes, in that transaction, the session it's ending (lib/sign-out.ts). A save
-//   asks the server which session it's in first, and writes only for another one: so once a
-//   sign-out has begun, no save for that session lands, in any tab, until the server has said the
-//   session lives on (and the note is cleared). If the server never says, it stays: a session
-//   whose sign-out may have gone through keeps nothing more here.
+// - Signing out also notes, in that transaction, the session it's ending (lib/sign-out.ts), and
+//   then ends that session only. A save asks the server which session it's in first, and writes
+//   only for another one: so once a sign-out has begun, no save for that session lands, in any
+//   tab, ever. If the sign-out fails, that session keeps no key here; signing in again, a new
+//   session, can.
 // - After every forget, every tab hears that saves were fenced (onFence), so a tab still signed
 //   in takes a new token for new work, and reads its key afresh.
 const forgetsKey = (userId: string) => `${userId}\u0000forgets`
 
 interface Forgets {
   count: number
-  /** The session a sign-out under way, or unconfirmed, is ending. */
+  /** The session last signed out of, or tried to be. */
   endingSession?: string
 }
 
@@ -160,8 +160,7 @@ const REFUSALS: Record<KeepRefusal, string> = {
   unreachable: 'the server couldn’t be reached to check you’re still signed in. Try again.',
   signedOut: 'you’ve been signed out meanwhile. Sign in again.',
   fenced: 'signing out was tried in another tab meanwhile. Try again.',
-  signingOut:
-    'signing out on this device hasn’t been confirmed by the server. Sign out, then sign in again, to keep it here.',
+  signingOut: 'signing out of this session was tried on this device. Sign out, then sign in again, to keep it here.',
 }
 
 /** A save that was turned away, not one the browser's storage failed. */
@@ -211,8 +210,8 @@ export async function storeIdentity(
  * Forgets this device's key and fences saves begun before it. With `onlyKid`, it removes the
  * stored key only if it's that one: a different key here is someone else's evidence to keep.
  * With `onlyKid` null it removes nothing, and only fences: signing out while a key's backups
- * aren't known to exist. With `endingSession`, saves for that session stay refused until
- * `sessionLivesOn` (for signing out). Every tab hears of it once the forget has committed.
+ * aren't known to exist. With `endingSession`, saves for that session are refused from then on
+ * (for signing out). Every tab hears of it once the forget has committed.
  */
 export async function forgetIdentity(
   userId: string,
@@ -236,13 +235,4 @@ export async function forgetIdentity(
   } finally {
     announceFence(userId)
   }
-}
-
-/** The server said signing out of `session` didn't happen: saves for it may go ahead again. */
-export function sessionLivesOn(userId: string, session: string): Promise<void> {
-  return inTransaction<void>('readwrite', (store) =>
-    readForgets(store, userId, (forgets) => {
-      if (forgets.endingSession === session) writeForgets(store, userId, { count: forgets.count })
-    }),
-  )
 }

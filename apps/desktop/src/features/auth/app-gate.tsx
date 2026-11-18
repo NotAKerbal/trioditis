@@ -26,7 +26,7 @@ import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { currentSession, SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
+import { currentSessionId, SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -550,7 +550,7 @@ function KeySetup({
     setError(null)
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => currentSession(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => currentSessionId(userId))
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device${because(e)}`)
@@ -808,7 +808,7 @@ function Unlock({
     if (isLeaving()) return
     try {
       if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => currentSession(userId))
+      await storeIdentity(userId, kid, keyPair, token, () => currentSessionId(userId))
     } catch (e) {
       return fail(
         e instanceof KeepRefused
