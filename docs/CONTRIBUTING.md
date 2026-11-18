@@ -145,9 +145,14 @@ builds to `apps/desktop/dist`, a static single-page app.
 
 ### Starting over
 
-To throw a checkout's data away, stop `pnpm dev` and delete `packages/backend/.convex/local`,
-`packages/backend/.env.local` and `.data/`. The next `pnpm dev` starts empty, with new
-secrets. Deleting only `.data/bridge-<network>` forgets that network's logins.
+To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset`. It
+deletes this checkout's backend (`packages/backend/.convex/local` and `.env.local`) and the
+bridge hosts' logins (`.data/bridge-<network>`), then sets up again with a new test account.
+It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the secrets in
+`.data/`. Deleting only `.data/bridge-<network>` forgets that network's logins.
+
+Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
+secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.
 
 ### Schema changes before the first release
 
@@ -420,10 +425,13 @@ with the shared test vectors or fixtures updated.
 
 ## Troubleshooting
 
-- **`pnpm dev` says every slot is taken.** Another program holds the ports. `ss -ltn` shows
-  which; or remove `.data/dev.json` to pick a new slot.
-- **"This backend already has an admin."** The backend was set up with another account first.
-  Sign in with that one, or start over.
+- **`pnpm dev` says every slot is taken.** Other programs hold the ports. `ss -ltn` shows
+  which. A checkout keeps its slot even if `.data/dev.json` is deleted; removing a worktree
+  frees its slot.
+- **"This backend already has an admin who isn't the test account."** The backend was set up
+  with another account first. Sign in with that one, or `pnpm dev --setup --reset` (see
+  [Starting over](#starting-over)). A test account from before sign-in derived its password is
+  moved over by itself.
 - **`convex dev` refuses to push a schema change.** The backend holds data the new schema
   doesn't allow. Start over (see [Starting over](#starting-over)).
 - **"pnpm dev only works with this checkout's own local backend."** `packages/backend` points
