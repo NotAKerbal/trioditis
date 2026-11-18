@@ -139,6 +139,10 @@ const (
 	// The gateway only dispatches commands to hosts heard from in the last two minutes.
 	HeartbeatInterval = 30 * time.Second
 	maxBackoff        = 30 * time.Second
+	// MaxBatchBytes caps a batch's JSON, as the gateway requires. A batch holds at least one
+	// event, and no event is sent larger than protocol.MaxEventBytes, so even a batch of one
+	// stays far inside the gateway's 32 MiB body limit.
+	MaxBatchBytes = 8 * 1024 * 1024
 )
 
 // Run pushes until ctx is cancelled. Events are resent from the gateway's last
@@ -182,7 +186,8 @@ func (p *Pusher) Run(ctx context.Context) {
 			if conflict.ExpectedSeq == lastConflict {
 				p.Log.Error().Int64("expected_seq", conflict.ExpectedSeq).Dur("retry_in", conflictBackoff).
 					Msg("Gateway keeps asking for the same sequence")
-				p.sleep(ctx, conflictBackoff)
+				// New journal events mustn't cut this short: they don't change what the gateway asks.
+				p.sleepFull(ctx, conflictBackoff)
 				conflictBackoff = min(conflictBackoff*2, maxBackoff)
 			} else {
 				p.Log.Warn().Int64("expected_seq", conflict.ExpectedSeq).Msg("Gateway asked to resend the journal from an earlier point")
@@ -222,6 +227,16 @@ func (p *Pusher) sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
+// sleepFull waits d unless ctx ends, whatever is appended to the journal meanwhile.
+func (p *Pusher) sleepFull(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
 // rewind moves the acknowledgement back so events after seq are sent again.
 func (p *Pusher) rewind(ctx context.Context, seq int64) error {
 	return p.Store.SetAckedThrough(ctx, max(seq, 0))
@@ -246,12 +261,9 @@ func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
 		if ackedThrough < acked {
 			p.Log.Warn().Int64("gateway", ackedThrough).Int64("local", acked).Msg("Gateway is behind the journal; resending")
 		}
+		// This also scrubs a login's QR or pairing code from what the gateway now has.
 		if err = p.Store.SetAckedThrough(ctx, ackedThrough); err != nil {
 			return err
-		}
-		// A login's QR or pairing code isn't needed once the gateway has it.
-		if err = p.Store.ScrubLoginDisplays(ctx, ackedThrough); err != nil {
-			p.Log.Err(err).Msg("Failed to scrub login codes from the journal")
 		}
 	}
 	return nil
@@ -273,7 +285,13 @@ func (p *Pusher) heartbeat(ctx context.Context) error {
 	return p.reconcile(ctx, ackedThrough)
 }
 
-// pushOnce sends the next batch, if any. It reports whether anything was sent.
+// ErrNoProgress is a batch the gateway took without acknowledging any of it.
+var ErrNoProgress = errors.New("gateway acknowledged none of the batch")
+
+// pushOnce sends the next batch, if any. It reports whether anything was sent. The gateway
+// may acknowledge only part of a batch (it stops early to stay inside its own limits); the
+// rest is sent again next time, which is normal progress. Only an acknowledgement that
+// doesn't move at all is an error, so the caller backs off instead of resending at once.
 func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 	acked, err := p.Store.AckedThrough(ctx)
 	if err != nil {
@@ -283,9 +301,41 @@ func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 	if err != nil || len(events) == 0 {
 		return false, err
 	}
+	events = p.capBytes(events, MaxBatchBytes)
 	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(events))
 	if err != nil {
 		return false, err
 	}
-	return true, p.reconcile(ctx, ackedThrough)
+	if err = p.reconcile(ctx, ackedThrough); err != nil {
+		return true, err
+	}
+	if ackedThrough <= acked {
+		return true, ErrNoProgress
+	}
+	return true, nil
+}
+
+// capBytes keeps the leading events whose JSON fits in limit, and always at least one. An
+// event over protocol.MaxEventBytes (only a journal row from before the host enforced the
+// limit can be) goes as a bare stand-in: the gateway quarantines it, as it would the whole
+// event, and the journal moves on instead of being stuck behind a body it refuses.
+func (p *Pusher) capBytes(events []*protocol.Event, limit int) []*protocol.Event {
+	total := 0
+	for i, evt := range events {
+		data, err := json.Marshal(evt)
+		if err == nil && len(data) > protocol.MaxEventBytes {
+			p.Log.Warn().Int64("seq", evt.Seq).Str("event_type", evt.Type).Int("bytes", len(data)).
+				Msg("Journal event is too large to send; sending a stand-in for the gateway to quarantine")
+			events[i] = protocol.Bare(evt)
+			data, err = json.Marshal(events[i])
+		}
+		if err != nil {
+			return events[:max(i, 1)]
+		}
+		total += len(data) + 1
+		if total > limit && i > 0 {
+			return events[:i]
+		}
+	}
+	return events
 }

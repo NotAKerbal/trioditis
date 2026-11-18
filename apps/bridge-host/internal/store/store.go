@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/util/dbutil"
@@ -78,6 +79,13 @@ var upgrades = dbutil.BuildUpgradeTable().
 		}
 		return migratePortalValues(ctx, db)
 	}).
+	WithRaw(2, 3, 0, "Durable login sessions", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A login in progress lives in memory; this row says one was promised, so a restart can
+		// tell the person it ended instead of leaving it waiting forever.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_login_session (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, started_at BIGINT NOT NULL)`,
+		})
+	}).
 	Finish()
 
 func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
@@ -123,6 +131,11 @@ func migratePortalValues(ctx context.Context, db *dbutil.Database) error {
 // Store is the bridge host's own tables.
 type Store struct {
 	DB *dbutil.Database
+	// writeLock lets one of the bridge host's own write transactions run at a time. They all
+	// take the journal counter, and some also insert ID and membership rows; serializing them
+	// in the process means two can't take those locks in opposite orders and deadlock on
+	// PostgreSQL. (SQLite serializes write transactions anyway.)
+	writeLock sync.Mutex
 }
 
 // New makes the store a child of the bridge's database, with its own version table.
@@ -138,6 +151,14 @@ func (s *Store) Upgrade(ctx context.Context) error {
 // Txn runs fn in one transaction. Store calls inside it join the transaction, so a state
 // change and the journal events reporting it commit together or not at all.
 func (s *Store) Txn(ctx context.Context, fn func(ctx context.Context) error) error {
+	// A call inside a transaction (ours, or bridgev2's that called into the connector) joins
+	// it: taking the lock again would wait on ourselves, or on a transaction that is waiting
+	// for this call to return.
+	if _, inside := s.DB.Execable(ctx).(dbutil.Transaction); inside {
+		return s.DB.DoTxn(ctx, nil, fn)
+	}
+	s.writeLock.Lock()
+	defer s.writeLock.Unlock()
 	return s.DB.DoTxn(ctx, nil, fn)
 }
 
@@ -159,6 +180,13 @@ func (s *Store) lockCounters(ctx context.Context, column string) (int64, error) 
 func (s *Store) Append(ctx context.Context, events ...*protocol.Event) error {
 	if len(events) == 0 {
 		return nil
+	}
+	// An event the backend would refuse (a field missing, over a size limit) is never
+	// journaled: it could only be quarantined, and one too large could hold up the journal.
+	for _, evt := range events {
+		if err := evt.Validate(); err != nil {
+			return fmt.Errorf("refusing to journal an invalid event: %w", err)
+		}
 	}
 	err := s.Txn(ctx, func(ctx context.Context) error {
 		next, err := s.lockCounters(ctx, "next_seq")
@@ -227,10 +255,15 @@ func (s *Store) AckedThrough(ctx context.Context) (int64, error) {
 	return acked, err
 }
 
-// SetAckedThrough records the gateway's acknowledgement.
+// SetAckedThrough records the gateway's acknowledgement, and in the same transaction scrubs
+// login codes from what it acknowledged, so the two can't diverge.
 func (s *Store) SetAckedThrough(ctx context.Context, seq int64) error {
-	_, err := s.DB.Exec(ctx, `UPDATE trioditis_journal_state SET acked_through=$1 WHERE id=1`, seq)
-	return err
+	return s.Txn(ctx, func(ctx context.Context) error {
+		if _, err := s.DB.Exec(ctx, `UPDATE trioditis_journal_state SET acked_through=$1 WHERE id=1`, seq); err != nil {
+			return err
+		}
+		return s.ScrubLoginDisplays(ctx, seq)
+	})
 }
 
 // LastSeq is the highest sequence number in the journal, or 0.
@@ -283,6 +316,55 @@ func (s *Store) ScrubLoginDisplays(ctx context.Context, throughSeq int64) error 
 		}
 	}
 	return nil
+}
+
+// PutLoginSession records that a login is in progress.
+func (s *Store) PutLoginSession(ctx context.Context, id, userID string) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_login_session (id, user_id, started_at) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+		id, userID, time.Now().UnixMilli())
+	return err
+}
+
+// DeleteLoginSession records that a login ended. It reports whether it was in progress.
+func (s *Store) DeleteLoginSession(ctx context.Context, id string) (bool, error) {
+	res, err := s.DB.Exec(ctx, `DELETE FROM trioditis_login_session WHERE id=$1`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// HasLoginSession reports whether a login is recorded as in progress.
+func (s *Store) HasLoginSession(ctx context.Context, id string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trioditis_login_session WHERE id=$1)`, id).Scan(&exists)
+	return exists, err
+}
+
+// LoginSession is a login that was in progress.
+type LoginSession struct {
+	ID     string
+	UserID string
+}
+
+// LoginSessions lists logins in progress.
+func (s *Store) LoginSessions(ctx context.Context) ([]LoginSession, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id, user_id FROM trioditis_login_session`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LoginSession
+	for rows.Next() {
+		var ls LoginSession
+		if err = rows.Scan(&ls.ID, &ls.UserID); err != nil {
+			return nil, err
+		}
+		out = append(out, ls)
+	}
+	return out, rows.Err()
 }
 
 // Command states.

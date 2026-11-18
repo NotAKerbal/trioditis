@@ -84,6 +84,9 @@ func Decode(s string) ([]byte, error) {
 	return b, nil
 }
 
+// DecodedLen is how many bytes a base64url string without padding holds.
+func DecodedLen(s string) int { return base64.RawURLEncoding.DecodedLen(len(s)) }
+
 // Encode writes base64url without padding.
 func Encode(b []byte) string { return encode(b) }
 

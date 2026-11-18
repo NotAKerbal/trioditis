@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 
@@ -16,8 +18,9 @@ import (
 )
 
 // loginSession is one run of a network's login flow, driven by loginStart, loginSubmit and
-// loginCancel commands. Sessions live in memory: a login interrupted by a restart is
-// started again by the person.
+// loginCancel commands. The flow lives in memory, but a row in the store records that it is
+// in progress until its last step is reported, so a restart ends it with an error the
+// person sees (RecoverLogins) rather than leaving it waiting.
 type loginSession struct {
 	c       *Connector
 	id      string
@@ -76,6 +79,10 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command,
 	if err != nil {
 		return &CommandError{Status: 409, Code: protocol.ErrLoginFailed, Detail: fmt.Sprintf("can't start login: %T", err)}
 	}
+	if err = c.Store.PutLoginSession(ctx, cmd.LoginSessionID, cmd.UserID); err != nil {
+		process.Cancel()
+		return err
+	}
 	sessionCtx, cancel := context.WithCancel(c.Bridge.BackgroundCtx)
 	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel}
 	c.logins.Store(s.id, s)
@@ -89,7 +96,24 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command,
 func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command, check bool) error {
 	raw, ok := c.logins.Load(cmd.LoginSessionID)
 	if !ok {
-		return conflict(protocol.ErrInvalidCommand, "unknown login session")
+		// A login recorded as in progress but not running here was lost (a restart): the
+		// person is waiting on it, so it ends with an error they see. One that has simply
+		// ended (a second submit after it completed) is only refused.
+		// One this process ended is over, not lost, even in the moment before its record is
+		// deleted.
+		if _, ended := c.endedLogins.Load(cmd.LoginSessionID); ended {
+			return conflict(protocol.ErrInvalidCommand, "the login is over")
+		}
+		lost, err := c.Store.HasLoginSession(ctx, cmd.LoginSessionID)
+		if err != nil {
+			return err
+		} else if !lost {
+			return conflict(protocol.ErrInvalidCommand, "unknown login session")
+		}
+		if err = c.endLoginWithError(ctx, cmd.UserID, cmd.LoginSessionID, protocol.ErrLoginFailed); err != nil {
+			return err
+		}
+		return conflict(protocol.ErrLoginFailed, "the login was lost")
 	}
 	s := raw.(*loginSession)
 	if s.userID != cmd.UserID {
@@ -156,7 +180,7 @@ func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command
 		return nil
 	}
 	s.finish()
-	return s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepCancelled})
+	return s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepCancelled})
 }
 
 func (s *loginSession) finish() {
@@ -170,10 +194,43 @@ func (s *loginSession) finish() {
 	s.process.Cancel()
 }
 
+// maxLoginStepBytes is the most a login step may hold, as the backend requires.
+const maxLoginStepBytes = 64 * 1024
+
 func (s *loginSession) emit(step *protocol.LoginStep) error {
+	if data, err := json.Marshal(step); err == nil && len(data) > maxLoginStepBytes {
+		// A network asking to show something this big can't be shown; the login ends instead.
+		s.c.forgetLogin(s.id)
+		s.finish()
+		return s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: protocol.ErrLoginFailed})
+	}
 	return s.c.emit(s.c.Bridge.BackgroundCtx, &protocol.Event{
 		Type: protocol.EventLoginStep, UserID: s.userID, LoginID: step.LoginID, LoginSessionID: s.id, Step: step,
 	})
+}
+
+// end reports a login's last step and records that it is no longer in progress, together.
+func (s *loginSession) end(step *protocol.LoginStep) error {
+	return s.c.endLogin(s.c.Bridge.BackgroundCtx, s.userID, s.id, step)
+}
+
+// endLogin reports a login's last step and forgets that it was in progress, in one
+// transaction, so a restart neither ends it twice nor misses it.
+func (c *Connector) endLogin(ctx context.Context, userID, loginSessionID string, step *protocol.LoginStep) error {
+	evt := &protocol.Event{
+		Type: protocol.EventLoginStep, UserID: userID, LoginID: step.LoginID, LoginSessionID: loginSessionID, Step: step,
+		At: time.Now().UnixMilli(),
+	}
+	err := c.Store.Txn(ctx, func(ctx context.Context) error {
+		if _, err := c.Store.DeleteLoginSession(ctx, loginSessionID); err != nil {
+			return err
+		}
+		return c.Store.Append(ctx, evt)
+	})
+	if err == nil {
+		c.Notify()
+	}
+	return err
 }
 
 // advance records the step the network returned and reports it. A display-and-wait step
@@ -190,7 +247,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		err = errors.New("login process returned no step")
 	}
 	if err != nil {
-		s.c.logins.Delete(s.id)
+		s.c.forgetLogin(s.id)
 		s.finish()
 		// Only the error's type is logged: a connector's error text can quote what the person
 		// typed. The person sees a code.
@@ -199,7 +256,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = protocol.ErrTimeout
 		}
-		if emitErr := s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code}); emitErr != nil {
+		if emitErr := s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code}); emitErr != nil {
 			log.Err(emitErr).Msg("Failed to report login error")
 		}
 		return
@@ -244,7 +301,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			}
 			out.LoginID = loginID
 		}
-		s.c.logins.Delete(s.id)
+		s.c.forgetLogin(s.id)
 		s.lock.Lock()
 		s.done = true
 		s.lock.Unlock()
@@ -253,7 +310,11 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		s.advance(nil, errors.New("this login step type isn't supported: "+string(step.Type)))
 		return
 	}
-	if err := s.emit(out); err != nil {
+	report := s.emit
+	if out.Type == protocol.StepComplete {
+		report = s.end
+	}
+	if err := report(out); err != nil {
 		log.Err(err).Msg("Failed to report login step")
 	}
 	if step.Type == bridgev2.LoginStepTypeDisplayAndWait {
@@ -270,19 +331,22 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 }
 
 // endLoginWithError ends a login the person was promised would go ahead (its command got a
-// 202) but that can't: a restart lost it, or its command couldn't run.
-func (c *Connector) endLoginWithError(userID, loginSessionID, code string) {
+// 202) but that can't: a restart lost it, or its command couldn't run. Ending one that has
+// already ended does no harm: the backend ignores steps for a login that is over.
+func (c *Connector) endLoginWithError(ctx context.Context, userID, loginSessionID, code string) error {
 	if loginSessionID == "" {
-		return
+		return nil
 	}
+	c.endedLogins.Store(loginSessionID, struct{}{})
 	if raw, ok := c.logins.LoadAndDelete(loginSessionID); ok {
 		raw.(*loginSession).finish()
 	}
-	err := c.emit(c.Bridge.BackgroundCtx, &protocol.Event{
-		Type: protocol.EventLoginStep, UserID: userID, LoginSessionID: loginSessionID,
-		Step: &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code},
-	})
-	if err != nil {
-		c.Log.Err(err).Msg("Failed to report an interrupted login")
-	}
+	return c.endLogin(ctx, userID, loginSessionID, &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
+}
+
+// forgetLogin stops running a login. It is remembered as ended (by this process), so a submit
+// arriving before its record is deleted isn't taken for a login a restart lost.
+func (c *Connector) forgetLogin(id string) {
+	c.endedLogins.Store(id, struct{}{})
+	c.logins.Delete(id)
 }
