@@ -162,6 +162,16 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   )
 }
 
+/** A setup step that finished while signing out ran: the backups are saved, and the key was or wasn't kept here yet. */
+interface Parked {
+  kid: string
+  keyPair: KeyPair
+  /** The recovery key shown here lost to another device's. */
+  lost: boolean
+  /** The key is already kept on this device. */
+  kept: boolean
+}
+
 /** What key setup is for: a new key, or the missing backups of one this device holds. */
 interface SetupFor {
   existing?: KeyPair
@@ -244,6 +254,8 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
+  // Where setup stopped because signing out began (see `park`).
+  const [parked, setParked] = useState<Parked | null>(null)
   // Signing out from setup waits for a backup call or save still under way, and forgets the
   // key once the server holds its backups (before that, this device's copy may be the only
   // one). While it runs, nothing else on these screens starts.
@@ -405,8 +417,17 @@ function KeySetup({
   }
 
   /** Keeps the key on this device, once the server has its backups. */
+  /**
+   * Stops where setup is while signing out runs: nothing moves on, and nothing stays busy. If
+   * signing out works, the page leaves anyway; if it doesn't, Continue picks up from here.
+   */
+  function park(step: Parked) {
+    setParked(step)
+    setBusy(false)
+  }
+
   async function keep(kid: string, keyPair: KeyPair, lost: boolean) {
-    if (leavingRef.current) return
+    if (leavingRef.current) return park({ kid, keyPair, lost, kept: false })
     setBusy(true)
     setError(null)
     try {
@@ -419,6 +440,7 @@ function KeySetup({
       setBusy(false)
       return
     }
+    if (leavingRef.current) return park({ kid, keyPair, lost, kept: true })
     // Done, unless the recovery key shown here lost the race: then say so before going on.
     if (!lost) return complete(kid)
     setKeptKid(null)
@@ -426,8 +448,22 @@ function KeySetup({
     setBusy(false)
   }
 
+  /** Carries on from where signing out stopped setup, once it didn't work. */
+  async function resume(step: Parked) {
+    setParked(null)
+    if (!step.kept) return keep(step.kid, step.keyPair, step.lost)
+    if (step.lost) {
+      setFinished(step.kid)
+      return
+    }
+    setBusy(true)
+    await complete(step.kid)
+  }
+
   /** Opens the app with the key kept here; if it won't read back, Try again stays on offer. */
   async function complete(kid: string) {
+    // Not while signing out runs: if it fails, its message and retry must still be on screen.
+    if (leavingRef.current) return park({ kid, keyPair: prepared!.keyPair, lost: false, kept: true })
     try {
       await onDone(kid)
     } catch (e) {
@@ -436,6 +472,20 @@ function KeySetup({
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
       setBusy(false)
     }
+  }
+
+  if (parked && !leaving) {
+    return (
+      <AuthCard
+        title="Finish setting up your key"
+        description="Your key’s backups are saved on the server. Continue to keep it on this device and open Trioditis."
+      >
+        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void resume(parked)}>
+          Continue
+        </Button>
+        {signOutButton()}
+      </AuthCard>
+    )
   }
 
   if (keyTaken) {
