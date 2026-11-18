@@ -356,12 +356,18 @@ const body = openJson<MessagePlaintext>(message.sealedEdit ?? message.sealed!, i
 Alongside the page:
 
 - `api.messages.reactions({ chatId, messageIds })`, at most 100 IDs, returns
-  `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message.
-  `senderKey` is `self` or `ghost:<ghostId>`. A deleted message has none (it's left out,
-  or gets an empty list), and so does an ID that isn't one of the person's messages. It
-  never reads the messages themselves, and reads at most 8 MiB of reactions, going through
-  the IDs in order: in the rare case that runs out, the IDs it didn't reach are left out,
-  and asking again for those (minus deleted ones) gets them.
+  `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message
+  (a message with more shows its first 100). `senderKey` is `self` or `ghost:<ghostId>`.
+  It never reads the messages themselves, and reads at most 8 MiB of reactions, going
+  through the IDs in order, so it answers a prefix of `messageIds`:
+  - **The first ID is always answered** unless it is a deleted message: one message's
+    reactions (at most 100 rows of at most 4 KiB) always fit. So a first ID missing from
+    the answer is a deleted message, and the client can move past it.
+  - A later ID is missing either because it is a deleted message or because the 8 MiB ran
+    out before it. To tell which, ask again starting from that ID: then it's first.
+  - A deleted message is missing while its reactions are being removed, and present with
+    `[]` once they are. An ID that isn't a message in this person's chat is present with
+    `[]`. Either way it has no reactions to show.
 - `api.messages.receipts({ chatId })` returns `[{ senderKey, upToEventId, networkTs }]`.
 - `api.messages.typing({ chatId })` returns `[{ senderKey, expiresAt }]` for rows still
   live when it ran. Hide a row once `expiresAt` passes: queries don't rerun just because
