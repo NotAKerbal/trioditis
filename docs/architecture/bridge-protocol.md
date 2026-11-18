@@ -122,6 +122,22 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 | `logout`            |                                                                                                                                        | `loginState` (`LOGGED_OUT`)                                   |
 | `backfill`          | `portalId`, `beforeEventId?`, `limit`                                                                                                  | `message` events with `historical: true`, then `backfillDone` |
 
+### Command validation
+
+- `send` needs `notAfter`; without it the command is refused (`400 invalid_command`).
+- Targets must be bridged messages in the command's own chat: `replyTo`, `targetEventId`
+  (edit, react, unreact, redact), `upToEventId` (markRead) and `beforeEventId` (backfill).
+  A `pending:` ID, a deleted message or a message from another chat is refused
+  (`409 invalid_command`).
+- Backfill `limit` is 1 to 500.
+- A repeated `commandId` always gets `202`, even if checking it again would now fail: it was
+  accepted once.
+- A command accepted with `202` that then fails when run is reported as a send `failed`, or
+  a login step of type `error`.
+- After a restart, an interrupted `loginStart` or `loginSubmit` ends with a login step of type
+  `error` (`internal` or `login_failed`); a send handed to the network but not recorded ends
+  `unknown`.
+
 ### Delivery rules for `send`
 
 - The bridge host emits `submitted` when it hands the message to the network connector,
@@ -167,6 +183,10 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
 
 The app renders every network's login from these steps; there is no per-network login
 UI.
+
+Pairing data shown to the person (a QR code, a pairing code) is scrubbed from the bridge
+host's journal once the gateway has acknowledged the step, so a replay of that step has an
+empty `display.data`.
 
 What a person types or pastes into a login step (phone numbers, codes, cookies) is a
 credential. The client seals it to the bridge key, so the outbox never holds it in
