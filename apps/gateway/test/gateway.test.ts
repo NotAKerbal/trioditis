@@ -97,6 +97,22 @@ describe('events', () => {
     expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 3])
   })
 
+  it('never sends an event with a field it shouldn’t have, where plaintext could be', async () => {
+    const backend = fakeBackend()
+    const secret = 'plaintext the bridge host should have sealed'
+    const events = [
+      event(1),
+      { ...event(2), body: secret },
+      { ...event(3), sender: { ghostId: 'g', name: secret } },
+      event(4),
+    ]
+    expect(await post(await serve(backend), batch(events))).toEqual({ status: 200, body: { ackedThrough: 4 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify((backend.ingest as ReturnType<typeof vi.fn>).mock.calls)).not.toContain(secret)
+    expect(JSON.stringify((backend.quarantineInvalid as ReturnType<typeof vi.fn>).mock.calls)).not.toContain(secret)
+    expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 4])
+  })
+
   it('quarantines an unknown type as unknown, never passing it on', async () => {
     const backend = fakeBackend()
     backend.ingest = vi.fn(async () => Promise.reject(new Error('ArgumentValidationError')))
@@ -206,12 +222,13 @@ describe('events', () => {
 
   it('quarantines the one event the backend refuses and applies the rest', async () => {
     const backend = fakeBackend()
+    // Well-formed here, refused by the backend's validators (a check only they make).
     backend.ingest = vi.fn(async (args) => {
-      const events = args.events as { seq: number; bad?: boolean }[]
-      if (events.some((e) => e.bad)) throw new Error('ArgumentValidationError: Value does not match validator.')
+      const events = args.events as { seq: number }[]
+      if (events.some((e) => e.seq === 2)) throw new Error('ArgumentValidationError: Value does not match validator.')
       return { ackedThrough: events.at(-1)?.seq ?? 0 }
     })
-    const result = await post(await serve(backend), batch([event(1), { ...event(2), bad: true }, event(3)]))
+    const result = await post(await serve(backend), batch([event(1), event(2), event(3)]))
     expect(result).toEqual({ status: 200, body: { ackedThrough: 3 } })
     expect(backend.quarantineInvalid).toHaveBeenCalledWith({
       hostId: 'whatsapp-1',

@@ -196,8 +196,16 @@ export type EventBatchConflict = { expectedSeq: number }
 interface CommandBase {
   commandId: string
   userId: string
-  /** Absent only for `loginStart`, which has no login yet. */
+  /**
+   * Absent for the commands of a login that isn't established yet (`loginStart`,
+   * `loginSubmit`, `loginCancel`), which name it by `loginSessionId` instead.
+   */
   loginId?: string
+  /**
+   * When the command stops being worth running (ms). Every send has one; login commands carry
+   * their 10-minute deadline too, and others may.
+   */
+  notAfter?: number
 }
 
 export type BridgeCommand = CommandBase &

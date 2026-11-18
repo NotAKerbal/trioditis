@@ -292,7 +292,14 @@ const OVERDUE_GRACE_MS = 60 * 60 * 1000
 async function settleOverdueSends(ctx: MutationCtx, now: number) {
   const overdue = await ctx.db
     .query('outbox')
-    .withIndex('by_expiry', (q) => q.eq('state', 'dispatched').lte('expiresAt', now - OVERDUE_GRACE_MS))
+    // From 0: a send settled here has no `expiresAt`, which sorts before every number, so
+    // without a lower bound the same settled rows would fill every scan.
+    .withIndex('by_expiry', (q) =>
+      q
+        .eq('state', 'dispatched')
+        .gte('expiresAt', 0)
+        .lte('expiresAt', now - OVERDUE_GRACE_MS),
+    )
     .take(MAX_EXPIRIES)
   for (const command of overdue) {
     const unsettled =
@@ -309,6 +316,10 @@ async function failLogin(ctx: MutationCtx, command: Doc<'outbox'>, error: Doc<'o
   const sessionId = ctx.db.normalizeId('loginSessions', payload.loginSessionId)
   const session = sessionId ? await ctx.db.get(sessionId) : null
   if (!session || session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
+  // Only while the login still waits on this command: a refused duplicate of a step it has
+  // moved past mustn't end it.
+  if (payload.type === 'loginStart' && session.state !== 'pending') return
+  if (payload.type === 'loginSubmit' && !(session.state === 'active' && session.step?.stepId === payload.stepId)) return
   await ctx.db.patch(session._id, {
     state: 'error',
     step: { stepId: 'rejected', type: 'error', error: error ?? 'invalid_command' },
@@ -402,13 +413,31 @@ export const claimCommands = mutation({
     if (cursor) await ctx.db.patch(cursor._id, { after: nextAfter })
     else await ctx.db.insert('claimCursor', { key: 'queued', after: nextAfter })
 
-    const candidates = [
-      ...(await ctx.db
-        .query('outbox')
-        .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', now))
-        .take(SCAN_EXPIRED_LEASES)),
-      ...queued,
-    ].sort((a, b) => a._creationTime - b._creationTime)
+    // Expired leases the same way: those pinned to a host that's down mustn't hide the rest.
+    const leaseCursor = await ctx.db
+      .query('claimCursor')
+      .withIndex('by_key', (q) => q.eq('key', 'leases'))
+      .unique()
+    const leaseAfter = Math.min(leaseCursor?.after ?? 0, now)
+    let leases = await ctx.db
+      .query('outbox')
+      .withIndex('by_lease', (q) => q.eq('state', 'claimed').gt('leaseUntil', leaseAfter).lte('leaseUntil', now))
+      .take(SCAN_EXPIRED_LEASES)
+    let nextLeaseAfter = leases.at(-1)?.leaseUntil ?? 0
+    if (leases.length < SCAN_EXPIRED_LEASES) {
+      if (leaseAfter > 0) {
+        const wrapped = await ctx.db
+          .query('outbox')
+          .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', leaseAfter))
+          .take(SCAN_EXPIRED_LEASES - leases.length)
+        leases = [...wrapped, ...leases]
+      }
+      nextLeaseAfter = 0
+    }
+    if (leaseCursor) await ctx.db.patch(leaseCursor._id, { after: nextLeaseAfter })
+    else await ctx.db.insert('claimCursor', { key: 'leases', after: nextLeaseAfter })
+
+    const candidates = [...leases, ...queued].sort((a, b) => a._creationTime - b._creationTime)
 
     const claimed = []
     const heldChats = new Set<Id<'chats'>>()

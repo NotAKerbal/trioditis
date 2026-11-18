@@ -1,7 +1,9 @@
 import type { BridgeEvent } from '@trioditis/core/bridge-protocol'
 import { NETWORKS, type Network } from '@trioditis/core'
 import { convexToJson, type Value } from 'convex/values'
+import { bridgeEvent } from '@trioditis/backend/validators'
 import type { Backend } from './backend.ts'
+import { conforms } from './shape.ts'
 
 // POST /v1/events: a bridge host's events, applied in order. The answer acknowledges a
 // sequence only once Convex has committed everything up to it. See
@@ -32,8 +34,8 @@ const isText = (value: unknown) => typeof value === 'string' && value.length > 0
 
 /**
  * The batch, if it is one. Every event needs a usable sequence number, without which the
- * order can't be kept; the rest of each event is checked by the backend, and an event it
- * can't use is quarantined without stopping the ones after.
+ * order can't be kept. The rest of each event is checked here (`sendable`) and again by the
+ * backend, and an event either can't use is quarantined without stopping the ones after.
  */
 export function parseBatch(value: unknown): Batch | null {
   if (typeof value !== 'object' || value === null) return null
@@ -52,13 +54,18 @@ function isValidationError(error: unknown) {
   return error instanceof Error && error.message.includes('ArgumentValidationError')
 }
 
-/** Whether the Convex client can encode the event at all, within the size any event may have. */
-function encodable(event: unknown) {
+/**
+ * Whether the event can go to the backend: the Convex client can encode it, within the size
+ * any event may have, and it has exactly an event's shape. One that doesn't (a stray field
+ * could be plaintext) is quarantined without being sent.
+ */
+function sendable(event: unknown) {
   try {
-    return Buffer.byteLength(JSON.stringify(convexToJson(event as Value))) <= MAX_EVENT_BYTES
+    if (Buffer.byteLength(JSON.stringify(convexToJson(event as Value))) > MAX_EVENT_BYTES) return false
   } catch {
     return false
   }
+  return conforms(bridgeEvent, event)
 }
 
 const EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -91,9 +98,8 @@ type Outcome = { ackedThrough: number } | { expectedSeq: number }
  */
 async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[]): Promise<Outcome> {
   const target = { hostId: batch.hostId, network: batch.network }
-  // An event the Convex client can't even encode would fail the whole chunk without reaching
-  // the backend's validators, so those go one at a time from the start.
-  if (events.every(encodable)) {
+  // A chunk holding an event that can't be sent goes one event at a time from the start.
+  if (events.every(sendable)) {
     try {
       return await ingestAll(backend, target, events)
     } catch (error) {
@@ -102,7 +108,7 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
   }
   let outcome: Outcome = { ackedThrough: 0 }
   for (const event of events) {
-    let invalid = !encodable(event)
+    let invalid = !sendable(event)
     if (!invalid) {
       try {
         outcome = await backend.ingest({ ...target, events: [event] as never })
