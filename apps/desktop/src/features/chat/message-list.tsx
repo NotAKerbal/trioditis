@@ -48,7 +48,7 @@ export function MessageList(props: MessageListProps) {
   // Set while earlier messages load: the top-most message in view and how far down it sat, to
   // put it back there. Anchoring on a message, not the list's height, keeps it still even if a
   // new message arrives at the bottom meanwhile.
-  const before = useRef<{ firstId: string | undefined; anchorId: string; offset: number } | null>(null)
+  const before = useRef<{ anchorId: string; index: number; offset: number } | null>(null)
 
   const loadEarlier = () => {
     const el = scroller.current
@@ -58,9 +58,10 @@ export function MessageList(props: MessageListProps) {
         (m) => m.getBoundingClientRect().bottom > top,
       )
       if (anchor) {
+        const anchorId = anchor.dataset.messageId!
         before.current = {
-          firstId: messages[0]?.id,
-          anchorId: anchor.dataset.messageId!,
+          anchorId,
+          index: messages.findIndex((m) => m.id === anchorId),
           offset: anchor.getBoundingClientRect().top - top,
         }
       }
@@ -75,8 +76,12 @@ export function MessageList(props: MessageListProps) {
   useLayoutEffect(() => {
     const el = scroller.current
     if (!el) return
+    // The earlier page has come when messages appear above the anchor, not merely when the first
+    // row changes (a live update can do that too, before the page arrives).
     const was = before.current
-    if (was && messages[0]?.id !== was.firstId) {
+    const index = was ? messages.findIndex((m) => m.id === was.anchorId) : -1
+    if (was && index < 0) before.current = null
+    else if (was && index > was.index) {
       const anchor = el.querySelector<HTMLElement>(`[data-message-id="${was.anchorId}"]`)
       if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
       before.current = null
@@ -215,7 +220,7 @@ export function MessageList(props: MessageListProps) {
               <span className="text-subtle-foreground">Opening…</span>
             ) : s.body === null ? (
               <span className="text-subtle-foreground italic">
-                This scheduled message can’t be opened on this device.
+                This scheduled message can’t be shown here. You can still cancel it.
               </span>
             ) : (
               s.body

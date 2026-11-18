@@ -148,7 +148,7 @@ export function Sidebar({
   // Search looks through the chats loaded so far, of the views shown; these are the ones with more.
   const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
   const unloaded = searched.filter((l) => l.canLoadMore)
-  const searchedAll = searched.every((l) => l.chats !== undefined && !l.canLoadMore)
+  const searchedAll = searched.every((l) => l.exhausted)
   const searchLabel = !searchedAll
     ? 'Results in loaded chats'
     : focused

@@ -76,6 +76,8 @@ export interface ChatList {
   chats: Chat[] | undefined
   /** More chats exist past what's loaded: show "50+" and load on scroll. */
   canLoadMore: boolean
+  /** Every chat in the view is loaded: not while a page is still on its way. */
+  exhausted: boolean
   loadMore: () => void
 }
 
@@ -99,7 +101,12 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
       !enabled || status === 'LoadingFirstPage' ? undefined : results.map((row) => toChat(row as ChatRow, session)),
     [enabled, status, results, session],
   )
-  return { chats, canLoadMore: status === 'CanLoadMore', loadMore: () => loadMore(50) }
+  return {
+    chats,
+    canLoadMore: status === 'CanLoadMore',
+    exhausted: enabled && status === 'Exhausted',
+    loadMore: () => loadMore(50),
+  }
 }
 
 export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
@@ -236,7 +243,8 @@ export function useScheduled(chatId?: ChatId) {
 
 type ScheduledCopy = FunctionReturnType<typeof api.scheduled.copies>[number]
 // Outside the hook, so useQueries can keep its result while the answers don't change.
-const copiesOf = (results: { data?: ScheduledCopy[] | undefined }[]) => results.flatMap((r) => r.data ?? [])
+const copiesOf = (results: { data?: ScheduledCopy[] | undefined; isError: boolean }[]) =>
+  results.map((r) => ({ rows: r.data, failed: r.isError }))
 
 /**
  * The person's sealed copies of scheduled messages, opened on this device, by scheduled ID.
@@ -246,15 +254,19 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
   const session = useSession()
   const batches: Id<'scheduledSends'>[][] = []
   for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20))
-  const data = useQueries({
+  const answers = useQueries({
     queries: batches.map((scheduledIds) => convexQuery(api.scheduled.copies, { scheduledIds })),
     combine: copiesOf,
   })
   const clientIds = useScheduled()
   return useMemo(() => {
-    // Text once opened; null for a copy that came but doesn't open here; missing while it loads.
+    // Text once opened; null for a copy that doesn't open here or couldn't be fetched (it can
+    // still be cancelled, with nothing to put back); missing while it loads.
     const out = new Map<string, string | null>()
-    for (const row of data) {
+    answers.forEach((answer, i) => {
+      if (answer.failed) for (const id of batches[i] ?? []) out.set(id, null)
+    })
+    for (const row of answers.flatMap((answer) => answer.rows ?? [])) {
       const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
       const body = tryOpen<MessagePlaintext>(
@@ -267,5 +279,6 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
       out.set(row._id, body ?? null)
     }
     return out
-  }, [data, clientIds, session])
+    // `batches` follows `ids`, which `answers` already reflects.
+  }, [answers, clientIds, session])
 }

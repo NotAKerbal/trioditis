@@ -197,7 +197,7 @@ function KeySetup({
   userId: string
   existing?: KeyPair
   has: SetupFor['has']
-  /** Saving has started: keep this screen until onDone or onLeave. */
+  /** A key is shown or being saved: keep this screen until onDone or onLeave. */
   onSaving: () => void
   /** The person gave up keeping the key here after the server saved it; they'll unlock instead. */
   onLeave: () => void
@@ -221,6 +221,8 @@ function KeySetup({
   // Another device installed its recovery key first, so the one shown here doesn't work.
   const [recoveryLost, setRecoveryLost] = useState(false)
   const [finished, setFinished] = useState(false)
+  // Set when the server has the backups but which recovery key it kept couldn't be checked.
+  const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
 
   async function prepare(event?: React.FormEvent) {
     event?.preventDefault()
@@ -239,6 +241,9 @@ function KeySetup({
       const next = { keyPair, setup: made, showRecovery: !has.recovery }
       setPrepared(next)
       setBusy(false)
+      // From the moment a recovery key is shown, this screen stays: if another device finishes
+      // setup meanwhile, the person must still learn which recovery key works.
+      if (next.showRecovery) onSaving()
       // With the recovery backup already there, there's nothing to confirm.
       if (!next.showRecovery) await finish(next)
     } catch (e) {
@@ -272,20 +277,36 @@ function KeySetup({
     try {
       kid = (await setup({ ...job.setup.args, proof })).kid
     } catch (e) {
-      onLeave()
+      // Still held: trying again ends in the same check below.
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
-    // keys.setup stores only what's missing, so if another device holding this key installed a
-    // recovery key a moment before, the one shown here isn't it. Check which one is there.
+    await check(kid, job)
+  }
+
+  /**
+   * keys.setup stores only what's missing, so if another device holding this key installed a
+   * recovery key a moment before, the one shown here isn't it. Which one the server kept is
+   * checked, and only a match, or a clear mismatch, goes on; a failed check can be tried again.
+   */
+  async function check(kid: string, job: NonNullable<typeof prepared>) {
+    setBusy(true)
+    setError(null)
     let lost = false
     if (job.showRecovery) {
       const installed = await convex
         .query(api.keys.identity, {})
-        .then((identity) => identity?.backups.find((b) => b.kind === 'recovery'))
+        .then((identity) => identity?.backups.find((b) => b.kind === 'recovery') ?? null)
         .catch(() => undefined)
-      lost = !!installed && installed.ct !== job.setup.args.recovery.ct
+      if (!installed) {
+        setUncheckedKid(kid)
+        setError('Your key’s backups are saved, but this device couldn’t check which recovery key the server kept.')
+        setBusy(false)
+        return
+      }
+      lost = installed.ct !== job.setup.args.recovery.ct
       setRecoveryLost(lost)
     }
+    setUncheckedKid(null)
     await keep(kid, job.keyPair, lost)
   }
 
@@ -311,6 +332,20 @@ function KeySetup({
     setBusy(false)
   }
 
+  if (uncheckedKid && prepared) {
+    return (
+      <AuthCard
+        title="Check your recovery key"
+        description="Another device may have finished setting up your key at the same moment. Check which recovery key works before going on."
+      >
+        <FormError message={error} />
+        <Button variant="primary" size="lg" block loading={busy} onClick={() => void check(uncheckedKid, prepared)}>
+          Check again
+        </Button>
+      </AuthCard>
+    )
+  }
+
   if (finished && recoveryLost) {
     return (
       <AuthCard
@@ -331,6 +366,13 @@ function KeySetup({
         description="Its backups are saved on the server. If this device can’t keep it, unlock with your password instead."
       >
         <FormError message={error} />
+        {/* Unlocking instead leaves this screen, so the warning comes along here. */}
+        {recoveryLost ? (
+          <p className="mb-4 text-sm text-warning-ink">
+            Another device saved its recovery key a moment earlier: the one shown here won’t work. Keep the one from
+            that device, or make a new one in Settings → Keys and devices.
+          </p>
+        ) : null}
         <Button
           variant="primary"
           size="lg"
