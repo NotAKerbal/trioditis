@@ -1,4 +1,4 @@
-import type { Infer } from 'convex/values'
+import { compareValues, type Infer } from 'convex/values'
 import type { Doc, Id } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
 import type { storedLastMessage } from '../validators'
@@ -12,7 +12,12 @@ import { byteSize } from './bounded'
 // needs comparing with it, and the chat's messages are read only when the one it points at
 // moves down (an echo with an earlier time) or goes away (a discarded send): then the
 // newest is one index read. A chat from before the pointer was kept has none (`undefined`)
-// and gets one the same way, the first time anything touches it or the backfill reaches it.
+// and gets one the same way, the first time a message in it is written or changed, or when
+// the backfill reaches it.
+//
+// Keys are compared as Convex's index compares them (`compareValues`, UTF-8 order), not with
+// JavaScript's `<` (UTF-16 order): the two disagree for some event IDs, and the pointer must
+// agree with the order `messages.list` reads.
 
 /**
  * The largest envelope the pointer keeps, as stored (its JSON in UTF-8). A text message fits
@@ -70,8 +75,8 @@ export async function noteMessage(ctx: MutationCtx, chat: Doc<'chats'>, message:
   if (last === undefined) return await refreshLast(ctx, chat._id)
   if (last !== null && last.messageId === message._id) {
     // It moved down, so another message may be newest now.
-    if (message.sortKey < last.sortKey) return await refreshLast(ctx, chat._id)
-  } else if (last !== null && message.sortKey <= last.sortKey) return null
+    if (compareValues(message.sortKey, last.sortKey) < 0) return await refreshLast(ctx, chat._id)
+  } else if (last !== null && compareValues(message.sortKey, last.sortKey) <= 0) return null
   await ctx.db.patch(chat._id, { last: lastOf(message) })
   return null
 }

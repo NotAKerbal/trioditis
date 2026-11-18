@@ -383,8 +383,9 @@ imported history and the person's pending sends, `lastMessage.at` can differ fro
 The server keeps it as a small pointer on the chat, so the list reads no messages. A row is
 at most about 18 KiB with the largest sealed metadata (8 KiB) and preview (4 KiB), so a full
 page of 50 is under 1 MiB, far inside its 8 MiB. A backend upgraded from before it gives
-each chat its pointer in `migrations:runAll`, after the deploy; until then an older chat's
-`lastMessage` is `null`.
+each chat its pointer in `migrations:runAll`, after the deploy; until then, or until a
+message in it is written or changed, an older chat's `lastMessage` is `null` (changing only
+the chat, such as pinning it, doesn't fill it in).
 
 `api.chats.get({ chatId })` returns one row. `api.chats.counts` returns
 `{ inbox, requests, woke }`, each `{ count, more }`: unread unmuted inbox chats, message

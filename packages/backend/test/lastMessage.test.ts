@@ -137,6 +137,15 @@ describe('a chat’s last message', () => {
     expect((await row(a)).lastMessage).toMatchObject({ objectId: 'later', at: 9_001 })
   })
 
+  it('orders messages at the same time as `messages.list` does, whatever their IDs', async () => {
+    const { t, a } = await ready()
+    // JavaScript's < puts the first after the second; Convex's index, and so messages.list,
+    // the other way round.
+    await ingest(t, [message('e\uE000', 2_000), message('e\u{10000}', 2_000)])
+    const { page } = await a.query(api.messages.list, { chatId: (await row(a))._id, paginationOpts: first })
+    expect((await row(a)).lastMessage!.messageId).toBe(page[0]!._id)
+  })
+
   it('takes an edit of the newest message, and ignores an edit of an older one', async () => {
     const { t, a } = await ready()
     await ingest(t, [message('e1', 2_000), message('e2', 3_000)])
@@ -487,7 +496,7 @@ describe('the chat list’s byte budget', () => {
     const page = await a.query(api.chats.list, { paginationOpts: first })
     expect(page.page).toHaveLength(50)
     expect(page.pageStatus).not.toBe('SplitRequired')
-    expect(page.page.every((row) => row.lastMessage?.sealed !== null)).toBe(true)
+    for (const row of page.page) expect(row.lastMessage?.sealed).toEqual(preview)
     const next = await a.query(api.chats.list, { paginationOpts: { numItems: 50, cursor: page.continueCursor } })
     expect(next.page).toHaveLength(10)
   })
