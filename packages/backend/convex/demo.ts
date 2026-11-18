@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api'
 import { action, internalMutation, type MutationCtx } from './_generated/server'
-import { requireUserId } from './auth'
+import { requireSessionIfGiven, requireUserId } from './auth'
 import { chatViewOf } from './lib/chatView'
 import { sortKey } from './lib/ingest'
 import { sealJson } from './lib/seal'
@@ -138,13 +138,14 @@ function loginIdFor(userId: string) {
  * isn't there, and says which contacts and chats are still missing. Null if nothing is.
  */
 export const begin = internalMutation({
-  args: { userId: v.string() },
+  args: { userId: v.string(), sessionId: v.optional(v.string()) },
   returns: v.union(
     v.null(),
     v.object({ publicKey: v.string(), contactsMissing: v.boolean(), chatsMissing: v.array(v.string()) }),
   ),
-  handler: async (ctx, { userId }) => {
+  handler: async (ctx, { userId, sessionId }) => {
     assertDemo()
+    await requireSessionIfGiven(ctx, sessionId, userId)
     const member = await ctx.db
       .query('members')
       .withIndex('by_userId', (q) => q.eq('userId', userId))
@@ -192,10 +193,15 @@ async function hasChat(ctx: MutationCtx, userId: string, portalId: string) {
 }
 
 export const writeContacts = internalMutation({
-  args: { userId: v.string(), contacts: v.array(v.object({ ghostId: v.string(), sealed: envelope })) },
+  args: {
+    userId: v.string(),
+    contacts: v.array(v.object({ ghostId: v.string(), sealed: envelope })),
+    sessionId: v.optional(v.string()),
+  },
   returns: v.null(),
-  handler: async (ctx, { userId, contacts }) => {
+  handler: async (ctx, { userId, contacts, sessionId }) => {
     assertDemo()
+    await requireSessionIfGiven(ctx, sessionId, userId)
     // All of them in one transaction, so a seed that stopped partway has all or none.
     for (const contact of contacts.slice(0, 50)) {
       if (await hasContact(ctx, userId, contact.ghostId)) continue
@@ -254,10 +260,12 @@ export const writeChat = internalMutation({
     archived: v.boolean(),
     pinned: v.boolean(),
     messages: v.array(v.object({ eventId: v.string(), networkTs: v.number(), sender, sealed: envelope })),
+    sessionId: v.optional(v.string()),
   },
   returns: v.null(),
-  handler: async (ctx, { userId, messages, ...chat }) => {
+  handler: async (ctx, { userId, messages, sessionId, ...chat }) => {
     assertDemo()
+    await requireSessionIfGiven(ctx, sessionId, userId)
     // A chat and its messages are one transaction: a retry after a failure finds either the
     // whole chat or none of it.
     if (await hasChat(ctx, userId, chat.portalId)) return null
@@ -290,12 +298,13 @@ export const writeChat = internalMutation({
  * once everything is there, calling it does nothing (`seeded: false`).
  */
 export const seedForMe = action({
-  args: {},
+  args: { sessionId: v.optional(v.string()) },
   returns: v.object({ seeded: v.boolean() }),
-  handler: async (ctx) => {
+  handler: async (ctx, { sessionId }) => {
     assertDemo()
-    const userId = await requireUserId(ctx)
-    const start = await ctx.runMutation(internal.demo.begin, { userId })
+    // Bound to the page's session like the key writes: the data is sealed to this user's key.
+    const userId = (await requireSessionIfGiven(ctx, sessionId)) ?? (await requireUserId(ctx))
+    const start = await ctx.runMutation(internal.demo.begin, { userId, sessionId })
     if (!start) return { seeded: false }
     const recipients = [start.publicKey]
     const seal = (value: unknown, kind: string, objectId: string) =>
@@ -303,6 +312,7 @@ export const seedForMe = action({
     if (start.contactsMissing) {
       await ctx.runMutation(internal.demo.writeContacts, {
         userId,
+        sessionId,
         contacts: CONTACTS.map(({ ghostId, name, handle }) => ({
           ghostId,
           sealed: seal({ name, handle }, 'contact', ghostId),
@@ -328,6 +338,7 @@ export const seedForMe = action({
       })
       await ctx.runMutation(internal.demo.writeChat, {
         userId,
+        sessionId,
         portalId: chat.portalId,
         kind: chat.kind,
         sealed: seal({ name: chat.name }, 'chat', chat.portalId),

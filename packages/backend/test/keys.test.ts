@@ -17,7 +17,7 @@ import {
 import { hashPassword, verifyPassword } from 'better-auth/crypto'
 import { api, components, internal } from '../convex/_generated/api'
 import { MAX_PASSKEY_BACKUPS, MIN_MEMLIMIT, MIN_OPSLIMIT } from '../convex/keys'
-import { setup, signIn, type T } from './setup'
+import { sealed, setup, signIn, type T } from './setup'
 
 beforeAll(ready)
 
@@ -666,10 +666,18 @@ describe('key writes bound to a session', () => {
     await expect(bob.mutation(api.logins.start, { network: 'whatsapp', sessionId: alicePage })).rejects.toMatchObject(
       sessionChanged,
     )
+    await expect(
+      bob.mutation(api.labels.create, {
+        labelKey: 'label-key-work-0001',
+        sealed: sealed('work'),
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
 
     expect(await rows(t, 'bob')).toEqual(before)
     expect((await rows(t, 'alice')).challenges).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('loginSessions').collect())).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('labels').collect())).toEqual([])
   })
 
   it('starts a network login with the page’s session named', async () => {

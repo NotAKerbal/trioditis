@@ -246,17 +246,18 @@ characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 ### Key writes are bound to the page's session
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
-`account.changePassword` and `logins.start` take an optional `sessionId`: pass the `sessionId` from
+`account.changePassword`, `logins.start`, `labels.create` and `demo.seedForMe` take an
+optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
 signing in as someone else can switch the token the page's calls run as while the page still
 shows the first account; a key or backup meant for one account would then be written to the
 other, which can never open it, or a network connected to the other account, whose key then
-seals what it brings in. With `sessionId`, the call is refused before it writes
+seals what it brings in, or a label or demo data sealed to the wrong key. With `sessionId`, the call is refused before it writes
 anything unless it runs as that same Better Auth session, with `ConvexError` data
 `{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
-A session that has ended is refused the same way. `account.changePassword`, an action,
-checks again inside each transaction that writes the backup or the password, so a session
-that ends while it runs is refused there too. Reload the page then: it reads `members.me`
+A session that has ended is refused the same way. The actions, `account.changePassword` and
+`demo.seedForMe`, check again inside each transaction that writes, so a session that ends
+while one runs is refused there too. Reload the page then: it reads `members.me`
 again. Without `sessionId` the call isn't bound to a session, though it still needs a
 signed-in member as usual; it will become required once every client sends it. Pass it on
 every one of these calls.
@@ -526,12 +527,12 @@ sent: its chat is gone.` (`sendNow` on a failed one)
 Seal a label's plaintext, `{ name, color }`, to the person: kind `label`, object ID a
 `labelKey` the client picks (16 to 64 letters, digits, `-`, `_`).
 
-| Function        | Arguments            | Returns                                                       |
-| --------------- | -------------------- | ------------------------------------------------------------- |
-| `labels.list`   | none                 | `[{ _id, labelKey, sealed, createdAt }]`                      |
-| `labels.create` | `labelKey`, `sealed` | The label's ID (the same one again for a repeated `labelKey`) |
-| `labels.update` | `labelId`, `sealed`  | `null`. Seal with the same `labelKey`                         |
-| `labels.remove` | `labelId`            | `null`. Also takes it off every chat                          |
+| Function        | Arguments                          | Returns                                                       |
+| --------------- | ---------------------------------- | ------------------------------------------------------------- |
+| `labels.list`   | none                               | `[{ _id, labelKey, sealed, createdAt }]`                      |
+| `labels.create` | `labelKey`, `sealed`, `sessionId?` | The label's ID (the same one again for a repeated `labelKey`) |
+| `labels.update` | `labelId`, `sealed`                | `null`. Seal with the same `labelKey`                         |
+| `labels.remove` | `labelId`                          | `null`. Also takes it off every chat                          |
 
 At most 100 labels of up to 4 KiB each. `labels.remove` takes the label off its first 1,000
 chats at once and the rest in batches straight after; until then a chat may still list the
@@ -623,7 +624,7 @@ when data changes, not when time passes, so recheck on focus.
 
 ## Demo data
 
-For previews and the nightly. `api.demo.seedForMe` (an action, no arguments) gives the
+For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
 signed-in person a connected fake-network account with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
@@ -634,7 +635,8 @@ that fails partway leaves no half-written chat, and calling again finishes the r
 everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
 available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
 
-- **Previews** create a known test account by script: sign up with
+- **Previews** create a known test account by script, on one account in one process, so it
+  can leave out `sessionId` (a page always passes it): sign up with
   `authPassword(password, email)` and the setup token, call `keys.challenge({ publicKey })`
   and open it with `keyPairFromPrivateKey(privateKey)`, call `keys.setup` with
   `{ ...makeKeySetup(privateKey, password, userId).args, proof }` (the same password backup
