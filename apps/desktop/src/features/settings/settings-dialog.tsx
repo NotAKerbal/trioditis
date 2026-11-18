@@ -1,10 +1,12 @@
 import { api } from '@trioditis/backend/api'
 import type { Id } from '@trioditis/backend/dataModel'
 import {
+  decodeRecoveryKey,
   generateRecoveryKey,
-  newPasswordParams,
-  passwordKey,
+  makeKeyBackup,
+  SealError,
   toBase64Url,
+  unwrapIdentityKey,
   wrapIdentityKey,
   type RecoveryKey,
 } from '@trioditis/crypto'
@@ -267,6 +269,13 @@ const ACCOUNT_STATE: Record<string, { text: string; warn?: boolean }> = {
   LOGGED_OUT: { text: 'Logged out', warn: true },
 }
 
+// Why a disconnect didn't finish (`logoutError`): no bridge host took it within 10 minutes
+// (`expired`), or one took it but never confirmed (`timeout`). Either way it may still be connected.
+const LOGOUT_ERROR: Record<string, string> = {
+  expired: 'The server’s bridge didn’t pick up the disconnect, so it’s still connected. Try again.',
+  timeout: 'The server’s bridge never confirmed the disconnect, so it may still be connected. Try again.',
+}
+
 function Accounts() {
   const networks = useNetworks()
   const accounts = useAccounts()
@@ -303,7 +312,7 @@ function Accounts() {
                   {a.logoutPending
                     ? 'Disconnecting…'
                     : a.logoutError
-                      ? 'It couldn’t be disconnected. Try again.'
+                      ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
                       : bridgeDown
                         ? 'The server’s bridge for this network isn’t running.'
                         : state.text}
@@ -585,11 +594,11 @@ function Keys() {
     if (!recovery) return
     setBusy('recovery')
     try {
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, {
-        userId: session.userId,
-        kid: session.kid,
-        kind: 'recovery',
-      })
+      const context = { userId: session.userId, kid: session.kid, kind: 'recovery' } as const
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, context)
+      // Open it again from the text the person saved, as makeKeySetup does: the server can't
+      // check a wrap, and one that doesn't open would leave them without a recovery key.
+      unwrapIdentityKey(wrap, decodeRecoveryKey(recovery.text), context, session.keyPair.publicKey)
       await putBackup({
         kind: 'recovery',
         ...wrap,
@@ -600,7 +609,11 @@ function Keys() {
       setRecovery(null)
       setSaved(false)
     } catch (e) {
-      toast(errorMessage(e, 'The new recovery key couldn’t be saved.'))
+      toast(
+        e instanceof SealError
+          ? 'The new recovery key didn’t check out on this device, so nothing changed. Try again.'
+          : errorMessage(e, 'The new recovery key couldn’t be saved.'),
+      )
     }
     setBusy(null)
   }
@@ -614,16 +627,14 @@ function Keys() {
     try {
       const currentAuthPassword = await derivedAuthPassword(current, email)
       const newAuthPassword = await derivedAuthPassword(next, email)
-      const params = newPasswordParams()
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, passwordKey(next, params), {
-        userId: session.userId,
-        kid: session.kid,
-        kind: 'password',
-      })
+      // Fresh Argon2id settings and the wrap, opened again: it throws a SealError unless the new
+      // password gives back this key.
+      const { password: newWrap } = makeKeyBackup(session.keyPair.privateKey, next, session.userId)
+      // It returns the backup's new revision; keys.identity brings it here as well.
       await changePasswordAction({
         currentAuthPassword,
         newAuthPassword,
-        newWrap: { ...wrap, params },
+        newWrap,
         proof: await proveKey(session.keyPair),
         expectedRevision: revisionOf('password'),
       })
@@ -631,8 +642,13 @@ function Keys() {
       setCurrent('')
       setNext('')
     } catch (err) {
-      // The backend's sentence says exactly what state things are in; show it as it is.
-      toast(errorMessage(err, 'Your password couldn’t be changed.'))
+      // The backend's sentence says exactly what state things are in (another device changed
+      // it first, or there's no password to change); show it as it is.
+      toast(
+        err instanceof SealError
+          ? 'Your key’s new backup didn’t check out on this device, so nothing changed. Try again.'
+          : errorMessage(err, 'Your password couldn’t be changed.'),
+      )
     }
     setBusy(null)
   }

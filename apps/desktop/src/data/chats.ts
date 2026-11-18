@@ -7,6 +7,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import { useMemo } from 'react'
+import { checkWithinAYear } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import {
   tryOpen,
@@ -81,8 +82,9 @@ export interface ChatList {
 }
 
 /**
- * One view of the chat list, a page at a time: the first page starts with the view's pinned
- * chats, then the rest newest first (client-api.md, The list).
+ * One view of the chat list, a page at a time: the pinned chats, then the rest, each newest
+ * first, paged as one list, so pins can carry on past the first page and the server never
+ * repeats one (client-api.md, The list). The rows are shown as they come, in order.
  */
 export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true): ChatList {
   const session = useSession()
@@ -155,11 +157,14 @@ export function useChatActions() {
         (chatId: ChatId, pinned: boolean) => setPinned({ chatId, pinned }),
         'That chat couldn’t be pinned.',
       ),
-      setMuted: guarded(
-        (chatId: ChatId, muted: boolean, until?: number) => setMuted({ chatId, muted, ...(until ? { until } : {}) }),
-        'That chat couldn’t be muted.',
-      ),
-      snooze: guarded((chatId: ChatId, until: number) => snooze({ chatId, until }), 'That chat couldn’t be snoozed.'),
+      setMuted: guarded((chatId: ChatId, muted: boolean, until?: number) => {
+        if (until !== undefined) checkWithinAYear(until)
+        return setMuted({ chatId, muted, ...(until !== undefined ? { until } : {}) })
+      }, 'That chat couldn’t be muted.'),
+      snooze: guarded((chatId: ChatId, until: number) => {
+        checkWithinAYear(until)
+        return snooze({ chatId, until })
+      }, 'That chat couldn’t be snoozed.'),
       wake: guarded((chatId: ChatId) => wake({ chatId }), 'That chat couldn’t be woken.'),
       acceptRequest: guarded((chatId: ChatId) => acceptRequest({ chatId }), 'That request couldn’t be accepted.'),
       setBlocked: guarded(

@@ -7,6 +7,7 @@ import {
   makeKeySetup,
   passwordKey,
   ready,
+  SealError,
   unwrapIdentityKey,
 } from '@trioditis/crypto'
 import { Button } from '@trioditis/ui/button'
@@ -141,7 +142,8 @@ const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 30))
 /**
  * First-device setup, or finishing the backups of a key this device already has (`existing`):
  * the key is wrapped with the person's password and a new recovery key, which they must
- * confirm saving before anything is sent.
+ * confirm saving before anything is sent. Then the device proves it holds the key, and the
+ * server stores both backups at once.
  */
 function KeySetup({ userId, existing, onDone }: { userId: string; existing?: KeyPair; onDone: () => void }) {
   const setup = useMutation(api.keys.setup)
@@ -160,10 +162,16 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
       await ready()
       await nextFrame()
       const keyPair = existing ?? generateKeyPair()
-      // Wraps the key with the password (Argon2id, about a second) and a new recovery key.
+      // Wraps the key with the password (Argon2id, about a second) and a new recovery key, and
+      // opens both wraps again: it throws a SealError unless both give back this key.
       setPrepared({ keyPair, setup: makeKeySetup(keyPair.privateKey, password, userId) })
     } catch (e) {
-      setError(`Your key couldn’t be made on this device (${reason(e)}). Reload the page and try again.`)
+      // Nothing has been sent yet, so there's no half-made key to undo.
+      setError(
+        e instanceof SealError
+          ? 'Your key’s backups didn’t check out on this device, so nothing was saved. Try again.'
+          : `Your key couldn’t be made on this device (${reason(e)}). Reload the page and try again.`,
+      )
     }
     setBusy(false)
   }
@@ -176,15 +184,16 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
       setError(message)
       setBusy(false)
     }
-    let proof: string | undefined
+    // Taken now, not when the recovery key was shown: a proof expires after five minutes.
+    let proof: string
     try {
-      proof = existing ? await proveKey(existing) : undefined
+      proof = await proveKey(prepared.keyPair)
     } catch (e) {
       return fail(errorMessage(e, 'This device couldn’t prove it holds your key. Try again.'))
     }
     let kid: string
     try {
-      kid = (await setup({ ...prepared.setup.args, ...(proof ? { proof } : {}) })).kid
+      kid = (await setup({ ...prepared.setup.args, proof })).kid
     } catch (e) {
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }

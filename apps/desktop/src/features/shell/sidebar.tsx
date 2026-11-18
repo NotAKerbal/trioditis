@@ -1,3 +1,4 @@
+import type { Id } from '@trioditis/backend/dataModel'
 import type { ChatView, Network } from '@trioditis/core'
 import { Button } from '@trioditis/ui/button'
 import {
@@ -14,8 +15,10 @@ import { Input, InputGroup } from '@trioditis/ui/input'
 import { Kbd } from '@trioditis/ui/kbd'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
+import { toast } from '@trioditis/ui/toast'
 import {
   AlarmClock,
+  AlertCircle,
   Archive,
   Ban,
   ChevronRight,
@@ -42,7 +45,9 @@ import {
   type ChatFilter,
   type LabelId,
 } from '~/data/chats.ts'
+import { useSendMutations } from '~/data/messages.ts'
 import { formatWhen } from '~/data/snooze.ts'
+import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
 
@@ -112,7 +117,10 @@ export function Sidebar({
   const snoozed = snoozedList.chats
   const requests = requestsList.chats
   const archived = archivedList.chats
-  const scheduledMessages = useScheduled()
+  // A scheduled send whose chat was gone when its time came failed: it's listed apart, to dismiss.
+  const scheduledRows = useScheduled()
+  const scheduledMessages = useMemo(() => scheduledRows?.filter((s) => s.state !== 'failed'), [scheduledRows])
+  const failedSends = useMemo(() => scheduledRows?.filter((s) => s.state === 'failed') ?? [], [scheduledRows])
   const scheduledTexts = useScheduledTexts((scheduledMessages ?? []).map((s) => s._id))
   const labels = useLabels()
   const networks = useNetworks()
@@ -315,6 +323,7 @@ export function Sidebar({
           </div>
         ) : null}
 
+        <FailedScheduled rows={failedSends} />
         {inbox === undefined ? (
           <ListSkeleton />
         ) : searching ? (
@@ -472,6 +481,37 @@ function Divider({
       {open ? children : null}
       {open && more ? <LoadMore list={more} /> : null}
     </>
+  )
+}
+
+/**
+ * Scheduled messages that failed: their time came after their chat was gone, so they were never
+ * sent and their copies are deleted. Shown in either layout until dismissed (scheduled.cancel).
+ */
+function FailedScheduled({ rows }: { rows: { _id: Id<'scheduledSends'>; sendAt: number }[] }) {
+  const { cancelScheduled } = useSendMutations()
+  if (!rows.length) return null
+  return (
+    <div className="mx-0.5 mt-1 mb-2 space-y-1.5 rounded-lg bg-warning-soft p-2.5 text-sm text-warning-ink">
+      {rows.map((s) => (
+        <div key={s._id} className="flex items-start gap-2">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span className="flex-1">A message scheduled for {formatWhen(s.sendAt)} wasn’t sent: its chat is gone.</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="-my-1"
+            onClick={() =>
+              void cancelScheduled({ scheduledId: s._id }).catch((e: unknown) =>
+                toast(errorMessage(e, 'That couldn’t be dismissed. Try again.')),
+              )
+            }
+          >
+            Dismiss
+          </Button>
+        </div>
+      ))}
+    </div>
   )
 }
 
