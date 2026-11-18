@@ -96,8 +96,8 @@ export const endSessionByToken = internalMutation({
 
 /**
  * The request header that carries the client's address, set by the proxy in front of the
- * backend and by nothing else: the self-hosted bundle's Caddy sets it to the address it saw,
- * replacing any a client sent. Better Auth reads the address from this header only, since a
+ * backend and by nothing else, replacing any a client sent (the self-hosted bundle's Caddy,
+ * once the install bundle sets it). Without it the per-address limits are off. Better Auth reads the address from this header only, since a
  * client can send any of the usual ones (X-Forwarded-For and the like) itself.
  */
 export const CLIENT_IP_HEADER = 'x-trioditis-client-ip'

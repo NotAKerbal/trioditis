@@ -162,9 +162,11 @@ with the error and never the key.
 Over a limit, the answer is 429 with `{ "message": "Too many requests. Please try again later." }`
 and `Retry-After` (and `X-Retry-After`) in whole seconds. Wait that long before trying again.
 
-**The client address** is read only from `X-Trioditis-Client-IP`, which the proxy in front of
-the backend sets, replacing any a client sent: in the self-hosted bundle, Caddy, from the
-connection or, behind a proxy it trusts, from that proxy's `X-Forwarded-For`. A client can
+**The per-address limits are on only where a trusted proxy in front of the backend sets
+`X-Trioditis-Client-IP`**, replacing any a client sent. The self-hosted bundle's Caddy will
+set it, from the connection or, behind a proxy it trusts, from that proxy's
+`X-Forwarded-For`, once that change lands in the install bundle; until then a bundle has
+only the per-account limit. The client address is read only from this header. A client can
 send `X-Forwarded-For` and the like itself, so the backend reads none of them. IPv6 addresses
 count by their /64. Convex passes request headers through as they are and adds no client
 address of its own, so the header must come from the proxy, and the backend must be reachable
