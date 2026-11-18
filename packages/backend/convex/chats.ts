@@ -1,5 +1,5 @@
-import { ConvexError, v } from 'convex/values'
-import type { ChatRow } from '@trioditis/core'
+import { ConvexError, v, type Infer } from 'convex/values'
+import type { ChatRow, ChatView } from '@trioditis/core'
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
@@ -13,6 +13,7 @@ import { chatKind, envelope, network } from './validators'
 /** The longest a chat can be snoozed or muted for, short of "forever" (mute without `until`). */
 const MAX_UNTIL_MS = 400 * 24 * 60 * 60 * 1000
 
+// Matches `ChatRow` in @trioditis/core; the type check at the end of this file keeps them in step.
 const chatRow = v.object({
   _id: v.id('chats'),
   network,
@@ -47,9 +48,7 @@ function isSnoozed(chat: Doc<'chats'>) {
 }
 
 /** Which view a chat belongs in. Every chat is in exactly one. */
-function viewOf(
-  chat: Doc<'chats'>,
-): ChatRow extends never ? never : 'inbox' | 'archived' | 'snoozed' | 'requests' | 'blocked' {
+function viewOf(chat: Doc<'chats'>): ChatView {
   if (chat.blocked) return 'blocked'
   if (chat.isRequest) return 'requests'
   if (isSnoozed(chat)) return 'snoozed'
@@ -351,3 +350,8 @@ export const setLabels = mutation({
     return null
   },
 })
+
+// `chats.list` returns exactly what @trioditis/core calls a `ChatRow`.
+type Returned = Infer<typeof chatRow>
+type SameShape<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+const _rowMatchesCore: SameShape<keyof Returned, keyof ChatRow> = true
