@@ -14,9 +14,11 @@ async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: Error
     .query('networkAccounts')
     .withIndex('by_login', (q) => q.eq('network', command.network).eq('loginId', loginId))
     .unique()
-  // Only a logout still waiting: one already confirmed, or already failed, stays as it is.
+  // Only the logout still waiting, and only by its own command: one already confirmed or
+  // failed stays as it is, and an earlier logout's late outcome can't end a newer one.
   if (!account || account.userId !== command.userId || !account.logoutPending) return
-  await ctx.db.patch(account._id, { logoutPending: false, logoutError: error })
+  if (account.logoutCommandId !== undefined && account.logoutCommandId !== command._id) return
+  await ctx.db.patch(account._id, { logoutPending: false, logoutError: error, logoutCommandId: undefined })
 }
 
 /** The bridge host refused the command as invalid (`commandResult` with `accepted: false`). */
@@ -39,7 +41,7 @@ export async function onCommandOverdue(ctx: MutationCtx, command: Doc<'outbox'>)
 
 /** The bridge host reports the account `LOGGED_OUT`: a pending logout is done. */
 export async function onLoggedOut(ctx: MutationCtx, account: Doc<'networkAccounts'>) {
-  if (account.logoutPending || account.logoutError) {
-    await ctx.db.patch(account._id, { logoutPending: false, logoutError: undefined })
+  if (account.logoutPending || account.logoutError || account.logoutCommandId) {
+    await ctx.db.patch(account._id, { logoutPending: false, logoutError: undefined, logoutCommandId: undefined })
   }
 }

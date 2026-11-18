@@ -71,6 +71,8 @@ export default defineSchema({
     updatedAt: v.number(),
     /** A logout was asked for and hasn't been confirmed yet. */
     logoutPending: v.optional(v.boolean()),
+    /** The command of that pending logout: only its own outcome or timeout ends it. */
+    logoutCommandId: v.optional(v.id('outbox')),
     /** Why the last logout didn't happen. */
     logoutError: v.optional(errorCode),
   })
@@ -267,6 +269,8 @@ export default defineSchema({
 
   reactions: defineTable({
     userId: v.string(),
+    /** The message's chat, so a lookup by chat needn't read the (large) message row. */
+    chatId: v.id('chats'),
     messageId: v.id('messages'),
     /** `self`, or the ghost ID. */
     senderKey: v.string(),

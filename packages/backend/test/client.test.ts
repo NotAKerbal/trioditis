@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../convex/_generated/api'
+import { api, components } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { chatViewOf } from '../convex/lib/chatView'
 import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
@@ -234,6 +234,7 @@ describe('messages alongside the page', () => {
     await t.run(async (ctx) => {
       await ctx.db.insert('reactions', {
         userId: 'user_a',
+        chatId,
         messageId,
         senderKey: 'self',
         key: '👍',
@@ -243,6 +244,7 @@ describe('messages alongside the page', () => {
       })
       await ctx.db.insert('reactions', {
         userId: 'user_a',
+        chatId,
         messageId,
         senderKey: 'ghost:g',
         key: '❤️',
@@ -328,6 +330,7 @@ describe('reads that large messages could push past the read limit', () => {
       for (const messageId of ids) {
         await ctx.db.insert('reactions', {
           userId: 'user_a',
+          chatId,
           messageId,
           senderKey: 'self',
           key: '👍',
@@ -348,6 +351,10 @@ describe('reads that large messages could push past the read limit', () => {
     const theirs = await aChat(t, 'user_c', 'q')
     const seen = await b.query(api.messages.reactions, { chatId: theirs, messageIds: ids.slice(1, 3) })
     expect(Object.values(seen).flat()).toEqual([])
+    // Nor does the same person asking from another of their chats.
+    const other = await aChat(t, 'user_a', 'other')
+    const elsewhere = await a.query(api.messages.reactions, { chatId: other, messageIds: ids.slice(1, 3) })
+    expect(elsewhere).toEqual({ [ids[1]!]: [], [ids[2]!]: [] })
   })
 })
 
@@ -369,6 +376,7 @@ describe('reads that many large rows could push past the read limit', () => {
         for (let r = 0; r < 100; r++) {
           await ctx.db.insert('reactions', {
             userId: 'user_a',
+            chatId,
             messageId,
             senderKey: `ghost:${String(r).padStart(256, 'g')}`,
             key: `${r}`.padStart(256, '€'),
@@ -663,6 +671,63 @@ describe('accounts, logins and logout', () => {
       logoutPending: false,
       logoutError: 'timeout',
     })
+  })
+
+  it('lets only a logout’s own command end it, not an earlier one’s timeout', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await connected(t)
+    const [account] = await a.query(api.logins.accounts, {})
+    // Logout A is taken and confirmed.
+    await a.mutation(api.logins.logout, { networkAccountId: account!._id })
+    const [first] = await t.mutation(api.gateway.claimCommands, {
+      secret: GATEWAY_SECRET,
+      limit: 5,
+      hostIds: ['whatsapp-1'],
+    })
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: first!.commandId,
+      lease: first!.lease,
+      accepted: true,
+    })
+    const report = async (seq: number, state: 'LOGGED_OUT' | 'CONNECTED') =>
+      await t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        hostId: 'whatsapp-1',
+        network: 'whatsapp',
+        events: [{ seq, type: 'loginState', userId: 'user_a', loginId: 'login_a', at: Date.now(), state }],
+      })
+    await report(2, 'LOGGED_OUT')
+    await report(3, 'CONNECTED')
+    // Logout B, a minute before A's old deadline job would time it out.
+    vi.advanceTimersByTime(70 * 60 * 1000 - 60_000)
+    await t.finishInProgressScheduledFunctions()
+    // Signed in again: the first session has run out by now.
+    const session = await t.run(
+      async (ctx) =>
+        (await ctx.runMutation(components.betterAuth.adapter.create, {
+          input: {
+            model: 'session',
+            data: {
+              token: 'token-again',
+              userId: 'user_a',
+              expiresAt: Date.now() + 60 * 60 * 1000,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          },
+        })) as { _id: string },
+    )
+    const again = t.withIdentity({ subject: 'user_a', sessionId: session._id })
+    await again.mutation(api.logins.logout, { networkAccountId: account!._id })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!).toMatchObject({
+      logoutPending: true,
+    })
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!.logoutError).toBeUndefined()
   })
 
   it('records an expired logout', async () => {

@@ -281,6 +281,7 @@ async function applyReaction(ctx: MutationCtx, event: Extract<BridgeEventDoc, { 
   if (!existing) {
     await ctx.db.insert('reactions', {
       userId: event.userId,
+      chatId: message.chatId,
       messageId: message._id,
       senderKey: senderKey(event.sender),
       key: event.key,

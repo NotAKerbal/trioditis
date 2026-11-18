@@ -655,11 +655,61 @@ describe('sending', () => {
     expect(await t.run(async (ctx) => await ctx.db.query('outboxPayloads').collect())).toHaveLength(0)
     const rows = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
     expect(rows.every((row) => row.state === 'expired' && row.deadlineScheduled)).toBe(true)
-    // Running it again schedules nothing more.
+    // Running it again schedules no more deadline jobs.
+    const deadlineJobs = async () =>
+      (await t.run(async (ctx) => await ctx.db.system.query('_scheduled_functions').collect())).filter((job) =>
+        job.name.includes('commandDeadline'),
+      ).length
+    const before = await deadlineJobs()
     await t.mutation(internal.migrations.scheduleCommandDeadlines, {})
-    expect(await t.run(async (ctx) => await ctx.db.system.query('_scheduled_functions').collect())).toSatisfy(
-      (jobs: { state: { kind: string } }[]) => jobs.every((job) => job.state.kind !== 'pending'),
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await deadlineJobs()).toBe(before)
+  })
+
+  it('schedules deadlines for older commands without a payload: a login, and an accepted send', async () => {
+    vi.useFakeTimers()
+    const { t } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    // As an older version left them, with no deadline jobs: a login start still queued, and a
+    // send the bridge host accepted (its payload already gone) that never reported back.
+    const loginSessionId = await t.run(
+      async (ctx) =>
+        await ctx.db.insert('loginSessions', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          state: 'pending',
+          updatedAt: Date.now(),
+        }),
     )
+    await t.run(async (ctx) => {
+      await ctx.db.insert('outbox', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        payload: { type: 'loginStart', loginSessionId, network: 'whatsapp' },
+        state: 'queued',
+        attempts: 0,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      })
+      await ctx.db.insert('outbox', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        loginId: 'login_a',
+        chatId,
+        payload: { type: 'send', portalId: 'portal_1', clientMessageId: id(1) },
+        state: 'dispatched',
+        attempts: 1,
+        delivery: 'submitted',
+        clientMessageId: id(1),
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      })
+    })
+    await t.mutation(internal.migrations.scheduleCommandDeadlines, {})
+    // No gateway from here on.
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.get(loginSessionId))).toMatchObject({ state: 'error' })
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'dispatched', delivery: 'unknown' })
   })
 
   it('ends a send at its deadline with no gateway running, deleting its payload', async () => {

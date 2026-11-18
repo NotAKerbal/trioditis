@@ -431,11 +431,12 @@ describe('ingest', () => {
     seq = 0
     const t = setup()
     await ingest(t, [message('e1')])
-    const messageId = (await messages(t))[0]!._id
+    const { _id: messageId, chatId } = (await messages(t))[0]!
     await t.run(async (ctx) => {
       for (let i = 0; i < 500; i++) {
         await ctx.db.insert('reactions', {
           userId: 'user_a',
+          chatId,
           messageId,
           senderKey: `ghost:g${i}`,
           key: '👍',

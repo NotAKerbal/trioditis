@@ -79,6 +79,9 @@ migrations. If a change no longer matches what a dev deployment holds, `convex d
 to push it; clear the dev data (or start a fresh local deployment) and run `pnpm dev:setup`
 again. From the first release on, every schema change ships with its migration.
 
+For example, chats now must have a `view`, which chats written by `dev` at b61b99b don't: a
+deployment holding those must be reset this way before it takes this schema.
+
 One-off fixes for rows an older version wrote are internal functions in
 `packages/backend/convex/migrations.ts`, safe to run more than once. Run each once after
 deploying the version that adds it, for example

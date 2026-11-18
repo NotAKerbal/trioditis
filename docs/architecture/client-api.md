@@ -420,8 +420,12 @@ await convex.mutation(api.messages.send, {
 | `unknown`           | **May not have sent.** Trioditis never resends on its own, because the network may have it. Offer "Send again" (a new `clientMessageId`, which may duplicate) or "Discard" (`messages.discardSend({ clientMessageId })`). A late confirmation can still move it to `sent` |
 
 A send that couldn't go out within 24 hours becomes `failed` (never sent) or `unknown` (it
-may have reached the network), at that deadline whether or not a gateway is running. One the
-bridge host took but never reported on becomes `unknown` an hour after the deadline.
+may have reached the network), at that deadline whether or not a gateway is running, with
+two exceptions. One a gateway was handing over at the deadline waits for that handover's
+lease (at most 30 seconds), so the bridge host's answer for it still counts. And one queued
+by a version from before these deadline jobs ends at the gateway's next claim until
+`migrations.scheduleCommandDeadlines` has been run on the server. One the bridge host took
+but never reported on becomes `unknown` an hour after the deadline, on the same terms.
 
 Errors: `That chat doesn’t exist.` · `That message ID isn’t valid.` (16 to 64 letters,
 digits, `-` or `_`) · `That message isn’t sealed, or is too long.` · `That message can’t be

@@ -127,7 +127,7 @@ export const reactions = query({
         .take(MAX_REACTIONS_PER_MESSAGE)
       bytes += byteSize(rows)
       out[messageId] = rows
-        .filter((row) => row.userId === member.userId && row.removedAt === undefined)
+        .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
         .map(({ key, senderKey }) => ({ key, senderKey }))
     }
     return out

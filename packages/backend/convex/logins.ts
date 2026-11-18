@@ -204,8 +204,7 @@ export const logout = mutation({
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
     if (account.state === 'LOGGED_OUT' || account.logoutPending) return null
     const now = Date.now()
-    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined })
-    await queueCommand(ctx, {
+    const logoutCommandId = await queueCommand(ctx, {
       userId: member.userId,
       network: account.network,
       loginId: account.loginId,
@@ -215,6 +214,7 @@ export const logout = mutation({
       createdAt: now,
       expiresAt: now + LOGIN_COMMAND_TTL_MS,
     })
+    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return null
   },
