@@ -1,0 +1,3 @@
+# Written by install.sh: secrets, and the web app's runtime config.
+.env
+runtime/

@@ -1,0 +1,12 @@
+#!/bin/sh
+# `docker compose` for this install, with its settings. Usage: deploy/trioditis <compose args>
+# e.g. `deploy/trioditis ps`, `deploy/trioditis logs -f gateway`, `deploy/trioditis down`.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+if [ ! -f "$here/.env" ]; then
+  echo "No install here yet. Run deploy/install/install.sh first." >&2
+  exit 1
+fi
+# Compose reads COMPOSE_FILE and COMPOSE_PROFILES from .env relative to where it runs.
+cd "$here/compose"
+exec docker compose --env-file "$here/.env" "$@"

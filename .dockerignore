@@ -1,0 +1,16 @@
+# Build context for the images in deploy/docker. Only sources go in: no installed modules,
+# no local data, secrets or deployment state, and no other worktrees.
+**/node_modules
+**/.turbo
+**/dist
+.git
+.worktrees
+.data
+**/.env
+**/.env.*
+!**/.env.example
+deploy/.env
+packages/backend/.convex
+packages/backend/.env.local
+apps/bridge-host/bin
+apps/bridge-host/.data
