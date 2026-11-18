@@ -7,13 +7,15 @@
 //   pnpm dev --setup               set up and stop; run for each new worktree
 //   pnpm dev --setup --reset       throw this checkout's backend data away first, then set up
 //
+// Only one of these runs at a time for a checkout: each holds .data/dev.lock while it runs.
+//
 // Every checkout of the repository, the main one and each git worktree, has its own backend,
 // data and ports, so branches run side by side without touching each other (scripts/lib.mjs,
 // `portsFor` and `claimSlot`). The backend is a Convex local deployment that needs no Convex
 // account: its data lives in packages/backend/.convex/local, and everything else this instance
 // keeps (secrets, bridge host databases) in .data/. Git ignores both. It never acts on any
 // other backend: see `assertLocalBackend`.
-import { chmodSync, existsSync, readFileSync, readdirSync, rmSync, watch } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, watch } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   TESTER,
@@ -27,11 +29,15 @@ import {
   dataDir,
   desktopPackage,
   devSecrets,
+  ensureDataDir,
   ensureTester,
   gatewayDir,
+  holdLock,
   isFree,
   localConvex,
+  parseDotenv,
   portsFor,
+  removeFromCheckout,
   root,
   run,
   setConvexEnv,
@@ -66,6 +72,19 @@ const fail = (message) => {
   process.exit(1)
 }
 
+if (reset && !setupOnly) fail('`--reset` only goes with `--setup`: run `pnpm dev --setup --reset`.')
+
+// One run at a time for this checkout, so a reset can never delete what another run is using.
+try {
+  ensureDataDir()
+  holdLock('dev', {
+    dir: dataDir,
+    busy: (pid) => `Another \`pnpm dev\` for this checkout (process ${pid}) is running. Stop it first.`,
+  })
+} catch (error) {
+  fail(error.message)
+}
+
 // Before anything: the Convex CLI must only be able to reach this checkout's own backend.
 try {
   assertLocalBackend({ requireConfigured: false })
@@ -79,14 +98,17 @@ const ports = portsFor(slot)
 // Starting over: this checkout's backend (its data, admin key and deployment) and the bridge
 // hosts' logins, which belong to that backend. The slot and the secrets in .data stay.
 if (reset) {
-  if (!(await isFree(ports.convexCloud))) fail('Stop this checkout’s `pnpm dev` first: its backend is running.')
+  // The lock above keeps out this checkout's own runs; this catches a backend started by hand.
+  if (!(await isFree(ports.convexCloud))) fail('Stop this checkout’s backend first: something is using its port.')
   step('Throwing this checkout’s backend data away')
-  rmSync(resolve(backendDir, '.convex/local'), { recursive: true, force: true })
-  rmSync(resolve(backendDir, '.env.local'), { force: true })
-  if (existsSync(dataDir)) {
-    for (const name of readdirSync(dataDir)) {
-      if (name.startsWith('bridge-')) rmSync(resolve(dataDir, name), { recursive: true, force: true })
+  try {
+    removeFromCheckout(resolve(backendDir, '.convex/local'))
+    removeFromCheckout(resolve(backendDir, '.env.local'))
+    for (const name of existsSync(dataDir) ? readdirSync(dataDir) : []) {
+      if (name.startsWith('bridge-')) removeFromCheckout(resolve(dataDir, name))
     }
+  } catch (error) {
+    fail(error.message)
   }
 }
 const desktop = desktopPackage()
@@ -133,12 +155,13 @@ const configured = () => {
 }
 
 try {
+  // The backend's data, keys and admin key: yours only, from before the CLI first writes there.
+  mkdirSync(resolve(backendDir, '.convex'), { recursive: true, mode: 0o700 })
+  chmodSync(resolve(backendDir, '.convex'), 0o700)
   if (!configured()) {
     step(`Creating a local backend for this checkout on ports ${ports.convexCloud} and ${ports.convexSite}`)
     run('pnpm', convex('dev', '--once', '--typecheck', 'disable', '--tail-logs', 'disable', ...portArgs), localConvex)
   }
-  // The backend's data, keys and admin key: yours only.
-  chmodSync(resolve(backendDir, '.convex'), 0o700)
   assertLocalBackend()
 
   step('Checking backend settings')
@@ -151,12 +174,11 @@ try {
     BRIDGE_PUBLIC_KEY: secrets.BRIDGE_PUBLIC_KEY,
     AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
   }
+  // With values: an agent running this gets names only otherwise. They stay in this process.
   const existing = new Map(
-    capture('pnpm', convex('env', 'list'), { ...localConvex, quiet: true })
-      .split('\n')
-      .map((line) => line.match(/^([A-Z0-9_]+)=(.*)$/))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]),
+    Object.entries(
+      parseDotenv(capture('pnpm', convex('env', 'list', '--include-values'), { ...localConvex, quiet: true })),
+    ),
   )
   const changed = Object.fromEntries(Object.entries(wanted).filter(([name, value]) => existing.get(name) !== value))
   setConvexEnv(changed, localConvex)
@@ -244,13 +266,17 @@ try {
   stop(1)
 }
 
-/** Warns, loudly, when something didn't come up. */
+/** Waits for `name` to answer at `url`; if it never does, says so and stops everything. */
 async function ready(name, url, seconds) {
   try {
     await waitFor(url, seconds)
-    return true
+    return !stopping
   } catch {
-    console.error(`\n\x1b[1m${name} didn't answer at ${url} within ${seconds} seconds.\x1b[0m Check its output above.`)
+    if (stopping) return false
+    console.error(
+      `\n\x1b[1m${name} didn't answer at ${url} within ${seconds} seconds.\x1b[0m Check its output above. Stopping the rest.`,
+    )
+    stop(1)
     return false
   }
 }
@@ -313,15 +339,11 @@ function superviseGateway() {
   }
 }
 
-if (stopping) {
-  // Stopping after a failure above: nothing else starts.
-} else if (setupOnly) {
-  console.log(`\n\x1b[1mSet up.\x1b[0m Run \`pnpm dev\` to start Trioditis for this checkout.`)
-  stop(0)
-} else {
+/** Starts the gateway, the bridge hosts and the web app, each once the one before is up. */
+async function startServices() {
   step('Starting the gateway')
   superviseGateway()
-  await ready('The gateway', `${instance.GATEWAY_URL}/healthz`, 30)
+  if (!(await ready('The gateway', `${instance.GATEWAY_URL}/healthz`, 30))) return
 
   if (hasBridgeHost) {
     for (const network of networks) {
@@ -358,11 +380,11 @@ if (stopping) {
         VITE_TRIODITIS_ENVIRONMENT: 'development',
       },
     })
-    await ready('The web app', siteUrl, 120)
+    if (!(await ready('The web app', siteUrl, 120))) return
   }
 
-  if (!stopping) {
-    console.log(`
+  if (stopping) return
+  console.log(`
 \x1b[1mTrioditis is running\x1b[0m
   URL        ${web ? siteUrl : `${siteUrl} (no web app in this checkout yet: apps/desktop)`}
   Email      ${TESTER.email}
@@ -371,5 +393,13 @@ if (stopping) {
   Data       packages/backend/.convex/local and .data/, this checkout only
 
 Ctrl+C stops everything.`)
-  }
+}
+
+if (stopping) {
+  // Stopping after a failure above: nothing else starts.
+} else if (setupOnly) {
+  console.log(`\n\x1b[1mSet up.\x1b[0m Run \`pnpm dev\` to start Trioditis for this checkout.`)
+  stop(0)
+} else {
+  await startServices()
 }

@@ -55,8 +55,8 @@ This one command:
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
 Like the app, the account signs in with the password derived from that one (`authPassword` in
-packages/crypto) once packages/crypto has it; a dev instance set up before then needs to start
-over (see [Starting over](#starting-over)) for the app to sign in.
+packages/crypto). A test account made before sign-in derived its password is moved to the
+derived one the next time `pnpm dev` runs, so there is no need to start over.
 
 Sign in to the web app at the address it prints, `http://localhost:<port>`. The web app's dev
 server forwards sign-in (`/api/auth`) and the MCP server to the backend, so the browser signs
@@ -98,8 +98,16 @@ slot.
 A worktree claims the first free slot the first time it is set up and keeps it while it
 exists, even when it isn't running. On every start the saved slot is checked against the
 registry; a slot whose lock names another checkout is given up for a new one, and a lock whose
-checkout no longer exists is released. These ports stay clear of Convex's defaults, so a backend
-started by hand never takes a checkout's ports.
+checkout no longer exists is released. Releasing happens under a guard,
+`~/.local/state/trioditis/slots/releasing/<n>.lock`, so two checkouts starting at once can't
+release the lock one of them has just taken. A guard is held for an instant; if a run is killed
+in that instant, its guard stays and that slot isn't released until you delete the guard (the
+next run says so). These ports stay clear of Convex's defaults, so a backend started by hand
+never takes a checkout's ports.
+
+Only one `pnpm dev` (with or without `--setup` or `--reset`) runs at a time for a checkout: each
+holds `.data/dev.lock` while it runs, and a second one stops and says which process holds it.
+A lock left by a run that was killed is taken over.
 
 In T3 Code, the Trioditis project should run `pnpm install && pnpm dev --setup` for every new
 worktree, so a branch's instance is ready before its first change. `--setup` does the slow
@@ -114,19 +122,27 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   environment (`CONVEX_DEPLOY_KEY`, `CONVEX_DEPLOYMENT`, `CONVEX_URL`, `CONVEX_SELF_HOSTED_URL`,
   `CONVEX_SELF_HOSTED_ADMIN_KEY` and every other `CONVEX_` variable), so a key in your shell
   can't send its pushes anywhere.
-- Before it pushes functions or changes a setting, it checks that `packages/backend/.env.local`
-  names an anonymous local deployment and that no other dotenv file there sets a `CONVEX_`
-  variable. Otherwise it stops and says why.
+- The Convex CLI also loads `packages/backend/.env.local` and `packages/backend/.env`, and a
+  deploy key in either overrides `CONVEX_DEPLOYMENT`. So before it pushes functions or changes
+  a setting, `pnpm dev` reads both files the way the CLI's dotenv does (`export` prefixes,
+  quotes, comments) and refuses any `CONVEX_` variable in them, except what the CLI writes to
+  `.env.local` for this checkout's local deployment: `CONVEX_DEPLOYMENT` naming it, and
+  `CONVEX_URL` and `CONVEX_SITE_URL` on this machine. A dotenv vault (`.env.vault`,
+  `.env.local.vault`) is refused too. Otherwise it stops and says why.
 - Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
-  a process list. `packages/backend/.convex` and `.data/` are readable only by you.
+  a process list, and the settings already there are read without being printed.
+  `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
 
-The local backend listens on all of the machine's network interfaces: the Convex CLI has no
-option to bind it to `127.0.0.1`. Its admin API needs the admin key in `.convex`, but its HTTP
-actions (sign-in) can be reached from your network. Use a firewall on a shared network.
+The gateway, the bridge hosts and the fake network's control port listen on `127.0.0.1` only,
+and the web app does unless you set `HOST`. The local backend listens on all of the machine's
+network interfaces: the Convex CLI has no option to bind it to `127.0.0.1`. Its admin API needs
+the admin key in `.convex`, but its HTTP actions (sign-in) can be reached from your network.
+Use a firewall on a shared network.
 
 The gateway is restarted when its code, or `packages/core` or `packages/crypto`, changes, and
 after a crash; if it stops three times in a minute, `pnpm dev` stops everything and says so.
-If the gateway or the web app doesn't come up, `pnpm dev` says which.
+If the gateway or the web app doesn't answer in time, `pnpm dev` says which and stops
+everything.
 
 ### What the web app is given
 
@@ -145,9 +161,12 @@ builds to `apps/desktop/dist`, a static single-page app.
 
 ### Starting over
 
-To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset`. It
+To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset` (it
+refuses while that checkout's `pnpm dev` runs, and `--reset` on its own is refused). It
 deletes this checkout's backend (`packages/backend/.convex/local` and `.env.local`) and the
 bridge hosts' logins (`.data/bridge-<network>`), then sets up again with a new test account.
+It deletes nothing a symlink leads to outside the checkout: a symlink there is removed itself,
+and one that leads the path out of the checkout stops the reset.
 It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the secrets in
 `.data/`. Deleting only `.data/bridge-<network>` forgets that network's logins.
 

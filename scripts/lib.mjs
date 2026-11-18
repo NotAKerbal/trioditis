@@ -6,15 +6,17 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { delimiter, dirname, resolve } from 'node:path'
+import { basename, delimiter, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
@@ -165,12 +167,23 @@ export function isFree(port) {
   })
 }
 
+/**
+ * Waits until `url` answers as `ok` wants, for at most `seconds` in all. Each request gets its
+ * own short timeout, so a server that accepts the connection and never answers can't hold the
+ * wait past its limit.
+ */
 export async function waitFor(url, seconds, { ok = (response) => response.ok } = {}) {
-  for (let i = 0; i < seconds; i++) {
+  const deadline = Date.now() + seconds * 1000
+  for (let left = seconds * 1000; left > 0; left = deadline - Date.now()) {
     try {
-      if (ok(await fetch(url))) return
+      const response = await fetch(url, { signal: AbortSignal.timeout(Math.min(5000, left)) })
+      const answered = ok(response)
+      // Free the connection: only the status was wanted.
+      await response.body?.cancel().catch(() => {})
+      if (answered) return
     } catch {}
-    await new Promise((done) => setTimeout(done, 1000))
+    const pause = Math.min(1000, deadline - Date.now())
+    if (pause > 0) await new Promise((done) => setTimeout(done, pause))
   }
   throw new Error(`${url} did not respond within ${seconds} seconds.`)
 }
@@ -199,41 +212,104 @@ const allPorts = (ports) => [
 ]
 
 const slotsDir = resolve(stateDir, 'slots')
-const slotLock = (slot) => resolve(slotsDir, `${slot}.lock`)
+const slotLockName = /^(\d+)\.lock$/
 const instanceFile = resolve(dataDir, 'dev.json')
 
-function lockHolder(slot) {
+/** `.data`, created readable only by you: it holds this checkout's secrets and bridge logins. */
+export function ensureDataDir() {
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  chmodSync(dataDir, 0o700)
+}
+
+function readLock(path) {
   try {
-    return readFileSync(slotLock(slot), 'utf8').trim()
+    return readFileSync(path, 'utf8').trim()
   } catch {
     return null
   }
 }
 
 /**
- * Takes a slot for this checkout, atomically: the lock file is created only if it doesn't
- * exist (O_EXCL), so two checkouts setting up at once can't both get it.
+ * Creates the lock at `path` naming `holder`, only if there is none (O_EXCL), so two processes
+ * can't both get it. Until `holder` is written the file is empty, which every reader takes to
+ * mean it is held.
  */
-function tryLock(slot) {
-  mkdirSync(slotsDir, { recursive: true })
+function createLock(path, holder) {
   let fd
   try {
-    fd = openSync(slotLock(slot), 'wx', 0o600)
+    fd = openSync(path, 'wx', 0o600)
   } catch (error) {
     if (error.code === 'EEXIST') return false
     throw error
   }
-  writeSync(fd, `${root}\n`)
+  writeSync(fd, `${holder}\n`)
   closeSync(fd)
   return true
 }
 
+/**
+ * Removes the lock at `path` if its holder is gone (`isStale`), without ever removing a lock
+ * that took its place. Two processes can both read the same stale holder; if both then removed
+ * the file, the second would remove the lock the first had just taken. So removal happens under
+ * a guard file created with O_EXCL, and the holder is read again under it: only a guard holder
+ * removes another's lock, so the lock can't change between that read and the removal.
+ *
+ * A guard is held for a few system calls. One left behind by a run that was killed in between
+ * stops that lock from being released automatically, and the message says which file to delete.
+ * `beforeGuard` is for tests, to run another process's steps between the two reads.
+ */
+export function removeStaleLock(path, isStale, { beforeGuard } = {}) {
+  const stale = (holder) => holder !== null && holder !== '' && isStale(holder)
+  if (!stale(readLock(path))) return false
+  beforeGuard?.()
+  const guardDir = resolve(dirname(path), 'releasing')
+  const guard = resolve(guardDir, basename(path))
+  mkdirSync(guardDir, { recursive: true, mode: 0o700 })
+  if (!createLock(guard, process.pid)) {
+    const pid = readLock(guard)
+    if (pid !== '' && !processAlive(pid)) {
+      console.warn(`${guard} was left by a run that stopped while releasing ${path}. Delete it to release that lock.`)
+    }
+    return false
+  }
+  try {
+    if (!stale(readLock(path))) return false
+    rmSync(path, { force: true })
+    return true
+  } finally {
+    rmSync(guard, { force: true })
+  }
+}
+
+function processAlive(text) {
+  const pid = Number(text)
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM: it exists, as another user's process.
+    return error.code === 'EPERM'
+  }
+}
+
+/** A slot lock's holder is a checkout; it is gone when that checkout no longer exists. */
+const checkoutGone = (holder) => !existsSync(resolve(holder, '.git'))
+
+/** Who holds slot `slot`: the checkout its lock names, or null. */
+export const slotHolder = (slot, dir = slotsDir) => readLock(resolve(dir, `${slot}.lock`))
+
+/** Takes slot `slot` for `owner`, atomically; false if another checkout holds it. */
+export function takeSlot(slot, owner = root, dir = slotsDir) {
+  mkdirSync(dir, { recursive: true })
+  return createLock(resolve(dir, `${slot}.lock`), owner)
+}
+
 /** Releases slots held by checkouts that no longer exist on this machine. */
-function releaseStaleSlots() {
-  if (!existsSync(slotsDir)) return
-  for (const file of readdirSync(slotsDir)) {
-    const holder = lockHolder(Number.parseInt(file, 10))
-    if (holder && !existsSync(resolve(holder, '.git'))) rmSync(resolve(slotsDir, file), { force: true })
+export function releaseStaleSlots(dir = slotsDir, options = {}) {
+  if (!existsSync(dir)) return
+  for (const file of readdirSync(dir)) {
+    if (slotLockName.test(file)) removeStaleLock(resolve(dir, file), checkoutGone, options)
   }
 }
 
@@ -248,39 +324,70 @@ export async function claimSlot() {
     saved = JSON.parse(readFileSync(instanceFile, 'utf8')).slot
   } catch {}
   if (Number.isInteger(saved)) {
-    if (lockHolder(saved) === root) return saved
-    if (lockHolder(saved) === null && tryLock(saved)) return saved
-    console.log(`Slot ${saved} now belongs to ${lockHolder(saved) ?? 'another checkout'}: taking a new one.`)
+    if (slotHolder(saved) === root) return saved
+    if (slotHolder(saved) === null && takeSlot(saved)) return saved
+    console.log(`Slot ${saved} now belongs to ${slotHolder(saved) || 'another checkout'}: taking a new one.`)
+  }
+  const save = (slot) => {
+    ensureDataDir()
+    writeFileSync(instanceFile, JSON.stringify({ slot }, null, 2) + '\n')
+    return slot
   }
   // A slot this checkout already holds but forgot (its .data/dev.json was deleted): take it back
   // rather than claim another and leave the old lock behind for good.
   const held = existsSync(slotsDir)
     ? readdirSync(slotsDir)
-        .map((file) => Number.parseInt(file, 10))
-        .filter((slot) => Number.isInteger(slot) && lockHolder(slot) === root)
+        .map((file) => file.match(slotLockName)?.[1])
+        .filter((slot) => slot !== undefined && slotHolder(slot) === root)
+        .map(Number)
         .sort((a, b) => a - b)
     : []
   if (held.length > 0) {
-    for (const extra of held.slice(1)) rmSync(slotLock(extra), { force: true })
-    mkdirSync(dataDir, { recursive: true })
-    writeFileSync(instanceFile, JSON.stringify({ slot: held[0] }, null, 2) + '\n')
-    return held[0]
+    for (const extra of held.slice(1)) rmSync(resolve(slotsDir, `${extra}.lock`), { force: true })
+    return save(held[0])
   }
   const main = capture('git', ['worktree', 'list', '--porcelain'], { quiet: true })
     .split('\n')
     .find((line) => line.startsWith('worktree '))
     ?.slice('worktree '.length)
   for (let slot = main === root ? 0 : 1; slot < 100; slot++) {
-    if (!tryLock(slot)) continue
+    if (!takeSlot(slot)) continue
     if (!(await Promise.all(allPorts(portsFor(slot)).map(isFree))).every(Boolean)) {
-      rmSync(slotLock(slot), { force: true })
+      rmSync(resolve(slotsDir, `${slot}.lock`), { force: true })
       continue
     }
-    mkdirSync(dataDir, { recursive: true })
-    writeFileSync(instanceFile, JSON.stringify({ slot }, null, 2) + '\n')
-    return slot
+    return save(slot)
   }
   throw new Error('Every dev slot is taken by another checkout or program.')
+}
+
+/**
+ * Removes `path`, which must be in this checkout (`top`), never anything a symlink leads to
+ * outside it: the directory it is in must really be inside the checkout, and a symlink at
+ * `path` itself is removed, not what it points to.
+ */
+export function removeFromCheckout(path, top = root) {
+  let parent
+  try {
+    parent = realpathSync(dirname(path))
+  } catch (error) {
+    if (error.code === 'ENOENT') return
+    throw error
+  }
+  const inside = realpathSync(top)
+  if (parent !== inside && !parent.startsWith(inside + sep)) {
+    throw new Error(`${path} is reached through a link to ${parent}, outside this checkout: not deleting it.`)
+  }
+  const target = resolve(parent, basename(path))
+  let link
+  try {
+    link = lstatSync(target).isSymbolicLink()
+  } catch (error) {
+    if (error.code === 'ENOENT') return
+    throw error
+  }
+  // A link is removed itself. Inside a directory, rmSync removes links without following them.
+  rmSync(target, { recursive: !link, force: true })
 }
 
 const secret = () => randomBytes(32).toString('base64url')
@@ -291,11 +398,23 @@ export function x25519() {
   return { publicKey: publicKey.export({ format: 'jwk' }).x, privateKey: privateKey.export({ format: 'jwk' }).d }
 }
 
-function parseEnv(text) {
-  const values = new Map()
-  for (const line of text.split('\n')) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/)
-    if (match) values.set(match[1], match[2])
+/**
+ * Parses a dotenv file exactly as dotenv 16.6.1 does (its `parse`), the version the Convex CLI
+ * bundles, so what is checked here is what the CLI would read: an `export ` prefix, `KEY: value`,
+ * quotes (with `\\n` expanded in double quotes), comments and blank lines. Later lines win.
+ */
+export function parseDotenv(text) {
+  const line =
+    /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm
+  const values = {}
+  const lines = text.replace(/\r\n?/gm, '\n')
+  let match
+  while ((match = line.exec(lines)) !== null) {
+    let value = (match[2] || '').trim()
+    const quote = value[0]
+    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, '$2')
+    if (quote === '"') value = value.replace(/\\n/g, '\n').replace(/\\r/g, '\r')
+    values[match[1]] = value
   }
   return values
 }
@@ -306,7 +425,7 @@ function parseEnv(text) {
  */
 export function devSecrets() {
   const file = resolve(dataDir, 'dev.env')
-  const values = existsSync(file) ? parseEnv(readFileSync(file, 'utf8')) : new Map()
+  const values = new Map(existsSync(file) ? Object.entries(parseDotenv(readFileSync(file, 'utf8'))) : [])
   const defaults = {
     BETTER_AUTH_SECRET: secret,
     GATEWAY_SECRET: secret,
@@ -325,7 +444,7 @@ export function devSecrets() {
 
 /** Writes .data/dev.env: the secrets plus this instance's addresses, for the dev scripts and tools. */
 export function writeDevEnv(values) {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  ensureDataDir()
   const file = resolve(dataDir, 'dev.env')
   writeFileSync(
     file,
@@ -364,35 +483,77 @@ export const localConvex = {
   unset: [
     ...new Set([
       ...CONVEX_SELECTORS,
+      // With DOTENV_KEY set, dotenv reads an encrypted .env.local.vault or .env.vault instead.
+      'DOTENV_KEY',
       ...Object.keys(process.env).filter((name) => name.startsWith('CONVEX_') && name !== 'CONVEX_AGENT_MODE'),
     ]),
   ],
 }
 
 /**
- * Refuses unless the Convex CLI, run in packages/backend, can only reach this checkout's own
- * local backend: `.env.local` (if any) names an anonymous local deployment, and no other dotenv
- * file there sets a `CONVEX_` variable. Checked before every push or settings change.
+ * The dotenv files the Convex CLI (1.50) loads from the directory it runs in, in that order, the
+ * first to set a name winning (`loadProjectEnvironmentVariables` in its lib/envvars.js, and
+ * `getAccountSelection` for CONVEX_ACCOUNT). It reads no others.
+ */
+const CONVEX_DOTENV_FILES = ['.env.local', '.env']
+
+/** Where the CLI writes a local deployment's own addresses in .env.local. */
+const LOOPBACK_URL = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+\/?$/
+
+/**
+ * Every name a line of `text` looks like it assigns, in dotenv's syntax or close to it. Checked
+ * as well as what dotenv parses, so a line dotenv reads differently than expected can't hide one.
+ */
+const assignedNames = (text) =>
+  [...text.matchAll(/^[^\S\n]*(?:export[^\S\n]+)?([\w.-]+)[^\S\n]*[=:]/gm)].map((match) => match[1])
+
+/**
+ * Refuses unless the Convex CLI, run in `dir` (packages/backend), can only reach this checkout's
+ * own local backend. The CLI loads .env.local and .env into its environment, and a deploy key
+ * there overrides any CONVEX_DEPLOYMENT, so neither file may set a CONVEX_ variable except, in
+ * .env.local, what the CLI itself writes for a local anonymous deployment: CONVEX_DEPLOYMENT
+ * naming this checkout's (the one in .convex/local), and CONVEX_URL and CONVEX_SITE_URL on this
+ * machine. Checked before every push or settings change.
  */
 export function assertLocalBackend({ requireConfigured = true, dir = backendDir } = {}) {
   const problems = []
-  const envLocal = resolve(dir, '.env.local')
-  if (existsSync(envLocal)) {
-    const deployment = parseEnv(readFileSync(envLocal, 'utf8')).get('CONVEX_DEPLOYMENT')
-    if (!deployment?.startsWith('anonymous:')) {
-      problems.push(
-        `packages/backend/.env.local names ${deployment ? `the deployment "${deployment}"` : 'no deployment'}, not this checkout's local backend`,
-      )
-    }
-  } else if (requireConfigured) {
-    problems.push('packages/backend/.env.local is missing')
+  let local = null
+  try {
+    local = JSON.parse(readFileSync(resolve(dir, '.convex/local/default/config.json'), 'utf8'))
+  } catch {}
+  const ours = local?.deploymentName ? `anonymous:${local.deploymentName}` : null
+  const allowed = {
+    CONVEX_DEPLOYMENT: (value) =>
+      /^anonymous:anonymous-[\w-]+$/.test(value) && (ours === null || value === ours)
+        ? null
+        : `names the deployment "${value}", not this checkout's local backend`,
+    CONVEX_URL: (value) => (LOOPBACK_URL.test(value) ? null : `sets CONVEX_URL to ${value}, not this machine`),
+    CONVEX_SITE_URL: (value) =>
+      LOOPBACK_URL.test(value) ? null : `sets CONVEX_SITE_URL to ${value}, not this machine`,
   }
-  for (const file of ['.env', '.env.development', '.env.development.local']) {
+  for (const file of CONVEX_DOTENV_FILES) {
     const path = resolve(dir, file)
-    if (existsSync(path) && /^CONVEX_/m.test(readFileSync(path, 'utf8')))
-      problems.push(`packages/backend/${file} sets a CONVEX_ variable`)
+    if (existsSync(`${path}.vault`))
+      problems.push(`packages/backend/${file}.vault exists, which dotenv can load instead`)
+    if (!existsSync(path)) {
+      if (file === '.env.local' && requireConfigured) problems.push('packages/backend/.env.local is missing')
+      continue
+    }
+    const text = readFileSync(path, 'utf8')
+    const values = parseDotenv(text)
+    const names = new Set([...Object.keys(values), ...assignedNames(text)].filter((name) => /^convex_/i.test(name)))
+    for (const name of names) {
+      const check = file === '.env.local' ? allowed[name] : undefined
+      const problem = check
+        ? check(values[name] ?? '')
+        : `sets ${name}, which can point the Convex CLI at another deployment`
+      if (problem) problems.push(`packages/backend/${file} ${problem}`)
+    }
+    if (file === '.env.local' && !values.CONVEX_DEPLOYMENT) {
+      problems.push("packages/backend/.env.local names no deployment, not this checkout's local backend")
+    }
   }
-  if (requireConfigured && !existsSync(resolve(dir, '.convex/local/default/config.json'))) {
+  if (requireConfigured && local === null) {
     problems.push('this checkout has no local backend in packages/backend/.convex/local')
   }
   if (problems.length > 0) {
@@ -538,31 +699,27 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
 }
 
 /**
- * Holds a lock named `name` for as long as this process runs, so two runs of the same thing
- * (`pnpm preview <name>`) can't overlap. A lock left by a process that died is taken over.
+ * Holds a lock named `name`, in `dir`, for as long as this process runs, so two runs of the same
+ * thing (`pnpm preview <name>`, a checkout's `pnpm dev`) can't overlap. A lock left by a process
+ * that died is taken over. `busy` says what to tell someone when a live process holds it.
  */
-export function holdLock(name) {
-  const dir = resolve(stateDir, 'locks')
-  mkdirSync(dir, { recursive: true })
+export function holdLock(name, { dir = resolve(stateDir, 'locks'), busy } = {}) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const path = resolve(dir, `${name}.lock`)
   for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(path, 'wx', 0o600)
-      writeSync(fd, `${process.pid}\n`)
-      closeSync(fd)
-      process.on('exit', () => rmSync(path, { force: true }))
-      return
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      const pid = Number.parseInt(readFileSync(path, 'utf8'), 10)
-      let alive = false
-      try {
-        process.kill(pid, 0)
-        alive = true
-      } catch {}
-      if (alive) throw new Error(`Another run (process ${pid}) holds ${name}. Wait for it to finish.`)
-      rmSync(path, { force: true })
+    if (createLock(path, process.pid)) {
+      process.on('exit', () => {
+        if (readLock(path) === String(process.pid)) rmSync(path, { force: true })
+      })
+      return path
+    }
+    if (removeStaleLock(path, (pid) => !processAlive(pid))) continue
+    const pid = readLock(path)
+    if (pid !== null) {
+      throw new Error(
+        busy?.(pid || 'starting') ?? `Another run (process ${pid || 'starting'}) holds ${name}. Wait for it to finish.`,
+      )
     }
   }
-  throw new Error(`Could not take the lock ${name}.`)
+  throw new Error(`Could not take the lock ${path}.`)
 }
