@@ -364,7 +364,15 @@ export const removePasskeyBackup = mutation({
   },
 })
 
-const passwordWrap = { nonce: v.string(), ct: v.string(), params: passwordParams, expectedRevision: v.number() }
+const passwordWrap = {
+  nonce: v.string(),
+  ct: v.string(),
+  params: passwordParams,
+  expectedRevision: v.number(),
+  // `account.changePassword`'s `sessionId`, checked again here in the transaction that
+  // writes, since the session can end between the action's own check and this.
+  sessionId: v.optional(v.string()),
+}
 
 /**
  * `account.changePassword`, before anything else: the proof (used up here), the revision and
@@ -375,6 +383,7 @@ export const checkPasswordChange = internalMutation({
   args: { userId: v.string(), proof: v.string(), ...passwordWrap },
   returns: v.null(),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId, args.userId)
     const member = await memberById(ctx, args.userId)
     checkWrapped(args)
     await checkReplacement(ctx, member, {
@@ -410,6 +419,7 @@ export const commitPasswordChange = internalMutation({
   args: { userId: v.string(), previousHash: v.string(), newHash: v.string(), ...passwordWrap },
   returns: v.object({ revision: v.number() }),
   handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId, args.userId)
     const member = await memberById(ctx, args.userId)
     checkWrapped(args)
     const replacing = await checkReplacement(ctx, member, {

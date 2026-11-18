@@ -424,6 +424,60 @@ describe('changing the password', { timeout: 30_000 }, () => {
     expect(await unlocks(sam, device, 'new password!!')).toBe(true)
   })
 
+  it('changes the password with the page’s session named', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    const result = await sam.action(api.account.changePassword, {
+      currentAuthPassword: 'auth-old-password',
+      newAuthPassword: 'auth-new-password',
+      newWrap: newWrap(device, 'new password!!'),
+      proof: await proofFrom(sam, device.identity),
+      expectedRevision: 1,
+      sessionId,
+    })
+    expect(result).toEqual({ revision: 2 })
+    expect(await verifyPassword({ hash: await signInHash(t), password: 'auth-new-password' })).toBe(true)
+  })
+
+  it('checks the session again in the transactions that write, after the action’s own check', async () => {
+    const t = setup()
+    const { sam, device } = await withPassword(t, 'auth-old-password')
+    const { sessionId } = (await sam.query(api.members.me, {}))!
+    const before = await signInHash(t)
+    const proof = await proofFrom(sam, device.identity)
+    const wrap = { ...newWrap(device, 'new password!!'), expectedRevision: 1, sessionId }
+    // The session ends while the action runs: between its check and the mutations it calls.
+    expect(await t.mutation(internal.auth.endSessionByToken, { token: 'token-sam' })).toBe('ended')
+    const changed = { data: { code: 'sessionChanged' } }
+    await expect(
+      sam.mutation(internal.keys.checkPasswordChange, { userId: 'sam', proof, ...wrap }),
+    ).rejects.toMatchObject(changed)
+    await expect(
+      sam.mutation(internal.keys.commitPasswordChange, {
+        userId: 'sam',
+        previousHash: before,
+        newHash: await hashPassword('auth-new-password'),
+        ...wrap,
+      }),
+    ).rejects.toMatchObject(changed)
+    // Another user's ID with this session is refused too.
+    const bob = await fresh(t, 'bob')
+    const { sessionId: bobSession } = (await bob.query(api.members.me, {}))!
+    await expect(
+      bob.mutation(internal.keys.checkPasswordChange, { userId: 'sam', proof, ...wrap, sessionId: bobSession }),
+    ).rejects.toMatchObject(changed)
+    expect(await signInHash(t)).toBe(before)
+    const password = await t.run(
+      async (ctx) =>
+        await ctx.db
+          .query('keyBackups')
+          .withIndex('by_user', (q) => q.eq('userId', 'sam').eq('kind', 'password'))
+          .collect(),
+    )
+    expect(password.map((row) => row.revision)).toEqual([1])
+  })
+
   it('changes nothing on a wrong password, a stale revision, weak settings or a reused proof', async () => {
     const t = setup()
     const { sam, device } = await withPassword(t, 'auth-old-password')
@@ -447,7 +501,14 @@ describe('changing the password', { timeout: 30_000 }, () => {
     ).rejects.toThrow(/settings/)
     await expect(attempt({ proof: toBase64Url(new Uint8Array(32)) })).rejects.toThrow(/expired/)
     expect(await signInHash(t)).toBe(before)
-    expect(await unlocks(sam, device, 'old password!!')).toBe(true)
+    const password = await t.run(
+      async (ctx) =>
+        await ctx.db
+          .query('keyBackups')
+          .withIndex('by_user', (q) => q.eq('userId', 'sam').eq('kind', 'password'))
+          .collect(),
+    )
+    expect(password.map((row) => row.revision)).toEqual([1])
   })
 
   it('lets one of two racing changes win, leaving sign-in and unlock on the same password', async () => {

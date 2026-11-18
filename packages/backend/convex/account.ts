@@ -47,7 +47,7 @@ export const changePassword = action({
   handler: async (ctx, args): Promise<{ revision: number }> => {
     await requireSessionIfGiven(ctx, args.sessionId)
     const userId = await requireUserId(ctx)
-    const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision }
+    const wrap = { ...args.newWrap, expectedRevision: args.expectedRevision, sessionId: args.sessionId }
     await ctx.runMutation(internal.keys.checkPasswordChange, { userId, proof: args.proof, ...wrap })
     const current = await ctx.runQuery(internal.account.credential, { userId })
     if (!current) throw new ConvexError('This account has no password to change.')

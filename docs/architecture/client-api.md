@@ -253,7 +253,9 @@ shows the first account; a key or backup meant for one account would then be wri
 other, which can never open it. With `sessionId`, the call is refused before it writes
 anything unless it runs as that same Better Auth session, with `ConvexError` data
 `{ code: 'sessionChanged', message: 'This page’s session has changed. Reload the page.' }`.
-A session that has ended is refused the same way. Reload the page then: it reads `members.me`
+A session that has ended is refused the same way. `account.changePassword`, an action,
+checks again inside each transaction that writes the backup or the password, so a session
+that ends while it runs is refused there too. Reload the page then: it reads `members.me`
 again. Without `sessionId` nothing is checked, as before; it will become required once every
 client sends it.
 
