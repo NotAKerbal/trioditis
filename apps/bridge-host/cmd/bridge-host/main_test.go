@@ -60,19 +60,21 @@ func TestLoginPromptExitsOnSignal(t *testing.T) {
 			defer held.Close() // the write end stays open: stdin never reaches EOF
 			var out bytes.Buffer
 			cmd := exec.Command(os.Args[0])
-			cmd.Env = append(os.Environ(),
-				"TRIODITIS_TEST_RUN_MAIN=1",
-				"TRIODITIS_TEST_ARGS=--network fake --dev-keys --user isaac login",
-				"BRIDGE_DATA_DIR="+t.TempDir(),
-			)
+			cmd.Env = childEnv(t)
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &syncWriter{buf: &out}, &syncWriter{buf: &out}
 			if err = cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			// However the test ends, the child is killed and reaped.
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			defer func() {
+				_ = cmd.Process.Kill()
+				<-exited
+			}()
 			deadline := time.Now().Add(20 * time.Second)
 			for !strings.Contains(outString(&out), "Username: ") {
 				if time.Now().After(deadline) {
-					_ = cmd.Process.Kill()
 					t.Fatalf("no prompt; output:\n%s", outString(&out))
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -80,12 +82,10 @@ func TestLoginPromptExitsOnSignal(t *testing.T) {
 			if err = cmd.Process.Signal(sig); err != nil {
 				t.Fatal(err)
 			}
-			exited := make(chan error, 1)
-			go func() { exited <- cmd.Wait() }()
 			select {
 			case err = <-exited:
+				exited <- err // for the deferred reap
 			case <-time.After(10 * time.Second):
-				_ = cmd.Process.Kill()
 				t.Fatalf("still running 10s after %s at the prompt", sig)
 			}
 			var exitErr *exec.ExitError
@@ -97,6 +97,27 @@ func TestLoginPromptExitsOnSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// childEnv is the child's whole environment: nothing from the shell that could point it at
+// a real bridge database, gateway or keys, only what a process needs plus this test's own
+// throwaway settings.
+func childEnv(t *testing.T) []string {
+	env := []string{
+		"TRIODITIS_TEST_RUN_MAIN=1",
+		"TRIODITIS_TEST_ARGS=--network fake --dev-keys --user isaac login",
+		// The database defaults to a file in here.
+		"BRIDGE_DATA_DIR=" + t.TempDir(),
+		// Nothing listens here: the child can't reach a real gateway.
+		"GATEWAY_URL=http://127.0.0.1:1",
+		"BRIDGE_HOST_ADDR=127.0.0.1:0",
+	}
+	for _, name := range []string{"PATH", "HOME", "TMPDIR", "GOCOVERDIR"} {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
 }
 
 var outLock = make(chan struct{}, 1)
