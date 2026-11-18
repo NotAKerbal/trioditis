@@ -3,20 +3,22 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import {
-  chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs'
-import { basename, delimiter, dirname, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
@@ -217,8 +219,51 @@ const instanceFile = resolve(dataDir, 'dev.json')
 
 /** `.data`, created readable only by you: it holds this checkout's secrets and bridge logins. */
 export function ensureDataDir() {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
-  chmodSync(dataDir, 0o700)
+  privateDir(dataDir)
+}
+
+/**
+ * Makes `dir` if needed and leaves it readable only by you. It is opened with O_NOFOLLOW before
+ * its mode is set, so a symlink there, even one made since it was checked, is refused rather
+ * than followed.
+ */
+export function privateDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  let fd
+  try {
+    fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  } catch (error) {
+    if (error.code === 'ELOOP' || error.code === 'ENOTDIR')
+      throw new Error(`${dir} isn't a directory, or is a symlink: not writing there.`)
+    throw error
+  }
+  try {
+    fchmodSync(fd, 0o700)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Writes all of `path`, readable only by you, never through a symlink: into a new file beside
+ * it (O_EXCL and O_NOFOLLOW), which is then renamed over it. A rename replaces a symlink at
+ * `path` instead of following it, so a link made since the checks can't send the write anywhere.
+ */
+export function writePrivateFile(path, text) {
+  const temp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try {
+    writeSync(fd, text)
+    fchmodSync(fd, 0o600)
+  } finally {
+    closeSync(fd)
+  }
+  try {
+    renameSync(temp, path)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
 }
 
 function readLock(path) {
@@ -231,7 +276,7 @@ function readLock(path) {
 
 /**
  * Creates the lock at `path` naming `holder`, only if there is none (O_EXCL), so two processes
- * can't both get it. Until `holder` is written the file is empty, which every reader takes to
+ * can't both get it. O_EXCL also refuses a symlink at `path`, so a lock is never written through one. Until `holder` is written the file is empty, which every reader takes to
  * mean it is held.
  */
 function createLock(path, holder) {
@@ -347,7 +392,7 @@ export async function claimSlot() {
   }
   const save = (slot) => {
     ensureDataDir()
-    writeFileSync(instanceFile, JSON.stringify({ slot }, null, 2) + '\n')
+    writePrivateFile(instanceFile, JSON.stringify({ slot }, null, 2) + '\n')
     return slot
   }
   // A slot this checkout already holds but forgot (its .data/dev.json was deleted): take it back
@@ -379,58 +424,103 @@ export async function claimSlot() {
 }
 
 /**
- * Where `pnpm dev` keeps this checkout's data, relative to the checkout. The Convex CLI writes
- * the backend's database and settings under packages/backend/.convex and its address to
- * .env.local; the dev scripts write secrets and bridge logins to .data.
+ * What `pnpm dev` and the Convex CLI write in this checkout, relative to it. The dev scripts
+ * write secrets, the slot, the run lock and bridge logins under .data; the CLI writes the
+ * backend's database and settings under packages/backend/.convex, its address to .env.local,
+ * generated code to the _generated directories, and .gitignore entries.
+ *
+ * Each place in DATA_PATHS must really be in the checkout, and nothing in a DATA_TREES
+ * directory may be a symlink: a write through one would change a file somewhere else.
  */
 const DATA_PATHS = [
   '.data',
   'packages/backend',
-  'packages/backend/.convex',
-  'packages/backend/.convex/local',
-  'packages/backend/.convex/local/default',
+  'packages/backend/.gitignore',
   'packages/backend/.env.local',
+  'packages/backend/.convex',
+  'packages/backend/convex',
+  'packages/backend/convex/betterAuth',
+]
+const DATA_TREES = [
+  '.data',
+  'packages/backend/.convex',
+  'packages/backend/convex/_generated',
+  'packages/backend/convex/betterAuth/_generated',
 ]
 
 /**
- * Refuses unless every place in DATA_PATHS that exists is really in this checkout (`top`): not
- * a symlink, and not reached through one that leads outside. Otherwise setting up would change
- * a database or settings somewhere else. Checked before anything is written.
+ * Refuses unless what `pnpm dev` and the Convex CLI write in this checkout (`top`) is really in
+ * it: DATA_PATHS not symlinks and not reached through one that leads outside, and no symlink
+ * anywhere in DATA_TREES (walked without following links). Checked before anything is written,
+ * and again before Convex commands. Our own writes also refuse links on their own
+ * (`privateDir`, `writePrivateFile`, O_EXCL locks); the CLI's can't, so this is what keeps them in.
  */
 export function assertCheckoutPaths(top = root) {
   const inside = realpathSync(top)
   const problems = []
-  for (const name of DATA_PATHS) {
-    const path = resolve(top, name)
-    let link
+  const lstat = (path) => {
     try {
-      link = lstatSync(path).isSymbolicLink()
+      return lstatSync(path)
     } catch (error) {
-      if (error.code === 'ENOENT') continue
+      if (error.code === 'ENOENT') return null
       throw error
     }
+  }
+  const linkTarget = (path) => {
+    try {
+      return ` to ${readlinkSync(path)}`
+    } catch {
+      return ''
+    }
+  }
+  for (const name of DATA_PATHS) {
+    const path = resolve(top, name)
+    const stat = lstat(path)
+    if (!stat) continue
     let real = null
     try {
       real = realpathSync(path)
     } catch {}
-    if (link) problems.push(`${name} is a symlink${real ? ` to ${real}` : ''}`)
+    if (stat.isSymbolicLink()) problems.push(`${name} is a symlink${linkTarget(path)}`)
     else if (real !== inside && !real?.startsWith(inside + sep)) problems.push(`${name} leads outside it, to ${real}`)
+  }
+  for (const tree of DATA_TREES) {
+    const pending = [tree]
+    while (pending.length > 0 && problems.length < 20) {
+      const name = pending.pop()
+      const stat = lstat(resolve(top, name))
+      if (!stat) continue
+      if (stat.isSymbolicLink()) {
+        if (!problems.some((problem) => problem.startsWith(`${name} `))) {
+          problems.push(`${name} is a symlink${linkTarget(resolve(top, name))}`)
+        }
+      } else if (stat.isDirectory()) {
+        for (const entry of readdirSync(resolve(top, name))) pending.push(join(name, entry))
+      }
+    }
   }
   if (problems.length > 0) {
     throw new Error(
       `pnpm dev keeps this checkout's data inside the checkout, and won't write anywhere else:\n  - ${problems.join('\n  - ')}\n` +
-        'Replace those with real directories (or files) in the checkout.',
+        'Replace those with real files and directories in the checkout.',
     )
   }
 }
 
 /**
- * Whether a backend is using this checkout's backend data (`dir`/.convex/local), on any port: a
- * process whose arguments name that data (the Convex local backend is given its database's
- * path), or something listening on the ports it last ran on (.convex/local/default/config.json).
- * Says which, or null. Before a reset deletes the data from under it.
+ * Whether a backend is using this checkout's backend data (`dir`/.convex/local), on any port.
+ * Says which, or null; before a reset deletes the data from under it. It is in use when:
+ *
+ * - something listens on the ports the backend last ran on (.convex/local/default/config.json);
+ * - on Linux, a process (from `proc`) has a file there open, runs in a directory there, or names
+ *   a path there in its arguments, relative ones read from its working directory. A Convex local
+ *   backend whose open files or directory can't be read (another user's) counts too;
+ * - elsewhere, a process names the data's absolute path in its arguments (`ps`).
+ *
+ * Only a process's ID and program name are ever shown: the local backend's arguments include
+ * its instance secret.
  */
-export async function backendInUse(dir = backendDir) {
+export async function backendInUse(dir = backendDir, { proc = '/proc' } = {}) {
   const local = resolve(dir, '.convex/local')
   let config = null
   try {
@@ -441,10 +531,15 @@ export async function backendInUse(dir = backendDir) {
       return `something is listening on port ${port}, where this checkout's backend last ran`
     }
   }
-  const paths = new Set([local])
+  const roots = new Set([local])
   try {
-    paths.add(realpathSync(local))
+    roots.add(realpathSync(local))
   } catch {}
+  const under = (path) => [...roots].some((top) => path === top || path.startsWith(top + sep))
+  // Compared as written, against both spellings of the data's path: /proc gives open files and
+  // working directories already resolved, and arguments are as the process was given them.
+  const ours = (path) => Boolean(path) && isAbsolute(path) && under(resolve(path))
+  if (proc !== '/proc' || existsSync('/proc/self')) return procUsing(proc, ours)
   const listed = spawnSync('ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (listed.status !== 0) {
     console.warn("Couldn't list processes, so only the backend's ports were checked.")
@@ -454,9 +549,66 @@ export async function backendInUse(dir = backendDir) {
     const match = line.match(/^\s*(\d+)\s+(\S+)(.*)$/)
     if (!match || Number(match[1]) === process.pid) continue
     const args = match[2] + match[3]
-    // Only the program's name is shown: the local backend's arguments include its instance secret.
-    if ([...paths].some((path) => args.includes(path + sep) || args.endsWith(path))) {
+    if ([...roots].some((path) => args.includes(path + sep) || args.endsWith(path))) {
       return `process ${match[1]} (${basename(match[2])}) is using its data`
+    }
+  }
+  return null
+}
+
+/** The Linux half of `backendInUse`: every process in `proc`, by its open files, directory and arguments. */
+function procUsing(proc, ours) {
+  const gone = (error) => error.code === 'ENOENT' || error.code === 'ESRCH'
+  for (const entry of readdirSync(proc)) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
+    const base = join(proc, entry)
+    let name
+    try {
+      name = readFileSync(join(base, 'comm'), 'utf8').trim()
+    } catch {
+      continue // It has exited.
+    }
+    let unreadable = false
+    let exited = false
+    const attempt = (read, fallback) => {
+      try {
+        return read()
+      } catch (error) {
+        if (gone(error)) exited = true
+        else unreadable = true
+        return fallback
+      }
+    }
+    const cwd = attempt(() => readlinkSync(join(base, 'cwd')), null)
+    const args = attempt(() => readFileSync(join(base, 'cmdline'), 'utf8').split('\0').filter(Boolean), [])
+    const fds = attempt(() => readdirSync(join(base, 'fd')), []).flatMap((fd) => {
+      try {
+        return [readlinkSync(join(base, 'fd', fd))]
+      } catch {
+        return []
+      }
+    })
+    if (exited) continue
+    // An argument can be a path, or end in one (`--local-storage=<path>`); relative ones are
+    // relative to the process's working directory.
+    const named = args
+      .flatMap((arg) => [arg, arg.slice(arg.indexOf('=') + 1)])
+      .map((arg) => (isAbsolute(arg) || !cwd ? arg : resolve(cwd, arg)))
+    if ([cwd, ...fds.map((fd) => fd.replace(/ \(deleted\)$/, '')), ...named].some(ours)) {
+      // Its program, not its arguments: the first argument is the program's path.
+      return `process ${entry} (${args[0] ? basename(args[0]) : name}) is using its data`
+    }
+    // A local backend whose files and directory can't be read is another user's, so it can reach
+    // this checkout's data (readable only by you) only as root. Its storage directory is then
+    // the evidence: the Convex CLI always passes it as an absolute path, checked above with the
+    // other arguments. One given no absolute storage path may be using this checkout's data.
+    const storageAt = args.findIndex((arg) => arg === '--local-storage' || arg.startsWith('--local-storage='))
+    const storage = storageAt < 0 ? null : (args[storageAt].split('=')[1] ?? args[storageAt + 1])
+    if (unreadable && name.startsWith('convex-local-ba') && !(storage && isAbsolute(storage))) {
+      return (
+        `process ${entry} is a Convex local backend whose open files can't be read here and whose storage ` +
+        'isn’t an absolute path, so it may be using this checkout’s data. Stop it first'
+      )
     }
   }
   return null
@@ -546,15 +698,12 @@ export function devSecrets() {
 /** Writes .data/dev.env: the secrets plus this instance's addresses, for the dev scripts and tools. */
 export function writeDevEnv(values) {
   ensureDataDir()
-  const file = resolve(dataDir, 'dev.env')
-  writeFileSync(
-    file,
+  writePrivateFile(
+    resolve(dataDir, 'dev.env'),
     Object.entries(values)
       .map(([name, value]) => `${name}=${value}`)
       .join('\n') + '\n',
-    { mode: 0o600 },
   )
-  chmodSync(file, 0o600)
 }
 
 export const convex = (...args) => ['exec', 'convex', ...args]

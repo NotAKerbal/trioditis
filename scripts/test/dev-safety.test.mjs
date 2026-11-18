@@ -7,11 +7,13 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -26,12 +28,14 @@ import {
   backendInUse,
   holdLock,
   parseDotenv,
+  privateDir,
   releaseStaleSlots,
   removeFromCheckout,
   removeStaleLock,
   slotHolder,
   takeSlot,
   waitFor,
+  writePrivateFile,
 } from '../lib.mjs'
 
 const backend = (files) => {
@@ -459,4 +463,147 @@ void test('a reset sees a backend using this checkout’s data, on any port', as
   } finally {
     backendLike.kill()
   }
+})
+
+void test('refuses a symlink anywhere among the files it or the Convex CLI writes', () => {
+  const dir = temp()
+  const top = join(dir, 'checkout')
+  const outside = join(dir, 'outside')
+  mkdirSync(outside)
+  writeFileSync(join(outside, 'target'), 'keep')
+  const dirs = ['.data/bridge-fake', 'packages/backend/.convex/local/default/convex_local_storage/modules']
+  for (const name of [...dirs, 'packages/backend/convex/_generated', 'packages/backend/convex/betterAuth/_generated']) {
+    mkdirSync(join(top, name), { recursive: true })
+  }
+  assertCheckoutPaths(top)
+  for (const name of [
+    '.data/dev.env',
+    '.data/dev.json',
+    '.data/dev.lock',
+    '.data/secrets.json',
+    '.data/releasing/dev.lock',
+    '.data/bridge-fake/bridge.db',
+    'packages/backend/.env.local',
+    'packages/backend/.gitignore',
+    'packages/backend/.convex/.gitignore',
+    'packages/backend/.convex/local/default/config.json',
+    'packages/backend/.convex/local/default/convex_local_backend.sqlite3',
+    'packages/backend/.convex/local/default/convex_local_storage/modules/x.blob',
+    'packages/backend/convex/_generated/api.js',
+    'packages/backend/convex/betterAuth/_generated/api.ts',
+  ]) {
+    mkdirSync(join(top, name, '..'), { recursive: true })
+    symlinkSync(join(outside, 'target'), join(top, name))
+    assert.throws(() => assertCheckoutPaths(top), new RegExp(`${name.replaceAll('.', '\\.')} is a symlink`), name)
+    rmSync(join(top, name))
+  }
+  assertCheckoutPaths(top)
+  assert.equal(readFileSync(join(outside, 'target'), 'utf8'), 'keep')
+})
+
+void test('its own writes never follow a symlink, even one made after the checks', () => {
+  const dir = temp()
+  const outside = join(dir, 'outside')
+  writeFileSync(outside, 'keep', { mode: 0o644 })
+  // A file: the link is replaced by the file, and what it pointed to is untouched.
+  symlinkSync(outside, join(dir, 'dev.env'))
+  writePrivateFile(join(dir, 'dev.env'), 'SECRET=x\n')
+  assert.equal(lstatSync(join(dir, 'dev.env')).isSymbolicLink(), false)
+  assert.equal(readFileSync(join(dir, 'dev.env'), 'utf8'), 'SECRET=x\n')
+  assert.equal(statSync(join(dir, 'dev.env')).mode & 0o777, 0o600)
+  assert.equal(readFileSync(outside, 'utf8'), 'keep')
+  assert.equal(statSync(outside).mode & 0o777, 0o644)
+  assert.deepEqual(readdirSync(dir).sort(), ['dev.env', 'outside'], 'no temporary file is left')
+  // A directory: refused, and the target's mode is unchanged.
+  const outsideDir = join(dir, 'outside-dir')
+  mkdirSync(outsideDir, { mode: 0o755 })
+  symlinkSync(outsideDir, join(dir, '.data'))
+  assert.throws(() => privateDir(join(dir, '.data')), /is a symlink: not writing there/)
+  assert.equal(statSync(outsideDir).mode & 0o777, 0o755)
+  // A lock: O_EXCL won't create one through a link.
+  const slots = join(dir, 'slots')
+  mkdirSync(slots)
+  symlinkSync(outside, join(slots, '1.lock'))
+  assert.equal(takeSlot(1, dir, slots), false)
+  assert.equal(readFileSync(outside, 'utf8'), 'keep')
+})
+
+void test('setup refuses a symlinked .data/dev.env or config.json before writing anything', () => {
+  for (const name of ['.data/dev.env', 'packages/backend/.convex/local/default/config.json']) {
+    const { dir, top, run } = throwawayCheckout()
+    const target = join(dir, 'target')
+    writeFileSync(target, '{"deploymentName":"anonymous-agent"}', { mode: 0o644 })
+    mkdirSync(join(top, name, '..'), { recursive: true })
+    symlinkSync(target, join(top, name))
+    const result = run(['--setup'])
+    assert.equal(result.status, 1, name)
+    assert.match(result.stderr, new RegExp(`${name.replaceAll('.', '\\.')} is a symlink`))
+    assert.equal(readFileSync(target, 'utf8'), '{"deploymentName":"anonymous-agent"}')
+    assert.equal(statSync(target).mode & 0o777, 0o644, 'not chmodded')
+    assert.equal(existsSync(join(top, '.data/dev.json')), false, 'nothing was written')
+  }
+})
+
+const linux = { skip: process.platform !== 'linux' && 'reads /proc' }
+
+void test('a reset sees a backend started with relative paths, or holding its files open', linux, async () => {
+  const dir = temp()
+  const local = join(dir, '.convex/local/default')
+  mkdirSync(local, { recursive: true })
+  writeFileSync(join(local, 'db.sqlite3'), '')
+  const idle = 'setInterval(() => {}, 1000)'
+  const cases = [
+    // Run in the backend's directory with a relative database path, as `cd` and a relative path would.
+    { args: ['-e', idle, 'db.sqlite3'], cwd: local },
+    // Run beside it, the path relative to that.
+    { args: ['-e', idle, 'db=local/default/db.sqlite3'], cwd: join(dir, '.convex') },
+    // Named nowhere, but with the database open (its path passed in the environment).
+    {
+      args: ['-e', `require('fs').openSync(process.env.DB, 'r'); ${idle}`],
+      cwd: dir,
+      env: { DB: join(local, 'db.sqlite3') },
+    },
+  ]
+  for (const { args, cwd, env } of cases) {
+    const child = spawn(process.execPath, args, { cwd, env: { ...process.env, ...env }, stdio: 'ignore' })
+    try {
+      let found = null
+      for (let i = 0; i < 50 && found === null; i++) {
+        await new Promise((done) => setTimeout(done, 100))
+        found = await backendInUse(dir)
+      }
+      assert.match(found ?? '', new RegExp(`process ${child.pid} \\(node\\) is using its data`), args.join(' '))
+      assert.ok(!found.includes('sqlite3'), 'its arguments are not shown')
+    } finally {
+      child.kill()
+      if (child.exitCode === null && child.signalCode === null) await new Promise((done) => child.once('exit', done))
+    }
+  }
+  assert.equal(await backendInUse(dir), null)
+})
+
+void test('a reset refuses a local backend it can’t inspect unless its storage is elsewhere', async () => {
+  const dir = temp()
+  mkdirSync(join(dir, '.convex/local/default'), { recursive: true })
+  // A stand-in for /proc with another user's backend: its directory and open files can't be read.
+  const proc = join(dir, 'proc')
+  const backendProcess = (args) => {
+    rmSync(proc, { recursive: true, force: true })
+    mkdirSync(join(proc, '4242'), { recursive: true })
+    writeFileSync(join(proc, '4242/comm'), 'convex-local-ba\n')
+    writeFileSync(join(proc, '4242/cmdline'), args.join('\0') + '\0')
+    writeFileSync(join(proc, '4242/cwd'), '') // Not a link: reading it fails, as EACCES would.
+    writeFileSync(join(proc, '4242/fd'), '') // Not a directory: listing it fails.
+  }
+  backendProcess(['convex-local-backend', '--local-storage', 'storage', 'db.sqlite3'])
+  assert.match(
+    await backendInUse(dir, { proc }),
+    /process 4242 is a Convex local backend whose open files can't be read/,
+  )
+  backendProcess(['convex-local-backend', '--port', '3210'])
+  assert.match(await backendInUse(dir, { proc }), /process 4242 is a Convex local backend/)
+  backendProcess(['convex-local-backend', '--local-storage', '/srv/convex/storage', '--db', 'sqlite'])
+  assert.equal(await backendInUse(dir, { proc }), null)
+  backendProcess(['convex-local-backend', '--local-storage', join(dir, '.convex/local/default/storage')])
+  assert.match(await backendInUse(dir, { proc }), /process 4242 \(convex-local-backend\) is using its data/)
 })

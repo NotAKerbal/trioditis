@@ -15,7 +15,7 @@
 // account: its data lives in packages/backend/.convex/local, and everything else this instance
 // keeps (secrets, bridge host databases) in .data/. Git ignores both. It never acts on any
 // other backend: see `assertLocalBackend`.
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, watch } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, watch } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   TESTER,
@@ -39,6 +39,7 @@ import {
   localConvex,
   parseDotenv,
   portsFor,
+  privateDir,
   removeFromCheckout,
   root,
   run,
@@ -160,11 +161,12 @@ const configured = () => {
 }
 
 try {
-  // Before any Convex command: the CLI must only be able to reach this checkout's own backend.
+  // Before any Convex command: the CLI must only be able to reach this checkout's own backend,
+  // and must write only inside this checkout.
+  assertCheckoutPaths()
   assertLocalBackend({ requireConfigured: false })
   // The backend's data, keys and admin key: yours only, from before the CLI first writes there.
-  mkdirSync(resolve(backendDir, '.convex'), { recursive: true, mode: 0o700 })
-  chmodSync(resolve(backendDir, '.convex'), 0o700)
+  privateDir(resolve(backendDir, '.convex'))
   if (!configured()) {
     step(`Creating a local backend for this checkout on ports ${ports.convexCloud} and ${ports.convexSite}`)
     run('pnpm', convex('dev', '--once', '--typecheck', 'disable', '--tail-logs', 'disable', ...portArgs), localConvex)
@@ -244,6 +246,12 @@ process.on('SIGINT', () => stop(0))
 process.on('SIGTERM', () => stop(0))
 
 step('Starting the backend')
+// Checked again: the bridge host build took a while, and the CLI is about to write.
+try {
+  assertCheckoutPaths()
+} catch (error) {
+  fail(error.message)
+}
 const backend = launch('convex', 'pnpm', convex('dev', '--typecheck', 'disable', ...portArgs), localConvex)
 // The CLI reports each push on stderr. Until the first push of this run, the backend may still
 // be serving the functions an earlier run pushed.

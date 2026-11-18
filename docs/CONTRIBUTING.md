@@ -107,7 +107,14 @@ never takes a checkout's ports.
 
 Only one `pnpm dev` (with or without `--setup` or `--reset`) runs at a time for a checkout: each
 holds `.data/dev.lock` while it runs, and a second one stops and says which process holds it.
-A lock left by a run that was killed is taken over.
+A lock left by a run that was killed is taken over, under its own guard,
+`.data/releasing/dev.lock`.
+
+A guard is never removed automatically: two runs both clearing a leftover guard could let
+two releases happen at once again. If one is left, the run that finds it stops (for
+`.data/dev.lock`) or warns and takes another slot (for a slot), and names the guard file.
+Check that no `pnpm dev` for that checkout is running, delete the file it names, and run
+again.
 
 In T3 Code, the Trioditis project should run `pnpm install && pnpm dev --setup` for every new
 worktree, so a branch's instance is ready before its first change. `--setup` does the slow
@@ -134,9 +141,17 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   versions kept backends for every project, and would push to it. So then `.env.local` may name
   no deployment, and `pnpm dev` refuses if `~/.convex/anonymous-convex-backend-state/anonymous-agent`
   (the name a new one gets) exists: move it aside.
-- Before it writes anything, it refuses if `.data`, `packages/backend/.convex`, `.convex/local`
-  or `packages/backend/.env.local` is a symlink or leads outside the checkout, so a backend's
-  database and settings elsewhere are never changed.
+- Before it writes anything, and again before Convex commands, it refuses if anything it or
+  the Convex CLI writes in the checkout is a symlink or leads outside it: `.data` and
+  everything in it (secrets, the slot, the run lock, bridge logins), everything in
+  `packages/backend/.convex`, `packages/backend/.env.local` and `.gitignore`, and the
+  generated code in `packages/backend/convex/_generated` and
+  `packages/backend/convex/betterAuth/_generated`. So a database, settings or secrets
+  elsewhere are never changed through a link. Its own writes refuse links as well, even
+  one made after the check: files are written to a new file beside them and renamed into
+  place, directories are opened with `O_NOFOLLOW` before their mode is set, and locks are
+  created with `O_EXCL`. The Convex CLI's writes can't be made to refuse links, so for those
+  the check is what stands guard.
 - If any of these fails, it stops and says why.
 - Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
   a process list, and the settings already there are read without being printed.
@@ -177,9 +192,16 @@ It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the s
 `.data/`. Deleting only `.data/bridge-<network>` forgets that network's logins.
 
 A reset refuses while this checkout's `pnpm dev` runs, and while any backend is using this
-checkout's data: a process given its database (one you started by hand with `npx convex dev`
-on other ports, say), or something listening on the ports in `.convex/local/default/config.json`.
-It deletes nothing a symlink leads to outside the checkout. `--reset` on its own is refused.
+checkout's data, on any port: something listening on the ports in
+`.convex/local/default/config.json`, or a process using `packages/backend/.convex/local`
+(one you started by hand with `npx convex dev`, say). On Linux that means a process with a
+file there open, running in a directory there, or naming a path there in its arguments,
+relative paths read from its working directory. A Convex local backend whose open files
+can't be read (another user's, such as one in Docker) counts unless it was given its
+storage as an absolute path outside this checkout. On other systems only absolute paths in
+a process's arguments are checked. Only a process's ID and program are shown, never its
+arguments, which include the backend's instance secret. A reset deletes nothing a symlink
+leads to outside the checkout. `--reset` on its own is refused.
 
 Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
 secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.
