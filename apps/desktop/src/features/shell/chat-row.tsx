@@ -49,7 +49,7 @@ export function ChatRow({
   const line = rowPreview({
     previews: prefs.previews,
     draft,
-    last: undefined,
+    last: chat.last,
     described: chat.described,
     topic: chat.topic,
     network: networkName(chat.network),
@@ -95,7 +95,12 @@ export function ChatRow({
             ) : (
               <span className="ml-auto shrink-0 pl-1 text-xs text-subtle-foreground">
                 {/* Imported history doesn't set a time, so a backfilled chat has none to show. */}
-                {chat.row.lastMessageAt > 0 ? listTime(chat.row.lastMessageAt) : null}
+                {/* The time of what the row shows: the previewed message's, else the chat's last. */}
+                {line.kind === 'message' && chat.last
+                  ? listTime(chat.last.at)
+                  : chat.row.lastMessageAt > 0
+                    ? listTime(chat.row.lastMessageAt)
+                    : null}
               </span>
             )}
           </span>

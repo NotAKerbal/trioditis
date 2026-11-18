@@ -1,5 +1,7 @@
 /** A chat's last message, opened on this device, as the chat list shows it. */
-export interface LastMessage {
+export interface LastShown {
+  /** Its network time. */
+  at: number
   self: boolean
   redacted: boolean
   /** The opened text; null if it doesn't open here, or there's none to show (a large message). */
@@ -21,7 +23,7 @@ export function rowPreview({
 }: {
   previews: boolean
   draft: string
-  last: LastMessage | null | undefined
+  last: LastShown | null | undefined
   described: boolean
   topic: string | undefined
   network: string

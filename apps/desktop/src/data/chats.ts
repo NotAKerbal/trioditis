@@ -9,6 +9,7 @@ import { useMutation, usePaginatedQuery } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
 import { useMemo } from 'react'
 import { checkWithinAYear } from '~/data/snooze.ts'
+import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import {
   openCached,
@@ -19,6 +20,7 @@ import {
   type MessagePlaintext,
 } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
+import { openLastMessage } from './last-message.ts'
 
 export type ChatId = Id<'chats'>
 export type LabelId = Id<'labels'>
@@ -37,6 +39,8 @@ export interface Chat {
   hasUnread: boolean
   mentions: number
   muted: boolean
+  /** The last message, opened here, for the list's preview; null until the row has one. */
+  last: LastShown | null
 }
 
 export const networkName = (network: string) => NETWORK_INFO[network as Network]?.name ?? network
@@ -63,6 +67,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     hasUnread: row.unreadCount > 0 || row.markedUnread,
     mentions: row.mentionCount,
     muted,
+    last: openLastMessage(row.lastMessage, session),
   }
 }
 
