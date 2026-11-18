@@ -132,9 +132,21 @@ version bump.
 Anything sealed to the bridge key (outbound sends, login input) can be opened by whoever
 holds `BRIDGE_PRIVATE_KEY`. So those payloads are kept only until the bridge host has them:
 the backend deletes its copy as soon as the bridge host accepts the command (or it is
-rejected or expires), and the bridge host keeps only IDs and status once it has run it. A
-backup therefore holds only commands in flight at that moment. Rotating the bridge key is a
-later addition.
+rejected or expires), and the bridge host keeps only IDs and status once it has run it. An
+ordinary send's bridge copy therefore exists for at most 24 hours (its `notAfter`), and a
+backup holds only commands in flight at that moment. Rotating the bridge key is a later
+addition.
+
+**Scheduled sends are the exception, accepted by design.** A scheduled message's
+bridge-sealed copy (kind `outbound`, in `scheduledPayloads`) is stored from the moment it is
+scheduled until its time comes, which `scheduled.create` allows up to 365 days ahead. It is
+deleted when the message goes out (at `sendAt`, or earlier with `scheduled.sendNow`), when it
+is cancelled, or when it fails because its chat is gone. Going out, it moves to the outbox
+and from then on is kept like any send: until the bridge host has it, at most 24 hours. So
+a database backup or snapshot taken in that window holds the copy. Reading it takes both
+that backup and the bridge private key, which lives in the server's `deploy/.env`
+(`BRIDGE_PRIVATE_KEY`), not in the database. This is accepted so a scheduled message goes
+out on time without the person's device being online to seal it then.
 
 ## What else is stored in plaintext
 

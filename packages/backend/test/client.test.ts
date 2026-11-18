@@ -218,9 +218,9 @@ describe('chat actions', () => {
     const day = 24 * 60 * 60 * 1000
     await a.mutation(api.chats.snooze, { chatId, until: Date.now() + 364 * day })
     await expect(a.mutation(api.chats.snooze, { chatId, until: Date.now() + 366 * day })).rejects.toThrow(/year/)
-    await expect(a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day })).rejects.toThrow(
-      /year/,
-    )
+    await expect(
+      a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day }),
+    ).rejects.toThrow(/year/)
   })
 })
 

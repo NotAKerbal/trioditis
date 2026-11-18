@@ -47,10 +47,7 @@ type As = Awaited<ReturnType<typeof signIn>>
  * `first`, the challenge names the key, as on a first device before the account has one.
  */
 async function proofFrom(as: As, identity: KeyPair, first = false) {
-  const { sealed } = await as.mutation(
-    api.keys.challenge,
-    first ? { publicKey: toBase64Url(identity.publicKey) } : {},
-  )
+  const { sealed } = await as.mutation(api.keys.challenge, first ? { publicKey: toBase64Url(identity.publicKey) } : {})
   return toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
 }
 
@@ -125,9 +122,7 @@ describe('identity key setup', () => {
     await sam.mutation(api.keys.setup, { ...args, proof })
     const other = firstDevice('sam', 'another password')
     await expect(sam.mutation(api.keys.setup, { ...other.args, proof })).rejects.toThrow(/already has/)
-    await expect(
-      sam.mutation(api.keys.challenge, { publicKey: other.args.publicKey }),
-    ).rejects.toThrow(/already has/)
+    await expect(sam.mutation(api.keys.challenge, { publicKey: other.args.publicKey })).rejects.toThrow(/already has/)
   })
 
   it('takes a first key only with proof that the device holds it', async () => {
@@ -135,9 +130,9 @@ describe('identity key setup', () => {
     const sam = await fresh(t)
     const device = firstDevice('sam', 'correct horse battery')
     // No proof, a proof for another key, and a made-up proof are all refused, and leave no key.
-    await expect(sam.mutation(api.keys.setup, { ...device.args, proof: toBase64Url(new Uint8Array(32)) })).rejects.toThrow(
-      /expired/,
-    )
+    await expect(
+      sam.mutation(api.keys.setup, { ...device.args, proof: toBase64Url(new Uint8Array(32)) }),
+    ).rejects.toThrow(/expired/)
     const other = generateKeyPair()
     const otherProof = await proofFrom(sam, other, true)
     await expect(sam.mutation(api.keys.setup, { ...device.args, proof: otherProof })).rejects.toThrow(/expired/)
@@ -315,7 +310,8 @@ describe('preferences', () => {
   })
 })
 
-describe('changing the password', () => {
+// Each test derives Argon2id keys at 64 MiB, which is slow while other suites run alongside.
+describe('changing the password', { timeout: 30_000 }, () => {
   /** A set-up account with an email-and-password sign-in credential for `authPassword`. */
   async function withPassword(t: T, authPassword: string) {
     const sam = await fresh(t)
@@ -395,11 +391,13 @@ describe('changing the password', () => {
     const t = setup()
     const { sam, device } = await withPassword(t, 'auth-old-password')
     const before = await signInHash(t)
+    // One wrap for every attempt: each is an Argon2id run.
+    const wrap = newWrap(device, 'new password!!')
     const attempt = async (overrides: Record<string, unknown>) =>
       await sam.action(api.account.changePassword, {
         currentAuthPassword: 'auth-old-password',
         newAuthPassword: 'auth-new-password',
-        newWrap: newWrap(device, 'new password!!'),
+        newWrap: wrap,
         proof: await proofFrom(sam, device.identity),
         expectedRevision: 1,
         ...overrides,
@@ -407,10 +405,9 @@ describe('changing the password', () => {
     await expect(attempt({ currentAuthPassword: 'not-the-password' })).rejects.toThrow(/current password is wrong/)
     await expect(attempt({ newAuthPassword: 'short' })).rejects.toThrow(/isn’t allowed/)
     await expect(attempt({ expectedRevision: 5 })).rejects.toThrow(/another device/)
-    const weak = newWrap(device, 'new password!!')
-    await expect(attempt({ newWrap: { ...weak, params: { ...weak.params, memlimit: MIN_MEMLIMIT - 1 } } })).rejects.toThrow(
-      /settings/,
-    )
+    await expect(
+      attempt({ newWrap: { ...wrap, params: { ...wrap.params, memlimit: MIN_MEMLIMIT - 1 } } }),
+    ).rejects.toThrow(/settings/)
     await expect(attempt({ proof: toBase64Url(new Uint8Array(32)) })).rejects.toThrow(/expired/)
     expect(await signInHash(t)).toBe(before)
     expect(await unlocks(sam, device, 'old password!!')).toBe(true)
@@ -468,7 +465,13 @@ describe('changing the password', () => {
 
   it('turns off Better Auth’s own routes that change the password or email', async () => {
     const t = setup()
-    for (const path of ['change-password', 'set-password', 'reset-password', 'request-password-reset', 'change-email']) {
+    for (const path of [
+      'change-password',
+      'set-password',
+      'reset-password',
+      'request-password-reset',
+      'change-email',
+    ]) {
       const response = await t.fetch(`/api/auth/${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin: 'https://trioditis.test' },

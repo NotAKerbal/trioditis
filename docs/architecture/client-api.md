@@ -52,7 +52,7 @@ once before any sealing or password derivation.
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                           |
 | (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up) |
-| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`                                                                                                                                                   |
+| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`. `TRIODITIS_DEMO=1` alone turns invitations off                                                                                                   |
 
 ## Passwords
 
@@ -64,8 +64,12 @@ A password does two jobs, and the server sees neither as the password:
 - **Unlocking the key.** The key backup is wrapped by `passwordKey(password, params)`: a
   separate Argon2id with its own random salt and stronger settings.
 
-The server can't unwrap a key backup without guessing the password, and each guess costs an
-Argon2id run (64 MiB, three passes). A short password is the weak point: ask for a long one.
+The server can't unwrap a key backup without guessing the password, and each guess against
+the backup costs an Argon2id run (64 MiB, three passes). But the server also keeps Better
+Auth's hash of the sign-in credential, so someone holding the database can test a guess more
+cheaply that way: `authPassword`'s Argon2id is libsodium's interactive setting (64 MiB, two
+passes), then Better Auth's scrypt. A guess that matches the sign-in credential also unlocks
+the key. A short password is the weak point: ask for a long one.
 
 Because the email salts `authPassword`, changing the email means re-deriving it (a
 follow-up: there is no email change yet).
@@ -81,6 +85,7 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                |
 | Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
 | Add a passkey       | `authClient.passkey.addPasskey()` while signed in                                                                                                                             |
+| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
 | Sign out            | `authClient.signOut()`                                                                                                                                                        |
 | Who am I            | `api.members.me` returns `{ userId, role, identityKid }`, or `null` when signed out or not a member                                                                           |
 | Invite (admin)      | `api.members.invite({ email, role })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                   |
@@ -109,38 +114,50 @@ them.
 
 ```ts
 const identity = generateKeyPair()
-const kid = keyId(identity.publicKey)
-const params = newPasswordParams()
-const recovery = generateRecoveryKey() // show recovery.text once; the person writes it down
-const password = wrapIdentityKey(identity.privateKey, passwordKey(pw, params), { userId, kid, kind: 'password' })
-const recoveryWrap = wrapIdentityKey(identity.privateKey, recovery.bytes, { userId, kid, kind: 'recovery' })
-await convex.mutation(api.keys.setup, {
-  publicKey: toBase64Url(identity.publicKey),
-  password: { ...password, params },
-  recovery: recoveryWrap,
-})
+// The password and recovery-key backups. It opens both again before returning, and throws
+// unless both give back this key: the server can't check them.
+const { args, recoveryText } = makeKeySetup(identity.privateKey, pw, userId) // show recoveryText once
+// Prove the device holds the key: the challenge is sealed to the key being set up.
+const { sealed } = await convex.mutation(api.keys.challenge, { publicKey: args.publicKey })
+const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
+await convex.mutation(api.keys.setup, { ...args, proof })
 ```
 
-- `passwordKey` takes about a second; show progress.
+- `makeKeySetup` runs `passwordKey`, which takes about a second; show progress. Building
+  the wraps by hand (`wrapIdentityKey`) works too, but then open each with
+  `unwrapIdentityKey` before calling `keys.setup`, as `makeKeySetup` does.
 - Keep the unwrapped key on the device (IndexedDB, non-extractable where possible) until
   sign-out.
 - The person must confirm they saved the recovery key before going on: without it, a
   forgotten password loses their history.
+- `keys.setup` always needs `proof`. Before the account has a key, get it from
+  `keys.challenge({ publicKey })` naming the key being set up; the proof then works only
+  for that key. The server refuses a public key nothing can be sealed to (not 32 canonical
+  bytes, or a low-order X25519 point), in `keys.challenge` and in `keys.setup`.
 - `keys.setup` is complete only when both backups exist. Repeating it with the same key then
   does nothing; a different key for an account that has one is refused.
-- For a key that exists without its backups (`needsBackup`), pass `proof` as well (below).
+- For a key that exists without its backups (`needsBackup`), get the proof from
+  `keys.challenge({})` (below).
+
+**What changed for the desktop app:** `keys.setup`'s `proof` is now required on the first
+device too, so call `keys.challenge({ publicKey })` first; `keys.challenge` gained the
+optional `publicKey` argument; and `makeKeySetup` (and `makeKeyBackup`) now check their
+wraps and throw a `SealError` if one doesn't open to the key.
 
 ### Proving the device has the key
 
-Changing any backup needs proof that the device holds the private key, so a stolen session
-can't replace someone's backups and lock them out:
+Setting up the key and changing any backup need proof that the device holds the private key,
+so the first key is one a device can really use, and a stolen session can't replace
+someone's backups and lock them out:
 
 ```ts
-const { sealed } = await convex.mutation(api.keys.challenge, {})
+const { sealed, expiresAt } = await convex.mutation(api.keys.challenge, {})
 const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), identity))
 ```
 
-A proof works once, within five minutes.
+`keys.challenge({ publicKey? })` returns `{ sealed, expiresAt }`. Once the account has a
+key it is sealed to that key (`publicKey`, if given, must be it). A proof works once, before
+`expiresAt` (five minutes), and only for the key it was sealed to.
 
 ### A new device
 
@@ -170,13 +187,19 @@ call is refused: reload and try again. `api.keys.removePasskeyBackup({ credentia
 proof })` removes a passkey backup. Password and recovery backups are replaced, never
 removed.
 
+Revisions only go up and are never reused, across all of the person's backups: a new or
+replaced backup takes the next one, which needn't be the old revision plus one, and a
+passkey backup removed and made again gets a new one, so a device still holding the old
+revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
+characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
+
 ### Changing the password
 
 One action changes both the sign-in password and the password backup:
 
 ```ts
 const newParams = newPasswordParams()
-await convex.action(api.account.changePassword, {
+const { revision } = await convex.action(api.account.changePassword, {
   currentAuthPassword: authPassword(oldPw, email),
   newAuthPassword: authPassword(newPw, email),
   newWrap: {
@@ -188,24 +211,30 @@ await convex.action(api.account.changePassword, {
 })
 ```
 
-It checks the proof, the revision and the settings (never weaker than the backup being
-replaced), changes the sign-in password, then stores the new backup. What can go wrong:
+It returns `{ revision }`, the password backup's new revision. It checks (and uses up) the
+proof, the revision and the settings (never weaker than the backup being replaced), checks
+the current password, and then changes the sign-in credential and the password backup in
+one transaction, only if neither changed since. Of two devices changing it at once, one
+succeeds and the other is refused. Every error leaves both as they were, so signing in and
+unlocking always take the same password. Better Auth's own password change is turned off:
+this is the only way.
 
-| Error                                                                                 | State afterwards                                                                                           |
-| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `That proof…` / `This backup changed on another device…` / `Those password settings…` | Nothing changed                                                                                            |
-| `Your current password is wrong, or the new one isn’t allowed.`                       | Nothing changed                                                                                            |
-| `Your password wasn’t changed. Try again.`                                            | Storing the backup failed, and the sign-in password was changed back                                       |
-| `Your password changed, but your key backup didn’t…`                                  | The sign-in password is the new one, but the old password still unlocks the key. Change the password again |
+| Error                                                                                 | State afterwards                                                      |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `That proof…` / `This backup changed on another device…` / `Those password settings…` | Nothing changed                                                       |
+| `Your current password is wrong, or the new one isn’t allowed.`                       | Nothing changed (the proof is used up: get a new one to retry)        |
+| `Your password changed on another device. Reload and try again.`                      | Nothing changed: another change won. Sign in with the password it set |
+| `This account has no password to change.`                                             | Nothing changed                                                       |
 
 ### Errors
 
 `That isn’t a valid public key.` · `That isn’t a wrapped key.` · `Those password settings
 aren’t allowed.` (weaker than 3 passes over 64 MiB, or weaker than the backup it replaces) ·
 `This account already has an identity key. Unlock it with your password or recovery key.` ·
-`Set up this account’s key first.` · `Prove this device has the key first (keys.challenge).`
-· `That proof of your key has expired or was already used. Try again.` · `This backup
-changed on another device. Reload and try again.`
+`Set up this account’s key first.` · `That proof of your key has expired or was already used.
+Try again.` (also a proof for a different key) · `This backup changed on another device.
+Reload and try again.` · `A passkey backup needs its credential and a 32-byte PRF salt.` ·
+`You can have at most 10 passkey backups. Remove one first.`
 
 ## Preferences
 
@@ -239,11 +268,12 @@ wakes it.
 
 `api.chats.list({ view?, network?, labelId?, paginationOpts })` returns a page
 `{ page: ChatRow[], isDone, continueCursor }` (use `usePaginatedQuery`; default `inbox`).
-The first page starts with the view's pinned chats (at most 50), then the rest, most recent
-first; later pages continue the rest. A page holds at most 50 chats and reads at most 8 MiB,
-so it can end early: keep loading with the cursor. With `network`, only that network's
-chats. With `labelId`, the chats with that label in the view, in the order they were
-labelled, pinned or not.
+The list is the view's pinned chats, most recent first, then the rest, most recent first,
+paged as one list: pins that don't fit on the first page carry on to the next, and none is
+left out. A page holds at most 50 chats (`numItems` above 50 counts as 50) and reads at most
+8 MiB, so it can end early: keep loading with the cursor. With `network`, only that
+network's chats, in the same order. With `labelId`, the chats with that label in the view,
+in the order they were labelled, pinned or not.
 
 A `ChatRow` (type in `@trioditis/core`):
 
@@ -269,18 +299,18 @@ requests, and woken chats. Each count stops at 99; `more` says there may be more
 
 All take `{ chatId }` plus what's listed, and return `null`.
 
-| Function              | Extra arguments   | Effect                                                                                                                                                                                                                                   |
-| --------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chats.markRead`      |                   | Clears unread, mentions and `markedUnread`, and ends a woken snooze. The network is told the person read up to the newest message (of the 50 newest) that reached the network and isn't deleted; if there's none, only Trioditis changes |
-| `chats.markUnread`    |                   | Sets `markedUnread`. Trioditis-side: the network still sees it as read                                                                                                                                                                   |
-| `chats.setArchived`   | `archived`        |                                                                                                                                                                                                                                          |
-| `chats.setPinned`     | `pinned`          |                                                                                                                                                                                                                                          |
-| `chats.setMuted`      | `muted`, `until?` | `until` in the future and within a year; no `until` mutes until unmuted                                                                                                                                                                  |
-| `chats.snooze`        | `until`           | Within a year; see Views for waking                                                                                                                                                                                                      |
-| `chats.wake`          |                   | Ends a snooze now                                                                                                                                                                                                                        |
-| `chats.acceptRequest` |                   | Moves a request to the inbox. Trioditis-side for now; a later request flag from the network doesn't undo it                                                                                                                              |
-| `chats.setBlocked`    | `blocked`         | Trioditis-side for now: hidden here, but the network isn't told and messages still arrive                                                                                                                                                |
-| `chats.setLabels`     | `labelIds`        | Exactly these labels (the person's own, at most 20)                                                                                                                                                                                      |
+| Function              | Extra arguments   | Effect                                                                                                                                                                                                                                                                        |
+| --------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chats.markRead`      |                   | Clears unread, mentions and `markedUnread`, and ends a woken snooze. The network is told the person read up to the newest message that reached the network and isn't deleted, of the newest it reads (at most 50, and 4 MiB of them); if there's none, only Trioditis changes |
+| `chats.markUnread`    |                   | Sets `markedUnread`. Trioditis-side: the network still sees it as read                                                                                                                                                                                                        |
+| `chats.setArchived`   | `archived`        |                                                                                                                                                                                                                                                                               |
+| `chats.setPinned`     | `pinned`          |                                                                                                                                                                                                                                                                               |
+| `chats.setMuted`      | `muted`, `until?` | `until` in the future and within a year (365 days); no `until` mutes until unmuted                                                                                                                                                                                            |
+| `chats.snooze`        | `until`           | Within a year (365 days); see Views for waking                                                                                                                                                                                                                                |
+| `chats.wake`          |                   | Ends a snooze now                                                                                                                                                                                                                                                             |
+| `chats.acceptRequest` |                   | Moves a request to the inbox. Trioditis-side for now; a later request flag from the network doesn't undo it                                                                                                                                                                   |
+| `chats.setBlocked`    | `blocked`         | Trioditis-side for now: hidden here, but the network isn't told and messages still arrive                                                                                                                                                                                     |
+| `chats.setLabels`     | `labelIds`        | Exactly these labels (the person's own, at most 20)                                                                                                                                                                                                                           |
 
 Errors: `That chat doesn’t exist.` · `Pick a time in the future.` · `Pick a time within a
 year.` · `That label doesn’t exist.`
@@ -317,7 +347,10 @@ Alongside the page:
 
 - `api.messages.reactions({ chatId, messageIds })`, at most 100 IDs, returns
   `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message.
-  `senderKey` is `self` or `ghost:<ghostId>`. Deleted messages have none.
+  `senderKey` is `self` or `ghost:<ghostId>`. A deleted message has none (it's left out,
+  or gets an empty list), and so does an ID that isn't one of the person's messages. It
+  never reads the messages themselves, so a page of large messages can't push it past the
+  read limit.
 - `api.messages.receipts({ chatId })` returns `[{ senderKey, upToEventId, networkTs }]`.
 - `api.messages.typing({ chatId })` returns `[{ senderKey, expiresAt }]` for rows still
   live when it ran. Hide a row once `expiresAt` passes: queries don't rerun just because
@@ -366,18 +399,26 @@ network, so it can’t be discarded here.`
 
 ### Scheduled sends
 
-| Function            | Arguments                                                              | Returns                                                                                  |
-| ------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `null` if that `clientMessageId` was already used                   |
-| `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo }]`, soonest first. No content         |
-| `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies, to show what each says; open like a pending copy |
-| `scheduled.cancel`  | `scheduledId`                                                          | `null`                                                                                   |
-| `scheduled.sendNow` | `scheduledId`                                                          | `null`                                                                                   |
+| Function            | Arguments                                                              | Returns                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `null` if that `clientMessageId` was already used                                            |
+| `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                           |
+| `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled, to show what each says; open like a pending copy |
+| `scheduled.cancel`  | `scheduledId`                                                          | `null`. Cancels one still scheduled, or dismisses one that failed                                                 |
+| `scheduled.sendNow` | `scheduledId`                                                          | `null`                                                                                                            |
 
-Seal it exactly as for `messages.send`. At `sendAt` (within a year) it becomes an ordinary
-send in its chat, on its network, with its 24-hour deadline starting then. Errors: `Pick a
-time in the future.` · `Pick a time within a year.` · `That scheduled message doesn’t
-exist.` · `That message has already gone out.`
+Seal it exactly as for `messages.send`. At `sendAt` (within a year: 365 days) it becomes an
+ordinary send in its chat, on its network, with its 24-hour deadline starting then. A person
+can have at most 500 scheduled at once. Its bridge-sealed copy is stored until then, unlike
+an ordinary send's, as `sealing.md` (Bridge key exposure) explains and accepts.
+
+`state` is `scheduled`, or `failed` when its time came and its chat was gone: it was never
+sent, and its sealed copies are deleted. A failed one stays listed until `scheduled.cancel`
+dismisses it.
+
+Errors: `Pick a time in the future.` · `Pick a time within a year.` · `You can schedule at
+most 500 messages.` · `That scheduled message doesn’t exist.` · `That message has already
+gone out.` · `That message couldn’t be sent: its chat is gone.` (`sendNow` on a failed one)
 
 ## Labels
 
@@ -391,7 +432,9 @@ Seal a label's plaintext, `{ name, color }`, to the person: kind `label`, object
 | `labels.update` | `labelId`, `sealed`  | `null`. Seal with the same `labelKey`                         |
 | `labels.remove` | `labelId`            | `null`. Also takes it off every chat                          |
 
-At most 100 labels of up to 4 KiB each.
+At most 100 labels of up to 4 KiB each. `labels.remove` takes the label off its first 1,000
+chats at once and the rest in batches straight after; until then a chat may still list the
+removed label's ID in `labelIds`. Show only labels that `labels.list` returns.
 
 ## Networks and connecting accounts
 
@@ -407,12 +450,14 @@ network with `termsRisk` (cookie or token logins can get an account banned).
 
 ### The login stepper
 
-1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId })`.
-   It needs `keys.identity` in state `ready`.
+1. `const loginSessionId = await convex.mutation(api.logins.start, { network, flowId? })`.
+   It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
+   from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
-   `{ _id, network, state, step, updatedAt }`, with `state` one of `pending`, `active`,
-   `complete`, `cancelled` or `error`. Render `step` (the `LoginStep` type in
-   `@trioditis/core/bridge-protocol`):
+   `{ _id, network, state, step, updatedAt }`, or `null` for a login that doesn't exist or
+   isn't the person's. `state` is one of `pending`, `active`, `complete`, `cancelled` or
+   `error`. `step` is `null` until the bridge host sends the first step (while `pending`);
+   then render it (the `LoginStep` type in `@trioditis/core/bridge-protocol`):
    - `displayAndWait`: with `display.type` `qr`, draw `display.data` as a QR code; with
      `code`, show it big, for typing on the phone; with `emoji`, show it to compare
    - `userInput`: a form from `fields` (`id`, `type`, `name`, `description?`, `pattern?`)
@@ -442,13 +487,15 @@ Accounts: `api.logins.accounts` returns
 `state` is `CONNECTED`, `CONNECTING`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` (reconnect
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
 one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
-bridge host took it within 10 minutes), `logoutPending` goes false and `logoutError` says why.
+bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
+hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why.
 
 Errors: `That network isn’t enabled on this server.` · `Finish setting up your key, with
 its password and recovery key, before connecting a network.` · `That isn’t a login method
 this network offers.` · `That step of the login is over. Start again if it didn’t finish.` ·
-`That input isn’t sealed, or is too long.` · `That login doesn’t exist.` · `That account
-doesn’t exist.`
+`That input isn’t sealed, or is too long.` · `That’s already been sent. Wait for the next
+step.` (a second submission for the same step) · `That login doesn’t exist.` · `That
+account doesn’t exist.`
 
 ### Health
 
@@ -471,15 +518,18 @@ For previews and the nightly. `api.demo.seedForMe` (an action, no arguments) giv
 signed-in person a connected fake-network account with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
-public key, so they open like anything else. It needs `keys.setup` done first, works only
-where `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake`, and a second call does nothing
-(`{ seeded: false }`).
+public key, so they open like anything else. It needs `keys.setup` done first and works only
+where `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` (exactly when `server.info` says
+`demo: true`). The contacts, and each chat with its messages, are written whole, so a call
+that fails partway leaves no half-written chat, and calling again finishes the rest. Once
+everything is there, a call does nothing (`{ seeded: false }`).
 
 - **Previews** create a known test account by script: sign up with
-  `authPassword(password, email)` and the setup token, call `keys.setup` with
-  `makeKeySetup(privateKey, password, userId).args` (the same password backup the browser
-  unlocks, plus a recovery backup; `makeKeyBackup` gives the password backup alone), then
-  call `demo.seedForMe`.
+  `authPassword(password, email)` and the setup token, call `keys.challenge({ publicKey })`
+  and open it with `keyPairFromPrivateKey(privateKey)`, call `keys.setup` with
+  `{ ...makeKeySetup(privateKey, password, userId).args, proof }` (the same password backup
+  the browser unlocks, plus a recovery backup; `makeKeyBackup` gives the password backup
+  alone), then call `demo.seedForMe`.
 - **The nightly** has no test account: its first admin signs up with the setup token, sets up
   their key in the app as on any first device, and calls `demo.seedForMe`.
 
@@ -512,8 +562,9 @@ request. Until one lands, the UI keeps the control disabled or shows the fallbac
 here.
 
 1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
-   `{ demo, invitations }`: whether this is a demo server, and whether admins can invite
-   people here. The client hides invite controls, and shows demo-only ones, from it instead
+   `{ demo, invitations }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
+   `TRIODITIS_NETWORKS=fake`, as `demo.seedForMe` needs), and `invitations` whether admins
+   can invite people here (false wherever `TRIODITIS_DEMO=1`). The client hides invite controls, and shows demo-only ones, from it instead
    of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
 2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind

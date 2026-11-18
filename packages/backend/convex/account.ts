@@ -52,8 +52,7 @@ export const changePassword = action({
     // Better Auth's own hashing, as its sign-in checks it.
     const { password } = await createAuth(ctx).$context
     const { minPasswordLength, maxPasswordLength } = password.config
-    const allowed =
-      args.newAuthPassword.length >= minPasswordLength && args.newAuthPassword.length <= maxPasswordLength
+    const allowed = args.newAuthPassword.length >= minPasswordLength && args.newAuthPassword.length <= maxPasswordLength
     const matches = await password.verify({ hash: current.passwordHash, password: args.currentAuthPassword })
     if (!matches || !allowed) throw new ConvexError('Your current password is wrong, or the new one isn’t allowed.')
     return await ctx.runMutation(internal.keys.commitPasswordChange, {
