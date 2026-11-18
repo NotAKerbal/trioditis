@@ -81,6 +81,36 @@ describe('demo data', () => {
     expect(page[0]!.pinned).toBe(true)
   })
 
+  it('finishes a seed that stopped partway when called again', async () => {
+    const t = setup()
+    process.env.TRIODITIS_DEMO = '1'
+    process.env.TRIODITIS_NETWORKS = 'fake'
+    const as = await memberWithKey(t, generateKeyPair())
+    expect(await as.action(api.demo.seedForMe, {})).toEqual({ seeded: true })
+    // As if it had stopped after the account and some chats: no contacts, two chats missing.
+    await t.run(async (ctx) => {
+      for (const contact of await ctx.db.query('contacts').collect()) await ctx.db.delete(contact._id)
+      const chats = await ctx.db.query('chats').collect()
+      for (const chat of chats.slice(0, 2)) {
+        const messages = await ctx.db
+          .query('messages')
+          .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id))
+          .collect()
+        for (const message of messages) await ctx.db.delete(message._id)
+        await ctx.db.delete(chat._id)
+      }
+    })
+    expect(await as.action(api.demo.seedForMe, {})).toEqual({ seeded: true })
+    expect(await as.action(api.demo.seedForMe, {})).toEqual({ seeded: false })
+    const [accounts, chats, contacts, messages] = await t.run(async (ctx) => [
+      await ctx.db.query('networkAccounts').collect(),
+      await ctx.db.query('chats').collect(),
+      await ctx.db.query('contacts').collect(),
+      await ctx.db.query('messages').collect(),
+    ])
+    expect([accounts.length, chats.length, contacts.length, messages.length]).toEqual([1, 8, 6, 160])
+  })
+
   it('needs the key set up first', async () => {
     const t = setup()
     process.env.TRIODITIS_DEMO = '1'

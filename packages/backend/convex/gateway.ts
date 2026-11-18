@@ -2,7 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
-import { onCommandExpired, onCommandRejected } from './lib/commandOutcome'
+import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
 import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
@@ -290,7 +290,8 @@ const OVERDUE_GRACE_MS = 60 * 60 * 1000
 /**
  * A send the bridge host accepted but never reported on (it went away) would stay "Sending"
  * forever. Once well past its deadline it becomes `unknown`, so the person can choose. It is
- * never sent again, and a late outcome from the bridge host still settles it.
+ * never sent again, and a late outcome from the bridge host still settles it. A logout the
+ * same way stops being pending, with `timeout`.
  */
 async function settleOverdueSends(ctx: MutationCtx, now: number) {
   const overdue = await ctx.db
@@ -309,6 +310,7 @@ async function settleOverdueSends(ctx: MutationCtx, now: number) {
       command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
     await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
     if (unsettled) await markCopy(ctx, command, 'unknown')
+    await onCommandOverdue(ctx, command)
   }
 }
 

@@ -419,6 +419,24 @@ describe('scheduled sends', () => {
     expect(await scheduleOne(a, chatId, 2, 60_000)).toBeNull()
   })
 
+  it('fails, and says so, when its chat is gone by the time it’s due', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000))!
+    await t.run(async (ctx) => await ctx.db.patch(chatId, { deleted: true, view: 'deleted' }))
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toHaveLength(0)
+    expect(await a.query(api.scheduled.list, {})).toMatchObject([{ _id: scheduledId, state: 'failed' }])
+    await expect(a.mutation(api.scheduled.sendNow, { scheduledId })).rejects.toThrow(/chat is gone/)
+    // Dismissing it takes it off the list.
+    await a.mutation(api.scheduled.cancel, { scheduledId })
+    expect(await a.query(api.scheduled.list, {})).toHaveLength(0)
+  })
+
   it('refuses a time in the past and someone else’s chat', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
@@ -518,6 +536,34 @@ describe('accounts, logins and logout', () => {
     expect((await a.query(api.logins.accounts, {}))[0]).toMatchObject({
       logoutPending: false,
       logoutError: 'not_connected',
+    })
+  })
+
+  it('stops a logout being pending when the bridge host took it and never said how it ended', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await connected(t)
+    const [account] = await a.query(api.logins.accounts, {})
+    await a.mutation(api.logins.logout, { networkAccountId: account!._id })
+    const [command] = await t.mutation(api.gateway.claimCommands, {
+      secret: GATEWAY_SECRET,
+      limit: 5,
+      hostIds: ['whatsapp-1'],
+    })
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: command!.commandId,
+      lease: command!.lease,
+      accepted: true,
+    })
+    expect((await a.query(api.logins.accounts, {}))[0]).toMatchObject({ logoutPending: true })
+    // Past its 10-minute deadline and the hour's grace, with no `LOGGED_OUT` from the host.
+    vi.advanceTimersByTime(71 * 60 * 1000)
+    await t.mutation(api.gateway.claimCommands, { secret: GATEWAY_SECRET, limit: 5, hostIds: [] })
+    expect((await t.run(async (ctx) => await ctx.db.query('networkAccounts').first()))!).toMatchObject({
+      logoutPending: false,
+      logoutError: 'timeout',
     })
   })
 

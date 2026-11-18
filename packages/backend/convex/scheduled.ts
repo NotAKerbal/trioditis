@@ -9,7 +9,8 @@ import { envelope } from './validators'
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
 // the time comes it becomes an ordinary send, and its 24-hour deadline starts then. Until then
 // the sealed copies wait in `scheduledPayloads`, apart from the metadata so listing never reads
-// them, and are deleted once the message goes out or is cancelled.
+// them, and are deleted once the message goes out, is cancelled, or fails because its chat is
+// gone. A failed one stays listed, so the person sees it didn't go, until they dismiss it.
 
 const MAX_AHEAD_MS = 365 * 24 * 60 * 60 * 1000
 const MAX_SCHEDULED = 500
@@ -20,6 +21,8 @@ const scheduledRow = v.object({
   clientMessageId: v.string(),
   sendAt: v.number(),
   replyTo: v.union(v.null(), v.string()),
+  /** `failed`: its time came and its chat was gone, so it was never sent. */
+  state: v.union(v.literal('scheduled'), v.literal('failed')),
 })
 
 function toRow(row: Doc<'scheduledSends'>) {
@@ -29,6 +32,7 @@ function toRow(row: Doc<'scheduledSends'>) {
     clientMessageId: row.clientMessageId,
     sendAt: row.sendAt,
     replyTo: row.replyTo ?? null,
+    state: row.state === 'failed' ? ('failed' as const) : ('scheduled' as const),
   }
 }
 
@@ -44,25 +48,35 @@ async function deletePayload(ctx: MutationCtx, scheduledId: Doc<'scheduledSends'
   if (payload) await ctx.db.delete(payload._id)
 }
 
-/** The person's scheduled messages, soonest first; in one chat if `chatId` is given. No content. */
+/**
+ * The person's scheduled messages, and those that failed and haven't been dismissed, soonest
+ * first; in one chat if `chatId` is given. No content.
+ */
 export const list = query({
   args: { chatId: v.optional(v.id('chats')) },
   returns: v.array(scheduledRow),
   handler: async (ctx, { chatId }) => {
     const member = await requireMember(ctx)
-    if (chatId) {
-      await ownChat(ctx, member.userId, chatId)
-      const rows = await ctx.db
-        .query('scheduledSends')
-        .withIndex('by_chat', (q) => q.eq('chatId', chatId).eq('state', 'scheduled'))
-        .take(MAX_SCHEDULED)
-      return rows.sort((a, b) => a.sendAt - b.sendAt).map(toRow)
+    if (chatId) await ownChat(ctx, member.userId, chatId)
+    const rows = []
+    for (const state of ['scheduled', 'failed'] as const) {
+      if (chatId) {
+        rows.push(
+          ...(await ctx.db
+            .query('scheduledSends')
+            .withIndex('by_chat', (q) => q.eq('chatId', chatId).eq('state', state))
+            .take(MAX_SCHEDULED)),
+        )
+      } else {
+        rows.push(
+          ...(await ctx.db
+            .query('scheduledSends')
+            .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('state', state))
+            .take(MAX_SCHEDULED)),
+        )
+      }
     }
-    const rows = await ctx.db
-      .query('scheduledSends')
-      .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('state', 'scheduled'))
-      .take(MAX_SCHEDULED)
-    return rows.map(toRow)
+    return rows.sort((a, b) => a.sendAt - b.sendAt).map(toRow)
   },
 })
 
@@ -140,11 +154,15 @@ async function ownScheduled(ctx: MutationCtx, scheduledId: Doc<'scheduledSends'>
 async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>) {
   if (row.state !== 'scheduled') return
   const payload = await payloadOf(ctx, row._id)
-  await ctx.db.patch(row._id, { state: 'sent' })
   if (payload) await ctx.db.delete(payload._id)
   const chat = await ctx.db.get(row.chatId)
-  // The chat is gone, so there's nowhere to send it. The person's copy goes with it.
-  if (!payload || !chat || chat.deleted) return
+  // The chat is gone, so there's nowhere to send it: it fails, and stays listed as failed so
+  // the person knows. The sealed copies go with it.
+  if (!payload || !chat || chat.deleted) {
+    await ctx.db.patch(row._id, { state: 'failed' })
+    return
+  }
+  await ctx.db.patch(row._id, { state: 'sent' })
   await queueSend(ctx, chat, {
     clientMessageId: row.clientMessageId,
     forBridge: payload.forBridge,
@@ -153,12 +171,13 @@ async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>) {
   })
 }
 
+/** Cancels a scheduled message, or dismisses one that failed. */
 export const cancel = mutation({
   args: { scheduledId: v.id('scheduledSends') },
   returns: v.null(),
   handler: async (ctx, { scheduledId }) => {
     const row = await ownScheduled(ctx, scheduledId)
-    if (row.state !== 'scheduled') throw new ConvexError('That message has already gone out.')
+    if (row.state !== 'scheduled' && row.state !== 'failed') throw new ConvexError('That message has already gone out.')
     await ctx.db.patch(row._id, { state: 'cancelled' })
     await deletePayload(ctx, row._id)
     return null
@@ -170,6 +189,7 @@ export const sendNow = mutation({
   returns: v.null(),
   handler: async (ctx, { scheduledId }) => {
     const row = await ownScheduled(ctx, scheduledId)
+    if (row.state === 'failed') throw new ConvexError('That message couldn’t be sent: its chat is gone.')
     if (row.state !== 'scheduled') throw new ConvexError('That message has already gone out.')
     await sendScheduled(ctx, row)
     return null

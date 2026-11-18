@@ -4,8 +4,8 @@ import type { MutationCtx } from '../_generated/server'
 
 // What a command's failure means to the person, beyond the outbox row: a logout that didn't
 // happen. (A failed login command ends its session in gateway.ts.) `gateway.ts` calls these
-// when the bridge host rejects a command or it expires undelivered; ingest calls `onLoggedOut`
-// when a logout is confirmed.
+// when the bridge host rejects a command, it expires undelivered, or it was taken but never
+// reported on; ingest calls `onLoggedOut` when a logout is confirmed.
 
 async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: ErrorCode) {
   if (command.payload.type !== 'logout' || !command.loginId) return
@@ -14,7 +14,8 @@ async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: Error
     .query('networkAccounts')
     .withIndex('by_login', (q) => q.eq('network', command.network).eq('loginId', loginId))
     .unique()
-  if (!account || account.userId !== command.userId) return
+  // Only a logout still waiting: one already confirmed, or already failed, stays as it is.
+  if (!account || account.userId !== command.userId || !account.logoutPending) return
   await ctx.db.patch(account._id, { logoutPending: false, logoutError: error })
 }
 
@@ -26,6 +27,14 @@ export async function onCommandRejected(ctx: MutationCtx, command: Doc<'outbox'>
 /** The command ran out of time before a bridge host took it. */
 export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>) {
   await failLogout(ctx, command, 'expired')
+}
+
+/**
+ * The bridge host took the command but never reported how it ended, well past its deadline
+ * (it went away). A logout still pending then didn't visibly happen: the person can try again.
+ */
+export async function onCommandOverdue(ctx: MutationCtx, command: Doc<'outbox'>) {
+  await failLogout(ctx, command, 'timeout')
 }
 
 /** The bridge host reports the account `LOGGED_OUT`: a pending logout is done. */

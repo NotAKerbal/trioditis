@@ -206,7 +206,8 @@ export default defineSchema({
     chatId: v.id('chats'),
     clientMessageId: v.string(),
     sendAt: v.number(),
-    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled')),
+    /** `failed` when its time came and its chat was gone: it was never sent. */
+    state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled'), v.literal('failed')),
     replyTo: v.optional(v.string()),
     createdAt: v.number(),
   })
