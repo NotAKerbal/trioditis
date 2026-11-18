@@ -73,7 +73,8 @@ PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 
 # Interrupted while streaming: a large, incompressible volume keeps tar busy.
 rm -rf "${backups:?}"/*
 fill bridge-fake 'head -c 600000000 /dev/urandom >/v/big'
-setsid "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
+# A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: restored here.
+setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
 for _ in $(seq 600); do
   part=$(find "$backups" -path '*/.*/archive.tgz' -size +1M 2>/dev/null | head -1)
   [ -z "$part" ] || break
