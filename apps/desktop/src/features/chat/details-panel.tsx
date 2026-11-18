@@ -10,7 +10,7 @@ import { Archive, ArchiveRestore, Ban, Bell, BellOff, Eye, Lock, Pin, Plus } fro
 import { useState, type ReactNode } from 'react'
 import { networkName, useChatActions, useLabels, type Chat, type ChatId, type LabelId } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { LABEL_COLORS, newClientId, sealLabel, type LabelColor } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 
@@ -161,11 +161,14 @@ function NewLabel({ onCreated }: { onCreated: (id: LabelId) => void }) {
           const id = await create({
             labelKey,
             sealed: sealLabel({ name: trimmed, color }, labelKey, session.userId, session.keyPair.publicKey),
+            // Sealed to this page's account: refused if the browser has moved to another since.
+            sessionId: session.sessionId,
           })
           onCreated(id)
           setEditing(false)
           setName('')
         } catch (err) {
+          if (sessionChanged(err)) return window.location.reload()
           toast(errorMessage(err, 'That label couldn’t be made.'))
         }
       }}

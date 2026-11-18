@@ -422,6 +422,7 @@ function Accounts() {
  * connecting a real one. Shown only where server.info says it's a demo.
  */
 function DemoSeed() {
+  const session = useSession()
   const seed = useAction(api.demo.seedForMe)
   const [busy, setBusy] = useState(false)
   return (
@@ -435,9 +436,10 @@ function DemoSeed() {
         onClick={async () => {
           setBusy(true)
           try {
-            const { seeded } = await seed({})
+            const { seeded } = await seed({ sessionId: session.sessionId })
             toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
           } catch (e) {
+            if (sessionChanged(e)) return window.location.reload()
             toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
           }
           setBusy(false)
@@ -450,6 +452,7 @@ function DemoSeed() {
 }
 
 function Members() {
+  const session = useSession()
   const server = useServerInfo()
   const invite = useMutation(api.members.invite)
   const revoke = useMutation(api.members.revokeInvitation)
@@ -485,13 +488,14 @@ function Members() {
             e.preventDefault()
             setBusy(true)
             try {
-              const { token } = await invite({ email, role })
+              const { token } = await invite({ email, role, sessionId: session.sessionId })
               // The token goes in the fragment, which never reaches a server or a proxy's logs.
               const query = new URLSearchParams({ email: email.trim().toLowerCase() })
               setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
               setCopied(false)
               setEmail('')
             } catch (err) {
+              if (sessionChanged(err)) return window.location.reload()
               toast(errorMessage(err, 'That invitation couldn’t be made.'))
             }
             setBusy(false)

@@ -9,7 +9,7 @@ import { useMutation, usePaginatedQuery } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
 import { useMemo } from 'react'
 import { checkWithinAYear } from '~/data/snooze.ts'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import {
   openCached,
   tryOpen,
@@ -208,6 +208,7 @@ export function useLabels(): Label[] | undefined {
 
 /** The sidebar layout follows the person across devices. Simple until they choose. */
 export function useSidebarLayout(): [SidebarLayout, (layout: SidebarLayout) => void] {
+  const session = useSession()
   const { data } = useQuery(convexQuery(api.preferences.get, {}))
   const set = useMutation(api.preferences.set).withOptimisticUpdate((store, { sidebarLayout }) => {
     if (sidebarLayout) store.setQuery(api.preferences.get, {}, { sidebarLayout })
@@ -216,7 +217,10 @@ export function useSidebarLayout(): [SidebarLayout, (layout: SidebarLayout) => v
   return [
     layout,
     (sidebarLayout) =>
-      void set({ sidebarLayout }).catch((e: unknown) => toast(errorMessage(e, 'That setting couldn’t be saved.'))),
+      // Saved for the session the page opened with; for another, the page starts again instead.
+      void set({ sidebarLayout, sessionId: session.sessionId }).catch((e: unknown) =>
+        sessionChanged(e) ? window.location.reload() : toast(errorMessage(e, 'That setting couldn’t be saved.')),
+      ),
   ]
 }
 
