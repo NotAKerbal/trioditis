@@ -1,12 +1,12 @@
-// End to end on the dev stack with the fake network: Convex, the gateway and a fake-network
-// bridge host must be running (docs/CONTRIBUTING.md, Run the stack locally; the bridge host
-// with BRIDGE_FAKE_CONTROL_ADDR set). It signs in as the dev admin, sets up an identity key,
-// connects the fake network through a sealed login, receives a message, sends one, and checks
-// that what reached Convex is sealed.
+// End to end with the fake network, against `pnpm dev` (docs/CONTRIBUTING.md, End-to-end
+// check) or an installed server (docs/deploy.md, Verifying an install). It signs in as the
+// admin, sets up an identity key as a first device does, connects the fake network through a
+// sealed login, receives a message, sends one, and checks that what reached Convex is sealed.
 //
 // The identity key it sets is kept (E2E_IDENTITY_FILE, default ../../.data/e2e-identity.json)
 // so the script can run again on the same account; a fresh fake login each run gives it a new
-// chat.
+// chat. Run it once at a time per admin: two runs at once can each take the other's newly
+// connected account for their own.
 //
 //   node --env-file=../../.data/dev.env scripts/e2e-fake.ts <admin email> <password>
 

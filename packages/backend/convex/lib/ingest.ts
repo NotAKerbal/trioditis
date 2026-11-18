@@ -329,7 +329,7 @@ async function applyRedaction(
   })
   // A message can have any number of reactions, so they're deleted in bounded batches after
   // this transaction, rather than all inside it. Until they're gone, the marker hides them.
-  await ctx.db.insert('reactionCleanups', { messageId: message._id })
+  await ctx.db.insert('reactionCleanups', { messageId: message._id, chatId: message.chatId })
   await ctx.scheduler.runAfter(0, internal.cleanup.reactionsOfMessage, { messageId: message._id })
 }
 

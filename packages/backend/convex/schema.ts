@@ -293,6 +293,8 @@ export default defineSchema({
    */
   reactionCleanups: defineTable({
     messageId: v.id('messages'),
+    /** The message's chat, so a query for another chat isn't told the message is deleted. */
+    chatId: v.optional(v.id('chats')),
   }).index('by_message', ['messageId']),
 
   /** Every reaction event applied, so a replay of any of them changes nothing. */
