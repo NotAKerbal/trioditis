@@ -20,10 +20,12 @@ import type * as lib_hash from "../lib/hash.js";
 import type * as lib_ingest from "../lib/ingest.js";
 import type * as lib_networks from "../lib/networks.js";
 import type * as lib_outbox from "../lib/outbox.js";
+import type * as lib_send from "../lib/send.js";
 import type * as logins from "../logins.js";
 import type * as mcp from "../mcp.js";
 import type * as members from "../members.js";
 import type * as messages from "../messages.js";
+import type * as preferences from "../preferences.js";
 import type * as validators from "../validators.js";
 
 import type {
@@ -45,10 +47,12 @@ declare const fullApi: ApiFromModules<{
   "lib/ingest": typeof lib_ingest;
   "lib/networks": typeof lib_networks;
   "lib/outbox": typeof lib_outbox;
+  "lib/send": typeof lib_send;
   logins: typeof logins;
   mcp: typeof mcp;
   members: typeof members;
   messages: typeof messages;
+  preferences: typeof preferences;
   validators: typeof validators;
 }>;
 
