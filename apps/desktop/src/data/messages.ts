@@ -4,11 +4,11 @@ import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
-import { reactionRequests } from './reaction-requests.ts'
+import { reactionGroups, reactionRequests } from './reaction-requests.ts'
 
 export interface Message {
   id: Id<'messages'>
@@ -79,20 +79,33 @@ export interface Reaction {
 const answersOf = (results: { data?: ReactionAnswer | undefined }[]) => results.map((r) => r.data)
 
 /**
- * Reactions on the loaded messages, grouped by key with who reacted. They're asked for 100
- * messages at a time, and again for any an answer didn't reach (reaction-requests.ts): each
- * request's answer is read from the cache, so the requests grow as answers come.
+ * Reactions on the loaded messages (oldest first), grouped by key with who reacted. They're asked
+ * for in groups that stay put as the list grows, 100 at most, and again for any an answer didn't
+ * reach (reaction-requests.ts): each request's answer is read from the cache, so the requests
+ * grow as answers come. While a group's request is new, its messages keep what they last showed.
  */
-export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
+export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at: number }[]) {
   const queryClient = useQueryClient()
   const request = (asked: Id<'messages'>[]) => convexQuery(api.messages.reactions, { chatId, messageIds: asked })
-  const requests = reactionRequests(messageIds, (asked) =>
-    queryClient.getQueryData<ReactionAnswer>(request(asked).queryKey),
-  )
+  const answerFor = (asked: Id<'messages'>[]) => queryClient.getQueryData<ReactionAnswer>(request(asked).queryKey)
+  const requests = reactionGroups(messages).flatMap((group) => reactionRequests(group, answerFor))
   const answers = useQueries({ queries: requests.map(request), combine: answersOf })
+  const shown = useRef<ReactionAnswer>({})
+  const ids = messages.map((m) => m.id).join()
+  const data = useMemo(() => {
+    const fresh: ReactionAnswer = Object.assign({}, ...answers.filter(Boolean))
+    const out: ReactionAnswer = {}
+    for (const id of ids ? ids.split(',') : []) {
+      const list = fresh[id] ?? shown.current[id]
+      if (list) out[id] = list
+    }
+    return out
+  }, [answers, ids])
+  useEffect(() => {
+    shown.current = data
+  }, [data])
   return useMemo(() => {
     const out = new Map<string, Reaction[]>()
-    const data: ReactionAnswer = Object.assign({}, ...answers.filter(Boolean))
     for (const [messageId, list] of Object.entries(data)) {
       // The server gives a message's first 100 reactions at most: at that, any count may be more.
       const more = list.length >= MAX_REACTIONS_PER_MESSAGE
@@ -106,7 +119,7 @@ export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
       out.set(messageId, [...byKey.values()])
     }
     return out
-  }, [answers])
+  }, [data])
 }
 
 /** Who is typing now. Queries don't rerun as time passes, so expiry is checked here. */

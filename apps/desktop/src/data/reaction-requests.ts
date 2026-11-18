@@ -12,20 +12,40 @@ export function unreached<T extends string>(asked: readonly T[], answer: Record<
   return cut < 0 ? [] : asked.slice(cut)
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * The loaded messages (oldest first) in groups whose edges stay put as the list grows: by day
+ * (UTC), then runs of at most 100 from each day's oldest message. Loading earlier history only
+ * changes the oldest, partly loaded day's groups, and a new message only the newest day's last
+ * one, so the other groups keep their requests, their answers and their subscriptions.
+ */
+export function reactionGroups<T extends string>(messages: readonly { id: T; at: number }[]): T[][] {
+  const groups: T[][] = []
+  let day: number | null = null
+  for (const m of messages) {
+    const d = Math.floor(m.at / DAY_MS)
+    const last = groups.at(-1)
+    if (last && d === day && last.length < MAX_IDS_PER_REQUEST) last.push(m.id)
+    else groups.push([m.id])
+    day = d
+  }
+  return groups
+}
+
 /**
  * The requests that cover `ids`: up to 100 at a time, each asking first for what the one before
  * it didn't reach. `answerFor` gives a request's answer once it has come; the plan stops at the
  * first request still waiting, and grows as answers come. Every request after the first starts
- * past at least one ID, so the plan always ends; `limit` caps it anyway.
+ * past at least one ID, so there are never more requests than IDs, and none is left out.
  */
 export function reactionRequests<T extends string>(
   ids: readonly T[],
   answerFor: (asked: T[]) => Record<string, unknown> | undefined,
-  limit = 50,
 ): T[][] {
   const requests: T[][] = []
   let rest = [...ids]
-  while (rest.length > 0 && requests.length < limit) {
+  while (rest.length > 0) {
     const asked = rest.slice(0, MAX_IDS_PER_REQUEST)
     requests.push(asked)
     const answer = answerFor(asked)

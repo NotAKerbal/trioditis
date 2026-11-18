@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_IDS_PER_REQUEST, reactionRequests, unreached } from '../src/data/reaction-requests.ts'
+import { MAX_IDS_PER_REQUEST, reactionGroups, reactionRequests, unreached } from '../src/data/reaction-requests.ts'
 
 const ids = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `m${from + i}`)
 /** An answer covering `reached`, as the server gives one: each reached ID, with its reactions or none. */
@@ -59,9 +59,47 @@ describe('asking for reactions until every message is covered', () => {
     expect(unreached(['m0', 'm1'], answer(['m0', 'm1']))).toEqual([])
   })
 
-  it('stops at the limit whatever the answers', () => {
-    // An answer that never covers anything past the first ID.
-    const requests = reactionRequests(ids(500), (a) => answer(a.slice(0, 1)), 5)
-    expect(requests).toHaveLength(5)
+  it('ends even when every answer covers only its first ID, asking no more often than there are IDs', () => {
+    const all = ids(500)
+    const requests = reactionRequests(all, (a) => answer(a.slice(0, 1)))
+    expect(requests.length).toBeLessThanOrEqual(all.length)
+    expect(new Set(requests.map((r) => r[0]))).toEqual(new Set(all))
+  })
+})
+
+describe('grouping messages so requests stay put as the list grows', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  // `n` messages a day for `days` days, oldest first, a minute apart.
+  const loaded = (days: number, n: number, firstDay = 0) =>
+    Array.from({ length: days * n }, (_, i) => {
+      const day = firstDay + Math.floor(i / n)
+      return { id: `d${day}-${i % n}`, at: day * DAY + (i % n) * 60_000 }
+    })
+
+  it('groups by day, at most 100 a group', () => {
+    const groups = reactionGroups(loaded(2, 150))
+    expect(groups.map((g) => g.length)).toEqual([100, 50, 100, 50])
+    expect(groups[2]![0]).toBe('d1-0')
+  })
+
+  it('keeps the newer days’ groups when earlier history loads', () => {
+    const now = reactionGroups(loaded(3, 30, 5))
+    const more = reactionGroups([...loaded(2, 30, 3), ...loaded(3, 30, 5)])
+    expect(more.slice(-now.length)).toEqual(now)
+  })
+
+  it('changes only the newest group when a message arrives', () => {
+    const before = loaded(3, 30)
+    const now = reactionGroups(before)
+    const after = reactionGroups([...before, { id: 'new', at: 2 * DAY + 50 * 60_000 }])
+    expect(after.slice(0, -1)).toEqual(now.slice(0, -1))
+    expect(after.at(-1)).toEqual([...now.at(-1)!, 'new'])
+  })
+
+  it('covers every loaded message, however many', () => {
+    const all = loaded(51, 100)
+    expect(all).toHaveLength(5100)
+    const requests = reactionGroups(all).flatMap((g) => reactionRequests(g, (a) => answer(a)))
+    expect(requests.flat()).toEqual(all.map((m) => m.id))
   })
 })
