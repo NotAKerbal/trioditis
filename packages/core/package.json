@@ -1,0 +1,21 @@
+{
+  "name": "@trioditis/core",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bridge-protocol": "./src/bridge-protocol.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trioditis/crypto": "workspace:*"
+  },
+  "devDependencies": {
+    "@trioditis/config": "workspace:*",
+    "typescript": "7.0.2"
+  }
+}

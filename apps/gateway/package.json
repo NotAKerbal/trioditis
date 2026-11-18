@@ -1,0 +1,25 @@
+{
+  "name": "@trioditis/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=../../.data/dev.env --watch src/main.ts",
+    "start": "node src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@trioditis/backend": "workspace:*",
+    "@trioditis/core": "workspace:*",
+    "@trioditis/crypto": "workspace:*",
+    "convex": "1.50.0"
+  },
+  "devDependencies": {
+    "@trioditis/config": "workspace:*",
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

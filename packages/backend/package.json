@@ -1,0 +1,37 @@
+{
+  "name": "@trioditis/backend",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    "./api": "./convex/_generated/api.js",
+    "./dataModel": "./convex/_generated/dataModel.d.ts",
+    "./validators": "./convex/validators.ts",
+    "./envelope": "./convex/lib/envelope.ts"
+  },
+  "scripts": {
+    "dev": "convex dev --tail-logs disable",
+    "codegen": "convex codegen",
+    "typecheck": "tsc --noEmit -p convex",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@better-auth/passkey": "1.7.25",
+    "@convex-dev/better-auth": "0.13.0",
+    "@convex-dev/mcp": "0.1.0-alpha.7",
+    "@noble/hashes": "2.4.0",
+    "@trioditis/core": "workspace:*",
+    "@trioditis/crypto": "workspace:*",
+    "better-auth": "1.7.25",
+    "convex": "1.50.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "5.0.0",
+    "@trioditis/config": "workspace:*",
+    "@types/node": "26.6.6",
+    "convex-test": "0.0.71",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

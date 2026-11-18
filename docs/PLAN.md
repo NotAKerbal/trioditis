@@ -1,6 +1,6 @@
 # Trioditis — Product & Implementation Plan
 
-*Trioditis: "of the three roads." A crossroads for all of your conversations.*
+_Trioditis: "of the three roads." A crossroads for all of your conversations._
 
 Status: draft v2, 2026-11-18. v1 of this plan was reviewed by a model council (GPT-6.2
 Astra, GPT-6.2 Sol, Claude Fable 5.2, Claude Opus 5.5, Grok 4.7); this revision folds
@@ -57,19 +57,19 @@ WhatsApp · Signal · Google Messages · Telegram · Messenger · Instagram · D
                  Desktop (Electron + TanStack) · Web · Mobile (Expo)
 ```
 
-| Component | Choice | Role |
-|---|---|---|
-| Network connectors | mautrix bridgev2 network connectors (Go) | Speak each platform's protocol |
-| Bridge host | Go service implementing bridgev2's `MatrixConnector` interface | Hosts the connectors without a Matrix homeserver; seals incoming messages; full-history backfill |
-| Gateway | TypeScript (Node) | Moves events between the bridge host and Convex; media proxy; webhook dispatch; login stepper |
-| Backend / data | Self-hosted Convex on Postgres | Realtime data for every client: inbox, sealed messages, agents, settings |
-| Auth (people) | Better Auth (Convex integration) | Accounts, invitations, sessions, passkeys, 2FA |
-| Auth (agents) | `@convex-dev/mcp` | MCP server and its own OAuth 2.1 server; Better Auth identifies the approving person |
-| Desktop / web | Electron + Vite + TanStack Router/Query (SPA) | Primary client; same build also served as a web app |
-| Mobile | Expo (React Native) + Expo Router | Phone client |
-| Push | Project-hosted push relay (Vaultwarden-style) | Content-free notifications via APNs/FCM; UnifiedPush option |
-| Edge | Caddy | Automatic HTTPS; the only publicly exposed service |
-| Fallback homeserver | Synapse | Used only if the bridge host spike fails; see below |
+| Component           | Choice                                                         | Role                                                                                             |
+| ------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Network connectors  | mautrix bridgev2 network connectors (Go)                       | Speak each platform's protocol                                                                   |
+| Bridge host         | Go service implementing bridgev2's `MatrixConnector` interface | Hosts the connectors without a Matrix homeserver; seals incoming messages; full-history backfill |
+| Gateway             | TypeScript (Node)                                              | Moves events between the bridge host and Convex; media proxy; webhook dispatch; login stepper    |
+| Backend / data      | Self-hosted Convex on Postgres                                 | Realtime data for every client: inbox, sealed messages, agents, settings                         |
+| Auth (people)       | Better Auth (Convex integration)                               | Accounts, invitations, sessions, passkeys, 2FA                                                   |
+| Auth (agents)       | `@convex-dev/mcp`                                              | MCP server and its own OAuth 2.1 server; Better Auth identifies the approving person             |
+| Desktop / web       | Electron + Vite + TanStack Router/Query (SPA)                  | Primary client; same build also served as a web app                                              |
+| Mobile              | Expo (React Native) + Expo Router                              | Phone client                                                                                     |
+| Push                | Project-hosted push relay (Vaultwarden-style)                  | Content-free notifications via APNs/FCM; UnifiedPush option                                      |
+| Edge                | Caddy                                                          | Automatic HTTPS; the only publicly exposed service                                               |
+| Fallback homeserver | Synapse                                                        | Used only if the bridge host spike fails; see below                                              |
 
 Convex is **self-hosted** on the operator's server, on **Postgres**: the default SQLite
 backend has an open out-of-memory issue on large index scans
@@ -151,32 +151,37 @@ able to read anyone's stored messages.
 - On their devices it is protected by a key-wrapping key derived from their passkey
   (WebAuthn PRF) or password (Argon2id), plus a **recovery key** shown once at setup.
 - New devices are approved from an existing device (QR scan) or with the recovery key.
-- Each chat has its own symmetric **chat key**, wrapped to the person's identity key.
+- Every sealed object has its own random **content key**, sealed to each recipient's
+  public key. The server can encrypt to a person but can never decrypt what it stored.
+  (An earlier draft used per-chat keys; the server would have needed them in the clear
+  to encrypt incoming messages.) The exact format is `docs/architecture/sealing.md`.
 
 ### What is sealed
 
-| Sealed (encrypted to the person) | Visible to the server |
-|---|---|
-| Message bodies, attachments, link previews | Message IDs, timestamps, sender IDs, delivery state |
-| Media files (encrypted per file, key inside the message envelope) | File sizes, content types |
-| Chat names, avatars, topics | Network, chat kind, unread counts, pinned/archived/muted flags |
-| Contact names, handles, avatars | Opaque contact IDs |
-| Drafts | Draft existence |
+| Sealed (encrypted to the person)                                  | Visible to the server                                          |
+| ----------------------------------------------------------------- | -------------------------------------------------------------- |
+| Message bodies, attachments, link previews                        | Message IDs, timestamps, sender IDs, delivery state            |
+| Media files (encrypted per file, key inside the message envelope) | File sizes, content types                                      |
+| Chat names, avatars, topics                                       | Network, chat kind, unread counts, pinned/archived/muted flags |
+| Contact names, handles, avatars                                   | Opaque contact IDs                                             |
+| Drafts                                                            | Draft existence                                                |
 
 ### Flows
 
-- **Incoming:** the bridge host seals each message with its chat key (creating and
-  wrapping the key on first use) before writing it to the journal. Convex and the
-  gateway only ever see ciphertext.
+- **Incoming:** the bridge host seals each message to the person's identity key (and the
+  agent-access key, for chats granted to an agent) before writing it to its journal,
+  then forgets the content key. Convex and the gateway only ever see ciphertext.
 - **Outgoing:** the client encrypts the message for the bridge host's public key and
   writes it to the outbox; the bridge host decrypts, sends, and discards the
-  plaintext. The client also stores the sent message sealed under the chat key.
+  plaintext. The client also stores its own copy, sealed to the person's recipients.
 - **Search:** runs on the device, over a local index built as messages are decrypted
   (SQLite FTS5 on mobile and desktop). Server-side message search does not exist.
 - **Push:** notifications never contain message content.
-- **Agents:** granting an agent access to a chat wraps that chat's key to the server's
-  agent-access key, so the MCP server can decrypt that chat for that agent. The grant
-  screen says so plainly. Revoking the grant destroys the wrapped copy.
+- **Agents:** granting an agent a chat adds the server's agent-access key as a
+  recipient: new messages include it from the start, and the person's device re-seals
+  the content keys of past messages to it (without re-encrypting content). The MCP
+  server can then decrypt that chat for that agent. The grant screen says so plainly.
+  Revoking the grant removes those recipient entries.
 
 ### What sealing cannot do
 
@@ -254,15 +259,15 @@ duplicated messages" is judged against the ledger, not by feel.
 
 TanStack for desktop/web, Expo for mobile, in one pnpm monorepo.
 
-| Layer | Shared? | How |
-|---|---|---|
-| Convex schema, queries, mutations | Fully | `packages/backend` |
-| Types, network capability metadata, state logic, hooks | Fully | `packages/core` |
-| Crypto (sealing, key wrapping, device approval) | Fully | `packages/crypto`, audited primitives only (libsodium) |
-| Message rendering logic (markdown, mentions, links, quotes) | Fully | Parse to an AST in core; thin per-platform renderers |
-| Local cache and on-device search | Fully | `packages/core` with a storage adapter per platform |
-| Design tokens (color, type, spacing, radii, icons) | Fully | `packages/ui-tokens`, consumed by Tailwind (web) and NativeWind (mobile) |
-| Screens, layout, navigation, lists, composer, menus, gestures | Per platform | Native to each platform |
+| Layer                                                         | Shared?      | How                                                                      |
+| ------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------ |
+| Convex schema, queries, mutations                             | Fully        | `packages/backend`                                                       |
+| Types, network capability metadata, state logic, hooks        | Fully        | `packages/core`                                                          |
+| Crypto (sealing, key wrapping, device approval)               | Fully        | `packages/crypto`, audited primitives only (libsodium)                   |
+| Message rendering logic (markdown, mentions, links, quotes)   | Fully        | Parse to an AST in core; thin per-platform renderers                     |
+| Local cache and on-device search                              | Fully        | `packages/core` with a storage adapter per platform                      |
+| Design tokens (color, type, spacing, radii, icons)            | Fully        | `packages/ui-tokens`, consumed by Tailwind (web) and NativeWind (mobile) |
+| Screens, layout, navigation, lists, composer, menus, gestures | Per platform | Native to each platform                                                  |
 
 Rule of thumb: **logic is written once; screens are written twice.** Components are not
 shared through react-native-web.
@@ -325,15 +330,15 @@ conformance results are green.
 
 ## Networks
 
-| Network | Connector | Status at plan time | Target maturity for v1 |
-|---|---|---|---|
-| WhatsApp | mautrix-whatsapp (bridgev2) | Phase 0 spike network | Stable |
-| Signal | mautrix-signal (bridgev2) | | Stable |
-| Google Messages (SMS/RCS) | mautrix-gmessages (bridgev2) | Google-account cookie login; QR login no longer works; phone must stay online | Stable |
-| Telegram | mautrix-telegram (rewritten in Go, bridgev2) | | Beta |
-| Messenger | mautrix-meta (bridgev2) | Messenger only since v26.08; cookie login; ToS / ban risk | Beta |
-| Instagram | mautrix-instagram (bridgev2) | Split out of mautrix-meta in v26.07; cookie login; ToS / ban risk | Beta |
-| Discord | mautrix-discord | Still on the legacy framework; user-token login; ToS / ban risk | Experimental, after its bridgev2 migration |
+| Network                   | Connector                                    | Status at plan time                                                           | Target maturity for v1                     |
+| ------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------ |
+| WhatsApp                  | mautrix-whatsapp (bridgev2)                  | Phase 0 spike network                                                         | Stable                                     |
+| Signal                    | mautrix-signal (bridgev2)                    |                                                                               | Stable                                     |
+| Google Messages (SMS/RCS) | mautrix-gmessages (bridgev2)                 | Google-account cookie login; QR login no longer works; phone must stay online | Stable                                     |
+| Telegram                  | mautrix-telegram (rewritten in Go, bridgev2) |                                                                               | Beta                                       |
+| Messenger                 | mautrix-meta (bridgev2)                      | Messenger only since v26.08; cookie login; ToS / ban risk                     | Beta                                       |
+| Instagram                 | mautrix-instagram (bridgev2)                 | Split out of mautrix-meta in v26.07; cookie login; ToS / ban risk             | Beta                                       |
+| Discord                   | mautrix-discord                              | Still on the legacy framework; user-token login; ToS / ban risk               | Experimental, after its bridgev2 migration |
 
 Later candidates: Slack, Google Voice, LinkedIn, X, Bluesky, iMessage (optional Mac
 companion). Testers for Telegram, Discord and Instagram are friends and family with
@@ -469,41 +474,41 @@ modules for the bridge host. License: AGPL-3.0.
 
 All rows are scoped to one person. Sealed fields are ciphertext envelopes.
 
-| Table | Key fields | Notes |
-|---|---|---|
-| `users` | role (admin/member), identityPublicKey | Better Auth tables alongside |
-| `invitations` | email, invitedBy, expiresAt, acceptedAt | |
-| `devices` | userId, platform, devicePublicKey, pushRegistration, approvedAt | |
-| `networkAccounts` | userId, network, loginId, status, lastHealthyAt | Several per network allowed |
-| `chats` | userId, networkAccountId, portalId, kind (dm/group/channel/agent), sealedMeta, wrappedChatKey, lastMessageAt, unreadCount, pinned, archived, mutedUntil, labels, parentSpaceId | Indexed by user + lastMessageAt |
-| `contacts` | userId, networkAccountId, ghostId, sealedProfile | |
-| `messages` | userId, chatId, eventId, networkTs, sortKey, senderContactId, sealedBody, kind, relatesTo (reply/edit/reaction/redaction/thread), status, clientMessageId, historical, expiresAt, sentByAgentId | Dedup by eventId via index + check-then-insert |
-| `readMarkers` | userId, chatId, upToSortKey | Unread counts derived, with a repair job |
-| `typing` | chatId, contactId, expiresAt | Ephemeral |
-| `outbox` | userId, chatId, kind, sealedForBridge, clientMessageId, state, leaseUntil, attempts, lastError, createdAt | FIFO per chat |
-| `media` | userId, objectId, size, contentType | Bytes in the encrypted media store |
-| `drafts` | userId, chatId, sealedText, updatedAt | |
-| `agents` | userId, mcpConnectionId, name, avatar, status | |
-| `agentGrants` | agentId, grantedBy, scope (chat/network), permission, agentWrappedChatKey | |
-| `approvals` | agentId, payloadHash, sealedPayload, state, expiresAt, decidedBy, decidedAt | |
-| `auditLog` | actor, action, target, at | Append-only |
-| `webhooks` | agentId, url, secret, eventTypes | |
-| `bridgeHealth` | network, loginId, state, checkedAt, detail | |
-| `quarantine` | eventId, reason, at | Unmappable events |
+| Table             | Key fields                                                                                                                                                                                      | Notes                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `users`           | role (admin/member), identityPublicKey                                                                                                                                                          | Better Auth tables alongside                   |
+| `invitations`     | email, invitedBy, expiresAt, acceptedAt                                                                                                                                                         |                                                |
+| `devices`         | userId, platform, devicePublicKey, pushRegistration, approvedAt                                                                                                                                 |                                                |
+| `networkAccounts` | userId, network, loginId, status, lastHealthyAt                                                                                                                                                 | Several per network allowed                    |
+| `chats`           | userId, networkAccountId, portalId, kind (dm/group/channel/agent), sealedMeta, lastMessageAt, unreadCount, pinned, archived, mutedUntil, labels, parentSpaceId                                  | Indexed by user + lastMessageAt                |
+| `contacts`        | userId, networkAccountId, ghostId, sealedProfile                                                                                                                                                |                                                |
+| `messages`        | userId, chatId, eventId, networkTs, sortKey, senderContactId, sealedBody, kind, relatesTo (reply/edit/reaction/redaction/thread), status, clientMessageId, historical, expiresAt, sentByAgentId | Dedup by eventId via index + check-then-insert |
+| `readMarkers`     | userId, chatId, upToSortKey                                                                                                                                                                     | Unread counts derived, with a repair job       |
+| `typing`          | chatId, contactId, expiresAt                                                                                                                                                                    | Ephemeral                                      |
+| `outbox`          | userId, chatId, kind, sealedForBridge, clientMessageId, state, leaseUntil, attempts, lastError, createdAt                                                                                       | FIFO per chat                                  |
+| `media`           | userId, objectId, size, contentType                                                                                                                                                             | Bytes in the encrypted media store             |
+| `drafts`          | userId, chatId, sealedText, updatedAt                                                                                                                                                           |                                                |
+| `agents`          | userId, mcpConnectionId, name, avatar, status                                                                                                                                                   |                                                |
+| `agentGrants`     | agentId, grantedBy, scope (chat/network), permission                                                                                                                                            |                                                |
+| `approvals`       | agentId, payloadHash, sealedPayload, state, expiresAt, decidedBy, decidedAt                                                                                                                     |                                                |
+| `auditLog`        | actor, action, target, at                                                                                                                                                                       | Append-only                                    |
+| `webhooks`        | agentId, url, secret, eventTypes                                                                                                                                                                |                                                |
+| `bridgeHealth`    | network, loginId, state, checkedAt, detail                                                                                                                                                      |                                                |
+| `quarantine`      | eventId, reason, at                                                                                                                                                                             | Unmappable events                              |
 
 ## Quality and testing
 
-| Layer | Tooling | Runs in CI |
-|---|---|---|
-| Unit (core, crypto, message AST, cache) | Vitest | Yes |
-| Convex functions and access checks | convex-test | Yes |
-| Bridge host and gateway pipeline | Go tests + Vitest against the fake network connector, Convex and Postgres in Compose | Yes |
-| Agent security (negative tests: no grant, expired approval, revoked token, wrong user) | convex-test + MCP client | Yes, from the first MCP PR |
-| Conformance live checklist | Scripted, real test accounts | Before each release and connector bump |
-| Canary ledger | Continuous, two test accounts | Always on in the dev environment |
-| Desktop end to end | Playwright (Electron) | Yes |
-| Mobile end to end | Maestro | Nightly / pre-release |
-| Install | Fresh-VM install of the bundle | Pre-release |
+| Layer                                                                                  | Tooling                                                                              | Runs in CI                             |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------- |
+| Unit (core, crypto, message AST, cache)                                                | Vitest                                                                               | Yes                                    |
+| Convex functions and access checks                                                     | convex-test                                                                          | Yes                                    |
+| Bridge host and gateway pipeline                                                       | Go tests + Vitest against the fake network connector, Convex and Postgres in Compose | Yes                                    |
+| Agent security (negative tests: no grant, expired approval, revoked token, wrong user) | convex-test + MCP client                                                             | Yes, from the first MCP PR             |
+| Conformance live checklist                                                             | Scripted, real test accounts                                                         | Before each release and connector bump |
+| Canary ledger                                                                          | Continuous, two test accounts                                                        | Always on in the dev environment       |
+| Desktop end to end                                                                     | Playwright (Electron)                                                                | Yes                                    |
+| Mobile end to end                                                                      | Maestro                                                                              | Nightly / pre-release                  |
+| Install                                                                                | Fresh-VM install of the bundle                                                       | Pre-release                            |
 
 CI (GitHub Actions): lint, typecheck, unit, Convex tests, pipeline integration and
 desktop end to end on every PR.
@@ -608,26 +613,48 @@ minutes.
 
 ## Decisions log
 
-| # | Decision | Status |
-|---|---|---|
-| 1 | Self-hosted, open source, Vaultwarden-style; anyone can host and invite people | Decided |
-| 2 | mautrix bridgev2 network connectors as the network layer | Decided |
-| 3 | Own bridge host implementing `MatrixConnector`; no homeserver; Synapse only as fallback | Decided, pending Phase 0 spike |
-| 4 | Self-hosted Convex on Postgres as the data layer | Decided |
-| 5 | Better Auth for people; `@convex-dev/mcp` for agent OAuth (Fluxalytics pattern) | Decided |
-| 6 | TanStack desktop/web + Expo mobile, shared core; no react-native-web component sharing | Decided |
-| 7 | Sealed storage by default for every account; per-chat keys; agents get access per granted chat | Decided |
-| 8 | Platform encryption ends at the bridge host; re-encrypted outbound by the connector | Decided |
-| 9 | Separate accounts per person; admin panel; admin chooses enabled networks | Decided |
-| 10 | All six v1 networks ship with maturity labels; connector platform + conformance suite | Decided |
-| 11 | No automatic resend after an ambiguous outcome; "delivery unknown" state | Decided |
-| 12 | Public domain default; Tailscale option; project-hosted push relay | Decided |
-| 13 | Backup, restore and update from Phase 1 | Decided |
-| 14 | License: AGPL-3.0; Convex backend (FSL-1.1-Apache-2.0) is a documented source-available dependency | Decided |
-| 15 | Tooling: pnpm workspaces + Turborepo; Go modules for the bridge host | Decided |
+| #   | Decision                                                                                                                          | Status                         |
+| --- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| 1   | Self-hosted, open source, Vaultwarden-style; anyone can host and invite people                                                    | Decided                        |
+| 2   | mautrix bridgev2 network connectors as the network layer                                                                          | Decided                        |
+| 3   | Own bridge host implementing `MatrixConnector`; no homeserver; Synapse only as fallback                                           | Decided, pending Phase 0 spike |
+| 4   | Self-hosted Convex on Postgres as the data layer                                                                                  | Decided                        |
+| 5   | Better Auth for people; `@convex-dev/mcp` for agent OAuth (Fluxalytics pattern)                                                   | Decided                        |
+| 6   | TanStack desktop/web + Expo mobile, shared core; no react-native-web component sharing                                            | Decided                        |
+| 7   | Sealed storage by default for every account; per-object content keys sealed to each recipient; agents get access per granted chat | Decided                        |
+| 8   | Platform encryption ends at the bridge host; re-encrypted outbound by the connector                                               | Decided                        |
+| 9   | Separate accounts per person; admin panel; admin chooses enabled networks                                                         | Decided                        |
+| 10  | All six v1 networks ship with maturity labels; connector platform + conformance suite                                             | Decided                        |
+| 11  | No automatic resend after an ambiguous outcome; "delivery unknown" state                                                          | Decided                        |
+| 12  | Public domain default; Tailscale option; project-hosted push relay                                                                | Decided                        |
+| 13  | Backup, restore and update from Phase 1                                                                                           | Decided                        |
+| 14  | License: AGPL-3.0; Convex backend (FSL-1.1-Apache-2.0) is a documented source-available dependency                                | Decided                        |
+| 15  | Tooling: pnpm workspaces + Turborepo; Go modules for the bridge host                                                              | Decided                        |
+
+## Known follow-ups (Phase 1)
+
+Found in Phase 0 reviews and accepted for a single-household, single-host spike:
+
+- **Claim byte bound:** claims bound commands, expiries and index lookups, but not bytes
+  read; bound them by bytes once login steps or host metadata can be large. Rows written
+  before the current size caps (login steps up to the old document limit) stay readable at
+  their old size; before the first release, reset dev data instead (CONTRIBUTING.md).
+- **Echo without a client message ID:** before a login's owning host is recorded, a copy
+  of a sent message without its `clientMessageId` from another host can win dedup and
+  leave the pending copy unreconciled. Matters only with several hosts per network.
+- **Cancel is best effort:** a login that completes while its cancel is in flight still
+  connects the account. Decide what Cancel promises, and disconnect if needed.
+- **Bridge host:** see `apps/bridge-host/README.md`, Known follow-ups (on the bridge host
+  branch until it lands).
 
 ## Open questions
 
+0. **Connector state at rest:** decided for Phase 0 (2026-11-18, the working default,
+   which Isaac can overrule). The connectors' own plaintext (bridgev2 portal, ghost and login
+   tables, WhatsApp history not yet imported, whatsmeow contacts) is protected by an
+   **encrypted disk and encrypted backups**; the installer warns when the data directory
+   isn't on an encrypted volume. Phase 1 adds sealing those columns with a server-held key.
+   Patching the connectors to store nothing in plaintext stays an option after that.
 1. **Bridge host spike:** does bridgev2 run fully without a homeserver (provisioning,
    commands, backfill, media), and how much of `MatrixAPI` each connector actually
    exercises?

@@ -1,0 +1,20 @@
+{
+  /* Convex functions' environment. Some of these settings are required by Convex. */
+  "compilerOptions": {
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "moduleResolution": "Bundler",
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ESNext",
+    "lib": ["ES2023", "dom"],
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["./**/*", "../test/**/*"],
+  "exclude": ["./_generated"]
+}

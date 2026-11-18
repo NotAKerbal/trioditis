@@ -1,0 +1,33 @@
+import type { Infer } from 'convex/values'
+import type { Doc, Id } from '../_generated/dataModel'
+import type { MutationCtx, QueryCtx } from '../_generated/server'
+import type { envelope } from '../validators'
+
+// The outbox's bridge-readable payloads live in their own table (`outboxPayloads`), so
+// scanning commands never reads ciphertext, and so deleting a payload is one place.
+
+/** Login commands run while the person waits; one that hasn't gone out by then won't. */
+export const LOGIN_COMMAND_TTL_MS = 10 * 60 * 1000
+
+type Command = Omit<Doc<'outbox'>, '_id' | '_creationTime'>
+
+/** Queues a command, with its bridge-readable payload if it has one. */
+export async function queueCommand(ctx: MutationCtx, command: Command, sealed?: Infer<typeof envelope>) {
+  const commandId = await ctx.db.insert('outbox', command)
+  if (sealed) await ctx.db.insert('outboxPayloads', { commandId, sealed })
+  return commandId
+}
+
+export async function commandPayload(ctx: QueryCtx, commandId: Id<'outbox'>) {
+  return await ctx.db
+    .query('outboxPayloads')
+    .withIndex('by_command', (q) => q.eq('commandId', commandId))
+    .unique()
+}
+
+/** Deletes a command's payload, returning it (for callers that meter what they read). */
+export async function deletePayload(ctx: MutationCtx, commandId: Id<'outbox'>) {
+  const payload = await commandPayload(ctx, commandId)
+  if (payload) await ctx.db.delete(payload._id)
+  return payload
+}

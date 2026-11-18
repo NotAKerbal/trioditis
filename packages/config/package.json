@@ -1,0 +1,10 @@
+{
+  "name": "@trioditis/config",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "files": [
+    "tsconfig.base.json",
+    "tsconfig.node.json"
+  ]
+}
