@@ -14,9 +14,11 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { AlarmClock, Archive, ArchiveRestore, Bell, BellOff, Check, Pin } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { networkName, type Chat } from '~/data/chats.ts'
+import { useDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { usePrefs } from '~/lib/prefs.ts'
+import { rowPreview } from './row-preview.ts'
 
 /** What a row's hover actions do. The sidebar decides; the row only offers them. */
 export interface RowActions {
@@ -43,6 +45,15 @@ export function ChatRow({
   actions: RowActions
 }) {
   const prefs = usePrefs()
+  const draft = useDraft(chat.id).text
+  const line = rowPreview({
+    previews: prefs.previews,
+    draft,
+    last: undefined,
+    described: chat.described,
+    topic: chat.topic,
+    network: networkName(chat.network),
+  })
   const snoozed = chat.row.snoozedUntil !== null && !chat.row.woke
   return (
     <div className="group relative">
@@ -88,21 +99,25 @@ export function ChatRow({
               </span>
             )}
           </span>
-          {prefs.previews ? (
-            <span className="mt-0.5 flex items-center gap-1.5">
-              <span className={cn('truncate text-sm', unread ? 'text-muted-foreground' : 'text-subtle-foreground')}>
-                {preview ??
-                  (chat.described ? (chat.topic ?? networkName(chat.network)) : 'Waiting for this chat’s details…')}
-              </span>
-              {chat.mentions > 0 ? (
-                <Badge className="ml-auto">@</Badge>
-              ) : chat.unread > 0 ? (
-                <Badge variant={chat.muted ? 'muted' : 'count'} className="ml-auto">
-                  {chat.unread}
-                </Badge>
-              ) : null}
+          <span className="mt-0.5 flex items-center gap-1.5">
+            <span className={cn('truncate text-sm', unread ? 'text-muted-foreground' : 'text-subtle-foreground')}>
+              {preview ??
+                (line.kind === 'draft' ? (
+                  <>
+                    <span className="font-medium text-danger">Draft:</span> {line.text}
+                  </>
+                ) : (
+                  line.text
+                ))}
             </span>
-          ) : null}
+            {chat.mentions > 0 ? (
+              <Badge className="ml-auto">@</Badge>
+            ) : chat.unread > 0 ? (
+              <Badge variant={chat.muted ? 'muted' : 'count'} className="ml-auto">
+                {chat.unread}
+              </Badge>
+            ) : null}
+          </span>
         </span>
       </Button>
       <RowActionBar actions={actions} />
