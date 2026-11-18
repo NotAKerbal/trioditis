@@ -1,7 +1,8 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   // `pnpm lint`: oxlint's correctness rules, type-aware ones included, plus Convex's rules
-  // for the backend.
+  // for the backend and the design system's for the app and packages/ui
+  // (scripts/lint/design-system.mjs).
   "plugins": ["eslint", "typescript", "unicorn", "oxc"],
   "categories": { "correctness": "error" },
   "options": { "typeAware": true, "reportUnusedDisableDirectives": "error" },
@@ -28,6 +29,21 @@
         "@convex-dev/no-schema-import-cycle": "error",
         "@convex-dev/no-top-of-hour-crons": "error"
       }
+    },
+    {
+      "files": ["apps/desktop/src/**", "packages/ui/src/**"],
+      "jsPlugins": ["./scripts/lint/design-system.mjs"],
+      "rules": { "trioditis/no-literal-colour": "error" }
+    },
+    {
+      "files": ["apps/desktop/src/**"],
+      "jsPlugins": ["./scripts/lint/design-system.mjs"],
+      "rules": { "trioditis/no-raw-control": "error", "trioditis/ui-imports": "error" }
+    },
+    {
+      // The tokens are where the colours are defined.
+      "files": ["packages/ui/src/styles/**"],
+      "rules": { "trioditis/no-literal-colour": "off" }
     }
   ]
 }

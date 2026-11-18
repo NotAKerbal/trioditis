@@ -1,0 +1,291 @@
+// Package gateway is the bridge host's side of the gateway protocol: it pushes the journal
+// to the gateway in order, at least once, and fetches recipient keys.
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/keys"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
+)
+
+// Client talks to the gateway's internal API.
+type Client struct {
+	BaseURL string
+	Token   string
+	HTTP    *http.Client
+}
+
+func NewClient(baseURL, token string) *Client {
+	return &Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return c.HTTP.Do(req)
+}
+
+// ConflictError is the gateway asking for events from an earlier sequence number.
+type ConflictError struct{ ExpectedSeq int64 }
+
+func (e *ConflictError) Error() string {
+	return fmt.Sprintf("gateway expects events from seq %d", e.ExpectedSeq)
+}
+
+// PostEvents sends a batch and returns the gateway's acknowledgement.
+func (c *Client) PostEvents(ctx context.Context, batch *protocol.EventBatch) (int64, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/events", batch)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var ack protocol.EventBatchResponse
+		if err = json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+			return 0, fmt.Errorf("invalid ack: %w", err)
+		}
+		return ack.AckedThrough, nil
+	case http.StatusConflict:
+		var conflict protocol.EventBatchConflict
+		if err = json.NewDecoder(resp.Body).Decode(&conflict); err != nil {
+			return 0, fmt.Errorf("invalid conflict response: %w", err)
+		}
+		return 0, &ConflictError{ExpectedSeq: conflict.ExpectedSeq}
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return 0, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+}
+
+// FetchKeys gets a person's recipient keys. It implements keys.Fetcher.
+func (c *Client) FetchKeys(ctx context.Context, userID string) (*protocol.RecipientKeys, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/keys/"+url.PathEscape(userID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out protocol.RecipientKeys
+		if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, err
+		}
+		return &out, nil
+	case http.StatusConflict:
+		return nil, keys.ErrNoIdentityKey
+	default:
+		return nil, fmt.Errorf("gateway returned %d for keys", resp.StatusCode)
+	}
+}
+
+// Pusher delivers the journal to the gateway.
+type Pusher struct {
+	Client      *Client
+	Store       *store.Store
+	HostID      string
+	Network     string
+	CommandAddr string
+	BatchSize   int
+	Log         zerolog.Logger
+
+	wake chan struct{}
+}
+
+func NewPusher(client *Client, st *store.Store, hostID, network, commandAddr string, log zerolog.Logger) *Pusher {
+	return &Pusher{
+		Client: client, Store: st, HostID: hostID, Network: network, CommandAddr: commandAddr,
+		BatchSize: 100, Log: log, wake: make(chan struct{}, 1),
+	}
+}
+
+// Wake tells the pusher new events are in the journal.
+func (p *Pusher) Wake() {
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+const (
+	idleWait = 5 * time.Second
+	// HeartbeatInterval is how often an empty batch tells the gateway the host is alive.
+	// The gateway only dispatches commands to hosts heard from in the last two minutes.
+	HeartbeatInterval = 30 * time.Second
+	maxBackoff        = 30 * time.Second
+)
+
+// Run pushes until ctx is cancelled. Events are resent from the gateway's last
+// acknowledgement until acknowledged, so delivery is at least once and in order. An empty
+// batch on startup, and whenever nothing else was sent for HeartbeatInterval, registers
+// the host and tells it where the gateway has got to.
+func (p *Pusher) Run(ctx context.Context) {
+	backoff := time.Second
+	var lastContact time.Time
+	var lastConflict int64
+	conflictBackoff := time.Second
+	for ctx.Err() == nil {
+		var sent bool
+		var err error
+		if time.Since(lastContact) >= HeartbeatInterval {
+			err = p.heartbeat(ctx)
+			sent = err == nil
+		} else {
+			sent, err = p.pushOnce(ctx)
+		}
+		var conflict *ConflictError
+		switch {
+		case errors.As(err, &conflict):
+			lastContact = time.Now()
+			last, lastErr := p.Store.LastSeq(ctx)
+			if lastErr != nil {
+				p.Log.Err(lastErr).Msg("Failed to read the journal")
+				p.sleep(ctx, backoff)
+				continue
+			}
+			// The gateway can only ask for a sequence the journal has (or the next one). Anything
+			// else means the journal and the gateway disagree about history, which resending
+			// can't fix: an operator has to look.
+			if conflict.ExpectedSeq < 1 || conflict.ExpectedSeq > last+1 {
+				p.Log.Error().Int64("expected_seq", conflict.ExpectedSeq).Int64("journal_last", last).
+					Msg("Gateway asked for a sequence the journal doesn't have; not resending")
+				p.sleep(ctx, maxBackoff)
+				continue
+			}
+			// The same request again means the resend didn't help; back off rather than spin.
+			if conflict.ExpectedSeq == lastConflict {
+				p.Log.Error().Int64("expected_seq", conflict.ExpectedSeq).Dur("retry_in", conflictBackoff).
+					Msg("Gateway keeps asking for the same sequence")
+				p.sleep(ctx, conflictBackoff)
+				conflictBackoff = min(conflictBackoff*2, maxBackoff)
+			} else {
+				p.Log.Warn().Int64("expected_seq", conflict.ExpectedSeq).Msg("Gateway asked to resend the journal from an earlier point")
+				conflictBackoff = time.Second
+			}
+			lastConflict = conflict.ExpectedSeq
+			if err = p.rewind(ctx, conflict.ExpectedSeq-1); err != nil {
+				p.Log.Err(err).Msg("Failed to rewind journal acknowledgement")
+			}
+			continue
+		case err != nil:
+			p.Log.Warn().Err(err).Dur("retry_in", backoff).Msg("Failed to push events to the gateway")
+			p.sleep(ctx, backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+		backoff = time.Second
+		lastConflict, conflictBackoff = 0, time.Second
+		if sent {
+			lastContact = time.Now()
+		} else {
+			p.sleep(ctx, min(idleWait, HeartbeatInterval-time.Since(lastContact)))
+		}
+	}
+}
+
+func (p *Pusher) sleep(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-p.wake:
+	case <-timer.C:
+	}
+}
+
+// rewind moves the acknowledgement back so events after seq are sent again.
+func (p *Pusher) rewind(ctx context.Context, seq int64) error {
+	return p.Store.SetAckedThrough(ctx, max(seq, 0))
+}
+
+// reconcile adopts the gateway's acknowledgement. Behind ours means the gateway lost
+// events (for example a restore) and they are resent; ahead of the journal can't be
+// fixed here and is reported.
+func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
+	acked, err := p.Store.AckedThrough(ctx)
+	if err != nil {
+		return err
+	}
+	last, err := p.Store.LastSeq(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case ackedThrough > last:
+		return fmt.Errorf("gateway has acknowledged seq %d but the journal ends at %d; the journal was reset or restored", ackedThrough, last)
+	case ackedThrough != acked:
+		if ackedThrough < acked {
+			p.Log.Warn().Int64("gateway", ackedThrough).Int64("local", acked).Msg("Gateway is behind the journal; resending")
+		}
+		if err = p.Store.SetAckedThrough(ctx, ackedThrough); err != nil {
+			return err
+		}
+		// A login's QR or pairing code isn't needed once the gateway has it.
+		if err = p.Store.ScrubLoginDisplays(ctx, ackedThrough); err != nil {
+			p.Log.Err(err).Msg("Failed to scrub login codes from the journal")
+		}
+	}
+	return nil
+}
+
+func (p *Pusher) batch(events []*protocol.Event) *protocol.EventBatch {
+	if events == nil {
+		events = []*protocol.Event{}
+	}
+	return &protocol.EventBatch{HostID: p.HostID, Network: p.Network, CommandAddr: p.CommandAddr, Events: events}
+}
+
+// heartbeat sends an empty batch and adopts the gateway's acknowledgement.
+func (p *Pusher) heartbeat(ctx context.Context) error {
+	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(nil))
+	if err != nil {
+		return err
+	}
+	return p.reconcile(ctx, ackedThrough)
+}
+
+// pushOnce sends the next batch, if any. It reports whether anything was sent.
+func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
+	acked, err := p.Store.AckedThrough(ctx)
+	if err != nil {
+		return false, err
+	}
+	events, err := p.Store.After(ctx, acked, p.BatchSize)
+	if err != nil || len(events) == 0 {
+		return false, err
+	}
+	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(events))
+	if err != nil {
+		return false, err
+	}
+	return true, p.reconcile(ctx, ackedThrough)
+}

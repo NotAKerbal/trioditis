@@ -157,8 +157,11 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- The bridge host keeps a safety margin (currently 2 minutes) before `notAfter` for the
-  connector's own waits, so a send can be refused as `expired` slightly before `notAfter`.
+- The bridge host keeps a safety margin (currently 11 minutes) before `notAfter` for the
+  connector's own waits, so a send can be refused as `expired` before `notAfter`. Phase 0
+  limit: a send already handed to the connector can still go out after `notAfter` if it waits
+  behind more than two incoming events that each hit bridgev2's 5-minute handler limit;
+  closing that needs a pre-send hook in bridgev2 (bridge host README, Known follow-ups).
 - A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
   the bridge host emits `failed` with error `expired`, and the person decides.
 
