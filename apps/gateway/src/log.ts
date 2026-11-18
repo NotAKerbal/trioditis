@@ -19,7 +19,12 @@ const KNOWN = [
 ] as const
 
 /** The gateway functions' own error messages, which are fixed strings. */
-const BACKEND_MESSAGES: ReadonlySet<string> = new Set(['Not the gateway', 'Host network mismatch', 'Batch too large'])
+const BACKEND_MESSAGES: ReadonlySet<string> = new Set([
+  'Not the gateway',
+  'Host network mismatch',
+  'Batch too large',
+  'Host ID too long',
+])
 
 export function describeError(error: unknown): string {
   if (error instanceof ConvexError && typeof error.data === 'string' && BACKEND_MESSAGES.has(error.data)) {

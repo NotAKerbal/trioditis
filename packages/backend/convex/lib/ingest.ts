@@ -41,6 +41,33 @@ export interface Origin {
   hostId: string
 }
 
+/**
+ * Roughly how many bytes an ingest call has read and written so far. Message, chat and contact
+ * rows can each hold up to two sealed objects, so a batch of small events (edits, reactions)
+ * can still touch many large rows. The caller stops a batch early once this passes its budget
+ * and acknowledges what it applied, so no call can exceed Convex's transaction limits.
+ */
+const meters = new WeakMap<MutationCtx, { bytes: number }>()
+
+export function startMeter(ctx: MutationCtx) {
+  const meter = { bytes: 0 }
+  meters.set(ctx, meter)
+  return meter
+}
+
+const encoder = new TextEncoder()
+
+export function byteSize(value: unknown) {
+  return encoder.encode(JSON.stringify(value) ?? '').length
+}
+
+/** Counts a row read and, as most are, rewritten. */
+function charge<T>(ctx: MutationCtx, doc: T): T {
+  const meter = meters.get(ctx)
+  if (meter && doc) meter.bytes += 2 * byteSize(doc)
+  return doc
+}
+
 type Sender = Extract<BridgeEventDoc, { type: 'message' }>['sender']
 type Delivery = NonNullable<Doc<'messages'>['delivery']>
 
@@ -54,6 +81,10 @@ export function sortKey(networkTs: number, eventId: string): string {
 }
 
 async function findChat(ctx: MutationCtx, userId: string, network: Network, portalId: string) {
+  return charge(ctx, await findChatRow(ctx, userId, network, portalId))
+}
+
+async function findChatRow(ctx: MutationCtx, userId: string, network: Network, portalId: string) {
   return await ctx.db
     .query('chats')
     .withIndex('by_portal', (q) => q.eq('userId', userId).eq('network', network).eq('portalId', portalId))
@@ -86,10 +117,13 @@ async function chatFor(
 }
 
 async function findMessage(ctx: MutationCtx, userId: string, network: Network, eventId: string) {
-  return await ctx.db
-    .query('messages')
-    .withIndex('by_event', (q) => q.eq('userId', userId).eq('network', network).eq('eventId', eventId))
-    .unique()
+  return charge(
+    ctx,
+    await ctx.db
+      .query('messages')
+      .withIndex('by_event', (q) => q.eq('userId', userId).eq('network', network).eq('eventId', eventId))
+      .unique(),
+  )
 }
 
 async function targetMessage(ctx: MutationCtx, userId: string, network: Network, eventId: string) {
@@ -118,10 +152,13 @@ async function sendFrom(ctx: MutationCtx, userId: string, clientMessageId: strin
 }
 
 async function findPersonsCopy(ctx: MutationCtx, userId: string, clientMessageId: string) {
-  return await ctx.db
-    .query('messages')
-    .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
-    .first()
+  return charge(
+    ctx,
+    await ctx.db
+      .query('messages')
+      .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
+      .first(),
+  )
 }
 
 const DELIVERY_ORDER: Record<Delivery, number> = {
@@ -344,6 +381,7 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     .query('contacts')
     .withIndex('by_ghost', (q) => q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId))
     .unique()
+  charge(ctx, existing)
   if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed })
   else
     await ctx.db.insert('contacts', {
@@ -394,6 +432,8 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
   }
   // A login that has ended stays ended, whatever step arrives late.
   if (session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
+  // Login steps are instructions, a code or a QR string, and a few fields: never this big.
+  if (byteSize(event.step) > MAX_LOGIN_STEP_BYTES) throw new Unmappable('too_large')
   const state =
     event.step.type === 'complete'
       ? 'complete'
@@ -434,6 +474,8 @@ async function applySendStatus(
 export const MAX_INCOMING_SEALED_BYTES = 256 * 1024
 /** The longest ID an event may carry: they are hashes and opaque IDs, never content. */
 export const MAX_ID_LENGTH = 256
+/** The most a login step may hold, in UTF-8 bytes. */
+const MAX_LOGIN_STEP_BYTES = 64 * 1024
 
 const ID_FIELDS = [
   'loginId',
@@ -452,11 +494,15 @@ const ID_FIELDS = [
 
 function hasOversizedId(event: BridgeEventDoc) {
   const fields = event as unknown as Record<string, unknown>
-  if (ID_FIELDS.some((name) => typeof fields[name] === 'string' && (fields[name] as string).length > MAX_ID_LENGTH))
-    return true
-  return event.type === 'loginStep' && event.step.stepId.length > MAX_ID_LENGTH
+  const ids = [
+    ...ID_FIELDS.map((name) => fields[name]),
+    event.userId,
+    'sender' in event && 'ghostId' in event.sender ? event.sender.ghostId : undefined,
+    event.type === 'loginStep' ? event.step.stepId : undefined,
+    event.type === 'loginStep' ? event.step.loginId : undefined,
+  ]
+  return ids.some((id) => typeof id === 'string' && id.length > MAX_ID_LENGTH)
 }
-
 /**
  * Whether `origin` may speak for the event's login: once a host is running a login, events
  * for it from any other host are refused. (A login moves hosts only through a newer

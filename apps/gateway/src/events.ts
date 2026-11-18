@@ -55,7 +55,7 @@ function isValidationError(error: unknown) {
 /** Whether the Convex client can encode the event at all, within the size any event may have. */
 function encodable(event: unknown) {
   try {
-    return JSON.stringify(convexToJson(event as Value)).length <= MAX_EVENT_BYTES
+    return Buffer.byteLength(JSON.stringify(convexToJson(event as Value))) <= MAX_EVENT_BYTES
   } catch {
     return false
   }
@@ -79,7 +79,7 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
   // the backend's validators, so those go one at a time from the start.
   if (events.every(encodable)) {
     try {
-      return await backend.ingest({ ...target, events: events as never })
+      return await ingestAll(backend, target, events)
     } catch (error) {
       if (!isValidationError(error) || events.length === 0) throw error
     }
@@ -101,13 +101,36 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
   return outcome
 }
 
+/**
+ * Sends a chunk until the backend has applied all of it. The backend may stop partway, to stay
+ * inside its transaction limits, and acknowledge only what it applied; the rest goes in the
+ * next call. A call that makes no progress ends the loop, and the bridge host resends later.
+ */
+async function ingestAll(
+  backend: Backend,
+  target: { hostId: string; network: Network },
+  events: BridgeEvent[],
+): Promise<Outcome> {
+  const last = events.at(-1)?.seq ?? 0
+  let remaining = events
+  let outcome: Outcome = await backend.ingest({ ...target, events: remaining as never })
+  while ('ackedThrough' in outcome && outcome.ackedThrough < last) {
+    const acked = outcome.ackedThrough
+    const rest = remaining.filter((event) => event.seq > acked)
+    if (rest.length === remaining.length) break
+    remaining = rest
+    outcome = await backend.ingest({ ...target, events: remaining as never })
+  }
+  return outcome
+}
+
 /** Splits events, in order, into chunks within both the count and the byte limit. */
 export function chunk(events: BridgeEvent[]): BridgeEvent[][] {
   const chunks: BridgeEvent[][] = []
   let current: BridgeEvent[] = []
   let bytes = 0
   for (const event of events) {
-    const size = JSON.stringify(event).length
+    const size = Buffer.byteLength(JSON.stringify(event) ?? '')
     if (current.length > 0 && (current.length >= CHUNK || bytes + size > CHUNK_BYTES)) {
       chunks.push(current)
       current = []

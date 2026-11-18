@@ -2,7 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
-import { Unmappable, applyEvent } from './lib/ingest'
+import { Unmappable, applyEvent, byteSize, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
@@ -15,6 +15,11 @@ const LEASE_MS = 30_000
 const HOST_STALE_MS = 2 * 60_000
 /** The most events one ingest call applies; the gateway splits bigger batches. */
 export const MAX_BATCH = 100
+/**
+ * The bytes one ingest call may touch before it stops early: far enough under Convex's
+ * 16 MiB read and write limits that the last event applied can't cross them.
+ */
+const INGEST_BUDGET_BYTES = 6 * 1024 * 1024
 /**
  * How many waiting commands one claim looks through to find chats that can go next. Outbox
  * rows hold no ciphertext (that's in `outboxPayloads`), so this stays well inside a
@@ -65,6 +70,7 @@ async function hostRow(ctx: QueryCtx, hostId: string) {
 }
 
 async function registerHost(ctx: MutationCtx, hostId: string, hostNetwork: Doc<'bridgeHosts'>['network'], now: number) {
+  if (hostId.length > 64) throw new ConvexError('Host ID too long')
   const existing = await hostRow(ctx, hostId)
   if (existing) {
     if (existing.network !== hostNetwork) throw new ConvexError('Host network mismatch')
@@ -96,8 +102,13 @@ export const ingest = mutation({
 
     let lastSeq = host.lastSeq
     let gap: number | null = null
+    let applied = 0
+    const meter = startMeter(ctx)
     for (const event of args.events) {
       if (event.seq <= lastSeq) continue
+      // Stop early, acknowledging what's applied, before the call could exceed Convex's
+      // transaction limits; the gateway sends the rest in its next call.
+      if (applied > 0 && meter.bytes > INGEST_BUDGET_BYTES) break
       if (event.seq !== lastSeq + 1) {
         gap = lastSeq + 1
         break
@@ -116,6 +127,8 @@ export const ingest = mutation({
         })
       }
       lastSeq = event.seq
+      applied++
+      meter.bytes += 2 * byteSize(event)
     }
     await ctx.db.patch(host._id, { lastSeq, lastSeenAt: now })
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
