@@ -88,8 +88,12 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 `POST /v1/commands`
 
 ```json
-{ "commandId": "…", "type": "send", "userId": "…", "loginId": "…", "...": "type-specific fields" }
+{ "commandId": "…", "type": "send", "userId": "…", "loginId": "…", "notAfter": 0, "...": "type-specific fields" }
 ```
+
+`loginId` is absent for the commands of a login that isn't established yet (`loginStart`,
+`loginSubmit`, `loginCancel`); they name it by `loginSessionId`. `notAfter` is on every send
+and on login commands, and may be on others.
 
 - The bridge host responds `202` once the command is durably queued, or `4xx` with
   `{"error": "<code>"}` if it is invalid. Outcomes arrive later as events.
@@ -108,9 +112,9 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 - **Routing:** a command for a connected login goes to the host that reported that login's
   state; a new login goes to the network's most recently seen host. Only hosts in the
   gateway's `BRIDGE_HOSTS` and heard from recently are used.
-- **Deadlines:** sends carry `notAfter` (24 hours). Login commands expire after 10 minutes
-  undelivered, ending the login with error `expired`, so credentials don't wait for a host
-  that never returns.
+- **Deadlines:** sends carry `notAfter` (24 hours). Login commands carry one too, 10 minutes
+  out: undelivered by then, they expire, ending the login with error `expired`, so
+  credentials don't wait for a host that never returns.
 - A status or echo for a send proves the host has the command, even if its `202` was lost;
   the backend then never delivers it again.
 - Once a command has run (sent, failed or expired), the bridge host keeps only its IDs and
@@ -157,8 +161,11 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- The bridge host keeps a safety margin (currently 2 minutes) before `notAfter` for the
-  connector's own waits, so a send can be refused as `expired` slightly before `notAfter`.
+- The bridge host keeps a safety margin (currently 11 minutes) before `notAfter` for the
+  connector's own waits, so a send can be refused as `expired` before `notAfter`. Phase 0
+  limit: a send already handed to the connector can still go out after `notAfter` if it waits
+  behind more than two incoming events that each hit bridgev2's 5-minute handler limit;
+  closing that needs a pre-send hook in bridgev2 (bridge host README, Known follow-ups).
 - A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
   the bridge host emits `failed` with error `expired`, and the person decides.
 

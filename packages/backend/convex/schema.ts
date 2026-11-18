@@ -236,7 +236,7 @@ export default defineSchema({
 
   /** Where the last command claim stopped scanning, so the next one carries on from there. */
   claimCursor: defineTable({
-    key: v.literal('queued'),
+    key: v.union(v.literal('queued'), v.literal('leases')),
     after: v.number(),
   }).index('by_key', ['key']),
 
