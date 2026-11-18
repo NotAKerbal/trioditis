@@ -92,6 +92,12 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
 - `commandId` is idempotent: repeating a command ID returns `202` without running it
   again. A command that may already have reached a host is only ever delivered again to
   that same host, whose journal knows its ID.
+- **Routing:** a command for a connected login goes to the host that reported that login's
+  state; a new login goes to the network's most recently seen host. Only hosts in the
+  gateway's `BRIDGE_HOSTS` and heard from recently are used.
+- **Deadlines:** sends carry `notAfter` (24 hours). Login commands expire after 10 minutes
+  undelivered, ending the login with error `expired`, so credentials don't wait for a host
+  that never returns.
 - A status or echo for a send proves the host has the command, even if its `202` was lost;
   the backend then never delivers it again.
 - Once a command has run (sent, failed or expired), the bridge host keeps only its IDs and
@@ -132,6 +138,10 @@ these codes, never free text: a connector's message can quote what the person ty
 `unsupported`, `rate_limited`, `bad_credentials`, `login_failed`, `internal`
 
 Connector error details are logged locally by the bridge host only, without content.
+
+Events the backend can't apply are quarantined with a reason code (`missing_target`,
+`missing_chat`, `foreign_login`, `foreign_host`, `unknown_login_session`, `unknown_send`,
+`malformed_envelope`, `invalid_event`), never with their content.
 
 ## Logins
 

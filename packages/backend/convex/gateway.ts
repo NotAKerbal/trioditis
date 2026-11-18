@@ -3,6 +3,7 @@ import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
 import { Unmappable, applyEvent } from './lib/ingest'
+import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -14,8 +15,29 @@ const LEASE_MS = 30_000
 const HOST_STALE_MS = 2 * 60_000
 /** The most events one ingest call applies; the gateway splits bigger batches. */
 export const MAX_BATCH = 100
-/** How many waiting commands one claim looks through to find chats that can go next. */
-const SCAN = 500
+/**
+ * How many waiting commands one claim looks through to find chats that can go next. Outbox
+ * rows hold no ciphertext (that's in `outboxPayloads`), so this stays well inside a
+ * transaction's read limit.
+ */
+const SCAN = 2_000
+const SCAN_EXPIRED_LEASES = 200
+
+const EVENT_TYPES = new Set([
+  'message',
+  'edit',
+  'reaction',
+  'reactionRemove',
+  'redaction',
+  'receipt',
+  'typing',
+  'chat',
+  'contact',
+  'loginState',
+  'loginStep',
+  'sendStatus',
+  'backfillDone',
+])
 
 function assertGateway(secret: string) {
   const expected = process.env.GATEWAY_SECRET
@@ -68,7 +90,7 @@ export const ingest = mutation({
         break
       }
       try {
-        await applyEvent(ctx, event, args.network, args.hostId)
+        await applyEvent(ctx, event, { network: args.network, hostId: args.hostId })
       } catch (error) {
         if (!(error instanceof Unmappable)) throw error
         await ctx.db.insert('quarantine', {
@@ -76,7 +98,7 @@ export const ingest = mutation({
           seq: event.seq,
           type: event.type,
           userId: event.userId,
-          reason: error.message.slice(0, 200),
+          reason: error.reason,
           at: now,
         })
       }
@@ -103,7 +125,8 @@ export const quarantineInvalid = mutation({
     await ctx.db.insert('quarantine', {
       hostId: args.hostId,
       seq: args.seq,
-      type: args.type.slice(0, 40),
+      // Only a known event type is kept; anything else could be arbitrary text.
+      type: EVENT_TYPES.has(args.type) ? args.type : 'unknown',
       userId: '',
       reason: 'invalid_event',
       at: now,
@@ -180,30 +203,48 @@ async function markCopy(ctx: MutationCtx, command: Doc<'outbox'>, delivery: 'fai
   if (message && message.eventId.startsWith('pending:')) await ctx.db.patch(message._id, { delivery })
 }
 
+/** A login whose command ran out of time ends with an error the person can start again from. */
+async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
+  const { payload } = command
+  if (payload.type !== 'loginStart' && payload.type !== 'loginSubmit' && payload.type !== 'loginCancel') return
+  const sessionId = ctx.db.normalizeId('loginSessions', payload.loginSessionId)
+  const session = sessionId ? await ctx.db.get(sessionId) : null
+  if (!session || session.state === 'complete' || session.state === 'cancelled') return
+  await ctx.db.patch(session._id, {
+    state: 'error',
+    step: { stepId: 'expired', type: 'error', error: 'expired' },
+    updatedAt: Date.now(),
+  })
+}
+
 /**
- * Ends a command that ran out of time. One never handed out wasn't sent: `failed`. One handed
- * out whose acceptance was never confirmed may have reached the bridge host: `unknown`, and
- * the person decides. (The bridge host itself won't send after `notAfter`.)
+ * Ends a command that ran out of time. A send never handed out wasn't sent: `failed`. One
+ * handed out whose acceptance was never confirmed may have reached the bridge host:
+ * `unknown`, and the person decides. (The bridge host itself won't send after `notAfter`.)
  */
 async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   const delivery = command.state === 'queued' ? 'failed' : 'unknown'
   await ctx.db.patch(command._id, {
     state: 'expired',
     leaseUntil: undefined,
-    sealedPayload: undefined,
     lastError: 'expired',
     ...(command.delivery ? { delivery } : {}),
   })
+  await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
+  await expireLogin(ctx, command)
 }
 
 /**
  * Leases up to `limit` commands to the gateway, each with the bridge host to deliver it to.
- * Only hosts heard from recently get commands. A command that may already have reached a host
- * goes back only to that host, whose journal knows its ID, so it runs at most once.
+ * Only hosts the gateway can reach (`hostIds`, from its configuration) that have been heard
+ * from recently get commands. A command for a connected login goes to the host running that
+ * login; a new login goes to the network's most recently seen host. A command that may
+ * already have reached a host goes back only to that host, whose journal knows its ID, so it
+ * runs at most once.
  */
 export const claimCommands = mutation({
-  args: { secret: v.string(), limit: v.number() },
+  args: { secret: v.string(), limit: v.number(), hostIds: v.array(v.string()) },
   returns: v.array(
     v.object({
       commandId: v.id('outbox'),
@@ -217,25 +258,42 @@ export const claimCommands = mutation({
       notAfter: v.optional(v.number()),
     }),
   ),
-  handler: async (ctx, { secret, limit }) => {
+  handler: async (ctx, { secret, limit, hostIds }) => {
     assertGateway(secret)
     const now = Date.now()
     const take = Math.min(Math.max(1, Math.floor(limit)), MAX_BATCH)
+    const reachable = new Set(hostIds)
 
     const liveHosts = new Map<string, Doc<'bridgeHosts'>>()
     const liveByNetwork = new Map<string, Doc<'bridgeHosts'>>()
     for (const host of await ctx.db.query('bridgeHosts').take(100)) {
-      if (now - host.lastSeenAt > HOST_STALE_MS) continue
+      if (!reachable.has(host.hostId) || now - host.lastSeenAt > HOST_STALE_MS) continue
       liveHosts.set(host.hostId, host)
       const current = liveByNetwork.get(host.network)
       if (!current || host.lastSeenAt > current.lastSeenAt) liveByNetwork.set(host.network, host)
+    }
+    const loginHosts = new Map<string, string | undefined>()
+    async function hostFor(command: Doc<'outbox'>) {
+      if (command.hostId) return liveHosts.get(command.hostId)
+      if (!command.loginId) return liveByNetwork.get(command.network)
+      const key = `${command.network}:${command.loginId}`
+      if (!loginHosts.has(key)) {
+        const loginId = command.loginId
+        const account = await ctx.db
+          .query('networkAccounts')
+          .withIndex('by_login', (q) => q.eq('network', command.network).eq('loginId', loginId))
+          .unique()
+        loginHosts.set(key, account?.hostId)
+      }
+      const owner = loginHosts.get(key)
+      return owner ? liveHosts.get(owner) : undefined
     }
 
     const candidates = [
       ...(await ctx.db
         .query('outbox')
         .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', now))
-        .take(SCAN)),
+        .take(SCAN_EXPIRED_LEASES)),
       ...(await ctx.db
         .query('outbox')
         .withIndex('by_state', (q) => q.eq('state', 'queued'))
@@ -250,7 +308,7 @@ export const claimCommands = mutation({
         await expire(ctx, command)
         continue
       }
-      const host = command.hostId ? liveHosts.get(command.hostId) : liveByNetwork.get(command.network)
+      const host = await hostFor(command)
       if (!host) continue
       if (command.chatId) {
         if (heldChats.has(command.chatId)) continue
@@ -265,6 +323,7 @@ export const claimCommands = mutation({
         hostId: host.hostId,
         ...(command.delivery === 'queued' ? { delivery: 'claimed' as const } : {}),
       })
+      const payload = await payloadOf(ctx, command._id)
       claimed.push({
         commandId: command._id,
         lease,
@@ -273,7 +332,7 @@ export const claimCommands = mutation({
         network: command.network,
         ...(command.loginId ? { loginId: command.loginId } : {}),
         payload: command.payload,
-        ...(command.sealedPayload ? { sealed: command.sealedPayload } : {}),
+        ...(payload ? { sealed: payload.sealed } : {}),
         ...(command.expiresAt !== undefined ? { notAfter: command.expiresAt } : {}),
       })
     }
@@ -299,14 +358,14 @@ export const commandResult = mutation({
     assertGateway(secret)
     const command = await ctx.db.get(commandId)
     if (!command || command.state !== 'claimed' || command.attempts !== lease) return null
+    await deletePayload(ctx, commandId)
     if (accepted) {
-      await ctx.db.patch(commandId, { state: 'dispatched', leaseUntil: undefined, sealedPayload: undefined })
+      await ctx.db.patch(commandId, { state: 'dispatched', leaseUntil: undefined })
       return null
     }
     await ctx.db.patch(commandId, {
       state: 'rejected',
       leaseUntil: undefined,
-      sealedPayload: undefined,
       lastError: error ?? 'invalid_command',
       ...(command.delivery ? { delivery: 'failed' as const } : {}),
     })

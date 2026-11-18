@@ -224,6 +224,32 @@ describe('ingest', () => {
     expect(await active()).toHaveLength(0)
     await ingest(t, [add('r2')])
     expect(await active()).toMatchObject([{ eventId: 'r2' }])
+    await ingest(t, [remove(), add('r1')])
+    expect(await active()).toHaveLength(0)
+  })
+
+  it('doesn’t let a replayed old removal undo a later add', async () => {
+    seq = 0
+    const t = setup()
+    const add = (at: number) => ({
+      ...event('reaction', {
+        portalId: 'portal_1',
+        eventId: `r${at}`,
+        targetEventId: 'e1',
+        sender: { ghostId: 'g' },
+        key: '❤️',
+        networkTs: at,
+      }),
+      at,
+    })
+    const remove = (at: number) => ({
+      ...event('reactionRemove', { portalId: 'portal_1', targetEventId: 'e1', sender: { ghostId: 'g' }, key: '❤️' }),
+      at,
+    })
+    await ingest(t, [message('e1'), add(10), remove(20), add(30), remove(20)])
+    const reactions = await t.run(async (ctx) => await ctx.db.query('reactions').collect())
+    expect(reactions).toMatchObject([{ eventId: 'r30' }])
+    expect(reactions[0]!.removedAt).toBeUndefined()
   })
 
   it('matches an echo only to a pending copy of the person’s own message in that chat', async () => {
@@ -251,7 +277,10 @@ describe('ingest', () => {
       message('e3'),
     ])
     expect(result).toEqual({ ackedThrough: 3 })
-    expect((await quarantined(t)).map((row) => row.type)).toEqual(['edit', 'loginStep'])
+    expect((await quarantined(t)).map((row) => [row.type, row.reason])).toEqual([
+      ['edit', 'missing_target'],
+      ['loginStep', 'unknown_login_session'],
+    ])
     expect(await messages(t)).toHaveLength(1)
   })
 

@@ -37,8 +37,21 @@ async function send(as: Awaited<ReturnType<typeof signIn>>, chatId: Id<'chats'>,
   })
 }
 
-async function claim(t: T, limit = 10) {
-  return await t.mutation(api.gateway.claimCommands, { secret: GATEWAY_SECRET, limit })
+const REACHABLE = ['whatsapp-1', 'whatsapp-2']
+
+async function claim(t: T, limit = 10, hostIds = REACHABLE) {
+  return await t.mutation(api.gateway.claimCommands, { secret: GATEWAY_SECRET, limit, hostIds })
+}
+
+async function payloadOf(t: T, clientMessageId: string) {
+  const row = await outboxRow(t, clientMessageId)
+  return await t.run(
+    async (ctx) =>
+      await ctx.db
+        .query('outboxPayloads')
+        .withIndex('by_command', (q) => q.eq('commandId', row!._id))
+        .unique(),
+  )
 }
 
 const sentIds = (claimed: Awaited<ReturnType<typeof claim>>) =>
@@ -92,11 +105,22 @@ async function delivery(t: T, clientMessageId: string) {
   })
 }
 
+/** The person's login runs on `hostId`, as the host's `loginState` reports establish. */
+async function loginOn(t: T, hostId: string) {
+  await t.mutation(api.gateway.ingest, {
+    secret: GATEWAY_SECRET,
+    hostId,
+    network: 'whatsapp',
+    events: [{ seq: 1, type: 'loginState', userId: 'user_a', loginId: 'login_a', at: Date.now(), state: 'CONNECTED' }],
+  })
+}
+
 async function ready() {
   seq = 0
   const t = setup()
   const as = await signIn(t, 'user_a')
-  await heartbeat(t)
+  await loginOn(t, 'whatsapp-1')
+  seq = 1
   return { t, as }
 }
 
@@ -228,10 +252,10 @@ describe('sending', () => {
   it('deletes the bridge-readable copy once the bridge host has it', async () => {
     const { t, as } = await ready()
     await send(as, await aChat(t, 'user_a'), 1)
-    expect((await outboxRow(t, id(1)))!.sealedPayload).toBeDefined()
+    expect(await payloadOf(t, id(1))).not.toBeNull()
     const [command] = await claim(t)
     await accept(t, command!)
-    expect((await outboxRow(t, id(1)))!.sealedPayload).toBeUndefined()
+    expect(await payloadOf(t, id(1))).toBeNull()
   })
 
   it('never moves delivery backwards', async () => {
@@ -276,7 +300,7 @@ describe('sending', () => {
     })
     const row = await outboxRow(t, id(1))
     expect(row).toMatchObject({ state: 'dispatched', delivery: 'sent' })
-    expect(row!.sealedPayload).toBeUndefined()
+    expect(await payloadOf(t, id(1))).toBeNull()
   })
 
   it('fails a send that never went out in time, without sending it late', async () => {
@@ -289,7 +313,7 @@ describe('sending', () => {
     expect(await delivery(t, id(1))).toBe('failed')
     const row = await outboxRow(t, id(1))
     expect(row).toMatchObject({ state: 'expired', lastError: 'expired' })
-    expect(row!.sealedPayload).toBeUndefined()
+    expect(await payloadOf(t, id(1))).toBeNull()
   })
 
   it('marks a send unknown when its deadline passes while it may be with the bridge host', async () => {
@@ -325,5 +349,65 @@ describe('sending', () => {
     await status(t, id(1), 'unknown')
     await as.mutation(api.messages.discardSend, { clientMessageId: id(1) })
     expect(await t.run(async (ctx) => await ctx.db.query('messages').collect())).toHaveLength(0)
+  })
+
+  it('sends a login’s commands to the host running it, and only to hosts the gateway can reach', async () => {
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    // A newer host for the network heartbeats; the send still goes where the login lives.
+    await heartbeat(t, 'whatsapp-2')
+    expect(await claim(t, 10, ['whatsapp-2'])).toHaveLength(0)
+    expect(await claim(t)).toMatchObject([{ hostId: 'whatsapp-1' }])
+  })
+
+  it('refuses a send status from a host the send didn’t go to', async () => {
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    await claim(t)
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-2',
+      network: 'whatsapp',
+      events: [
+        {
+          seq: 1,
+          type: 'sendStatus',
+          userId: 'user_a',
+          loginId: 'login_a',
+          at: 1,
+          clientMessageId: id(1),
+          status: 'failed',
+        },
+      ],
+    })
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'claimed', delivery: 'claimed' })
+    expect(await payloadOf(t, id(1))).not.toBeNull()
+    const quarantined = await t.run(async (ctx) => await ctx.db.query('quarantine').collect())
+    expect(quarantined).toMatchObject([{ hostId: 'whatsapp-2', reason: 'foreign_host' }])
+  })
+
+  it('drops login input that never reached a bridge host, and ends the login', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await t.run(async (ctx) => {
+      await ctx.db.patch(loginSessionId, {
+        state: 'active',
+        step: { stepId: 's1', type: 'userInput' },
+        hostId: 'whatsapp-1',
+      })
+    })
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('cookies') })
+    vi.advanceTimersByTime(11 * 60 * 1000)
+    await heartbeat(t)
+    expect(await claim(t)).toHaveLength(0)
+    const [payloads, session] = await t.run(async (ctx) => [
+      await ctx.db.query('outboxPayloads').collect(),
+      await ctx.db.get(loginSessionId),
+    ])
+    expect(payloads).toHaveLength(0)
+    expect(session).toMatchObject({ state: 'error', step: { error: 'expired' } })
   })
 })

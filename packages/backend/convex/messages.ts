@@ -3,6 +3,7 @@ import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
+import { queueCommand } from './lib/outbox'
 import { sortKey } from './lib/ingest'
 import { envelope } from './validators'
 
@@ -70,25 +71,28 @@ export const send = mutation({
       delivery: 'queued',
       ...(args.replyTo ? { replyTo: args.replyTo } : {}),
     })
-    await ctx.db.insert('outbox', {
-      userId: member.userId,
-      network: chat.network,
-      loginId: chat.loginId,
-      chatId: chat._id,
-      payload: {
-        type: 'send',
-        portalId: chat.portalId,
+    await queueCommand(
+      ctx,
+      {
+        userId: member.userId,
+        network: chat.network,
+        loginId: chat.loginId,
+        chatId: chat._id,
+        payload: {
+          type: 'send',
+          portalId: chat.portalId,
+          clientMessageId: args.clientMessageId,
+          ...(args.replyTo ? { replyTo: args.replyTo } : {}),
+        },
+        state: 'queued',
+        attempts: 0,
+        delivery: 'queued',
         clientMessageId: args.clientMessageId,
-        ...(args.replyTo ? { replyTo: args.replyTo } : {}),
+        createdAt: now,
+        expiresAt: now + SEND_EXPIRY_MS,
       },
-      sealedPayload: args.forBridge,
-      state: 'queued',
-      attempts: 0,
-      delivery: 'queued',
-      clientMessageId: args.clientMessageId,
-      createdAt: now,
-      expiresAt: now + SEND_EXPIRY_MS,
-    })
+      args.forBridge,
+    )
     await ctx.db.patch(chat._id, { lastMessageAt: Math.max(chat.lastMessageAt, now) })
     return null
   },
