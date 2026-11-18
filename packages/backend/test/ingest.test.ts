@@ -531,4 +531,25 @@ describe('ingest', () => {
     ])
     expect(await chat(t)).toMatchObject({ unreadCount: 2, mentionCount: 1 })
   })
+
+  it('puts chats ingest creates in the right list', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1'),
+      event('chat', { portalId: 'portal_2', kind: 'dm', sealed: sealed('c2'), isRequest: true }),
+    ])
+    const views = async () =>
+      Object.fromEntries(
+        (await t.run(async (ctx) => await ctx.db.query('chats').collect())).map((row) => [row.portalId, row.view]),
+      )
+    expect(await views()).toEqual({ portal_1: 'inbox', portal_2: 'requests' })
+    await t.run(async (ctx) => {
+      const chat = (await ctx.db.query('chats').collect()).find((row) => row.portalId === 'portal_1')!
+      await ctx.db.patch(chat._id, { snoozedUntil: Date.now() + 60_000, woke: false, archived: true, view: 'snoozed' })
+    })
+    // A new message wakes the snooze and brings the chat back to the inbox.
+    await ingest(t, [message('e2')])
+    expect((await views()).portal_1).toBe('inbox')
+  })
 })

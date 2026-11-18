@@ -4,6 +4,8 @@ import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
 import { deletePayload } from './outbox'
+import { patchChat } from './chatView'
+import { onLoggedOut } from './commandOutcome'
 import { internal } from '../_generated/api'
 
 // Applying one bridge host event to the tables. See docs/architecture/bridge-protocol.md.
@@ -113,6 +115,7 @@ async function chatFor(
     unreadCount: 0,
     pinned: false,
     archived: false,
+    view: 'inbox',
   })
   return (await ctx.db.get(chatId))!
 }
@@ -240,7 +243,7 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   // Imported history neither notifies, counts as unread, nor reorders the inbox.
   if (event.historical) return
   const fromSomeoneElse = !('self' in event.sender)
-  await ctx.db.patch(chat._id, {
+  await patchChat(ctx, chat, {
     lastMessageAt: Math.max(chat.lastMessageAt, event.networkTs),
     ...(fromSomeoneElse
       ? {
@@ -393,7 +396,7 @@ async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { ty
 
 async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'chat' }>, network: Network) {
   const chat = await chatFor(ctx, event, network)
-  await ctx.db.patch(chat._id, {
+  await patchChat(ctx, chat, {
     kind: event.kind,
     sealedMeta: event.sealed,
     // A request stays accepted once the person accepts it: only a chat seen for the first
@@ -445,8 +448,10 @@ async function applyLoginState(
     ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
   }
-  if (existing) await ctx.db.patch(existing._id, fields)
-  else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
+  if (existing) {
+    await ctx.db.patch(existing._id, fields)
+    if (event.state === 'LOGGED_OUT') await onLoggedOut(ctx, existing)
+  } else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
