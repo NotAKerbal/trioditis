@@ -2,6 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
+import { onCommandExpired, onCommandRejected } from './lib/commandOutcome'
 import { Unmappable, applyEvent, byteSize, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { enabledNetworks } from './lib/networks'
@@ -279,6 +280,7 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
   await expireLogin(ctx, command)
+  await onCommandExpired(ctx, command)
 }
 
 /** How long after its deadline a send the bridge host accepted may go without an outcome. */
@@ -494,6 +496,7 @@ export const commandResult = mutation({
     })
     await markCopy(ctx, command, 'failed')
     await failLogin(ctx, command, error ?? 'invalid_command')
+    await onCommandRejected(ctx, command, error ?? 'invalid_command')
     return null
   },
 })

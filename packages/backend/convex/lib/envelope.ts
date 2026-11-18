@@ -23,12 +23,12 @@ export function decodedLength(text: string): number | null {
   return bytes
 }
 
-function decode(text: string): Uint8Array {
+export function decode(text: string): Uint8Array {
   const binary = atob(text.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - (text.length % 4)) % 4))
   return Uint8Array.from(binary, (char) => char.charCodeAt(0))
 }
 
-function encode(bytes: Uint8Array): string {
+export function encode(bytes: Uint8Array): string {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')

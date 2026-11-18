@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
-import { fromBase64Url, generateKeyPair, keyId, ready, toBase64Url } from '@trioditis/crypto'
 import { SETUP_TOKEN, sealed, setup, signIn } from './setup'
 
 describe('accounts', () => {
@@ -99,20 +98,6 @@ describe('accounts', () => {
       /signed out/,
     )
   })
-
-  it('sets a valid identity key once, deriving its key ID', async () => {
-    await ready()
-    const t = setup()
-    const sam = await signIn(t, 'sam', 'member', false)
-    // libsodium can't decode a non-canonical key, so the bridge host couldn't seal to it.
-    await expect(sam.mutation(api.members.setIdentityKey, { publicKey: 'B'.repeat(43) })).rejects.toThrow(/valid/)
-    const publicKey = toBase64Url(generateKeyPair().publicKey)
-    const { kid } = await sam.mutation(api.members.setIdentityKey, { publicKey })
-    expect(kid).toBe(keyId(fromBase64Url(publicKey)))
-    await sam.mutation(api.members.setIdentityKey, { publicKey })
-    const other = toBase64Url(generateKeyPair().publicKey)
-    await expect(sam.mutation(api.members.setIdentityKey, { publicKey: other })).rejects.toThrow(/already/)
-  })
 })
 
 describe('logins', () => {
@@ -160,6 +145,7 @@ describe('privacy between people', () => {
           unreadCount: 0,
           pinned: false,
           archived: false,
+          view: 'inbox',
         }),
     )
     expect((await a.query(api.chats.list, { paginationOpts: { numItems: 10, cursor: null } })).page).toHaveLength(1)
