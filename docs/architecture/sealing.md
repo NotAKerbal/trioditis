@@ -139,7 +139,12 @@ So those payloads (`outboxPayloads`) are kept only until the bridge host has the
 backend deletes one as soon as the bridge host accepts or rejects its command, and otherwise
 at the command's deadline: 24 hours after a send is queued (its `notAfter`), 10 minutes for
 login input. The deadline is enforced by a job scheduled when the command is queued, so it
-doesn't depend on a gateway running; the gateway's own sweep may get there first. The bridge
+doesn't depend on a gateway running; the gateway's own sweep may get there first. Commands
+queued by a version from before these jobs have none until
+`migrations.scheduleCommandDeadlines` is run once after deploying (until then only the
+gateway's sweep deletes theirs). A command a gateway claimed just before its deadline loses
+its payload at the deadline all the same; it is ended once its lease is over, so a result
+for that lease still counts. The bridge
 host keeps only IDs and status once it has run a command. A backup therefore holds only
 commands still in flight when it was taken. Rotating the bridge key is a later addition.
 

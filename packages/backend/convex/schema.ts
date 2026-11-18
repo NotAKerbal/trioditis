@@ -352,6 +352,11 @@ export default defineSchema({
     createdAt: v.number(),
     /** A send can't go out after this; it asks the person instead. */
     expiresAt: v.optional(v.number()),
+    /**
+     * `gateway.commandDeadline` is scheduled for it. Set when it is queued;
+     * `migrations.scheduleCommandDeadlines` schedules one for rows from before that.
+     */
+    deadlineScheduled: v.optional(v.boolean()),
   })
     // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
     // ones by deadline. Both orders are needed.

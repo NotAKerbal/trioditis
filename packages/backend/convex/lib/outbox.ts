@@ -19,11 +19,10 @@ type Command = Omit<Doc<'outbox'>, '_id' | '_creationTime'>
  * running.
  */
 export async function queueCommand(ctx: MutationCtx, command: Command, sealed?: Infer<typeof envelope>) {
-  const commandId = await ctx.db.insert('outbox', command)
+  const deadline = command.expiresAt !== undefined
+  const commandId = await ctx.db.insert('outbox', { ...command, ...(deadline ? { deadlineScheduled: true } : {}) })
   if (sealed) await ctx.db.insert('outboxPayloads', { commandId, sealed })
-  if (command.expiresAt !== undefined) {
-    await ctx.scheduler.runAt(command.expiresAt, internal.gateway.commandDeadline, { commandId })
-  }
+  if (deadline) await ctx.scheduler.runAt(command.expiresAt!, internal.gateway.commandDeadline, { commandId })
   return commandId
 }
 

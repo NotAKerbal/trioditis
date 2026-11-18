@@ -321,8 +321,10 @@ async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
 
 /**
  * Runs at a command's deadline, scheduled when it was queued, so a command ends on time even
- * when no gateway is claiming: one still queued or claimed expires (and its bridge-readable
- * payload is deleted), and one the bridge host accepted is settled an hour later if it never
+ * when no gateway is claiming. At the deadline its bridge-readable payload is deleted, and:
+ * one still queued expires; one claimed expires once its lease is over too (until then the
+ * gateway may be handing it over, and its result for that lease still counts, as it would
+ * have before the deadline); one the bridge host accepted is settled an hour later if it never
  * reported back. The gateway's own sweep does the same; whichever runs first wins, and the
  * other finds nothing left to do.
  */
@@ -332,19 +334,26 @@ export const commandDeadline = internalMutation({
   handler: async (ctx, { commandId }) => {
     const command = await ctx.db.get(commandId)
     if (!command) return null
-    // Whatever state it's in, nothing bridge-readable stays past the deadline.
-    await deletePayload(ctx, commandId)
-    if (command.expiresAt === undefined) return null
     const now = Date.now()
-    if (command.state === 'queued' || command.state === 'claimed') {
-      if (command.expiresAt <= now) await expire(ctx, command)
-      else await ctx.scheduler.runAt(command.expiresAt, internal.gateway.commandDeadline, { commandId })
+    const later = async (at: number) => await ctx.scheduler.runAt(at, internal.gateway.commandDeadline, { commandId })
+    // Run early (as a migration may), it waits for the deadline: a claim before then still
+    // needs the payload.
+    if (command.expiresAt !== undefined && command.expiresAt > now) {
+      await later(command.expiresAt)
       return null
     }
-    if (command.state === 'dispatched') {
+    // Past the deadline, whatever state it's in, nothing bridge-readable stays.
+    await deletePayload(ctx, commandId)
+    if (command.expiresAt === undefined) return null
+    if (command.state === 'queued') {
+      await expire(ctx, command)
+    } else if (command.state === 'claimed') {
+      if (command.leaseUntil !== undefined && command.leaseUntil > now) await later(command.leaseUntil)
+      else await expire(ctx, command)
+    } else if (command.state === 'dispatched') {
       const overdueAt = command.expiresAt + OVERDUE_GRACE_MS
       if (overdueAt <= now) await settle(ctx, command)
-      else await ctx.scheduler.runAt(overdueAt, internal.gateway.commandDeadline, { commandId })
+      else await later(overdueAt)
     }
     return null
   },

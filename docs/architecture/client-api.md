@@ -241,7 +241,9 @@ aren’t allowed.` (weaker than 3 passes over 64 MiB, or weaker than the backup 
 `Set up this account’s key first.` · `That proof of your key has expired or was already used.
 Try again.` (also a proof for a different key) · `This backup changed on another device.
 Reload and try again.` · `A passkey backup needs its credential and a 32-byte PRF salt.` ·
-`You can have at most 10 passkey backups. Remove one first.`
+`You can have at most 10 passkey backups. Remove one first.` · `A password backup needs its
+password settings.` (a defensive check: the arguments of `keys.setup` and
+`account.changePassword` always include the settings, so a client never sees it)
 
 ## Preferences
 
@@ -279,8 +281,9 @@ The list is the view's pinned chats, most recent first, then the rest, most rece
 paged as one list: pins that don't fit on the first page carry on to the next, and none is
 left out. A page holds at most 50 chats (`numItems` above 50 counts as 50) and reads at most
 8 MiB, so it can end early: keep loading with the cursor. A page reloaded with an
-`endCursor` range is held to the same bounds, and says so with `pageStatus:
-'SplitRequired'` and a `splitCursor` (`usePaginatedQuery` splits it). With `network`, only that
+`endCursor` range (as `usePaginatedQuery` does) isn't limited by `numItems`; it holds at
+most 51 chats, and when it reaches that it ends early with `pageStatus: 'SplitRequired'`
+and a `splitCursor`, which `usePaginatedQuery` uses to split it. With `network`, only that
 network's chats, in the same order. With `labelId`, the chats with that label in the view,
 in the order they were labelled, pinned or not.
 
@@ -388,7 +391,9 @@ await convex.mutation(api.messages.send, {
 ```
 
 - `bridgeKey` comes from `api.keys.bridge`, which is `null` on a server with no bridge key
-  set up yet; then sending and connecting networks aren't available:
+  set up yet. The client then can't seal sends or login input, so it should keep those
+  disabled. The server doesn't check this for it: `logins.start` still queues a login
+  without a bridge key, which can't get past a step that needs input.
 
   ```ts
   const bridge = await convex.query(api.keys.bridge, {})

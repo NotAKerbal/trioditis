@@ -79,6 +79,11 @@ migrations. If a change no longer matches what a dev deployment holds, `convex d
 to push it; clear the dev data (or start a fresh local deployment) and run `pnpm dev:setup`
 again. From the first release on, every schema change ships with its migration.
 
+One-off fixes for rows an older version wrote are internal functions in
+`packages/backend/convex/migrations.ts`, safe to run more than once. Run each once after
+deploying the version that adds it, for example
+`npx convex run migrations:scheduleCommandDeadlines`.
+
 ## Checks
 
 Run before opening a pull request:

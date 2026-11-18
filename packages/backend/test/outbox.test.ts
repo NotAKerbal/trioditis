@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../convex/_generated/api'
+import { api, internal } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
 
@@ -531,6 +531,135 @@ describe('sending', () => {
     await claim(t)
     await claim(t)
     expect(await expired()).toBe(60)
+  })
+
+  /** Lets the scheduler run what's due after moving the clock on by `ms`. */
+  async function after(t: T, ms: number) {
+    vi.advanceTimersByTime(ms)
+    await t.finishInProgressScheduledFunctions()
+  }
+
+  it('applies the result for a lease that was live at the deadline, deleting the payload then', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await send(as, chatId, 1)
+    // Claimed a second before its 24-hour deadline.
+    await after(t, 24 * 60 * 60 * 1000 - 1000)
+    await heartbeat(t)
+    const [command] = await claim(t)
+    expect(command!.sealed).toBeDefined()
+    await after(t, 2000)
+    // The ciphertext is gone at the deadline, but the lease still stands.
+    expect(await payloadOf(t, id(1))).toBeNull()
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'claimed' })
+    // The bridge host's definitive rejection for that lease counts: the send failed.
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: command!.commandId,
+      lease: command!.lease,
+      accepted: false,
+      error: 'network_rejected',
+    })
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'rejected', delivery: 'failed' })
+    expect(await delivery(t, id(1))).toBe('failed')
+    // The job at the lease's end finds nothing left to do.
+    await after(t, 60_000)
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'rejected', delivery: 'failed' })
+  })
+
+  it('expires a command claimed at its deadline once the lease runs out with no answer', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await send(as, chatId, 1)
+    await after(t, 24 * 60 * 60 * 1000 - 1000)
+    await heartbeat(t)
+    await claim(t)
+    await after(t, 2000)
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'claimed' })
+    await after(t, 30_000)
+    // It may have reached the bridge host, so the person decides.
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'expired', delivery: 'unknown' })
+  })
+
+  it('keeps a login going whose start was accepted on a lease live at the deadline', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await after(t, 10 * 60 * 1000 - 1000)
+    await heartbeat(t)
+    const [command] = await claim(t)
+    await after(t, 2000)
+    await accept(t, command!)
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      events: [
+        {
+          seq: 1,
+          type: 'loginStep',
+          userId: 'user_a',
+          loginId: '',
+          at: Date.now(),
+          loginSessionId,
+          step: { stepId: 's1', type: 'userInput' },
+        },
+      ],
+    })
+    const session = await t.run(async (ctx) => await ctx.db.get(loginSessionId))
+    expect(session).toMatchObject({ state: 'active', step: { stepId: 's1' } })
+  })
+
+  it('waits for the deadline when its job runs early, keeping the payload for a claim', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    await send(as, chatId, 1)
+    const row = (await outboxRow(t, id(1)))!
+    await t.mutation(internal.gateway.commandDeadline, { commandId: row._id })
+    expect(await payloadOf(t, id(1))).not.toBeNull()
+    const [command] = await claim(t)
+    expect(command!.sealed).toBeDefined()
+  })
+
+  it('schedules deadlines for payloads queued before commands scheduled their own', async () => {
+    vi.useFakeTimers()
+    const { t } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    // As an older version left them: no deadline job, some past their deadline.
+    for (let n = 0; n < 150; n++) {
+      await t.run(async (ctx) => {
+        const commandId = await ctx.db.insert('outbox', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          loginId: 'login_a',
+          chatId,
+          payload: { type: 'send', portalId: 'portal_1', clientMessageId: id(n) },
+          state: 'queued',
+          attempts: 0,
+          delivery: 'queued',
+          clientMessageId: id(n),
+          createdAt: Date.now(),
+          expiresAt: Date.now() + (n < 100 ? -1000 : 60_000),
+        })
+        await ctx.db.insert('outboxPayloads', { commandId, sealed: sealed(`b${n}`) })
+      })
+    }
+    await t.mutation(internal.migrations.scheduleCommandDeadlines, {})
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.query('outboxPayloads').collect())).toHaveLength(0)
+    const rows = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(rows.every((row) => row.state === 'expired' && row.deadlineScheduled)).toBe(true)
+    // Running it again schedules nothing more.
+    await t.mutation(internal.migrations.scheduleCommandDeadlines, {})
+    expect(await t.run(async (ctx) => await ctx.db.system.query('_scheduled_functions').collect())).toSatisfy(
+      (jobs: { state: { kind: string } }[]) => jobs.every((job) => job.state.kind !== 'pending'),
+    )
   })
 
   it('ends a send at its deadline with no gateway running, deleting its payload', async () => {
