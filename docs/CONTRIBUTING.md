@@ -55,8 +55,8 @@ This one command:
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
 Like the app, the account signs in with the password derived from that one (`authPassword` in
-packages/crypto) once packages/crypto has it; a dev instance set up before then needs to start
-over (see [Starting over](#starting-over)) for the app to sign in.
+packages/crypto). A test account made before sign-in derived its password is moved to the
+derived one the next time `pnpm dev` runs, so there is no need to start over.
 
 Sign in to the web app at the address it prints, `http://localhost:<port>`. The web app's dev
 server forwards sign-in (`/api/auth`) and the MCP server to the backend, so the browser signs
@@ -98,8 +98,23 @@ slot.
 A worktree claims the first free slot the first time it is set up and keeps it while it
 exists, even when it isn't running. On every start the saved slot is checked against the
 registry; a slot whose lock names another checkout is given up for a new one, and a lock whose
-checkout no longer exists is released. These ports stay clear of Convex's defaults, so a backend
-started by hand never takes a checkout's ports.
+checkout no longer exists is released. Releasing happens under a guard,
+`~/.local/state/trioditis/slots/releasing/<n>.lock`, so two checkouts starting at once can't
+release the lock one of them has just taken. A guard is held for an instant; if a run is killed
+in that instant, its guard stays and that slot isn't released until you delete the guard (the
+next run says so). These ports stay clear of Convex's defaults, so a backend started by hand
+never takes a checkout's ports.
+
+Only one `pnpm dev` (with or without `--setup` or `--reset`) runs at a time for a checkout: each
+holds `.data/dev.lock` while it runs, and a second one stops and says which process holds it.
+A lock left by a run that was killed is taken over, under its own guard,
+`.data/releasing/dev.lock`.
+
+A guard is never removed automatically: two runs both clearing a leftover guard could let
+two releases happen at once again. If one is left, the run that finds it stops (for
+`.data/dev.lock`) or warns and takes another slot (for a slot), and names the guard file.
+Check that no `pnpm dev` for that checkout is running, delete the file it names, and run
+again.
 
 In T3 Code, the Trioditis project should run `pnpm install && pnpm dev --setup` for every new
 worktree, so a branch's instance is ready before its first change. `--setup` does the slow
@@ -114,19 +129,48 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   environment (`CONVEX_DEPLOY_KEY`, `CONVEX_DEPLOYMENT`, `CONVEX_URL`, `CONVEX_SELF_HOSTED_URL`,
   `CONVEX_SELF_HOSTED_ADMIN_KEY` and every other `CONVEX_` variable), so a key in your shell
   can't send its pushes anywhere.
-- Before it pushes functions or changes a setting, it checks that `packages/backend/.env.local`
-  names an anonymous local deployment and that no other dotenv file there sets a `CONVEX_`
-  variable. Otherwise it stops and says why.
+- The Convex CLI also loads `packages/backend/.env.local` and `packages/backend/.env`, and a
+  deploy key in either overrides `CONVEX_DEPLOYMENT`. So before it runs any Convex command,
+  `pnpm dev` reads both files the way the CLI's dotenv does (`export` prefixes, quotes,
+  comments) and refuses any `CONVEX_` variable in them, except what the CLI writes to
+  `.env.local` for this checkout's local deployment: `CONVEX_DEPLOYMENT` naming the one in
+  `packages/backend/.convex/local`, and `CONVEX_URL` and `CONVEX_SITE_URL` on this machine. A
+  dotenv vault (`.env.vault`, `.env.local.vault`) is refused too.
+- Until `packages/backend/.convex/local` holds this checkout's backend, the CLI looks for the
+  deployment it is about to use in `~/.convex/anonymous-convex-backend-state`, where older
+  versions kept backends for every project, and would push to it. So then `.env.local` may name
+  no deployment, and `pnpm dev` refuses if `~/.convex/anonymous-convex-backend-state/anonymous-agent`
+  (the name a new one gets) exists: move it aside.
+- Before it writes anything, and again before Convex commands, it refuses if anything it or
+  the Convex CLI writes in the checkout is a symlink or leads outside it: `.data` and
+  everything in it (secrets, the slot, the run lock, bridge logins), everything in
+  `packages/backend/.convex`, `packages/backend/.env.local` and `.gitignore`, and the
+  generated code in `packages/backend/convex/_generated` and
+  `packages/backend/convex/betterAuth/_generated`. So a database, settings or secrets
+  elsewhere are never changed through a link. Its own writes refuse a link at the file or
+  directory itself, even one made after the check: files are written to a new file beside
+  them and renamed into place, directories are opened with `O_NOFOLLOW` before their mode is
+  set, and locks are created with `O_EXCL`. That protects only the last part of the path: a
+  directory above it replaced by a link in between would still be followed. The Convex CLI's
+  own writes are protected only by the check just before each Convex command; a link created
+  after that check isn't caught.
+- If any of these fails, it stops and says why. For a reported symlink, replace it with a
+  real file or directory in the checkout (move the data it pointed to back in, or delete it
+  and let setup make a new one), then run again.
 - Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
-  a process list. `packages/backend/.convex` and `.data/` are readable only by you.
+  a process list, and the settings already there are read without being printed.
+  `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
 
-The local backend listens on all of the machine's network interfaces: the Convex CLI has no
-option to bind it to `127.0.0.1`. Its admin API needs the admin key in `.convex`, but its HTTP
-actions (sign-in) can be reached from your network. Use a firewall on a shared network.
+The gateway, the bridge hosts and the fake network's control port listen on `127.0.0.1` only,
+and the web app does unless you set `HOST`. The local backend listens on all of the machine's
+network interfaces: the Convex CLI has no option to bind it to `127.0.0.1`. Its admin API needs
+the admin key in `.convex`, but its HTTP actions (sign-in) can be reached from your network.
+Use a firewall on a shared network.
 
 The gateway is restarted when its code, or `packages/core` or `packages/crypto`, changes, and
 after a crash; if it stops three times in a minute, `pnpm dev` stops everything and says so.
-If the gateway or the web app doesn't come up, `pnpm dev` says which.
+If the gateway or the web app doesn't answer in time, `pnpm dev` says which and stops
+everything.
 
 ### What the web app is given
 
@@ -151,6 +195,39 @@ bridge hosts' logins (`.data/bridge-<network>`), then sets up again with a new t
 It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the secrets in
 `.data/`. Deleting only `.data/bridge-<network>` forgets that network's logins.
 
+A reset refuses while this checkout's `pnpm dev` runs, and while any backend is using this
+checkout's data, on any port: something listening on the ports in
+`.convex/local/default/config.json`, or a process using `packages/backend/.convex/local`
+(one you started by hand with `npx convex dev`, say). On Linux that means:
+
+- a process with a file there open, running in a directory there, or naming a path there in
+  its arguments, relative paths read from its working directory;
+- a Convex local backend running anywhere in this checkout (not in another checkout inside
+  it), since it opens its data relative to its directory by default;
+- a Convex local backend whose open files and directory can't be read (another user's), unless
+  it runs in a container. What such a backend opens can't be told from its arguments, so it
+  counts as using this checkout's data. A container's backend is ignored, recognised by its
+  cgroup (Docker, containerd, Podman, Kubernetes, LXC).
+
+The reset can't see into containers. A container whose Convex backend uses this checkout's
+files through a bind mount, such as a dev container with the checkout mounted, isn't
+detected, and a reset would delete the database from under it: stop such containers before
+`pnpm dev --setup --reset`. The self-hosted bundle (`deploy/`) is safe to leave running: it
+keeps its data in named Docker volumes and mounts no checkout.
+
+On other systems only absolute paths in a process's arguments are checked, so a backend
+started there with relative paths isn't seen. Only a process's ID and program are shown,
+never its arguments, which include the backend's instance secret.
+
+When a reset names a process, stop that backend (Ctrl+C where it runs, or end the process it
+names) and run the reset again. If it names another user's backend you are certain has
+nothing to do with this checkout, run `pnpm dev --setup --reset --reset-ignoring <pid>` with
+the ID it gave; repeat the option for several. It skips only those processes, and only when
+they can't be inspected: one seen using this checkout's data still stops the reset.
+
+A reset deletes nothing a symlink leads to outside the checkout. `--reset` on its own is
+refused.
+
 Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
 secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.
 
@@ -161,13 +238,17 @@ migrations. If a change no longer matches what a dev backend holds, `convex dev`
 push it: start over as above. From the first release on, every schema change ships with its
 migration.
 
-For example, chats now must have a `view`, which chats written by `dev` at b61b99b don't: a
-deployment holding those must be reset this way before it takes this schema.
+For example, chats now must have a `view` and reactions a `chatId`, which rows written by
+`dev` before the client API (b61b99b) don't have: a backend holding those must start over
+before it takes this schema.
 
 One-off fixes for rows an older version wrote are internal functions in
-`packages/backend/convex/migrations.ts`, safe to run more than once. Run each once after
-deploying the version that adds it, for example
-`npx convex run migrations:scheduleCommandDeadlines`.
+`packages/backend/convex/migrations.ts`, each safe to run any number of times, and
+`migrations:runAll` runs them all in order: add a new one there too. `pnpm dev` (and
+`--setup`) calls `runAll` once its functions are pushed, directly on this checkout's backend
+with its own admin key, so a backend that keeps its data is always caught up; after adding a
+migration while `pnpm dev` runs, restart it. The self-hosted installer calls it after each of
+its deploys as well: see `docs/deploy.md`.
 
 ### End-to-end check
 
