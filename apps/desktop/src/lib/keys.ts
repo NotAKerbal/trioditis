@@ -68,17 +68,34 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
   return { kid: stored.kid, keyPair: { publicKey: fromBase64Url(stored.publicKey), privateKey } }
 }
 
-/** Keeps an unwrapped identity key on this device. */
+// Saving and forgetting a person's key take turns, in the order asked, and forgetting cancels
+// every save asked for before it: once forgetting has finished, no save can put the key back,
+// however long it took to get ready.
+const turns = new Map<string, Promise<unknown>>()
+const forgets = new Map<string, number>()
+
+function inTurn<T>(userId: string, run: () => Promise<T>): Promise<T> {
+  const next = (turns.get(userId) ?? Promise.resolve()).catch(() => undefined).then(run)
+  turns.set(userId, next)
+  return next
+}
+
+/** Keeps an unwrapped identity key on this device, unless it's forgotten before its turn comes. */
 export async function storeIdentity(userId: string, kid: string, keyPair: KeyPair): Promise<void> {
   if (!canKeepKeys()) throw new Error('this page isn’t secure, so the browser offers no WebCrypto here')
+  const asked = forgets.get(userId) ?? 0
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
   const record: StoredIdentity = { userId, kid, publicKey: toBase64Url(keyPair.publicKey), iv, wrapped, deviceKey }
-  await withStore('readwrite', (s) => s.put(record))
+  await inTurn(userId, async () => {
+    if ((forgets.get(userId) ?? 0) !== asked) throw new Error('this device was signed out of meanwhile')
+    await withStore('readwrite', (s) => s.put(record))
+  })
 }
 
-/** Forgets this device's key, as signing out does. */
+/** Forgets this device's key, as signing out does, after any save already in turn, and cancels the rest. */
 export async function forgetIdentity(userId: string): Promise<void> {
-  await withStore('readwrite', (s) => s.delete(userId))
+  forgets.set(userId, (forgets.get(userId) ?? 0) + 1)
+  await inTurn(userId, () => withStore('readwrite', (s) => s.delete(userId)))
 }

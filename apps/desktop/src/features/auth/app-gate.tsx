@@ -4,6 +4,7 @@ import {
   decodeRecoveryKey,
   fromBase64Url,
   generateKeyPair,
+  keyId,
   makeKeySetup,
   passwordKey,
   ready,
@@ -20,7 +21,7 @@ import { Navigate } from '@tanstack/react-router'
 import { ConvexHttpClient } from 'convex/browser'
 import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
@@ -96,6 +97,41 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // The key setup just finished and kept here: it's ready, even before the live query says so
   // (it can lag, or still hold an error from during setup).
   const [setUpKid, setSetUpKid] = useState<string | null>(null)
+  const [, recheck] = useReducer((n: number) => n + 1, 0)
+
+  // Signing out from setup or unlock is the gate's, shown ahead of everything else here, so
+  // nothing (setup finishing, the app opening) takes its screen while it runs. It waits a little
+  // for a backup call under way, then forgets this device's key if its backups are known to
+  // exist, from setup's own answer or from the server for this key; unsure, it keeps it (it may
+  // be the only copy). Saving and forgetting take turns (lib/keys.ts), so no save lands after.
+  // If it fails, going back reloads the page, to start again from what's really there.
+  const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
+  const leavingRef = useRef(false)
+  const backup = useRef<{ call: Promise<unknown> | null; saved: boolean; lost: boolean }>({
+    call: null,
+    saved: false,
+    lost: false,
+  })
+  const remoteNow = useRef(remote.data)
+  remoteNow.current = remote.data
+  const signOutHere = async (keyKid: string | null) => {
+    leavingRef.current = true
+    setLeaving('running')
+    await settled(backup.current.call)
+    const server = remoteNow.current
+    const backedUp = backup.current.saved || (server?.state === 'ready' && keyKid !== null && server.kid === keyKid)
+    if (await signOut(backedUp ? userId : undefined)) return
+    setLeaving('failed')
+  }
+  const isLeaving = () => leavingRef.current
+  if (leaving) {
+    return (
+      <SignOutProgress state={leaving} onRetry={() => void signOutHere(remoteNow.current?.kid ?? null)}>
+        {backup.current.lost ? <RecoveryLostNote /> : null}
+      </SignOutProgress>
+    )
+  }
+
   const setupScreen = (setupFor: SetupFor) => (
     <KeySetup
       userId={userId}
@@ -103,14 +139,23 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       has={setupFor.has}
       onSaving={() => setHeld(setupFor)}
       onLeave={() => setHeld(null)}
-      onDone={async (doneKid, leaving) => {
+      onSignOut={(keyKid) => void signOutHere(keyKid)}
+      isLeaving={isLeaving}
+      onBackup={(call) => {
+        backup.current.call = call.then(() => {
+          backup.current.saved = true
+        })
+      }}
+      onRecoveryLost={(lost) => {
+        backup.current.lost = lost
+      }}
+      onDone={async (doneKid) => {
         // Read straight from the device: a failed refetch would still offer the data it had.
         // Until the key reads back, setup stays on screen, with Try again.
         const kept = await loadIdentity(userId)
         if (kept?.kid !== doneKid) throw new Error('the key couldn’t be read back from this device')
         await local.refetch()
-        // Signing out began meanwhile: setup keeps the screen, to say how that went.
-        if (leaving()) return
+        if (leavingRef.current) return
         setSetUpKid(doneKid)
         setHeld(null)
         void remote.refetch()
@@ -143,15 +188,24 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     return setupScreen(setupFor)
   }
   if (state === 'needsBackup') {
-    // The key exists but its backups aren't both there: only a device holding the key can make them.
+    // The key exists but its backups aren't both there: only a device holding the key can make
+    // them. This device may hold it even if reading it failed, so signing out here keeps it.
     return (
       <AuthCard
         title="Finish setting up on your first device"
         description="Your key was made on another device, but its backups weren’t finished. Open Trioditis there to finish, then sign in here again."
       >
-        <SignOutButton userId={userId} />
+        <Button block onClick={() => void signOutHere(null)}>
+          Sign out
+        </Button>
       </AuthCard>
     )
+  }
+  // A recovery key shown before a reload may not be the one the server kept: say so first.
+  const pending = pendingRecoveryCheck(userId, kid ?? null)
+  if (pending) {
+    const installed = backups.find((b) => b.kind === 'recovery')
+    return <RecoveryCheckAfterReload pending={pending} installedCt={installed?.ct} onDone={recheck} />
   }
   if (here) {
     const session: Session = { userId, role, kid: here.kid, keyPair: here.keyPair }
@@ -160,7 +214,15 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // A key already here was opened with WebCrypto, so only unlocking needs the check.
   if (!canKeepKeys()) return <InsecurePage />
   return (
-    <Unlock userId={userId} kid={kid!} publicKey={publicKey!} backups={backups} onDone={() => void local.refetch()} />
+    <Unlock
+      userId={userId}
+      kid={kid!}
+      publicKey={publicKey!}
+      backups={backups}
+      isLeaving={isLeaving}
+      onSignOut={() => void signOutHere(kid ?? null)}
+      onDone={() => void local.refetch()}
+    />
   )
 }
 
@@ -214,6 +276,10 @@ function KeySetup({
   has,
   onSaving,
   onLeave,
+  onSignOut,
+  isLeaving,
+  onBackup,
+  onRecoveryLost,
   onDone,
 }: {
   userId: string
@@ -223,8 +289,16 @@ function KeySetup({
   onSaving: () => void
   /** The person gave up keeping the key here after the server saved it; they'll unlock instead. */
   onLeave: () => void
+  /** Signs out (the gate's: see KeyGate), naming the key being set up, if there is one yet. */
+  onSignOut: (kid: string | null) => void
+  /** Signing out has begun: no step starts or moves on after it. */
+  isLeaving: () => boolean
+  /** A keys.setup call is on its way, for signing out to wait on and learn from. */
+  onBackup: (call: Promise<unknown>) => void
+  /** Whether the recovery key shown here lost to another device's. */
+  onRecoveryLost: (lost: boolean) => void
   /** Setup is done and the key is kept here, as `kid`. */
-  onDone: (kid: string, leaving: () => boolean) => Promise<void>
+  onDone: (kid: string) => Promise<void>
 }) {
   const setup = useMutation(api.keys.setup)
   // The password backup must open with the password that signs in, so it's only ever the one
@@ -249,28 +323,15 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
-  // Signing out from setup is a screen of its own ("Signing out…"): whatever step finishes
-  // behind it changes nothing on screen, and no new step starts. It waits a little for a backup
-  // call or save still under way, and forgets the key only once the server is known to hold its
-  // backups; unsure, it keeps it (before then, this device's copy may be the only one). If
-  // signing out fails, going back to setup reloads the page, so setup starts again from what
-  // the server and this device really hold, not from wherever its steps had got to.
-  const backingUp = useRef<Promise<unknown> | null>(null)
-  const saving = useRef<Promise<unknown> | null>(null)
-  const backupsSaved = useRef(false)
-  const leavingRef = useRef(false)
-  const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
-  const leave = async () => {
-    leavingRef.current = true
-    setLeaving('running')
-    // A step that stalls (a backup call over a stuck connection) mustn't hold signing out up.
-    await settled(backingUp.current)
-    await settled(saving.current)
-    if (await signOut(backupsSaved.current ? userId : undefined)) return
-    setLeaving('failed')
-  }
+  // Signing out is the gate's (KeyGate); this names the key it's for, to decide whether its
+  // backups are known to exist.
   const signOutButton = (label = 'Sign out') => (
-    <Button block onClick={() => void leave()}>
+    <Button
+      block
+      onClick={() =>
+        onSignOut(prepared ? keyId(prepared.keyPair.publicKey) : existing ? keyId(existing.publicKey) : null)
+      }
+    >
       {label}
     </Button>
   )
@@ -324,7 +385,10 @@ function KeySetup({
       setBusy(false)
       // From the moment a recovery key is shown, this screen stays: if another device finishes
       // setup meanwhile, the person must still learn which recovery key works.
-      if (next.showRecovery) onSaving()
+      if (next.showRecovery) {
+        onSaving()
+        void notePendingRecoveryCheck(userId, keyId(keyPair.publicKey), made.args.recovery.ct)
+      }
       // With the recovery backup already there, there's nothing to confirm.
       if (!next.showRecovery) await finish(next)
     } catch (e) {
@@ -339,7 +403,7 @@ function KeySetup({
   }
 
   async function finish(job = prepared) {
-    if (!job || leavingRef.current) return
+    if (!job || isLeaving()) return
     setBusy(true)
     setError(null)
     const fail = (message: string) => {
@@ -356,7 +420,7 @@ function KeySetup({
     }
     // Signing out began while the proof was on its way: no backups start now, so the key's
     // fate is decided by what's already done.
-    if (leavingRef.current) {
+    if (isLeaving()) {
       setBusy(false)
       return
     }
@@ -364,9 +428,8 @@ function KeySetup({
     onSaving()
     try {
       const call = setup({ ...job.setup.args, proof })
-      backingUp.current = call
+      onBackup(call)
       kid = (await call).kid
-      backupsSaved.current = true
     } catch (e) {
       if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
@@ -395,6 +458,9 @@ function KeySetup({
       }
       lost = installed.ct !== job.setup.args.recovery.ct
       setRecoveryLost(lost)
+      onRecoveryLost(lost)
+      // Settled here: a reload no longer needs to check it (see pendingRecoveryCheck).
+      if (!lost) clearPendingRecoveryCheck()
     }
     setUncheckedKid(null)
     await keep(kid, job.keyPair, lost)
@@ -402,20 +468,18 @@ function KeySetup({
 
   /** Keeps the key on this device, once the server has its backups. */
   async function keep(kid: string, keyPair: KeyPair, lost: boolean) {
-    if (leavingRef.current) return
+    if (isLeaving()) return
     setBusy(true)
     setError(null)
     try {
-      const save = storeIdentity(userId, kid, keyPair)
-      saving.current = save
-      await save
+      await storeIdentity(userId, kid, keyPair)
     } catch (e) {
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
       setBusy(false)
       return
     }
-    if (leavingRef.current) return
+    if (isLeaving()) return
     // Done, unless the recovery key shown here lost the race: then say so before going on.
     if (!lost) return complete(kid)
     setKeptKid(null)
@@ -425,29 +489,17 @@ function KeySetup({
 
   /** Opens the app with the key kept here; if it won't read back, Try again stays on offer. */
   async function complete(kid: string) {
-    if (leavingRef.current) return
+    if (isLeaving()) return
     try {
       // The gate checks again just before it lets setup go: not while signing out runs.
-      await onDone(kid, () => leavingRef.current)
+      await onDone(kid)
+      clearPendingRecoveryCheck()
     } catch (e) {
       setFinished(null)
       setKeptKid(kid)
       setError(`Your key’s backups are saved, but the key couldn’t be kept on this device (${reason(e)}).`)
       setBusy(false)
     }
-  }
-
-  if (leaving) {
-    return (
-      <SignOutProgress state={leaving} onRetry={() => void leave()} backLabel="Back to setup">
-        {recoveryLost ? (
-          <p className="mb-4 text-sm text-warning-ink">
-            Another device saved its recovery key a moment earlier: the one shown here won’t work. Keep the one from
-            that device, or make a new one in Settings → Keys and devices.
-          </p>
-        ) : null}
-      </SignOutProgress>
-    )
   }
 
   if (keyTaken) {
@@ -617,30 +669,23 @@ function Unlock({
   kid,
   publicKey,
   backups,
+  isLeaving,
+  onSignOut,
   onDone,
 }: {
   userId: string
   kid: string
   publicKey: string
   backups: Backup[]
+  /** Signing out (the gate's) has begun: an unlock that finishes after it doesn't open the app. */
+  isLeaving: () => boolean
+  onSignOut: () => void
   onDone: () => void
 }) {
   const [mode, setMode] = useState<'password' | 'recovery'>('password')
   const [secret, setSecret] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Signing out here waits a little for a save under way, then forgets the key: unlocking means
-  // its backups exist. An unlock that finishes meanwhile doesn't open the app.
-  const saving = useRef<Promise<unknown> | null>(null)
-  const leavingRef = useRef(false)
-  const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
-  const leave = async () => {
-    leavingRef.current = true
-    setLeaving('running')
-    await settled(saving.current)
-    if (!(await signOut(userId))) setLeaving('failed')
-  }
-
   async function unlock(value: string, how: 'password' | 'recovery') {
     const backup = backups.find((b) => b.kind === how)
     if (!backup)
@@ -679,17 +724,15 @@ function Unlock({
           : 'That recovery key doesn’t match. Check it and try again.',
       )
     }
-    if (leavingRef.current) return
+    if (isLeaving()) return
     try {
-      const save = storeIdentity(userId, kid, keyPair)
-      saving.current = save
-      await save
+      await storeIdentity(userId, kid, keyPair)
     } catch (e) {
       return fail(
         `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
       )
     }
-    if (leavingRef.current) return
+    if (isLeaving()) return
     onDone()
   }
 
@@ -699,8 +742,6 @@ function Unlock({
     const password = takePassword()
     if (password) void unlock(password, 'password')
   }, [])
-
-  if (leaving) return <SignOutProgress state={leaving} onRetry={() => void leave()} backLabel="Back to unlock" />
 
   return (
     <AuthCard
@@ -745,7 +786,7 @@ function Unlock({
         <Button type="submit" variant="primary" size="lg" block loading={busy}>
           {busy ? 'Unlocking…' : 'Unlock'}
         </Button>
-        <Button type="button" block className="mt-2" onClick={() => void leave()}>
+        <Button type="button" block className="mt-2" onClick={onSignOut}>
           Sign out
         </Button>
       </form>
@@ -769,12 +810,10 @@ const settled = (step: Promise<unknown> | null) =>
 function SignOutProgress({
   state,
   onRetry,
-  backLabel,
   children,
 }: {
   state: 'running' | 'failed'
   onRetry: () => void
-  backLabel: string
   children?: ReactNode
 }) {
   if (state === 'running') {
@@ -793,7 +832,97 @@ function SignOutProgress({
         Try again
       </Button>
       <Button block onClick={() => window.location.reload()}>
-        {backLabel}
+        Go back
+      </Button>
+    </AuthCard>
+  )
+}
+
+function RecoveryLostNote() {
+  return (
+    <p className="mb-4 text-sm text-warning-ink">
+      Another device saved its recovery key a moment earlier: the one shown here won’t work. Keep the one from that
+      device, or make a new one in Settings → Keys and devices.
+    </p>
+  )
+}
+
+// A recovery key shown on this tab, kept (as a fingerprint of its wrap, nothing secret) until
+// it's known to be the one the server kept, so a reload before then still checks: two devices
+// finishing a key's backups at once each show one, and only one is installed.
+const RECOVERY_CHECK = 'trioditis:recovery-check'
+interface PendingRecoveryCheck {
+  userId: string
+  kid: string
+  fingerprint: string
+}
+
+async function fingerprint(ct: string) {
+  return toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ct))))
+}
+
+async function notePendingRecoveryCheck(userId: string, kid: string, ct: string) {
+  const note: PendingRecoveryCheck = { userId, kid, fingerprint: await fingerprint(ct) }
+  try {
+    sessionStorage.setItem(RECOVERY_CHECK, JSON.stringify(note))
+  } catch {
+    // Without storage, only this page's own check covers it.
+  }
+}
+
+function clearPendingRecoveryCheck() {
+  try {
+    sessionStorage.removeItem(RECOVERY_CHECK)
+  } catch {
+    // Nothing kept, so nothing to clear.
+  }
+}
+
+function pendingRecoveryCheck(userId: string, kid: string | null): PendingRecoveryCheck | null {
+  try {
+    const note = JSON.parse(sessionStorage.getItem(RECOVERY_CHECK) ?? 'null') as PendingRecoveryCheck | null
+    return note && note.userId === userId && note.kid === kid ? note : null
+  } catch {
+    return null
+  }
+}
+
+/** After a reload: is the recovery key shown before it the one the server kept? Says so if not. */
+function RecoveryCheckAfterReload({
+  pending,
+  installedCt,
+  onDone,
+}: {
+  pending: PendingRecoveryCheck
+  installedCt: string | undefined
+  onDone: () => void
+}) {
+  const { data: installed } = useQuery({
+    queryKey: ['recovery-fingerprint', installedCt],
+    queryFn: () => (installedCt ? fingerprint(installedCt) : Promise.resolve(null)),
+  })
+  const matches = installed !== undefined && installed === pending.fingerprint
+  useEffect(() => {
+    if (!matches) return
+    clearPendingRecoveryCheck()
+    onDone()
+  }, [matches, onDone])
+  if (installed === undefined || matches) return <Splash />
+  return (
+    <AuthCard
+      title="Your recovery key is the other one"
+      description="Another device finished saving its recovery key at the same time as this one. The recovery key shown here before won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
+    >
+      <Button
+        variant="primary"
+        size="lg"
+        block
+        onClick={() => {
+          clearPendingRecoveryCheck()
+          onDone()
+        }}
+      >
+        Continue
       </Button>
     </AuthCard>
   )
