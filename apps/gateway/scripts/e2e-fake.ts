@@ -75,7 +75,7 @@ step('Signed in')
 
 const identityFile =
   process.env.E2E_IDENTITY_FILE ?? new URL('../../../.data/e2e-identity.json', import.meta.url).pathname
-const me = await client.query(api.members.me, {})
+const me = (await client.query(api.members.me, {}))?.member
 if (!me) throw new Error('Not a member')
 let userIdentity: KeyPair
 if (me.identityKid) {

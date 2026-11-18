@@ -30,6 +30,11 @@ origin**: in the self-hosted bundle Caddy proxies that path to the Convex site, 
 development the Vite dev server does. Cookies and passkeys then belong to the app's origin,
 and no cross-origin auth is configured or supported.
 
+Better Auth trusts only `SITE_URL`, the app's origin, so every auth request's `Origin` must
+be it: per-worktree `pnpm dev` sets `SITE_URL` to that worktree's own web app address. The
+Electron shell, when it comes, loads the app from `SITE_URL` with `loadURL`, never from
+`file://` or a custom scheme, which would send another `Origin` (or `null`) and be refused.
+
 ```ts
 import { ConvexReactClient } from 'convex/react'
 import { ConvexQueryClient } from '@convex-dev/react-query'
@@ -88,13 +93,47 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
 | Add a passkey       | `authClient.passkey.addPasskey()` while signed in                                                                                                                             |
 | Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
-| Sign out            | `authClient.signOut()`                                                                                                                                                        |
-| Who am I            | `api.members.me` returns `{ userId, role, identityKid }`, or `null` when signed out or not a member                                                                           |
+| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
+| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
 | Invite (admin)      | `api.members.invite({ email, role })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                   |
 | Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
 `INVITE_REQUIRED`.
+
+`members.me` gives the account and its membership in one result, so the two always belong
+together. `sessionId` is the Better Auth session the Convex token names, the same as
+`session.id` from `authClient.getSession()`. When the screen says the account isn't a
+member, sign out the account in that result, not whatever Better Auth's session cache holds
+by then: another tab may have signed in as someone else.
+
+### Ending a known session
+
+`POST /api/auth/end-session` with the JSON body `{ "token": "<session.token>" }`, the token
+read from `authClient.getSession()`. It ends exactly that session, whichever account the
+request's cookie belongs to: holding the token is the authority. Use it when the session to
+end may no longer be the cookie's, for example after another tab signed in as someone else.
+Better Auth's own `revokeSession` can't do this: it acts only on the cookie's account and
+answers `status: true` even when it deleted nothing.
+
+| Status | Body                                                                       | Meaning                                                                                                                                                     |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                            |
+| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                         |
+| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                            |
+| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status: Better Auth's own check answers first when a cookie comes without an `Origin` |
+| 429    | Better Auth's rate limit answer                                            | Over 10 requests in 10 seconds. Registered, but not enforced on Convex today, as for every Better Auth route: see below                                     |
+| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                 |
+
+Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
+any other answer means nothing was changed, or that it couldn't tell. The response never
+sets or expires a cookie, so a late answer can't clear a sign-in made meanwhile in another
+tab: the app clears its own state for the ended session itself. The `Origin` header is
+required even without a cookie.
+
+Better Auth's rate limiting is off unless `NODE_ENV` is `production`, and its default store
+is memory, which doesn't last from one Convex HTTP action to the next. So on Convex no auth
+route answers 429 yet; shared storage for it is a follow-up. Treat a 429 like a 5xx.
 
 Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
