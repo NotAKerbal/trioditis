@@ -47,6 +47,24 @@ LAN IP otherwise. Pick one address and use it everywhere: sign-in is tied to one
 the server answers at its address and not at others. Run the installer again with `--host`
 to change it.
 
+#### HTTPS in local mode
+
+Browsers treat a plain-HTTP page as insecure unless it's on `localhost`, and an insecure
+page can't use the Web Crypto API the web app keeps each person's key with. So over plain
+HTTP from another device, sign-up works but setting up or unlocking the key fails. Serve
+local mode over HTTPS instead. With Tailscale, Tailscale Serve gives the machine a
+certificate for its tailnet name and forwards to the port:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8080
+deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
+```
+
+`--public-url` makes that the server's address, and binds the port to `127.0.0.1` so it's
+only reachable through the proxy (pass `--bind` for a proxy on another machine). Any reverse
+proxy that serves HTTPS works the same way. Reruns keep it; `--public-url ''` goes back to
+plain HTTP.
+
 ### Domain mode
 
 ```sh
@@ -69,14 +87,14 @@ list when the bridge host runs their connectors.
 
 ## What's running
 
-| Service | What it is | Exposed |
-|---|---|---|
-| `caddy` | The web app, and the proxy to everything below | Yes: the only published port |
-| `backend` | The Convex backend, on Postgres | No |
-| `postgres` | Postgres 17: Convex's data and each bridge host's | No |
-| `functions` | One-shot: sets Convex's environment and deploys the functions | No |
-| `gateway` | Moves events between bridge hosts and Convex | No |
-| `bridge-<network>` | A bridge host: runs that network's connector | No |
+| Service            | What it is                                                    | Exposed                      |
+| ------------------ | ------------------------------------------------------------- | ---------------------------- |
+| `caddy`            | The web app, and the proxy to everything below                | Yes: the only published port |
+| `backend`          | The Convex backend, on Postgres                               | No                           |
+| `postgres`         | Postgres 17: Convex's data and each bridge host's             | No                           |
+| `functions`        | One-shot: sets Convex's environment and deploys the functions | No                           |
+| `gateway`          | Moves events between bridge hosts and Convex                  | No                           |
+| `bridge-<network>` | A bridge host: runs that network's connector                  | No                           |
 
 `deploy/trioditis` is `docker compose` for this install, with its settings:
 
@@ -92,13 +110,13 @@ deploy/trioditis up -d         # start it again
 
 Everything is on one origin, so the web app's auth cookies are first-party:
 
-| Path | Goes to |
-|---|---|
-| `/convex/*` | The Convex client API and its websocket (port 3210), prefix stripped. The client is given `<origin>/convex` and keeps the prefix (`ws://<origin>/convex/api/<version>/sync`) |
-| `/api/auth/*` | Better Auth, in Convex's HTTP actions (port 3211) |
-| `/mcp`, `/mcp/*`, `/.well-known/oauth-*` | The MCP server and its OAuth discovery, in Convex's HTTP actions |
-| `/config.json` | The web app's runtime config, written by the installer: `{ "convexUrl": "<origin>/convex", "convexSiteUrl": "<origin>", "environment": "selfhosted" }`. Never cached |
-| Everything else | The web app's static files, falling back to `index.html` |
+| Path                                     | Goes to                                                                                                                                                                      |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/convex/*`                              | The Convex client API and its websocket (port 3210), prefix stripped. The client is given `<origin>/convex` and keeps the prefix (`ws://<origin>/convex/api/<version>/sync`) |
+| `/api/auth/*`                            | Better Auth, in Convex's HTTP actions (port 3211)                                                                                                                            |
+| `/mcp`, `/mcp/*`, `/.well-known/oauth-*` | The MCP server and its OAuth discovery, in Convex's HTTP actions                                                                                                             |
+| `/config.json`                           | The web app's runtime config, written by the installer: `{ "convexUrl": "<origin>/convex", "convexSiteUrl": "<origin>", "environment": "selfhosted" }`. Never cached         |
+| Everything else                          | The web app's static files, falling back to `index.html`                                                                                                                     |
 
 The Convex backend also calls its own public origin: it checks sign-in tokens against the
 signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`. The bundle maps the
