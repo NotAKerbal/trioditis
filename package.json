@@ -8,14 +8,17 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "turbo run dev",
+    "dev": "node scripts/dev.mjs",
+    "preview": "node scripts/preview.mjs",
+    "fake": "node scripts/fake.mjs",
+    "check": "node scripts/check.mjs",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "lint": "oxlint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "dev:setup": "node scripts/dev-setup.ts"
+    "test:scripts": "node --test scripts/test/*.test.mjs"
   },
   "devDependencies": {
     "@convex-dev/eslint-plugin": "5.0.1",
@@ -25,8 +28,9 @@
     "turbo": "2.11.11",
     "typescript": "7.0.2"
   },
+  "type": "module",
   "dependencies": {
-    "@trioditis/crypto": "workspace:*"
-  },
-  "type": "module"
+    "@trioditis/crypto": "workspace:*",
+    "convex": "1.50.0"
+  }
 }
