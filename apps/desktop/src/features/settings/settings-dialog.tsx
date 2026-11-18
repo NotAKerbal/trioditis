@@ -451,9 +451,9 @@ function Members() {
           setBusy(true)
           try {
             const { token } = await invite({ email, role })
-            setLink(
-              `${window.location.origin}/invite?${new URLSearchParams({ token, email: email.trim().toLowerCase() })}`,
-            )
+            // The token goes in the fragment, which never reaches a server or a proxy's logs.
+            const query = new URLSearchParams({ email: email.trim().toLowerCase() })
+            setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
             setCopied(false)
             setEmail('')
           } catch (err) {
@@ -557,8 +557,17 @@ function Keys() {
     if (!recovery) return
     setBusy('recovery')
     try {
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, { userId: session.userId, kid: session.kid, kind: 'recovery' })
-      await putBackup({ kind: 'recovery', ...wrap, proof: await proveKey(session.keyPair), expectedRevision: revisionOf('recovery') })
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, recovery.bytes, {
+        userId: session.userId,
+        kid: session.kid,
+        kind: 'recovery',
+      })
+      await putBackup({
+        kind: 'recovery',
+        ...wrap,
+        proof: await proveKey(session.keyPair),
+        expectedRevision: revisionOf('recovery'),
+      })
       toast('Your new recovery key is saved. The old one no longer works.')
       setRecovery(null)
       setSaved(false)
@@ -578,7 +587,11 @@ function Keys() {
       const currentAuthPassword = await derivedAuthPassword(current, email)
       const newAuthPassword = await derivedAuthPassword(next, email)
       const params = newPasswordParams()
-      const wrap = wrapIdentityKey(session.keyPair.privateKey, passwordKey(next, params), { userId: session.userId, kid: session.kid, kind: 'password' })
+      const wrap = wrapIdentityKey(session.keyPair.privateKey, passwordKey(next, params), {
+        userId: session.userId,
+        kid: session.kid,
+        kind: 'password',
+      })
       await changePasswordAction({
         currentAuthPassword,
         newAuthPassword,

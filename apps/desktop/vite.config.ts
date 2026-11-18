@@ -1,13 +1,22 @@
 import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig, loadEnv, type ProxyOptions } from 'vite'
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  // Better Auth runs on the Convex deployment's HTTP actions. The app reaches it through its
-  // own origin, as the self-hosted bundle's Caddy does, so its session cookie is first-party.
-  const authProxy = { '/api/auth': { target: env.AUTH_PROXY_TARGET ?? 'http://127.0.0.1:3211', changeOrigin: true } }
+  const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
+  // This worktree's Convex deployment's HTTP actions; `pnpm dev` passes it per worktree.
+  const convexSite = env.VITE_CONVEX_SITE_URL ?? 'http://127.0.0.1:3211'
+  // Served on the app's own origin, as the self-hosted bundle's Caddy does: Better Auth (so its
+  // cookies and passkeys are first-party) and the MCP server with its OAuth discovery documents.
+  const forward: ProxyOptions = { target: convexSite, changeOrigin: true }
+  const proxy = {
+    '/api/auth': forward,
+    '/mcp': forward,
+    '/.well-known/oauth-protected-resource': forward,
+    '/.well-known/oauth-authorization-server': forward,
+  }
+  const server = { host: env.HOST ? '0.0.0.0' : '127.0.0.1', port: Number(env.PORT ?? 5173), strictPort: true, proxy }
   return {
     plugins: [
       tanstackRouter({
@@ -22,7 +31,7 @@ export default defineConfig(({ mode }) => {
     resolve: { tsconfigPaths: true },
     // The config loads before anything else with a top-level await.
     build: { target: 'es2022' },
-    server: { host: '127.0.0.1', port: Number(env.VITE_PORT ?? 5173), strictPort: true, proxy: authProxy },
-    preview: { host: '127.0.0.1', port: Number(env.VITE_PORT ?? 5173), strictPort: true, proxy: authProxy },
+    server,
+    preview: server,
   }
 })

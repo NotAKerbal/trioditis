@@ -8,7 +8,13 @@ import { useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import { useMemo } from 'react'
 import { errorMessage } from '~/lib/errors.ts'
-import { tryOpen, type ChatPlaintext, type LabelColor, type LabelPlaintext, type MessagePlaintext } from '~/lib/sealed.ts'
+import {
+  tryOpen,
+  type ChatPlaintext,
+  type LabelColor,
+  type LabelPlaintext,
+  type MessagePlaintext,
+} from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 
 export type ChatId = Id<'chats'>
@@ -80,10 +86,17 @@ export interface ChatList {
  */
 export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true): ChatList {
   const session = useSession()
-  const args = { view, ...(filter.network ? { network: filter.network } : {}), ...(filter.labelId ? { labelId: filter.labelId } : {}) }
-  const { results, status, loadMore } = usePaginatedQuery(api.chats.list, enabled ? args : 'skip', { initialNumItems: 50 })
+  const args = {
+    view,
+    ...(filter.network ? { network: filter.network } : {}),
+    ...(filter.labelId ? { labelId: filter.labelId } : {}),
+  }
+  const { results, status, loadMore } = usePaginatedQuery(api.chats.list, enabled ? args : 'skip', {
+    initialNumItems: 50,
+  })
   const chats = useMemo(
-    () => (!enabled || status === 'LoadingFirstPage' ? undefined : results.map((row) => toChat(row as ChatRow, session))),
+    () =>
+      !enabled || status === 'LoadingFirstPage' ? undefined : results.map((row) => toChat(row as ChatRow, session)),
     [enabled, status, results, session],
   )
   return { chats, canLoadMore: status === 'CanLoadMore', loadMore: () => loadMore(50) }
@@ -220,14 +233,23 @@ export function useScheduled(chatId?: ChatId) {
 export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, string> {
   const session = useSession()
   const first = ids.slice(0, 20)
-  const { data } = useQuery({ ...convexQuery(api.scheduled.copies, { scheduledIds: first }), enabled: first.length > 0 })
+  const { data } = useQuery({
+    ...convexQuery(api.scheduled.copies, { scheduledIds: first }),
+    enabled: first.length > 0,
+  })
   const clientIds = useScheduled()
   return useMemo(() => {
     const out = new Map<string, string>()
     for (const row of data ?? []) {
       const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
-      const body = tryOpen<MessagePlaintext>(row.copy, session.keyPair, 'message', session.userId, clientMessageId)?.body
+      const body = tryOpen<MessagePlaintext>(
+        row.copy,
+        session.keyPair,
+        'message',
+        session.userId,
+        clientMessageId,
+      )?.body
       if (body !== undefined) out.set(row._id, body)
     }
     return out

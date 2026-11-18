@@ -25,7 +25,15 @@ import {
   PinOff,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { networkName, useChat, useChatActions, useScheduled, useScheduledTexts, type Chat, type ChatId } from '~/data/chats.ts'
+import {
+  networkName,
+  useChat,
+  useChatActions,
+  useScheduled,
+  useScheduledTexts,
+  type Chat,
+  type ChatId,
+} from '~/data/chats.ts'
 import { useBridgeKey, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'

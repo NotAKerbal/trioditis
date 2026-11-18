@@ -1,18 +1,21 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { useState } from 'react'
 import { AuthCard } from '~/features/auth/auth-card.tsx'
 import { SignUpForm } from '~/features/auth/sign-up-form.tsx'
+import { takeFragmentToken } from '~/lib/fragment.ts'
 
-// An invitation link: /invite?token=…&email=…, made by an admin in Settings → Members.
+// An invitation link, made in Settings → Members: /invite?email=…#token=…. The token is in the
+// fragment so it never reaches a server or a proxy's logs.
 export const Route = createFileRoute('/invite')({
   validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === 'string' ? search.token : '',
     email: typeof search.email === 'string' ? search.email : '',
   }),
   component: Invite,
 })
 
 function Invite() {
-  const { token, email } = Route.useSearch()
+  const { email } = Route.useSearch()
+  const [token] = useState(takeFragmentToken)
   if (!token || !email) {
     return (
       <AuthCard

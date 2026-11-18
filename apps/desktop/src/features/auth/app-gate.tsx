@@ -1,6 +1,14 @@
 import { api } from '@trioditis/backend/api'
 import type { KeyPair, PasswordParams } from '@trioditis/crypto'
-import { decodeRecoveryKey, fromBase64Url, generateKeyPair, makeKeySetup, passwordKey, ready, unwrapIdentityKey } from '@trioditis/crypto'
+import {
+  decodeRecoveryKey,
+  fromBase64Url,
+  generateKeyPair,
+  makeKeySetup,
+  passwordKey,
+  ready,
+  unwrapIdentityKey,
+} from '@trioditis/crypto'
 import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { convexQuery } from '@convex-dev/react-query'
@@ -152,7 +160,14 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
         <form onSubmit={prepare}>
           <FormError message={error} />
           <Field label="Your password" hint="The one you sign in with.">
-            <Input type="password" autoComplete="current-password" required minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} />
+            <Input
+              type="password"
+              autoComplete="current-password"
+              required
+              minLength={12}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
           </Field>
           <Button type="submit" variant="primary" size="lg" block loading={busy}>
             {busy ? 'Securing your key…' : 'Continue'}
@@ -164,9 +179,15 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
 
   const recoveryText = prepared.setup.recoveryText
   return (
-    <AuthCard title="Save your recovery key" description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now.">
+    <AuthCard
+      title="Save your recovery key"
+      description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now."
+    >
       <FormError message={error} />
-      <div className="mb-3 rounded-md bg-surface-2 p-3 text-center font-mono text-base leading-relaxed tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]" aria-label="Recovery key">
+      <div
+        className="mb-3 rounded-md bg-surface-2 p-3 text-center font-mono text-base leading-relaxed tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]"
+        aria-label="Recovery key"
+      >
         {recoveryText}
       </div>
       <Button
@@ -182,7 +203,12 @@ function KeySetup({ userId, existing, onDone }: { userId: string; existing?: Key
         {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
       </Button>
       <label className="mb-5 flex items-start gap-2.5 text-sm">
-        <input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+        <input
+          type="checkbox"
+          className="mt-0.5 size-4 accent-[var(--accent)]"
+          checked={saved}
+          onChange={(e) => setSaved(e.target.checked)}
+        />
         I’ve saved my recovery key somewhere safe.
       </label>
       <Button variant="primary" size="lg" block disabled={!saved} loading={busy} onClick={finish}>
