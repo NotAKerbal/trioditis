@@ -377,6 +377,41 @@ describe('signing out, as the key on this device sees it', () => {
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
   })
 
+  it('never reads the session to sign out, even when its token wasn’t noted', async () => {
+    // The page opened, but noting its session's token failed (the server was unreachable then).
+    const opened = server.signIn('v18')
+    server.reachable = false
+    expect(await rememberSession(opened.id)).toBe('unknown')
+    server.reachable = true
+    let reads = 0
+    const read = server.onRead
+    server.onRead = () => void reads++
+    try {
+      expect(await signOut('v18', opened.id)).toMatch(/couldn’t end your session/)
+    } finally {
+      server.onRead = read
+    }
+    expect(reads).toBe(0)
+    expect(server.ended).toEqual([])
+  })
+
+  it('waits for the token being noted as the page opens, rather than asking again', async () => {
+    const opened = server.signIn('v19')
+    let reads = 0
+    const read = server.onRead
+    server.onRead = () => void reads++
+    try {
+      const noting = rememberSession(opened.id)
+      // Signing out at once, before that answer is in.
+      expect(await signOut('v19', opened.id)).toBeNull()
+      expect(await noting).toBe('noted')
+    } finally {
+      server.onRead = read
+    }
+    expect(reads).toBe(1)
+    expect(server.ended).toEqual([opened.token])
+  })
+
   it('asks nothing of the server but to end the session, and says when that can’t be done', async () => {
     const kept = await keptHere('v6')
     let reads = 0
@@ -402,8 +437,10 @@ describe('signing out, as the key on this device sees it', () => {
     const opened = server.signIn('v17')
     server.signIn('someone-else')
     expect(await rememberSession(opened.id)).toBe('changed')
+    // Asked once per session: the answer stands.
+    expect(await rememberSession(opened.id)).toBe('changed')
     server.reachable = false
-    expect(await rememberSession(opened.id)).toBe('unknown')
+    expect(await rememberSession(server.signIn('v17').id)).toBe('unknown')
   })
 
   it('tries forgetting again when storage fails once, so no save slips in', async () => {

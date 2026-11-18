@@ -81,7 +81,16 @@ function MemberGate({ children }: { children: ReactNode }) {
     if (!sessionId) return
     if (opened.current && opened.current !== sessionId) return window.location.reload()
     opened.current = sessionId
-    void rememberSession(sessionId).then((noted) => noted === 'changed' && window.location.reload())
+    let stop = false
+    const note = (tries: number): unknown =>
+      rememberSession(sessionId).then((noted) => {
+        if (noted === 'changed') window.location.reload()
+        else if (noted === 'unknown' && tries > 0 && !stop) setTimeout(() => note(tries - 1), 3000)
+      })
+    void note(5)
+    return () => {
+      stop = true
+    }
   }, [sessionId])
   if (opened.current && sessionId && opened.current !== sessionId) return <Splash />
   if (me.isPending) return <Splash />
@@ -194,7 +203,7 @@ function KeyGate({
     // none is, but saves still under way in any tab are stopped all the same.
     const failure = await signOut(userId, sessionId, {
       onlyKid: backedUp ? keyKid : null,
-      backedUpKid: backedUp ? undefined : backedUpNow,
+      backedUpKid: backedUp ? undefined : () => backedUpNow(sessionId),
     })
     if (failure === null) return
     leavingFailure.current = failure
@@ -334,7 +343,7 @@ const sessionStill = (userId: string, sessionId: string) =>
   currentSessionId(userId).then((now) => (now === sessionId ? now : null))
 
 /** The key the server has both backups of now, if any (see signOut's backedUpKid). */
-async function backedUpNow(): Promise<string | null> {
+async function backedUpNow(sessionId: string): Promise<string | null> {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error('the server didn’t answer in time')), LEAVE_WAIT_MS),
   )
@@ -343,12 +352,25 @@ async function backedUpNow(): Promise<string | null> {
   const read = async () => {
     const { data } = await authClient.convex.token({ fetchOptions: { throw: false } })
     if (!data?.token) throw new Error('this page isn’t signed in to the server any more')
+    // Only an answer for the page's own session counts: another tab may have signed in since.
+    if (tokenSession(data.token) !== sessionId) throw new Error('the signed-in session has changed')
     const http = new ConvexHttpClient(config.convexUrl)
     http.setAuth(data.token)
     return http.query(api.keys.identity, {})
   }
   const identity = await Promise.race([read(), timeout])
   return identity.state === 'ready' ? identity.kid : null
+}
+
+/** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */
+function tokenSession(jwt: string): string | null {
+  try {
+    const payload = jwt.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(payload)) as { sessionId?: unknown }
+    return typeof claims.sessionId === 'string' ? claims.sessionId : null
+  } catch {
+    return null
+  }
 }
 
 /** What key setup is for: a new key, or the missing backups of one this device holds. */
@@ -568,6 +590,11 @@ function KeySetup({
     // start now either, since the key they'd be for can't be kept here.
     if (typeof token === 'number' && (await saveToken(userId).catch(() => null)) !== token) {
       return fail(`Your key couldn’t be set up on this device: ${new KeepRefused('fenced').message}`)
+    }
+    // Signing out may have begun while that was read: then no backups start either.
+    if (isLeaving()) {
+      setBusy(false)
+      return
     }
     let kid: string
     onSaving()

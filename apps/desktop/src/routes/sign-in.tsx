@@ -1,7 +1,8 @@
 import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
-import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
+import { Link, Navigate, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { KeyRound } from 'lucide-react'
+import { useConvexAuth } from 'convex/react'
 import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
 import { errorMessage } from '~/lib/errors.ts'
@@ -20,6 +21,9 @@ function SignIn() {
   // After a sign-out that couldn't confirm removing the key from this device (lib/sign-out.ts).
   const [keyUnconfirmed] = useState(() => new URLSearchParams(window.location.search).get('key') === 'unconfirmed')
 
+  // Signed in already, in another tab (which reloaded this one, lib/account-tabs.ts): the app
+  // is where this tab belongs now.
+  const { isAuthenticated } = useConvexAuth()
   async function withPassword(event: React.FormEvent) {
     event.preventDefault()
     setBusy('password')
@@ -46,6 +50,8 @@ function SignIn() {
     announceAccountChange()
     await navigate({ to: '/' })
   }
+
+  if (isAuthenticated) return <Navigate to="/" />
 
   return (
     <AuthCard

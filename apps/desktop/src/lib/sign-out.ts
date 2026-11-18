@@ -43,22 +43,31 @@ async function signedIn(): Promise<SignedIn | null> {
 // The token of the session this page opened with (members.me names it), to end exactly that
 // session later. Memory only.
 const tokens = new Map<string, string>()
+const noting = new Map<string, Promise<'noted' | 'changed' | 'unknown'>>()
 
 /**
  * Notes the token of `sessionId`, the session this page opened with, if it's the one this
  * browser is in: 'noted'. 'changed' if the browser is in another by now (the page should
- * reload), 'unknown' if the server couldn't say.
+ * reload), 'unknown' if the server couldn't say (asking again may). Asked as the page opens,
+ * and never again once answered.
  */
-export async function rememberSession(sessionId: string): Promise<'noted' | 'changed' | 'unknown'> {
-  if (tokens.has(sessionId)) return 'noted'
-  try {
-    const now = await signedIn()
-    if (now?.id !== sessionId) return 'changed'
-    tokens.set(sessionId, now.token)
-    return 'noted'
-  } catch {
-    return 'unknown'
+export function rememberSession(sessionId: string): Promise<'noted' | 'changed' | 'unknown'> {
+  let answer = noting.get(sessionId)
+  if (!answer) {
+    answer = signedIn().then(
+      (now) => {
+        if (now?.id !== sessionId) return 'changed'
+        tokens.set(sessionId, now.token)
+        return 'noted'
+      },
+      () => {
+        noting.delete(sessionId)
+        return 'unknown' as const
+      },
+    )
+    noting.set(sessionId, answer)
   }
+  return answer
 }
 
 /** The session this tab is signed in to as `userId` (see signedIn); null if not signed in as them. */
@@ -145,9 +154,12 @@ export async function signOut(
       unconfirmed = true
     }
   }
-  // Not noted yet (signing out as the page opens): note it now, if it's still this browser's.
-  if ((await rememberSession(sessionId)) !== 'noted') return SIGN_OUT_SWITCHED
-  if (!(await endSession(tokens.get(sessionId)!))) return SIGN_OUT_FAILED
+  // Noted as the page opened (waiting for that if it's still on its way); never asked for now,
+  // when a read could set the cookie back to this session after another tab signed in.
+  await noting.get(sessionId)
+  const token = tokens.get(sessionId)
+  if (!token) return SIGN_OUT_SWITCHED
+  if (!(await endSession(token))) return SIGN_OUT_FAILED
   tokens.delete(sessionId)
   announceAccountChange()
   window.location.assign(unconfirmed ? KEY_UNCONFIRMED : '/sign-in')
