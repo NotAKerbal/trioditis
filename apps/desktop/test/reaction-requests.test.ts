@@ -117,28 +117,40 @@ describe('what a message shows while its reactions are asked for again', () => {
   const before = new Map([['m1', { list: heart, at: t0 }]])
 
   it('keeps the last list while the new request is on its way', () => {
-    const { shown, expires } = showReactions(['m1'], {}, new Set(['m1']), before, t0 + 1000)
+    const { shown, expires } = showReactions(['m1'], new Map(), new Set(['m1']), before, t0 + 1000)
     expect(shown.get('m1')?.list).toBe(heart)
     expect(expires).toBe(t0 + KEEP_SHOWN_MS)
   })
 
   it('takes a new answer at once, an empty one too', () => {
-    const { shown, expires } = showReactions(['m1'], { m1: [] }, new Set(), before, t0 + 1000)
-    expect(shown.get('m1')?.list).toEqual([])
+    const fresh = new Map([['m1', { list: [], at: t0 + 900 }]])
+    const { shown, expires } = showReactions(['m1'], fresh, new Set(), before, t0 + 1000)
+    expect(shown.get('m1')).toEqual({ list: [], at: t0 + 900 })
     expect(expires).toBeNull()
   })
 
   it('shows nothing once the request has failed', () => {
-    const { shown } = showReactions(['m1'], {}, new Set(), before, t0 + 1000)
+    const { shown } = showReactions(['m1'], new Map(), new Set(), before, t0 + 1000)
     expect(shown.has('m1')).toBe(false)
   })
 
   it('shows nothing once the wait runs past the limit', () => {
-    const { shown } = showReactions(['m1'], {}, new Set(['m1']), before, t0 + KEEP_SHOWN_MS)
+    const { shown } = showReactions(['m1'], new Map(), new Set(['m1']), before, t0 + KEEP_SHOWN_MS)
     expect(shown.has('m1')).toBe(false)
   })
 
   it('keeps nothing for a message no longer passed in', () => {
-    expect(showReactions([], {}, new Set(['m1']), before, t0).shown.size).toBe(0)
+    expect(showReactions([], new Map(), new Set(['m1']), before, t0).shown.size).toBe(0)
+  })
+
+  it('never renews a kept list: its limit runs from the last answer, however often it’s looked at', () => {
+    // An answer at t0, then other groups answering keep re-running the merge.
+    let state = showReactions(['m1'], new Map([['m1', { list: heart, at: t0 }]]), new Set(), new Map(), t0)
+    state = showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + 3000)
+    state = showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + 4000)
+    expect(state.expires).toBe(t0 + KEEP_SHOWN_MS)
+    expect(showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + KEEP_SHOWN_MS).shown.has('m1')).toBe(
+      false,
+    )
   })
 })

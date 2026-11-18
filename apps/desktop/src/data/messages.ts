@@ -77,8 +77,8 @@ export interface Reaction {
   mine: boolean
 }
 // Outside the hook, so useQueries can keep its result while the answers don't change.
-const resultsOf = (results: { data?: ReactionAnswer | undefined; isPending: boolean }[]) =>
-  results.map((r) => ({ data: r.data, pending: r.isPending }))
+const resultsOf = (results: { data?: ReactionAnswer | undefined; isPending: boolean; isError: boolean }[]) =>
+  results.map((r) => ({ data: r.data, pending: r.isPending, failed: r.isError }))
 // A request replaced by another (its group moved) stops being watched soon after, not in minutes.
 const REACTIONS_GC_MS = 10_000
 
@@ -105,13 +105,19 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
   const asked = requests.map((r) => r.join()).join('|')
   // `tick` is a dependency so it looks again when a kept list runs out.
   const { shown, expires } = useMemo(() => {
-    const fresh: ReactionAnswer = {}
+    // A failed request counts as neither an answer nor one on its way, even with data from
+    // before it failed. A live one's answer is current now: its watch would have brought any
+    // change. A list kept after its request is replaced keeps that time, so its limit runs from
+    // the last moment it was known to be right.
+    const now = Date.now()
+    const fresh = new Map<string, Shown<ReactionAnswer[string]>>()
     const waiting = new Set<string>()
     results.forEach((r, i) => {
-      if (r.data) Object.assign(fresh, r.data)
+      if (r.failed) return
+      if (r.data) for (const [id, list] of Object.entries(r.data)) fresh.set(id, { list, at: now })
       else if (r.pending) for (const id of asked.split('|')[i]?.split(',') ?? []) waiting.add(id)
     })
-    return showReactions(ids ? ids.split(',') : [], fresh, waiting, before.current, Date.now())
+    return showReactions(ids ? ids.split(',') : [], fresh, waiting, before.current, now)
   }, [results, ids, asked, tick])
   useEffect(() => {
     before.current = shown

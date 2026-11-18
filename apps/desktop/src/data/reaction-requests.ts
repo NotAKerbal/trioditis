@@ -66,15 +66,16 @@ export interface Shown<L> {
 }
 
 /**
- * What each of `ids` shows: its answer, when one is in. Otherwise, only while the request for it
- * is still on its way (`waiting`) and for at most KEEP_SHOWN_MS since an answer last gave it, the
- * list it showed before, so moving a group to a new request doesn't blank it. A failed request,
- * or one that takes longer, shows nothing rather than reactions that may since have gone.
- * `expires` is when the next kept list runs out, to look again then.
+ * What each of `ids` shows: its answer, when one is in from a request that hasn't failed, with
+ * when that answer came (`fresh`). Otherwise, only while the request for it is still on its way
+ * (`waiting`) and for at most KEEP_SHOWN_MS since an answer last gave it, the list it showed
+ * before, so moving a group to a new request doesn't blank it. A failed request, or one that
+ * takes longer, shows nothing rather than reactions that may since have gone. `expires` is when
+ * the next kept list runs out, to look again then.
  */
 export function showReactions<L>(
   ids: readonly string[],
-  fresh: Readonly<Record<string, L>>,
+  fresh: ReadonlyMap<string, Shown<L>>,
   waiting: ReadonlySet<string>,
   before: ReadonlyMap<string, Shown<L>>,
   now: number,
@@ -82,8 +83,9 @@ export function showReactions<L>(
   const shown = new Map<string, Shown<L>>()
   let expires: number | null = null
   for (const id of ids) {
-    if (Object.hasOwn(fresh, id)) {
-      shown.set(id, { list: fresh[id]!, at: now })
+    const answer = fresh.get(id)
+    if (answer) {
+      shown.set(id, answer)
       continue
     }
     const kept = before.get(id)
