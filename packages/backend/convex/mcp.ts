@@ -103,10 +103,16 @@ export const authorize = action({
     userCode: v.optional(v.string()),
     sessionId: v.optional(v.string()),
   },
-  handler: async (ctx, { sessionId, ...args }): Promise<unknown> => {
+  // As the component's: where to send the browser back to the agent, or null for a device
+  // request.
+  returns: v.object({ redirectUrl: v.union(v.string(), v.null()) }),
+  handler: async (ctx, { sessionId, ...args }): Promise<{ redirectUrl: string | null }> => {
     await requireSessionIfGiven(ctx, sessionId)
-    const handler = (consent.authorize as unknown as { _handler: (ctx: ActionCtx, args: AuthorizeArgs) => unknown })
-      ._handler
+    const handler = (
+      consent.authorize as unknown as {
+        _handler: (ctx: ActionCtx, args: AuthorizeArgs) => Promise<{ redirectUrl: string | null }>
+      }
+    )._handler
     return await handler(ctx, args)
   },
 })
