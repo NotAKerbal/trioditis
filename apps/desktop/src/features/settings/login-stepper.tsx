@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 import { networkName } from '~/data/chats.ts'
 import { loginInputBlocked } from '~/data/bridge-ready.ts'
 import { useBridge } from '~/data/messages.ts'
-import { errorMessage } from '~/lib/errors.ts'
+import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { sealLoginInput } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { canSubmit, initialSubmit, submitReducer, type SubmitEvent } from './login-submit.ts'
@@ -80,13 +80,16 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
     dispatch({ type: 'step', stepId: null })
     live.current = { id: null, over: false, closed: live.current.closed }
     const run = live.current
-    start({ network: network as Network, ...(flowId ? { flowId } : {}) }).then(
+    // Bound to the session the page opened with: a page another tab has since signed out of, or
+    // into someone else, can't start a login for the wrong account (sessionChanged).
+    start({ network: network as Network, ...(flowId ? { flowId } : {}), sessionId: session.sessionId }).then(
       (id) => {
         run.id = id
         if (run.closed || live.current !== run) abandon(id)
         else setLoginSessionId(id)
       },
       (e: unknown) => {
+        if (sessionChanged(e)) return window.location.reload()
         if (live.current === run) setStartError(errorMessage(e, 'That login couldn’t start.'))
       },
     )
