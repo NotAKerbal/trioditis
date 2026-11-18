@@ -17,10 +17,12 @@ import { Input } from '@trioditis/ui/input'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { Navigate } from '@tanstack/react-router'
+import { ConvexHttpClient } from 'convex/browser'
 import { useConvexAuth, useMutation } from 'convex/react'
 import { Check, Copy, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { authClient } from '~/lib/auth-client.ts'
+import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, forgetIdentity, loadIdentity, storeIdentity } from '~/lib/keys.ts'
 import { takePassword } from '~/lib/pending-password.ts'
@@ -226,9 +228,21 @@ function KeySetup({
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
 
-  /** The account's key as the server has it now, or undefined if that couldn't be read. */
-  async function readIdentity() {
+  /**
+   * The account's key as the server has it now, or undefined if that couldn't be read. The app's
+   * client answers from its live subscription, which can hold an error; `fresh` asks the server
+   * itself, so a retry isn't just the same error again.
+   */
+  async function readIdentity(fresh = false) {
     try {
+      if (fresh) {
+        const { data } = await authClient.convex.token({ fetchOptions: { throw: false } })
+        if (data?.token) {
+          const http = new ConvexHttpClient(config.convexUrl)
+          http.setAuth(data.token)
+          return await http.query(api.keys.identity, {})
+        }
+      }
       // Inside try: with a failed cached result, the client can throw before giving a promise.
       return await convex.query(api.keys.identity, {})
     } catch {
@@ -311,12 +325,12 @@ function KeySetup({
    * recovery key a moment before, the one shown here isn't it. Which one the server kept is
    * checked, and only a match, or a clear mismatch, goes on; a failed check can be tried again.
    */
-  async function check(kid: string, job: NonNullable<typeof prepared>) {
+  async function check(kid: string, job: NonNullable<typeof prepared>, fresh = false) {
     setBusy(true)
     setError(null)
     let lost = false
     if (job.showRecovery) {
-      const identity = await readIdentity()
+      const identity = await readIdentity(fresh)
       const installed = identity?.backups.find((b) => b.kind === 'recovery')
       if (!installed) {
         setUncheckedKid(kid)
@@ -374,7 +388,13 @@ function KeySetup({
         description="Another device may have finished setting up your key at the same moment. Check which recovery key works before going on."
       >
         <FormError message={error} />
-        <Button variant="primary" size="lg" block loading={busy} onClick={() => void check(uncheckedKid, prepared)}>
+        <Button
+          variant="primary"
+          size="lg"
+          block
+          loading={busy}
+          onClick={() => void check(uncheckedKid, prepared, true)}
+        >
           Check again
         </Button>
         <div className="mt-2">
@@ -390,9 +410,10 @@ function KeySetup({
         title="Your recovery key is the other one"
         description="Your key is set up, but another device finished saving its recovery key a moment earlier. The recovery key shown here won’t work: keep the one from that device, or make a new one in Settings → Keys and devices."
       >
-        <Button variant="primary" size="lg" block onClick={() => void onDone()}>
+        <Button variant="primary" size="lg" block className="mb-2" onClick={() => void onDone()}>
           Continue
         </Button>
+        <SignOutButton />
       </AuthCard>
     )
   }
