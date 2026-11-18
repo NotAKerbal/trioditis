@@ -47,6 +47,24 @@ LAN IP otherwise. Pick one address and use it everywhere: sign-in is tied to one
 the server answers at its address and not at others. Run the installer again with `--host`
 to change it.
 
+#### HTTPS in local mode
+
+Browsers treat a plain-HTTP page as insecure unless it's on `localhost`, and an insecure
+page can't use the Web Crypto API the web app keeps each person's key with. So over plain
+HTTP from another device, sign-up works but setting up or unlocking the key fails. Serve
+local mode over HTTPS instead. With Tailscale, Tailscale Serve gives the machine a
+certificate for its tailnet name and forwards to the port:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8080
+deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
+```
+
+`--public-url` makes that the server's address, and binds the port to `127.0.0.1` so it's
+only reachable through the proxy (pass `--bind` for a proxy on another machine). Any reverse
+proxy that serves HTTPS works the same way. Reruns keep it; `--public-url ''` goes back to
+plain HTTP.
+
 ### Domain mode
 
 ```sh

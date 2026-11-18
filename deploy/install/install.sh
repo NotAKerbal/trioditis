@@ -3,6 +3,7 @@
 #
 #   deploy/install/install.sh                         # local mode: http://<this machine>:8080
 #   deploy/install/install.sh --port 9000 --host 192.168.1.20
+#   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
 #   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
 #
@@ -20,7 +21,8 @@ port=8080
 host=''
 domain=''
 networks=whatsapp
-bind=0.0.0.0
+bind=''
+proxy_url=unset
 e2e=0
 
 usage() {
@@ -31,7 +33,11 @@ Options:
   --port <n>           Local mode's port (default 8080)
   --host <address>     The address people open, in local mode (default: this machine's
                        Tailscale IP if Tailscale is up, else its first LAN IP)
-  --bind <address>     The interface local mode listens on (default 0.0.0.0)
+  --bind <address>     The interface local mode listens on (default 0.0.0.0, or 127.0.0.1
+                       with --public-url)
+  --public-url <url>   Local mode behind something that serves HTTPS and forwards to the
+                       port, such as Tailscale Serve: the https:// address people open.
+                       Kept for reruns; pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
   --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
   --e2e                Also expose the fake network's test endpoint on this machine's loopback
@@ -44,6 +50,7 @@ while [ $# -gt 0 ]; do
     --port) port=$2; shift ;;
     --host) host=$2; shift ;;
     --bind) bind=$2; shift ;;
+    --public-url) proxy_url=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
     --e2e) e2e=1 ;;
@@ -114,6 +121,25 @@ hex_secret() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 keep_or() { local current; current=$(get "$1"); [ -n "$current" ] || set_var "$1" "$2"; }
 
 if [ "$mode" = local ]; then
+  [ "$proxy_url" != unset ] || proxy_url=$(get PROXY_URL)
+  proxy_url=${proxy_url%/}
+  case "$proxy_url" in
+    '' | https://*) ;;
+    *) die "--public-url must be an https:// address: browsers keep keys only on secure pages." ;;
+  esac
+  set_var PROXY_URL "$proxy_url"
+fi
+if [ "$mode" = local ] && [ -n "$proxy_url" ]; then
+  host=${proxy_url#https://}
+  host=${host%%[:/]*}
+  public_url=$proxy_url
+  [ -n "$bind" ] || bind=127.0.0.1
+  set_var CADDY_SITE_ADDRESS ':80'
+  set_var CADDY_GLOBAL_OPTIONS 'auto_https off'
+  set_var HTTP_BIND "$bind"
+  set_var HTTP_PORT "$port"
+elif [ "$mode" = local ]; then
+  [ -n "$bind" ] || bind=0.0.0.0
   if [ -z "$host" ]; then
     host=$(get PUBLIC_HOST)
     if [ -z "$host" ] || [ "$(get INSTALL_MODE)" != local ]; then
@@ -124,6 +150,10 @@ if [ "$mode" = local ]; then
   fi
   public_url="http://$host"
   [ "$port" = 80 ] || public_url="$public_url:$port"
+  case "$host" in
+    localhost | 127.* | '[::1]') ;;
+    *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking. Serve it over HTTPS: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
+  esac
   set_var CADDY_SITE_ADDRESS ':80'
   set_var CADDY_GLOBAL_OPTIONS 'auto_https off'
   set_var HTTP_BIND "$bind"
