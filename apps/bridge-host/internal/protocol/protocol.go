@@ -48,9 +48,9 @@ type Event struct {
 
 	GhostID string `json:"ghostId,omitempty"`
 
-	State   string `json:"state,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Message string `json:"message,omitempty"`
+	State string `json:"state,omitempty"`
+	// Error is always one of the error codes below, never free text.
+	Error string `json:"error,omitempty"`
 
 	LoginSessionID string     `json:"loginSessionId,omitempty"`
 	Step           *LoginStep `json:"step,omitempty"`
@@ -86,6 +86,21 @@ const (
 	StatusRead      = "read"
 	StatusFailed    = "failed"
 	StatusUnknown   = "unknown"
+)
+
+// Error codes. Every error field and every 4xx body uses one of these; connector error
+// text, user input and content never leave the bridge host.
+const (
+	ErrNetworkRejected = "network_rejected"
+	ErrNotConnected    = "not_connected"
+	ErrTimeout         = "timeout"
+	ErrInvalidCommand  = "invalid_command"
+	ErrExpired         = "expired"
+	ErrUnsupported     = "unsupported"
+	ErrRateLimited     = "rate_limited"
+	ErrBadCredentials  = "bad_credentials"
+	ErrLoginFailed     = "login_failed"
+	ErrInternal        = "internal"
 )
 
 // LoginStep is one step of a login flow, rendered by the app's generic login stepper.
@@ -160,11 +175,13 @@ type Command struct {
 	PortalID        string         `json:"portalId,omitempty"`
 	ClientMessageID string         `json:"clientMessageId,omitempty"`
 	Sealed          *seal.Envelope `json:"sealed,omitempty"`
-	ReplyTo         string         `json:"replyTo,omitempty"`
-	TargetEventID   string         `json:"targetEventId,omitempty"`
-	Key             string         `json:"key,omitempty"`
-	UpToEventID     string         `json:"upToEventId,omitempty"`
-	Typing          bool           `json:"typing,omitempty"`
+	// NotAfter (ms since the epoch) is the latest a send or edit may still go out.
+	NotAfter      int64  `json:"notAfter,omitempty"`
+	ReplyTo       string `json:"replyTo,omitempty"`
+	TargetEventID string `json:"targetEventId,omitempty"`
+	Key           string `json:"key,omitempty"`
+	UpToEventID   string `json:"upToEventId,omitempty"`
+	Typing        bool   `json:"typing,omitempty"`
 
 	LoginSessionID string `json:"loginSessionId,omitempty"`
 	Network        string `json:"network,omitempty"`

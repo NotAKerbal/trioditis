@@ -134,23 +134,37 @@ func (p *Pusher) Wake() {
 }
 
 const (
-	idleWait   = 5 * time.Second
-	maxBackoff = 30 * time.Second
+	idleWait = 5 * time.Second
+	// HeartbeatInterval is how often an empty batch tells the gateway the host is alive.
+	// The gateway only dispatches commands to hosts heard from in the last two minutes.
+	HeartbeatInterval = 30 * time.Second
+	maxBackoff        = 30 * time.Second
 )
 
 // Run pushes until ctx is cancelled. Events are resent from the gateway's last
-// acknowledgement until acknowledged, so delivery is at least once and in order.
+// acknowledgement until acknowledged, so delivery is at least once and in order. An empty
+// batch on startup, and whenever nothing else was sent for HeartbeatInterval, registers
+// the host and tells it where the gateway has got to.
 func (p *Pusher) Run(ctx context.Context) {
 	backoff := time.Second
+	var lastContact time.Time
 	for ctx.Err() == nil {
-		sent, err := p.pushOnce(ctx)
+		var sent bool
+		var err error
+		if time.Since(lastContact) >= HeartbeatInterval {
+			err = p.heartbeat(ctx)
+			sent = err == nil
+		} else {
+			sent, err = p.pushOnce(ctx)
+		}
 		var conflict *ConflictError
 		switch {
 		case errors.As(err, &conflict):
 			p.Log.Warn().Int64("expected_seq", conflict.ExpectedSeq).Msg("Gateway asked to resend the journal from an earlier point")
-			if err = p.Store.SetAckedThrough(ctx, max(conflict.ExpectedSeq-1, 0)); err != nil {
+			if err = p.rewind(ctx, conflict.ExpectedSeq-1); err != nil {
 				p.Log.Err(err).Msg("Failed to rewind journal acknowledgement")
 			}
+			lastContact = time.Now()
 			continue
 		case err != nil:
 			p.Log.Warn().Err(err).Dur("retry_in", backoff).Msg("Failed to push events to the gateway")
@@ -159,13 +173,18 @@ func (p *Pusher) Run(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
-		if !sent {
-			p.sleep(ctx, idleWait)
+		if sent {
+			lastContact = time.Now()
+		} else {
+			p.sleep(ctx, min(idleWait, HeartbeatInterval-time.Since(lastContact)))
 		}
 	}
 }
 
 func (p *Pusher) sleep(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
@@ -173,6 +192,51 @@ func (p *Pusher) sleep(ctx context.Context, d time.Duration) {
 	case <-p.wake:
 	case <-timer.C:
 	}
+}
+
+// rewind moves the acknowledgement back so events after seq are sent again.
+func (p *Pusher) rewind(ctx context.Context, seq int64) error {
+	return p.Store.SetAckedThrough(ctx, max(seq, 0))
+}
+
+// reconcile adopts the gateway's acknowledgement. Behind ours means the gateway lost
+// events (for example a restore) and they are resent; ahead of the journal can't be
+// fixed here and is reported.
+func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
+	acked, err := p.Store.AckedThrough(ctx)
+	if err != nil {
+		return err
+	}
+	last, err := p.Store.LastSeq(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case ackedThrough > last:
+		return fmt.Errorf("gateway has acknowledged seq %d but the journal ends at %d; the journal was reset or restored", ackedThrough, last)
+	case ackedThrough != acked:
+		if ackedThrough < acked {
+			p.Log.Warn().Int64("gateway", ackedThrough).Int64("local", acked).Msg("Gateway is behind the journal; resending")
+		}
+		return p.Store.SetAckedThrough(ctx, ackedThrough)
+	}
+	return nil
+}
+
+func (p *Pusher) batch(events []*protocol.Event) *protocol.EventBatch {
+	if events == nil {
+		events = []*protocol.Event{}
+	}
+	return &protocol.EventBatch{HostID: p.HostID, Network: p.Network, CommandAddr: p.CommandAddr, Events: events}
+}
+
+// heartbeat sends an empty batch and adopts the gateway's acknowledgement.
+func (p *Pusher) heartbeat(ctx context.Context) error {
+	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(nil))
+	if err != nil {
+		return err
+	}
+	return p.reconcile(ctx, ackedThrough)
 }
 
 // pushOnce sends the next batch, if any. It reports whether anything was sent.
@@ -185,20 +249,9 @@ func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 	if err != nil || len(events) == 0 {
 		return false, err
 	}
-	ackedThrough, err := p.Client.PostEvents(ctx, &protocol.EventBatch{
-		HostID: p.HostID, Network: p.Network, CommandAddr: p.CommandAddr, Events: events,
-	})
+	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(events))
 	if err != nil {
 		return false, err
 	}
-	last := events[len(events)-1].Seq
-	if ackedThrough > last || ackedThrough < acked {
-		return false, fmt.Errorf("gateway acknowledged %d, outside the batch %d–%d", ackedThrough, acked+1, last)
-	}
-	if ackedThrough > acked {
-		if err = p.Store.SetAckedThrough(ctx, ackedThrough); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
+	return true, p.reconcile(ctx, ackedThrough)
 }

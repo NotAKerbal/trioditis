@@ -17,20 +17,22 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
-// CommandError is a command refused before it ran. The server turns it into a 4xx.
+// CommandError is a command refused before it ran. The server answers with its status and
+// code; the detail is only logged, locally.
 type CommandError struct {
-	Status  int
-	Message string
+	Status int
+	Code   string
+	Detail string
 }
 
-func (e *CommandError) Error() string { return e.Message }
+func (e *CommandError) Error() string { return e.Code + ": " + e.Detail }
 
 func badRequest(format string, args ...any) error {
-	return &CommandError{Status: 400, Message: fmt.Sprintf(format, args...)}
+	return &CommandError{Status: 400, Code: protocol.ErrInvalidCommand, Detail: fmt.Sprintf(format, args...)}
 }
 
-func conflict(format string, args ...any) error {
-	return &CommandError{Status: 409, Message: fmt.Sprintf(format, args...)}
+func conflict(code, format string, args ...any) error {
+	return &CommandError{Status: 409, Code: code, Detail: fmt.Sprintf(format, args...)}
 }
 
 // pendingKind is the kind of Matrix-side event waiting for bridgev2's message status.
@@ -75,39 +77,39 @@ func (c *Connector) resolve(ctx context.Context, cmd *protocol.Command, needPort
 	if t.user, err = c.Bridge.GetExistingUserByMXID(ctx, t.userMXID); err != nil {
 		return nil, err
 	} else if t.user == nil {
-		return nil, conflict("user %s has no logins on this bridge host", cmd.UserID)
+		return nil, conflict(protocol.ErrNotConnected, "the user has no logins on this bridge host")
 	}
 	if cmd.LoginID == "" {
 		return nil, badRequest("loginId is required")
 	}
 	rawLogin, err := c.Store.LookupID(ctx, cmd.LoginID, ids.KindLogin)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, conflict("unknown login")
+		return nil, conflict(protocol.ErrInvalidCommand, "unknown login")
 	} else if err != nil {
 		return nil, err
 	}
 	t.login = c.Bridge.GetCachedUserLoginByID(networkid.UserLoginID(rawLogin))
 	// A person can only act through their own logins.
 	if t.login == nil || t.login.UserMXID != t.userMXID {
-		return nil, conflict("login isn't connected for this user")
+		return nil, conflict(protocol.ErrNotConnected, "login isn't connected for this user")
 	}
 	if !needPortal {
 		return t, nil
 	}
 	rawPortal, err := c.Store.LookupID(ctx, cmd.PortalID, ids.KindPortal)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, conflict("unknown portal")
+		return nil, conflict(protocol.ErrInvalidCommand, "unknown portal")
 	} else if err != nil {
 		return nil, err
 	}
 	key := ids.ParsePortalValue(rawPortal)
 	if key.Receiver != t.login.ID {
-		return nil, conflict("portal doesn't belong to this login")
+		return nil, conflict(protocol.ErrInvalidCommand, "portal doesn't belong to this login")
 	}
 	if t.portal, err = c.Bridge.GetExistingPortalByKey(ctx, key); err != nil {
 		return nil, err
 	} else if t.portal == nil || t.portal.MXID == "" {
-		return nil, conflict("portal doesn't exist")
+		return nil, conflict(protocol.ErrInvalidCommand, "portal doesn't exist")
 	}
 	if t.owner, err = c.owner(ctx, t.portal.MXID); err != nil {
 		return nil, err
@@ -170,7 +172,7 @@ func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, t
 		att := plain.Attachments[0]
 		uri, err := c.Media.Register(att, t.owner.userID, timeout)
 		if err != nil {
-			return nil, evtType, badRequest("invalid attachment: %v", err)
+			return nil, evtType, badRequest("invalid attachment")
 		}
 		content.URL = uri
 		content.FileName = att.Name
@@ -184,7 +186,7 @@ func (c *Connector) openOutbound(cmd *protocol.Command, userID, objectID string,
 		return badRequest("sealed is required")
 	}
 	if err := seal.OpenJSON(cmd.Sealed, c.BridgeKey, seal.Context{Kind: seal.KindOutbound, OwnerUserID: userID, ObjectID: objectID}, out); err != nil {
-		return badRequest("sealed content can't be opened by the bridge key: %v", err)
+		return badRequest("sealed content can't be opened by the bridge key")
 	}
 	return nil
 }
@@ -203,6 +205,19 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command) error
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
+	eventID := ids.OutgoingEventID(cmd.UserID, cmd.ClientMessageID)
+	// A send that waited too long (for example while the gateway was down) doesn't go out:
+	// the person decides again.
+	if cmd.NotAfter != 0 && time.Now().UnixMilli() > cmd.NotAfter {
+		inserted, err := c.Store.InsertOutgoing(ctx, &store.Outgoing{
+			UserID: cmd.UserID, LoginID: t.owner.loginID, ClientMessageID: cmd.ClientMessageID, EventID: string(eventID),
+			Status: protocol.StatusFailed, Error: protocol.ErrExpired,
+		})
+		if err != nil || !inserted {
+			return err
+		}
+		return c.emitSendStatus(ctx, t.owner, cmd.ClientMessageID, protocol.StatusFailed, "", protocol.ErrExpired)
+	}
 	var plain protocol.MessagePlaintext
 	if err = c.openOutbound(cmd, cmd.UserID, cmd.ClientMessageID, &plain); err != nil {
 		return err
@@ -211,7 +226,6 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command) error
 	if err != nil {
 		return err
 	}
-	eventID := ids.OutgoingEventID(cmd.UserID, cmd.ClientMessageID)
 	pending := &pendingCommand{kind: pendingSend, owner: t.owner, clientMessageID: cmd.ClientMessageID, plaintext: &plain}
 	if cmd.Type == protocol.CommandEdit {
 		if cmd.TargetEventID == "" {
@@ -299,7 +313,7 @@ func (c *Connector) ownReaction(ctx context.Context, t *target, target id.EventI
 	if err != nil {
 		return "", err
 	} else if part == nil {
-		return "", conflict("unknown target message")
+		return "", conflict(protocol.ErrInvalidCommand, "unknown target message")
 	}
 	reactions, err := c.Bridge.DB.Reaction.GetAllToMessage(ctx, t.login.ID, part.ID)
 	if err != nil {
@@ -317,7 +331,7 @@ func (c *Connector) ownReaction(ctx context.Context, t *target, target id.EventI
 			return reaction.MXID, nil
 		}
 	}
-	return "", conflict("no reaction with that key from this user")
+	return "", conflict(protocol.ErrInvalidCommand, "no reaction with that key from this user")
 }
 
 func (c *Connector) handleMarkRead(ctx context.Context, cmd *protocol.Command) error {
@@ -416,7 +430,7 @@ func (c *Connector) expirePending(eventID id.EventID) {
 		return
 	}
 	ctx := c.Bridge.BackgroundCtx
-	if err := c.setSendStatus(ctx, pending, protocol.StatusUnknown, "", "no outcome was reported in time"); err != nil {
+	if err := c.setSendStatus(ctx, pending, protocol.StatusUnknown, "", protocol.ErrTimeout); err != nil {
 		c.Log.Err(err).Msg("Failed to mark send unknown")
 	}
 }
@@ -460,11 +474,9 @@ func (c *Connector) handleOutcome(ctx context.Context, pending *pendingCommand, 
 			if ms.IsCertain {
 				status = protocol.StatusFailed
 			}
-			errMsg := ms.Message
-			if errMsg == "" && ms.InternalError != nil {
-				errMsg = ms.InternalError.Error()
-			}
-			return c.setSendStatus(ctx, pending, status, "", errMsg)
+			// The connector's error text stays in the local log; only a code leaves.
+			c.Log.Warn().Err(ms.InternalError).Stringer("event_id", info.SourceEventID).Str("status", status).Msg("Send didn't go through")
+			return c.setSendStatus(ctx, pending, status, "", sendErrorCode(ms))
 		}
 		if err := c.setSendStatus(ctx, pending, protocol.StatusSent, eventID, ""); err != nil {
 			return err
@@ -529,12 +541,30 @@ func (c *Connector) MarkInFlightUnknown(ctx context.Context) error {
 	}
 	for _, out := range inFlight {
 		o := &owner{userID: out.UserID, loginID: out.LoginID}
-		if err = c.Store.SetOutgoingStatus(ctx, out.UserID, out.ClientMessageID, protocol.StatusUnknown, "interrupted by a restart"); err != nil {
+		if err = c.Store.SetOutgoingStatus(ctx, out.UserID, out.ClientMessageID, protocol.StatusUnknown, protocol.ErrInternal); err != nil {
 			return err
 		}
-		if err = c.emitSendStatus(ctx, o, out.ClientMessageID, protocol.StatusUnknown, "", "interrupted by a restart"); err != nil {
+		if err = c.emitSendStatus(ctx, o, out.ClientMessageID, protocol.StatusUnknown, "", protocol.ErrInternal); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sendErrorCode turns bridgev2's message status into a protocol error code.
+func sendErrorCode(ms *bridgev2.MessageStatus) string {
+	switch {
+	case errors.Is(ms.InternalError, bridgev2.ErrNotLoggedIn):
+		return protocol.ErrNotConnected
+	case ms.ErrorReason == event.MessageStatusUnsupported:
+		return protocol.ErrUnsupported
+	case ms.ErrorReason == event.MessageStatusTooOld:
+		return protocol.ErrExpired
+	case ms.ErrorReason == event.MessageStatusNetworkError, ms.ErrorReason == event.MessageStatusBridgeUnavailable:
+		return protocol.ErrNotConnected
+	case ms.IsCertain:
+		return protocol.ErrNetworkRejected
+	default:
+		return protocol.ErrInternal
+	}
 }

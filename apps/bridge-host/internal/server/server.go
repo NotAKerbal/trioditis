@@ -39,10 +39,11 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
-func writeError(w http.ResponseWriter, status int, msg string) {
+// writeError answers with a protocol error code, never free text.
+func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
 func (s *Server) authorized(r *http.Request) bool {
@@ -53,22 +54,22 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, protocol.ErrInvalidCommand)
 		return
 	}
 	var cmd protocol.Command
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&cmd); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidCommand)
 		return
 	} else if cmd.CommandID == "" || cmd.Type == "" {
-		writeError(w, http.StatusBadRequest, "commandId and type are required")
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidCommand)
 		return
 	}
 	ctx := s.Log.With().Str("command_id", cmd.CommandID).Str("command_type", cmd.Type).Logger().WithContext(r.Context())
 	isNew, err := s.Store.ClaimCommand(ctx, cmd.CommandID)
 	if err != nil {
 		s.Log.Err(err).Msg("Failed to record command")
-		writeError(w, http.StatusInternalServerError, "failed to record command")
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal)
 		return
 	} else if !isNew {
 		// Already run. The gateway is retrying a command whose 202 it missed.
@@ -82,11 +83,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		}
 		var cmdErr *connector.CommandError
 		if errors.As(err, &cmdErr) {
-			writeError(w, cmdErr.Status, cmdErr.Message)
+			s.Log.Debug().Str("code", cmdErr.Code).Str("detail", cmdErr.Detail).Msg("Command refused")
+			writeError(w, cmdErr.Status, cmdErr.Code)
 			return
 		}
 		s.Log.Err(err).Msg("Command failed")
-		writeError(w, http.StatusInternalServerError, "command failed")
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)

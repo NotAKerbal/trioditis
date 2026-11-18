@@ -51,7 +51,7 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 	if has, err := c.Keys.Has(ctx, cmd.UserID); err != nil {
 		return err
 	} else if !has {
-		return conflict("the person has no identity key yet, so a login can't start")
+		return conflict(protocol.ErrInvalidCommand, "the person has no identity key yet, so a login can't start")
 	}
 	user, err := c.Bridge.GetUserByMXID(ctx, ids.UserMXID(cmd.UserID))
 	if err != nil {
@@ -61,13 +61,13 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 	if flowID == "" {
 		flows := c.Bridge.Network.GetLoginFlows()
 		if len(flows) == 0 {
-			return conflict("the network has no login flows")
+			return conflict(protocol.ErrUnsupported, "the network has no login flows")
 		}
 		flowID = flows[0].ID
 	}
 	process, err := c.Bridge.Network.CreateLogin(ctx, user, flowID)
 	if err != nil {
-		return badRequest("can't start login: %v", err)
+		return &CommandError{Status: 409, Code: protocol.ErrLoginFailed, Detail: "can't start login: " + err.Error()}
 	}
 	sessionCtx, cancel := context.WithCancel(c.Bridge.BackgroundCtx)
 	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel}
@@ -82,11 +82,11 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command)
 func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command) error {
 	raw, ok := c.logins.Load(cmd.LoginSessionID)
 	if !ok {
-		return conflict("unknown login session")
+		return conflict(protocol.ErrInvalidCommand, "unknown login session")
 	}
 	s := raw.(*loginSession)
 	if s.userID != cmd.UserID {
-		return conflict("login session belongs to someone else")
+		return conflict(protocol.ErrInvalidCommand, "login session belongs to someone else")
 	}
 	var plain protocol.LoginSubmitPlaintext
 	if err := c.openOutbound(cmd, cmd.UserID, cmd.LoginSessionID+"/"+cmd.StepID, &plain); err != nil {
@@ -96,7 +96,7 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 	step, stepID := s.step, s.stepID
 	s.lock.Unlock()
 	if step == nil || stepID != cmd.StepID {
-		return conflict("that login step isn't the current one")
+		return conflict(protocol.ErrInvalidCommand, "that login step isn't the current one")
 	}
 	go func() {
 		var next *bridgev2.LoginStep
@@ -134,7 +134,7 @@ func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command
 	s := raw.(*loginSession)
 	if s.userID != cmd.UserID {
 		c.logins.Store(s.id, s)
-		return conflict("login session belongs to someone else")
+		return conflict(protocol.ErrInvalidCommand, "login session belongs to someone else")
 	}
 	s.finish()
 	return s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepCancelled})
@@ -173,7 +173,13 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	if err != nil {
 		s.c.logins.Delete(s.id)
 		s.finish()
-		if emitErr := s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: err.Error()}); emitErr != nil {
+		// The connector's error stays in the local log; the person sees a code.
+		log.Warn().Err(err).Msg("Login failed")
+		code := protocol.ErrLoginFailed
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = protocol.ErrTimeout
+		}
+		if emitErr := s.emit(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code}); emitErr != nil {
 			log.Err(emitErr).Msg("Failed to report login error")
 		}
 		return

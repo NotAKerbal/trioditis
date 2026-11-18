@@ -292,10 +292,18 @@ func TestConformance(t *testing.T) {
 	aliceLogin := h.login("alice", "alice-fake")
 	const aliceNet = networkid.UserLoginID("alice-fake")
 
-	t.Run("refuses a login for someone with no key", func(t *testing.T) {
-		status, _ := h.command(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "nokey", LoginSessionID: "s-nokey"})
-		if status != http.StatusConflict {
-			t.Fatalf("expected 409, got %d", status)
+	t.Run("registers with an empty batch on startup", func(t *testing.T) {
+		gw.lock.Lock()
+		defer gw.lock.Unlock()
+		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "fake-1" {
+			t.Fatalf("the first batch must be an empty heartbeat from fake-1, got %+v", gw.batches[0])
+		}
+	})
+
+	t.Run("refuses a login for someone with no key, with a code", func(t *testing.T) {
+		status, body := h.command(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "nokey", LoginSessionID: "s-nokey"})
+		if status != http.StatusConflict || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("expected 409 invalid_command, got %d %s", status, body)
 		}
 	})
 
@@ -471,7 +479,10 @@ func TestConformance(t *testing.T) {
 		defer h.net.SetSendMode(fakenet.SendOK)
 		before := len(h.net.Sent())
 		send("cm-ambiguous", "maybe sent")
-		gw.waitFor(t, "unknown", statusOf("cm-ambiguous", protocol.StatusUnknown))
+		unknown := gw.waitFor(t, "unknown", statusOf("cm-ambiguous", protocol.StatusUnknown))
+		if unknown.Error != protocol.ErrInternal {
+			t.Fatalf("expected error code internal, got %q", unknown.Error)
+		}
 		time.Sleep(300 * time.Millisecond)
 		if gw.count(statusOf("cm-ambiguous", protocol.StatusSent)) != 0 || len(h.net.Sent()) != before {
 			t.Fatal("an ambiguous send was retried")
@@ -482,7 +493,47 @@ func TestConformance(t *testing.T) {
 		h.net.SetSendMode(fakenet.SendRefused)
 		defer h.net.SetSendMode(fakenet.SendOK)
 		send("cm-refused", "refused")
-		gw.waitFor(t, "failed", statusOf("cm-refused", protocol.StatusFailed))
+		failed := gw.waitFor(t, "failed", statusOf("cm-refused", protocol.StatusFailed))
+		if failed.Error != protocol.ErrNetworkRejected {
+			t.Fatalf("expected error code network_rejected, got %q", failed.Error)
+		}
+	})
+
+	t.Run("a send past notAfter expires without reaching the network", func(t *testing.T) {
+		before := len(h.net.Sent())
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			ClientMessageID: "cm-expired", NotAfter: time.Now().Add(-time.Second).UnixMilli(),
+			Sealed: h.sealForBridge("alice", "cm-expired", protocol.MessagePlaintext{Type: "text", Body: "too late"}),
+		})
+		expired := gw.waitFor(t, "expired", statusOf("cm-expired", protocol.StatusFailed))
+		if expired.Error != protocol.ErrExpired || len(h.net.Sent()) != before {
+			t.Fatalf("expected an expired failure with nothing sent, got %q", expired.Error)
+		}
+	})
+
+	t.Run("every error is a code and every event is well-formed", func(t *testing.T) {
+		codes := map[string]bool{
+			protocol.ErrNetworkRejected: true, protocol.ErrNotConnected: true, protocol.ErrTimeout: true,
+			protocol.ErrInvalidCommand: true, protocol.ErrExpired: true, protocol.ErrUnsupported: true,
+			protocol.ErrRateLimited: true, protocol.ErrBadCredentials: true, protocol.ErrLoginFailed: true, protocol.ErrInternal: true,
+		}
+		for _, evt := range gw.snapshot() {
+			raw, _ := json.Marshal(evt)
+			var fields map[string]any
+			_ = json.Unmarshal(raw, &fields)
+			_, hasUser := fields["userId"]
+			_, hasLogin := fields["loginId"]
+			if evt.Seq < 1 || evt.Type == "" || !hasUser || !hasLogin || evt.UserID == "" {
+				t.Fatalf("malformed event %s", raw)
+			}
+			if evt.Error != "" && !codes[evt.Error] {
+				t.Fatalf("event %d has a non-code error %q", evt.Seq, evt.Error)
+			}
+			if evt.Step != nil && evt.Step.Error != "" && !codes[evt.Step.Error] {
+				t.Fatalf("login step has a non-code error %q", evt.Step.Error)
+			}
+		}
 	})
 
 	t.Run("commands are idempotent by command ID", func(t *testing.T) {
@@ -506,6 +557,10 @@ func TestConformance(t *testing.T) {
 		})
 		if status != http.StatusConflict {
 			t.Fatalf("expected 409 for someone else's login, got %d", status)
+		}
+		status, body := h.command(protocol.Command{CommandID: nextCommandID(), Type: "nonsense", UserID: "alice"})
+		if status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("expected 400 invalid_command, got %d %s", status, body)
 		}
 	})
 

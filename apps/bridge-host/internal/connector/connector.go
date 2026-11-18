@@ -186,22 +186,26 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 	if !ok {
 		return nil
 	}
-	var mapped string
+	// Only a code leaves the bridge host; the connector's message is logged locally.
+	var mapped, code string
 	switch state.StateEvent {
 	case status.StateConnecting:
 		mapped = "CONNECTING"
 	case status.StateConnected, status.StateBackfilling:
 		mapped = "CONNECTED"
 	case status.StateTransientDisconnect:
-		mapped = "TRANSIENT_DISCONNECT"
+		mapped, code = "TRANSIENT_DISCONNECT", protocol.ErrNotConnected
 	case status.StateBadCredentials:
-		mapped = "BAD_CREDENTIALS"
+		mapped, code = "BAD_CREDENTIALS", protocol.ErrBadCredentials
 	case status.StateUnknownError:
-		mapped = "UNKNOWN_ERROR"
+		mapped, code = "UNKNOWN_ERROR", protocol.ErrInternal
 	case status.StateLoggedOut:
 		mapped = "LOGGED_OUT"
 	default:
 		return nil
+	}
+	if code != "" {
+		c.Log.Warn().Str("state", mapped).Str("error", string(state.Error)).Msg("Login isn't connected")
 	}
 	loginID, err := c.loginOpaque(ctx, networkid.UserLoginID(state.RemoteID))
 	if err != nil {
@@ -209,7 +213,7 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 	}
 	return c.emit(ctx, &protocol.Event{
 		Type: protocol.EventLoginState, UserID: userID, LoginID: loginID,
-		State: mapped, Error: string(state.Error), Message: state.Message,
+		State: mapped, Error: code,
 	})
 }
 
