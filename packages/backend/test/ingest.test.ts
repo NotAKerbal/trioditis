@@ -373,4 +373,50 @@ describe('ingest', () => {
     expect(await ingest(t, [original, edit])).toEqual({ ackedThrough: 2 })
     expect((await messages(t))[0]).toMatchObject({ editEventId: 'edit1' })
   })
+
+  it('stops a batch that would touch too much early, acknowledging what it applied', async () => {
+    seq = 0
+    const t = setup()
+    const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+    const originals = Array.from({ length: 30 }, (_, i) => message(`m${i}`, { sealed: big(`m${i}`) }))
+    for (const original of originals) await ingest(t, [original])
+    const edits = originals.map((original, i) =>
+      event('edit', {
+        portalId: 'portal_1',
+        eventId: `edit${i}`,
+        targetEventId: original.eventId,
+        networkTs: 9_000,
+        sender: { ghostId: 'ghost_1' },
+        sealed: sealed(`e${i}`),
+      }),
+    )
+    const first = await ingest(t, edits)
+    expect('ackedThrough' in first && first.ackedThrough).toBeGreaterThan(30)
+    expect('ackedThrough' in first && first.ackedThrough).toBeLessThan(60)
+    // Sending the rest, as the gateway does, gets through all of them.
+    let acked = (first as { ackedThrough: number }).ackedThrough
+    for (let calls = 0; acked < 60 && calls < 30; calls++) {
+      const next = await ingest(
+        t,
+        edits.filter((edit) => edit.seq > acked),
+      )
+      acked = (next as { ackedThrough: number }).ackedThrough
+    }
+    expect(acked).toBe(60)
+    expect((await messages(t)).every((row) => row.editEventId)).toBe(true)
+  })
+
+  it('quarantines a login step or sender ID too big to store', async () => {
+    seq = 0
+    const t = setup()
+    const result = await ingest(t, [
+      message('e1', { sender: { ghostId: 'g'.repeat(300) } }),
+      event('loginStep', {
+        loginSessionId: 'x',
+        step: { stepId: 's', type: 'userInput', instructions: '雪'.repeat(30_000) },
+      }),
+    ])
+    expect(result).toEqual({ ackedThrough: 2 })
+    expect((await quarantined(t)).map((row) => row.reason)).toEqual(['too_large', 'unknown_login_session'])
+  })
 })

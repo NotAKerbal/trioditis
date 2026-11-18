@@ -49,6 +49,10 @@ and command payloads only go to configured addresses, and redirects are refused.
 - The bridge host resends from `ackedThrough + 1` until acknowledged. Delivery is
   at-least-once; the gateway and Convex deduplicate on `eventId` (and on `seq` per
   `hostId`).
+- `ackedThrough` can be less than the last event sent: the backend stops early to stay inside
+  its transaction limits. Resend from `ackedThrough + 1`.
+- A batch is at most 100 events and **8 MiB** of JSON; the gateway refuses bodies over 32 MiB.
+  A single event over 1 MiB is quarantined without being applied.
 - A response of `409 {"expectedSeq": n}` tells the bridge host to resend from `n`;
   everything before `n` is committed.
 - **Heartbeat:** on startup and every 30 seconds the bridge host posts an empty batch
@@ -96,6 +100,7 @@ Every event carries `seq`, `type`, `userId`, `loginId`, and `at` (bridge host ti
   (a login moves to another host only through a newer `CONNECTED` report). A login's steps
   are accepted only from the host its start command was handed to.
 - **Sizes:** a sealed object in an event may be at most 256 KiB; files travel separately.
+  A login step may be at most 64 KiB (UTF-8), and a `hostId` at most 64 characters.
   Clients may seal at most 64 KiB into a send or login input.
 - **Routing:** a command for a connected login goes to the host that reported that login's
   state; a new login goes to the network's most recently seen host. Only hosts in the

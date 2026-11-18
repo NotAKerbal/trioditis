@@ -159,6 +159,23 @@ describe('events', () => {
     })
   })
 
+  it('sends the rest of a chunk when the backend stops partway', async () => {
+    const backend = fakeBackend()
+    backend.ingest = vi.fn(async (args) => {
+      const events = args.events as { seq: number }[]
+      backend.ingested.push(events)
+      // Applies at most two per call, as a backend near its transaction budget would.
+      return { ackedThrough: events[Math.min(1, events.length - 1)]!.seq }
+    })
+    const result = await post(await serve(backend), batch([event(1), event(2), event(3), event(4), event(5)]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 5 } })
+    expect(backend.ingested.map((part) => part.map((e) => (e as { seq: number }).seq))).toEqual([
+      [1, 2, 3, 4, 5],
+      [3, 4, 5],
+      [5],
+    ])
+  })
+
   it('answers an empty batch with where Convex is, as a heartbeat', async () => {
     const backend = fakeBackend({ ingest: vi.fn(async () => ({ ackedThrough: 41 })) })
     expect(await post(await serve(backend), batch([]))).toEqual({ status: 200, body: { ackedThrough: 41 } })
