@@ -6,11 +6,16 @@
 
 Trioditis is an open-source, self-hostable alternative to Beeper: one polished app for
 WhatsApp, Signal, Google Messages, Telegram, Discord, Instagram, and more, running on
-hardware you own. Setup is one command.
+a server you own. Host it yourself and invite the people you message with; stored
+messages are sealed to each person's own keys. Setup is one command.
 
 **Status:** planning. See [docs/PLAN.md](docs/PLAN.md) for the product and
 implementation plan.
 
 ## License
 
-[AGPL-3.0](LICENSE)
+Trioditis is licensed under the [AGPL-3.0](LICENSE).
+
+It depends on the self-hosted [Convex](https://github.com/get-convex/convex-backend)
+backend, which is source-available under FSL-1.1-Apache-2.0 (converting to Apache-2.0
+after two years) and runs unmodified as a separate service.
