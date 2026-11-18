@@ -101,25 +101,30 @@ export async function loadIdentity(userId: string): Promise<{ kid: string; keyPa
 //   checks the count it was given (its token) in the same transaction as its write. So work begun
 //   before a sign-out never lands after it.
 // - Signing out also notes, in that transaction, the session it's ending (lib/sign-out.ts), and
-//   then ends that session only. A save asks the server which session it's in first, and writes
-//   only for another one: so once a sign-out has begun, no save for that session lands, in any
-//   tab, ever. If the sign-out fails, that session keeps no key here; signing in again, a new
-//   session, can.
+//   only then ends that session. A save asks the server which session it's in first, and writes
+//   only for one never noted: so once a sign-out has begun, no save for that session lands, in
+//   any tab, ever. If the sign-out fails, that session keeps no key here; signing in again, a new
+//   session, can. Each session is noted for good, so one sign-out never undoes another's.
 // - After every forget, every tab hears that saves were fenced (onFence), so a tab still signed
 //   in takes a new token for new work, and reads its key afresh.
 const forgetsKey = (userId: string) => `${userId}\u0000forgets`
 
 interface Forgets {
   count: number
-  /** The session last signed out of, or tried to be. */
-  endingSession?: string
+  /** Every session signed out of here, or tried to be, the latest last. */
+  endedSessions: string[]
 }
+
+/** How many sessions stay noted: far more than anyone signs out of on one device in a session's life. */
+const NOTED_SESSIONS = 200
 
 function readForgets(store: IDBObjectStore, userId: string, then: (forgets: Forgets) => void) {
   const request = store.get(forgetsKey(userId))
   request.onsuccess = () => {
-    const stored = request.result as Partial<Forgets> | undefined
-    then({ count: stored?.count ?? 0, endingSession: stored?.endingSession })
+    const stored = request.result as (Partial<Forgets> & { endingSession?: string }) | undefined
+    // Before every session was kept, only the latest was, as endingSession.
+    const ended = stored?.endedSessions ?? (stored?.endingSession ? [stored.endingSession] : [])
+    then({ count: stored?.count ?? 0, endedSessions: ended })
   }
 }
 
@@ -198,7 +203,7 @@ export async function storeIdentity(
   if (session === null) throw new KeepRefused('signedOut')
   const refused = await inTransaction<KeepRefusal | null>('readwrite', (store, answer) =>
     readForgets(store, userId, (forgets) => {
-      const why = forgets.count !== token ? 'fenced' : forgets.endingSession === session ? 'signingOut' : null
+      const why = forgets.count !== token ? 'fenced' : forgets.endedSessions.includes(session) ? 'signingOut' : null
       answer(why)
       if (!why) store.put(record)
     }),
@@ -220,10 +225,9 @@ export async function forgetIdentity(
   try {
     await inTransaction<void>('readwrite', (store) =>
       readForgets(store, userId, (forgets) => {
-        writeForgets(store, userId, {
-          count: forgets.count + 1,
-          endingSession: endingSession ?? forgets.endingSession,
-        })
+        const ended = forgets.endedSessions.filter((id) => id !== endingSession)
+        if (endingSession) ended.push(endingSession)
+        writeForgets(store, userId, { count: forgets.count + 1, endedSessions: ended.slice(-NOTED_SESSIONS) })
         if (onlyKid === null) return
         if (onlyKid === undefined) return void store.delete(userId)
         const stored = store.get(userId)

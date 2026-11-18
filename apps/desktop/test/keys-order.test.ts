@@ -1,5 +1,5 @@
 import { generateKeyPair, keyId, ready } from '@trioditis/crypto'
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // A small in-memory IndexedDB: one store keyed by userId. Each request's change lands on a later
 // tick, and a transaction completes once no request is left in it (those its callbacks start
@@ -70,24 +70,50 @@ function fakeIndexedDB() {
   }
 }
 
-// The auth server, as lib/sign-out.ts sees it: who's signed in (the browser's cookie), and how
-// ending a session goes.
-type SignedIn = { user: { id: string }; session: { id: string; token: string } }
-const auth = vi.hoisted(() => ({
-  session: null as SignedIn | null,
-  sessionFails: false,
-  revoked: [] as string[],
-  revoke: (_token: string): Promise<{ error: { status?: number } | null }> => Promise.resolve({ error: null }),
-}))
+// The auth server as Better Auth 1.7 runs it, and this browser's cookie, shared by every tab.
+// revokeSession ends the session with the given token only if it's the cookie user's, clears the
+// cookie only if it's that session, and answers 401 when the cookie's own session is gone.
+const server = vi.hoisted(() => {
+  const sessions = new Map<string, { id: string; userId: string }>()
+  let n = 0
+  const state = {
+    sessions,
+    cookie: null as string | null,
+    reachable: true,
+    /** Forced error answer for revokeSession, as a 429 or 503. */
+    status: null as number | null,
+    /** Runs as each revokeSession request goes, before the server acts on it. */
+    onRequest: async () => {},
+    revoked: [] as string[],
+    signIn(userId: string) {
+      const token = `token-${++n}`
+      sessions.set(token, { id: `session-${n}`, userId })
+      state.cookie = token
+      return { id: `session-${n}`, token }
+    },
+  }
+  return state
+})
 vi.mock('../src/lib/auth-client.ts', () => ({
   authClient: {
     getSession: async () => {
-      if (auth.sessionFails) throw new TypeError('Failed to fetch')
-      return { data: auth.session, error: null }
+      if (!server.reachable) throw new TypeError('Failed to fetch')
+      const mine = server.cookie ? server.sessions.get(server.cookie) : undefined
+      return {
+        data: mine ? { user: { id: mine.userId }, session: { id: mine.id, token: server.cookie } } : null,
+        error: null,
+      }
     },
-    revokeSession: ({ token }: { token: string }) => {
-      auth.revoked.push(token)
-      return auth.revoke(token)
+    revokeSession: async ({ token }: { token: string }) => {
+      server.revoked.push(token)
+      await server.onRequest()
+      if (!server.reachable) throw new TypeError('Failed to fetch')
+      if (server.status) return { data: null, error: { status: server.status } }
+      const me = server.cookie ? server.sessions.get(server.cookie) : undefined
+      if (!me) return { data: null, error: { status: 401 } }
+      if (server.sessions.get(token)?.userId === me.userId) server.sessions.delete(token)
+      if (token === server.cookie) server.cookie = null
+      return { data: { status: true }, error: null }
     },
     signOut: () => Promise.reject(new Error('signing out ends the session it noted, not the cookie’s')),
   },
@@ -217,12 +243,13 @@ describe('keeping and forgetting the key on this device', () => {
 describe('signing out, as the key on this device sees it', () => {
   beforeAll(ready)
 
-  const signIn = (userId: string, n = 1): SignedIn => {
-    auth.session = { user: { id: userId }, session: { id: `${userId}-session-${n}`, token: `${userId}-token-${n}` } }
-    return auth.session
-  }
+  beforeEach(() => {
+    Object.assign(server, { reachable: true, status: null, onRequest: async () => {}, revoked: [] })
+    db.failing = 0
+  })
+
   async function keptHere(userId: string) {
-    const { session } = signIn(userId)
+    const session = server.signIn(userId)
     const keyPair = generateKeyPair()
     const kid = keyId(keyPair.publicKey)
     await storeIdentity(userId, kid, keyPair, await saveToken(userId), inSession(session.id))
@@ -230,100 +257,134 @@ describe('signing out, as the key on this device sees it', () => {
   }
   const saveIn = (tab: typeof keys, userId: string, kept: Awaited<ReturnType<typeof keptHere>>, session: string) =>
     tab.saveToken(userId).then((token) => tab.storeIdentity(userId, kept.kid, kept.keyPair, token, inSession(session)))
+  const held = () => {
+    const gate = later<void>()
+    server.onRequest = () => gate.promise
+    return gate
+  }
 
   it('keeps no tab’s save while the server is still answering, nor after it ends the session', async () => {
     const kept = await keptHere('v1')
-    const answer = later<{ error: null }>()
-    auth.revoke = () => answer.promise
+    const gate = held()
     const leaving = signOut('v1')
-    // The key goes, and every tab hears of it, before the server answers.
+    // The key goes, and every tab hears of it, before the request goes.
     await new Promise<void>((resolve) => otherTab.onFence('v1', resolve))
     expect(await loadIdentity('v1')).toBeNull()
     // Another tab, taking a new token and still in the session, can't put it back meanwhile.
     await expect(saveIn(otherTab, 'v1', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
-    answer.settle({ error: null })
-    expect(await leaving).toBe(true)
-    expect(auth.revoked.at(-1)).toBe(kept.session.token)
+    gate.settle()
+    expect(await leaving).toBeNull()
+    expect(server.sessions.has(kept.session.token)).toBe(false)
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
     await expect(saveIn(otherTab, 'v1', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
     expect(await loadIdentity('v1')).toBeNull()
   })
 
-  it('ends the session it fenced, though another tab signed in again before the request went', async () => {
+  it('ends the session it fenced, though they signed in again in another tab as the request went', async () => {
     const kept = await keptHere('v2')
-    const answer = later<{ error: null }>()
-    auth.revoke = () => answer.promise
-    const leaving = signOut('v2')
-    await new Promise<void>((resolve) => onFence('v2', resolve))
-    // The cookie now holds a new session: it isn't the one ended, so it may keep the key.
-    const again = signIn('v2', 2)
-    answer.settle({ error: null })
-    expect(await leaving).toBe(true)
-    expect(auth.revoked.at(-1)).toBe(kept.session.token)
-    await saveIn(otherTab, 'v2', kept, again.session.id)
+    let again!: { id: string; token: string }
+    server.onRequest = async () => void (again = server.signIn('v2'))
+    expect(await signOut('v2')).toBeNull()
+    expect(server.sessions.has(kept.session.token)).toBe(false)
+    // The new session lives on, and may keep the key.
+    expect(server.sessions.has(again.token)).toBe(true)
+    await saveIn(otherTab, 'v2', kept, again.id)
     expect((await loadIdentity('v2'))?.kid).toBe(kept.kid)
   })
 
-  it('keeps saves for the session stopped whenever signing out didn’t go through, in every tab', async () => {
-    // Two tabs sign out at once: one is turned away (a 429, say), the other hasn't heard back.
-    const kept = await keptHere('v3')
-    const pending = later<{ error: null }>()
-    const answers = [pending.promise, Promise.resolve({ error: { status: 429 } })]
-    auth.revoke = () => answers.shift()!
-    const first = signOut('v3')
-    await new Promise<void>((resolve) => onFence('v3', resolve))
-    expect(await signOut('v3')).toBe(false)
-    await expect(saveIn(otherTab, 'v3', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
-    pending.settle({ error: null })
-    expect(await first).toBe(true)
-    // Timed out or failed on the server's side: still stopped.
-    for (const revoke of [async () => ({ error: { status: 503 } }), () => Promise.reject(new Error('timed out'))]) {
-      auth.revoke = revoke
-      expect(await signOut('v3')).toBe(false)
-      await expect(saveIn(keys, 'v3', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+  it('never lets one sign-out undo another’s fence, across two sessions', async () => {
+    const keyPair = generateKeyPair()
+    const kid = keyId(keyPair.publicKey)
+    // S1's sign-out, then S2's (signed in again since), then S1's tried again.
+    await forgetIdentity('v3', { endingSession: 'S1' })
+    await forgetIdentity('v3', { endingSession: 'S2' })
+    await forgetIdentity('v3', { endingSession: 'S1' })
+    // A save that took its token after all three, and checked S2 is still signed in.
+    const token = await otherTab.saveToken('v3')
+    const checked = later<string>()
+    const save = otherTab.storeIdentity('v3', kid, keyPair, token, () => checked.promise)
+    checked.settle('S2')
+    await expect(save).rejects.toEqual(refusal('signingOut'))
+    for (const session of ['S1', 'S2']) {
+      await expect(storeIdentity('v3', kid, keyPair, await saveToken('v3'), inSession(session))).rejects.toEqual(
+        refusal('signingOut'),
+      )
     }
+  })
+
+  it('keeps saves for the session stopped whenever signing out didn’t go through, in every tab', async () => {
+    const kept = await keptHere('v4')
+    for (const fail of [() => (server.status = 429), () => (server.status = 503), () => (server.reachable = false)]) {
+      Object.assign(server, { status: null, reachable: true })
+      // Unreachable only once the request goes: it may or may not have arrived.
+      server.onRequest = async () => void fail()
+      expect(await signOut('v4')).toMatch(/didn’t go through/)
+      server.reachable = true
+      await expect(saveIn(otherTab, 'v4', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+    }
+    expect(server.sessions.has(kept.session.token)).toBe(true)
     // Signing in again starts a session that keeps the key.
-    await saveIn(keys, 'v3', kept, signIn('v3', 2).session.id)
-    expect((await loadIdentity('v3'))?.kid).toBe(kept.kid)
+    await saveIn(keys, 'v4', kept, server.signIn('v4').id)
+    expect((await loadIdentity('v4'))?.kid).toBe(kept.kid)
+  })
+
+  it('goes through when the session had already ended elsewhere as the request went (a 401)', async () => {
+    const kept = await keptHere('v5')
+    server.onRequest = async () => void server.sessions.delete(kept.session.token)
+    expect(await signOut('v5')).toBeNull()
+    expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
   })
 
   it('changes nothing here when the server can’t be reached to start with', async () => {
-    const { kid } = await keptHere('v4')
-    const token = await saveToken('v4')
-    auth.sessionFails = true
-    try {
-      expect(await signOut('v4')).toBe(false)
-    } finally {
-      auth.sessionFails = false
-    }
-    expect((await loadIdentity('v4'))?.kid).toBe(kid)
-    expect(await saveToken('v4')).toBe(token)
+    const { kid } = await keptHere('v6')
+    const token = await saveToken('v6')
+    server.reachable = false
+    expect(await signOut('v6')).toMatch(/didn’t go through/)
+    expect((await loadIdentity('v6'))?.kid).toBe(kid)
+    expect(await saveToken('v6')).toBe(token)
+    expect(server.revoked).toEqual([])
   })
 
-  it('ends no session when they aren’t signed in here any more, and just forgets the key', async () => {
-    await keptHere('v5')
-    signIn('someone-else')
-    const before = auth.revoked.length
-    expect(await signOut('v5')).toBe(true)
-    expect(auth.revoked.length).toBe(before)
-    expect(await loadIdentity('v5')).toBeNull()
-    expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
+  it('ends no one else’s session when someone else is signed in here now, and just forgets the key', async () => {
+    // A stale screen for v7, while another tab has signed in as someone else.
+    await keptHere('v7')
+    const other = server.signIn('someone-else')
+    expect(await signOut('v7')).toBeNull()
+    expect(server.revoked).toEqual([])
+    expect(server.sessions.has(other.token)).toBe(true)
+    expect(await loadIdentity('v7')).toBeNull()
   })
 
   it('tries forgetting again when storage fails once, so no save slips in', async () => {
-    const kept = await keptHere('v6')
-    auth.revoke = async () => ({ error: null })
+    const kept = await keptHere('v8')
     db.failing = 1
-    expect(await signOut('v6')).toBe(true)
-    expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
-    expect(await loadIdentity('v6')).toBeNull()
-    await expect(saveIn(otherTab, 'v6', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
+    expect(await signOut('v8')).toBeNull()
+    expect(await loadIdentity('v8')).toBeNull()
+    await expect(saveIn(otherTab, 'v8', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
   })
 
-  it('says so on the sign-in page when the key couldn’t be forgotten', async () => {
-    await keptHere('v7')
+  it('doesn’t end the session when the sign-out couldn’t be recorded here, so no save lands after', async () => {
+    const kept = await keptHere('v9')
+    // A save in another tab has checked its session and is on its way to storage.
+    const token = await otherTab.saveToken('v9')
+    const checked = later<string>()
+    const save = otherTab.storeIdentity('v9', kept.kid, kept.keyPair, token, () => checked.promise)
     db.failing = 3
-    expect(await signOut('v7')).toBe(true)
+    expect(await signOut('v9')).toMatch(/couldn’t record the sign-out/)
+    expect(server.revoked).toEqual([])
+    expect(server.sessions.has(kept.session.token)).toBe(true)
+    checked.settle(kept.session.id)
+    // It lands while still signed in, and a sign-out that works then forgets it.
+    await save
+    expect(await signOut('v9')).toBeNull()
+    expect(await loadIdentity('v9')).toBeNull()
+  })
+
+  it('says so on the sign-in page when the key couldn’t be forgotten, with no session left to end', async () => {
+    await keptHere('v10')
+    server.cookie = null
+    db.failing = 3
+    expect(await signOut('v10')).toBeNull()
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in?key=unconfirmed')
   })
 

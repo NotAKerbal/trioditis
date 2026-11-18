@@ -14,7 +14,7 @@ import { toast } from '@trioditis/ui/toast'
 import { KeyRound, LogOut, Plus, Settings, Users } from 'lucide-react'
 import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
-import { SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
+import { signOut } from '~/lib/sign-out.ts'
 import { useSession } from '~/lib/session.tsx'
 
 const STATUS_TEXT = {
@@ -82,9 +82,7 @@ export function BottomBar({
             <KeyRound /> Keys and devices
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onSelect={() => void signOut(session.userId).then((ended) => ended || toast(SIGN_OUT_FAILED))}
-          >
+          <DropdownMenuItem onSelect={() => void signOut(session.userId).then((failure) => failure && toast(failure))}>
             <LogOut /> Sign out of this device
           </DropdownMenuItem>
         </DropdownMenuContent>

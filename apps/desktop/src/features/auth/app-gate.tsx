@@ -26,7 +26,7 @@ import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
-import { currentSessionId, SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
+import { currentSessionId, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -70,6 +70,8 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
 
 function MemberGate({ children }: { children: ReactNode }) {
   const me = useQuery(convexQuery(api.members.me, {}))
+  // Who this screen is for, to sign out of their session only, whoever another tab has signed in.
+  const shown = authClient.useSession().data?.user.id
   if (me.isPending) return <Splash />
   if (!me.data) {
     return (
@@ -77,7 +79,7 @@ function MemberGate({ children }: { children: ReactNode }) {
         title="This account isn’t on this server"
         description="It may have been removed. Ask the server’s admin for an invitation."
       >
-        <SignOutButton />
+        <SignOutButton userId={shown} />
       </AuthCard>
     )
   }
@@ -142,6 +144,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
   // be the only copy). From then on no tab keeps a key for this session (lib/keys.ts).
   // If it fails, going back reloads the page, to start again from what's really there.
   const [leaving, setLeaving] = useState<'running' | 'failed' | null>(null)
+  const leavingFailure = useRef('')
   const leavingRef = useRef(false)
   const backup = useRef<{
     call: Promise<unknown> | null
@@ -165,13 +168,19 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
       keyKid !== null && (backup.current.savedKid === keyKid || (server?.state === 'ready' && server.kid === keyKid))
     // Only that key is forgotten, and only if it's the one here (checked as it's removed); unsure,
     // none is, but saves still under way in any tab are stopped all the same.
-    if (await signOut(userId, { onlyKid: backedUp ? keyKid : null })) return
+    const failure = await signOut(userId, { onlyKid: backedUp ? keyKid : null })
+    if (failure === null) return
+    leavingFailure.current = failure
     setLeaving('failed')
   }
   const isLeaving = () => leavingRef.current
   if (leaving) {
     return (
-      <SignOutProgress state={leaving} onRetry={() => void signOutHere(leavingFor.current)}>
+      <SignOutProgress
+        state={leaving}
+        failure={leavingFailure.current}
+        onRetry={() => void signOutHere(leavingFor.current)}
+      >
         {backup.current.lost ? <RecoveryLostNote /> : null}
         {backup.current.untracked && !backup.current.lost ? <RecoveryUntrackedNote /> : null}
       </SignOutProgress>
@@ -234,7 +243,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
         : null
   if (setupFor) {
     // Setting up a key keeps it on this device, which an insecure page can't do.
-    if (!canKeepKeys()) return <InsecurePage />
+    if (!canKeepKeys()) return <InsecurePage userId={userId} />
     return setupScreen(setupFor)
   }
   if (state === 'needsBackup') {
@@ -273,7 +282,7 @@ function KeyGate({ userId, role, children }: { userId: string; role: 'admin' | '
     return <SessionContext value={session}>{children}</SessionContext>
   }
   // A key already here was opened with WebCrypto, so only unlocking needs the check.
-  if (!canKeepKeys()) return <InsecurePage />
+  if (!canKeepKeys()) return <InsecurePage userId={userId} />
   return (
     <Unlock
       userId={userId}
@@ -303,7 +312,7 @@ interface SetupFor {
  * WebCrypto, which encrypts this device's copy of the key, from such pages, so without it the key
  * would have nowhere safe to stay.
  */
-function InsecurePage() {
+function InsecurePage({ userId }: { userId: string }) {
   return (
     <AuthCard
       title="This page can’t keep your key"
@@ -312,7 +321,7 @@ function InsecurePage() {
       <p className="mb-4 text-sm text-muted-foreground">
         This page is <span className="font-mono break-all">{window.location.origin}</span>.
       </p>
-      <SignOutButton />
+      <SignOutButton userId={userId} />
     </AuthCard>
   )
 }
@@ -893,10 +902,13 @@ const settled = (step: Promise<unknown> | null) =>
  */
 function SignOutProgress({
   state,
+  failure,
   onRetry,
   children,
 }: {
   state: 'running' | 'failed'
+  /** What went wrong, once it has. */
+  failure: string
   onRetry: () => void
   children?: ReactNode
 }) {
@@ -910,7 +922,7 @@ function SignOutProgress({
     )
   }
   return (
-    <AuthCard title="Couldn’t sign out" description={SIGN_OUT_FAILED}>
+    <AuthCard title="Couldn’t sign out" description={failure}>
       {children}
       <Button variant="primary" size="lg" block className="mb-2" onClick={onRetry}>
         Try again
@@ -1034,24 +1046,27 @@ function RecoveryUntrackedNote() {
   )
 }
 
-export function SignOutButton({ userId, label = 'Sign out' }: { userId?: string; label?: string }) {
+/** Signs `userId` out of this device (lib/sign-out.ts); until it's known who's shown, it waits. */
+export function SignOutButton({ userId, label = 'Sign out' }: { userId: string | undefined; label?: string }) {
   const [busy, setBusy] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [failure, setFailure] = useState<string | null>(null)
   return (
     <>
-      {failed ? (
+      {failure ? (
         <p role="alert" className="mb-2 text-sm text-danger">
-          {SIGN_OUT_FAILED}
+          {failure}
         </p>
       ) : null}
       <Button
         block
-        loading={busy}
+        loading={busy || !userId}
         onClick={async () => {
+          if (!userId) return
           setBusy(true)
-          setFailed(false)
-          if (await signOut(userId)) return
-          setFailed(true)
+          setFailure(null)
+          const failed = await signOut(userId)
+          if (failed === null) return
+          setFailure(failed)
           setBusy(false)
         }}
       >
