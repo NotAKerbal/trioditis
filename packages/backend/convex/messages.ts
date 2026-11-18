@@ -120,7 +120,12 @@ export const reactions = query({
         .query('reactionCleanups')
         .withIndex('by_message', (q) => q.eq('messageId', messageId))
         .first()
-      if (deleted) continue
+      if (deleted) {
+        // A deleted message in this chat is left out; one in another chat isn't this chat's,
+        // so it gets an empty list like any other ID that isn't a message here.
+        if (deleted.chatId !== undefined && deleted.chatId !== chatId) out[messageId] = []
+        continue
+      }
       const rows = await ctx.db
         .query('reactions')
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
