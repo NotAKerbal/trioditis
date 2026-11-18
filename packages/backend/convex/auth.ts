@@ -52,13 +52,17 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
     databaseHooks: {
       user: {
         create: {
-          // Runs for every new account, however it is created.
+          // Runs for every new account, however it is created. Sign-up runs in an HTTP
+          // action, which can run mutations; nothing else creates accounts.
           before: async (user, endpoint) => {
             const token = endpoint?.headers?.get(INVITE_HEADER)
-            const decision = await ctx.runQuery(internal.members.mayCreateAccount, {
-              email: user.email,
-              tokenHash: token ? await sha256Hex(token) : undefined,
-            })
+            const decision =
+              'runMutation' in ctx
+                ? await ctx.runMutation(internal.members.reserveAdmission, {
+                    email: user.email,
+                    tokenHash: token ? await sha256Hex(token) : undefined,
+                  })
+                : { allowed: false }
             if (!decision.allowed) {
               throw new APIError('FORBIDDEN', {
                 code: 'INVITE_REQUIRED',
@@ -66,8 +70,6 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
               })
             }
           },
-          // Sign-up runs in an HTTP action, which can run mutations; a query context never
-          // creates accounts.
           after: async (user, endpoint) => {
             if (!('runMutation' in ctx)) return
             const token = endpoint?.headers?.get(INVITE_HEADER)

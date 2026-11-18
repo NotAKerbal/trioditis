@@ -57,7 +57,19 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`.
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`. The object ID
+for each:
+
+| Object                              | Kind       | Object ID                   |
+| ----------------------------------- | ---------- | --------------------------- |
+| A message                           | `message`  | its `eventId`               |
+| An edit                             | `message`  | the edit's own `eventId`    |
+| The person's pending copy of a send | `message`  | its `clientMessageId`       |
+| Chat metadata                       | `chat`     | `portalId`                  |
+| A contact                           | `contact`  | `ghostId`                   |
+| A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
+| Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
+| A file                              | `media`    | its `mediaId`               |
 
 ## Recipients
 
@@ -105,5 +117,25 @@ file.
 }
 ```
 
+Chat and contact metadata carry their avatar as an attachment (with its key and nonce)
+in `avatar`, for the same reason.
+
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.
+
+## Bridge key exposure
+
+Anything sealed to the bridge key (outbound sends, login input) can be opened by whoever
+holds `BRIDGE_PRIVATE_KEY`. So those payloads are kept only until the bridge host has them:
+the backend deletes its copy as soon as the bridge host accepts the command (or it is
+rejected or expires), and the bridge host keeps only IDs and status once it has run it. A
+backup therefore holds only commands in flight at that moment. Rotating the bridge key is a
+later addition.
+
+## What else is stored in plaintext
+
+The network connectors keep their own state in the bridge host's database, and some of it
+is plaintext the operator could read with database access: bridgev2's portal and ghost
+tables (chat names, contact names, phone numbers), and WhatsApp's history-sync table (raw
+history until it is imported). That database must live on an encrypted volume; pruning or
+sealing those columns is an open question in docs/PLAN.md.

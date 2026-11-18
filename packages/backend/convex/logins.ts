@@ -2,6 +2,7 @@ import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
 import { audit } from './lib/audit'
+import { isEnvelope } from './lib/envelope'
 import { enabledNetworks } from './lib/networks'
 import { envelope, network } from './validators'
 
@@ -75,10 +76,14 @@ export const submit = mutation({
     if (session.state !== 'active' || session.step?.stepId !== args.stepId) {
       throw new ConvexError('That step of the login is over. Start again if it didn’t finish.')
     }
+    if (!isEnvelope(args.sealed)) throw new ConvexError('That input isn’t sealed.')
     await ctx.db.insert('outbox', {
       userId: member.userId,
       network: session.network,
-      payload: { type: 'loginSubmit', loginSessionId: args.loginSessionId, stepId: args.stepId, sealed: args.sealed },
+      payload: { type: 'loginSubmit', loginSessionId: args.loginSessionId, stepId: args.stepId },
+      sealedPayload: args.sealed,
+      // The login runs inside the bridge host that started it.
+      ...(session.hostId ? { hostId: session.hostId } : {}),
       state: 'queued',
       attempts: 0,
       createdAt: Date.now(),
@@ -99,6 +104,7 @@ export const cancel = mutation({
       userId: member.userId,
       network: session.network,
       payload: { type: 'loginCancel', loginSessionId },
+      ...(session.hostId ? { hostId: session.hostId } : {}),
       state: 'queued',
       attempts: 0,
       createdAt: Date.now(),

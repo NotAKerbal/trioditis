@@ -6,6 +6,24 @@ import type { ChatKind, Network } from './index.ts'
 
 export const PROTOCOL_VERSION = 1
 
+/**
+ * Why something failed. Errors are always one of these codes, never free text: a connector's
+ * message can quote what the person typed. See bridge-protocol.md, Errors.
+ */
+export const ERROR_CODES = [
+  'network_rejected',
+  'not_connected',
+  'timeout',
+  'invalid_command',
+  'expired',
+  'unsupported',
+  'rate_limited',
+  'bad_credentials',
+  'login_failed',
+  'internal',
+] as const
+export type ErrorCode = (typeof ERROR_CODES)[number]
+
 export type Sender = { self: true } | { ghostId: string }
 
 interface EventBase {
@@ -109,8 +127,7 @@ export type LoginState = (typeof LOGIN_STATES)[number]
 export interface LoginStateEvent extends EventBase {
   type: 'loginState'
   state: LoginState
-  error?: string
-  message?: string
+  error?: ErrorCode
 }
 
 export interface LoginStep {
@@ -121,7 +138,7 @@ export interface LoginStep {
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
   cookies?: { url: string; userAgent?: string; fields: { id: string; required: boolean }[] }
   loginId?: string
-  error?: string
+  error?: ErrorCode
 }
 
 export interface LoginStepEvent extends EventBase {
@@ -137,7 +154,7 @@ export interface SendStatusEvent extends EventBase {
   clientMessageId: string
   status: SendStatus
   eventId?: string
-  error?: string
+  error?: ErrorCode
 }
 
 export interface BackfillDoneEvent extends EventBase {
@@ -165,7 +182,9 @@ export type BridgeEvent =
 export interface EventBatch {
   hostId: string
   network: Network
-  commandAddr: string
+  /** Informational only: the gateway takes command addresses from its own configuration. */
+  commandAddr?: string
+  /** Empty for a heartbeat. */
   events: BridgeEvent[]
 }
 
@@ -181,8 +200,15 @@ interface CommandBase {
 
 export type BridgeCommand = CommandBase &
   (
-    | { type: 'send'; portalId: string; clientMessageId: string; sealed: Envelope; replyTo?: string }
-    | { type: 'edit'; portalId: string; targetEventId: string; clientMessageId: string; sealed: Envelope }
+    | { type: 'send'; portalId: string; clientMessageId: string; sealed: Envelope; notAfter: number; replyTo?: string }
+    | {
+        type: 'edit'
+        portalId: string
+        targetEventId: string
+        clientMessageId: string
+        sealed: Envelope
+        notAfter?: number
+      }
     | { type: 'react' | 'unreact'; portalId: string; targetEventId: string; key: string }
     | { type: 'redact'; portalId: string; targetEventId: string }
     | { type: 'markRead'; portalId: string; upToEventId: string }

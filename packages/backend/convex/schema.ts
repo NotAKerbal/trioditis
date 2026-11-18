@@ -1,6 +1,16 @@
 import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
-import { chatKind, commandPayload, deliveryState, envelope, loginState, loginStep, network, sender } from './validators'
+import {
+  chatKind,
+  commandPayload,
+  deliveryState,
+  envelope,
+  errorCode,
+  loginState,
+  loginStep,
+  network,
+  sender,
+} from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
 //
@@ -24,11 +34,20 @@ export default defineSchema({
     role: v.union(v.literal('admin'), v.literal('member')),
     invitedBy: v.string(),
     expiresAt: v.number(),
+    /** Held for one sign-up while Better Auth creates the account, so two can't both redeem it. */
+    reservedUntil: v.optional(v.number()),
     acceptedAt: v.optional(v.number()),
     acceptedBy: v.optional(v.string()),
   })
     .index('by_tokenHash', ['tokenHash'])
     .index('by_email', ['email']),
+
+  /** Server-wide state. `setup` holds the first-admin sign-up while it is in progress. */
+  serverState: defineTable({
+    key: v.literal('setup'),
+    reservedUntil: v.number(),
+    reservedEmail: v.string(),
+  }).index('by_key', ['key']),
 
   /** One connected account on one network, e.g. Isaac's WhatsApp. */
   networkAccounts: defineTable({
@@ -36,7 +55,7 @@ export default defineSchema({
     network,
     loginId: v.string(),
     state: loginState,
-    error: v.optional(v.string()),
+    error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
     updatedAt: v.number(),
   })
@@ -55,6 +74,8 @@ export default defineSchema({
     ),
     step: v.optional(loginStep),
     loginId: v.optional(v.string()),
+    /** The bridge host running the login; its later steps must go there. */
+    hostId: v.optional(v.string()),
     updatedAt: v.number(),
   }).index('by_user', ['userId']),
 
@@ -121,7 +142,11 @@ export default defineSchema({
     /** `self`, or the ghost ID. */
     senderKey: v.string(),
     key: v.string(),
+    /** The event that added it, so replaying that event after a removal doesn't add it back. */
+    eventId: v.string(),
     networkTs: v.number(),
+    /** Kept as a tombstone rather than deleted, for the same reason. */
+    removedAt: v.optional(v.number()),
   }).index('by_message', ['messageId', 'senderKey', 'key']),
 
   receipts: defineTable({
@@ -141,7 +166,7 @@ export default defineSchema({
 
   /**
    * Commands for the bridge host. Each row's ID is the command's `commandId`, so the bridge
-   * host runs a command once however often the gateway delivers it.
+   * host runs a command once however often it is delivered.
    */
   outbox: defineTable({
     userId: v.string(),
@@ -150,7 +175,16 @@ export default defineSchema({
     /** Commands for one chat go out in order, one at a time. */
     chatId: v.optional(v.id('chats')),
     payload: commandPayload,
-    /** `queued` → `claimed` (leased by a gateway) → `dispatched` (bridge host accepted it) or `rejected`. */
+    /**
+     * The bridge-readable part (message or login input, sealed to the bridge key). Deleted as
+     * soon as the bridge host has accepted the command, or it is rejected or expires, so old
+     * outgoing messages and credentials don't sit in the database or its backups.
+     */
+    sealedPayload: v.optional(envelope),
+    /**
+     * `queued` → `claimed` (leased to the gateway) → `dispatched` (the bridge host has it) or
+     * `rejected` or `expired`.
+     */
     state: v.union(
       v.literal('queued'),
       v.literal('claimed'),
@@ -159,26 +193,36 @@ export default defineSchema({
       v.literal('expired'),
     ),
     leaseUntil: v.optional(v.number()),
+    /** Increases with every claim; a result for an older claim is ignored. */
     attempts: v.number(),
-    lastError: v.optional(v.string()),
+    /**
+     * The bridge host it was first delivered to. Once delivery may have happened, only that
+     * host (whose journal knows the command ID) may receive it again.
+     */
+    hostId: v.optional(v.string()),
+    lastError: v.optional(errorCode),
     /** For sends: where the message is. Never reset to `queued` by an ambiguous outcome. */
     delivery: v.optional(deliveryState),
     clientMessageId: v.optional(v.string()),
     createdAt: v.number(),
-    /** A send still queued after this asks the person before it goes out. */
+    /** A send can't go out after this; it asks the person instead. */
     expiresAt: v.optional(v.number()),
   })
-    .index('by_state', ['state', 'createdAt'])
-    .index('by_chat', ['chatId', 'state', 'createdAt'])
+    // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
+    // ones by deadline. Both orders are needed.
+    // eslint-disable-next-line @convex-dev/no-duplicate-indexes
+    .index('by_state', ['state'])
+    .index('by_lease', ['state', 'leaseUntil'])
+    .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
   /** Each bridge host's position in its event journal. */
   bridgeHosts: defineTable({
     hostId: v.string(),
     network,
-    commandAddr: v.string(),
     lastSeq: v.number(),
-    updatedAt: v.number(),
+    /** The last batch or heartbeat. Commands only go to hosts heard from recently. */
+    lastSeenAt: v.number(),
   }).index('by_hostId', ['hostId']),
 
   /** Events that couldn't be applied, kept for the health page instead of blocking the feed. */

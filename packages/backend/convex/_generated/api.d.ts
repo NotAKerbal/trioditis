@@ -15,6 +15,7 @@ import type * as http from "../http.js";
 import type * as keys from "../keys.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_audit from "../lib/audit.js";
+import type * as lib_envelope from "../lib/envelope.js";
 import type * as lib_hash from "../lib/hash.js";
 import type * as lib_ingest from "../lib/ingest.js";
 import type * as lib_networks from "../lib/networks.js";
@@ -38,6 +39,7 @@ declare const fullApi: ApiFromModules<{
   keys: typeof keys;
   "lib/access": typeof lib_access;
   "lib/audit": typeof lib_audit;
+  "lib/envelope": typeof lib_envelope;
   "lib/hash": typeof lib_hash;
   "lib/ingest": typeof lib_ingest;
   "lib/networks": typeof lib_networks;

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { api } from '../convex/_generated/api'
 import { GATEWAY_SECRET, sealed, setup, type T } from './setup'
 
-const HOST = { hostId: 'whatsapp-1', network: 'whatsapp' as const, commandAddr: 'http://127.0.0.1:8611' }
+const HOST = { hostId: 'whatsapp-1', network: 'whatsapp' as const }
 const base = { userId: 'user_a', loginId: 'login_a', at: 1_000 }
 
 let seq = 0
@@ -25,6 +25,8 @@ function message(eventId: string, overrides: Record<string, unknown> = {}) {
   }
 }
 
+const event = (type: string, fields: Record<string, unknown>) => ({ ...base, seq: nextSeq(), type, ...fields })
+
 async function ingest(t: T, events: unknown[]) {
   return await t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, ...HOST, events: events as never })
 }
@@ -37,6 +39,10 @@ async function chat(t: T) {
   return await t.run(async (ctx) => (await ctx.db.query('chats').first())!)
 }
 
+async function quarantined(t: T) {
+  return await t.run(async (ctx) => await ctx.db.query('quarantine').collect())
+}
+
 describe('ingest', () => {
   it('refuses callers without the gateway secret', async () => {
     const t = setup()
@@ -47,8 +53,7 @@ describe('ingest', () => {
     seq = 0
     const t = setup()
     expect(await ingest(t, [message('e1'), message('e2', { networkTs: 3_000 })])).toEqual({ ackedThrough: 2 })
-    const rows = await messages(t)
-    expect(rows.map((row) => row.eventId)).toEqual(['e1', 'e2'])
+    expect((await messages(t)).map((row) => row.eventId)).toEqual(['e1', 'e2'])
     expect((await chat(t)).unreadCount).toBe(2)
   })
 
@@ -62,13 +67,26 @@ describe('ingest', () => {
     expect((await chat(t)).unreadCount).toBe(2)
   })
 
-  it('answers a gap with the sequence to resend from', async () => {
+  it('commits the events before a gap, then asks for the rest', async () => {
+    seq = 0
+    const t = setup()
+    const first = message('e1')
+    seq = 5
+    const afterGap = message('e6')
+    expect(await ingest(t, [first, afterGap])).toEqual({ expectedSeq: 2 })
+    expect((await messages(t)).map((row) => row.eventId)).toEqual(['e1'])
+    // The resend from 2 onwards, including the replayed 1, goes through.
+    seq = 1
+    const resent = [first, message('e2'), message('e3'), message('e4'), message('e5'), afterGap]
+    expect(await ingest(t, resent)).toEqual({ ackedThrough: 6 })
+    expect(await messages(t)).toHaveLength(6)
+  })
+
+  it('treats an empty batch as a heartbeat that reports where it is', async () => {
     seq = 0
     const t = setup()
     await ingest(t, [message('e1')])
-    seq = 5
-    expect(await ingest(t, [message('e6')])).toEqual({ expectedSeq: 2 })
-    expect(await messages(t)).toHaveLength(1)
+    expect(await ingest(t, [])).toEqual({ ackedThrough: 1 })
   })
 
   it('rejects plaintext content', async () => {
@@ -76,6 +94,27 @@ describe('ingest', () => {
     const t = setup()
     const plaintext = { ...message('e1'), sealed: undefined, body: 'hello' }
     await expect(ingest(t, [plaintext])).rejects.toThrow()
+  })
+
+  it('quarantines an envelope that isn’t one', async () => {
+    seq = 0
+    const t = setup()
+    const notSealed = { v: 1, nonce: 'n', ct: 'hello in plaintext', keys: [] }
+    expect(await ingest(t, [message('e1', { sealed: notSealed }), message('e2')])).toEqual({ ackedThrough: 2 })
+    expect(await quarantined(t)).toMatchObject([{ seq: 1, reason: 'malformed_envelope' }])
+    expect((await messages(t)).map((row) => row.eventId)).toEqual(['e2'])
+  })
+
+  it('skips an invalid event only at the next expected sequence', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [message('e1')])
+    const skip = (n: number) =>
+      t.mutation(api.gateway.quarantineInvalid, { secret: GATEWAY_SECRET, ...HOST, seq: n, type: 'message' })
+    expect(await skip(3)).toEqual({ expectedSeq: 2 })
+    expect(await skip(2)).toEqual({ ackedThrough: 2 })
+    expect(await skip(2)).toEqual({ ackedThrough: 2 })
+    expect(await quarantined(t)).toMatchObject([{ seq: 2, reason: 'invalid_event' }])
   })
 
   it('orders by network time, not arrival', async () => {
@@ -96,9 +135,7 @@ describe('ingest', () => {
     seq = 0
     const t = setup()
     await ingest(t, [message('old', { historical: true, networkTs: 500 })])
-    const imported = await chat(t)
-    expect(imported.unreadCount).toBe(0)
-    expect(imported.lastMessageAt).toBe(0)
+    expect(await chat(t)).toMatchObject({ unreadCount: 0, lastMessageAt: 0 })
   })
 
   it('does not count the person’s own messages as unread', async () => {
@@ -111,85 +148,110 @@ describe('ingest', () => {
   it('applies edits, reactions and deletes to their message', async () => {
     seq = 0
     const t = setup()
+    const reaction = (eventId: string) =>
+      event('reaction', {
+        portalId: 'portal_1',
+        eventId,
+        targetEventId: 'e1',
+        sender: { self: true },
+        key: '👍',
+        networkTs: 2_600,
+      })
     await ingest(t, [
       message('e1'),
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'edit',
+      event('edit', {
         portalId: 'portal_1',
         eventId: 'edit1',
         targetEventId: 'e1',
         networkTs: 2_500,
         sender: { ghostId: 'ghost_1' },
         sealed: sealed('edit1'),
-      },
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'reaction',
-        portalId: 'portal_1',
-        eventId: 'r1',
-        targetEventId: 'e1',
-        sender: { self: true },
-        key: '👍',
-        networkTs: 2_600,
-      },
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'reaction',
-        portalId: 'portal_1',
-        eventId: 'r1',
-        targetEventId: 'e1',
-        sender: { self: true },
-        key: '👍',
-        networkTs: 2_600,
-      },
+      }),
+      reaction('r1'),
     ])
     let [row] = await messages(t)
     expect(row!.editEventId).toBe('edit1')
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(1)
 
     await ingest(t, [
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'redaction',
+      event('redaction', {
         portalId: 'portal_1',
         targetEventId: 'e1',
         sender: { ghostId: 'ghost_1' },
         networkTs: 3_000,
-      },
+      }),
     ])
     ;[row] = await messages(t)
-    expect(row!.redactedAt).toBe(3_000)
+    expect(row).toMatchObject({ redactedAt: 3_000 })
     expect(row!.sealed).toBeUndefined()
     expect(row!.sealedEdit).toBeUndefined()
     expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+
+    // Nothing brings a deleted message's content back.
+    await ingest(t, [
+      event('edit', {
+        portalId: 'portal_1',
+        eventId: 'edit2',
+        targetEventId: 'e1',
+        networkTs: 4_000,
+        sender: { ghostId: 'ghost_1' },
+        sealed: sealed('edit2'),
+      }),
+      reaction('r2'),
+    ])
+    ;[row] = await messages(t)
+    expect(row!.sealedEdit).toBeUndefined()
+    expect(await t.run(async (ctx) => await ctx.db.query('reactions').collect())).toHaveLength(0)
+  })
+
+  it('doesn’t bring back a removed reaction when its event is replayed, but does for a new one', async () => {
+    seq = 0
+    const t = setup()
+    const add = (eventId: string) =>
+      event('reaction', {
+        portalId: 'portal_1',
+        eventId,
+        targetEventId: 'e1',
+        sender: { ghostId: 'g' },
+        key: '❤️',
+        networkTs: 1,
+      })
+    const remove = () =>
+      event('reactionRemove', { portalId: 'portal_1', targetEventId: 'e1', sender: { ghostId: 'g' }, key: '❤️' })
+    const active = async () =>
+      (await t.run(async (ctx) => await ctx.db.query('reactions').collect())).filter((r) => r.removedAt === undefined)
+    await ingest(t, [message('e1'), add('r1'), remove(), add('r1')])
+    expect(await active()).toHaveLength(0)
+    await ingest(t, [add('r2')])
+    expect(await active()).toMatchObject([{ eventId: 'r2' }])
+  })
+
+  it('matches an echo only to a pending copy of the person’s own message in that chat', async () => {
+    seq = 0
+    const t = setup()
+    // A message from someone else carrying a client message ID is just a message.
+    await ingest(t, [message('e1', { clientMessageId: 'client-message-0001' })])
+    await ingest(t, [message('e2', { clientMessageId: 'client-message-0001', sender: { self: true } })])
+    expect((await messages(t)).map((row) => row.eventId).sort()).toEqual(['e1', 'e2'])
   })
 
   it('quarantines an event it can’t apply and carries on', async () => {
     seq = 0
     const t = setup()
     const result = await ingest(t, [
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'edit',
+      event('edit', {
         portalId: 'portal_1',
         eventId: 'x',
         targetEventId: 'missing',
         networkTs: 1,
         sender: { ghostId: 'g' },
         sealed: sealed(),
-      },
-      message('e2'),
+      }),
+      event('loginStep', { loginSessionId: 'not-a-session-id', step: { stepId: 's', type: 'complete' } }),
+      message('e3'),
     ])
-    expect(result).toEqual({ ackedThrough: 2 })
-    expect(await t.run(async (ctx) => await ctx.db.query('quarantine').collect())).toMatchObject([
-      { seq: 1, type: 'edit' },
-    ])
+    expect(result).toEqual({ ackedThrough: 3 })
+    expect((await quarantined(t)).map((row) => row.type)).toEqual(['edit', 'loginStep'])
     expect(await messages(t)).toHaveLength(1)
   })
 
@@ -198,24 +260,19 @@ describe('ingest', () => {
     const t = setup()
     await ingest(t, [
       message('e1'),
-      {
-        ...base,
-        seq: nextSeq(),
-        type: 'receipt',
-        portalId: 'portal_1',
-        sender: { self: true },
-        upToEventId: 'e1',
-        networkTs: 2_100,
-      },
+      event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId: 'e1', networkTs: 2_100 }),
     ])
     expect((await chat(t)).unreadCount).toBe(0)
   })
 
-  it('records login state per account', async () => {
+  it('records login state per account, with error codes only', async () => {
     seq = 0
     const t = setup()
-    await ingest(t, [{ ...base, seq: nextSeq(), type: 'loginState', state: 'CONNECTED' }])
+    await ingest(t, [event('loginState', { state: 'CONNECTED' })])
     const [account] = await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())
     expect(account).toMatchObject({ userId: 'user_a', network: 'whatsapp', state: 'CONNECTED', lastHealthyAt: 1_000 })
+    await expect(
+      ingest(t, [event('loginState', { state: 'UNKNOWN_ERROR', error: 'wrong code 123456' })]),
+    ).rejects.toThrow()
   })
 })

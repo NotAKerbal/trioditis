@@ -2,6 +2,7 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
+import { isEnvelope } from './lib/envelope'
 import { sortKey } from './lib/ingest'
 import { envelope } from './validators'
 
@@ -46,6 +47,7 @@ export const send = mutation({
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, args.chatId)
     if (!CLIENT_MESSAGE_ID.test(args.clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
+    if (!isEnvelope(args.forBridge) || !isEnvelope(args.copy)) throw new ConvexError('That message isn’t sealed.')
     const existing = await ctx.db
       .query('outbox')
       .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', args.clientMessageId))
@@ -77,9 +79,9 @@ export const send = mutation({
         type: 'send',
         portalId: chat.portalId,
         clientMessageId: args.clientMessageId,
-        sealed: args.forBridge,
         ...(args.replyTo ? { replyTo: args.replyTo } : {}),
       },
+      sealedPayload: args.forBridge,
       state: 'queued',
       attempts: 0,
       delivery: 'queued',

@@ -35,13 +35,17 @@ function keyPair(name: string) {
 
 const defaults: Record<string, () => string> = {
   CONVEX_URL: () => 'http://127.0.0.1:3210',
-  SITE_URL: () => 'http://127.0.0.1:3000',
+  // Until the app has a frontend, Better Auth and the MCP server are reached directly at the
+  // local deployment's HTTP actions.
+  SITE_URL: () => 'http://127.0.0.1:3211',
+  BETTER_AUTH_SECRET: secret,
   GATEWAY_SECRET: secret,
   TRIODITIS_INTERNAL_TOKEN: secret,
   TRIODITIS_SETUP_TOKEN: secret,
   TRIODITIS_NETWORKS: () => 'whatsapp,fake',
   GATEWAY_INTERNAL_ADDR: () => '127.0.0.1:8601',
   GATEWAY_URL: () => 'http://127.0.0.1:8601',
+  BRIDGE_HOSTS: () => 'fake-1=http://127.0.0.1:8611,whatsapp-1=http://127.0.0.1:8612',
 }
 for (const [name, make] of Object.entries(defaults)) if (!env.has(name)) env.set(name, make())
 keyPair('BRIDGE')
@@ -55,6 +59,7 @@ console.log('Wrote .data/dev.env')
 // What the Convex deployment reads. Private keys stay out of it until a function needs one.
 const forConvex = [
   'SITE_URL',
+  'BETTER_AUTH_SECRET',
   'GATEWAY_SECRET',
   'TRIODITIS_SETUP_TOKEN',
   'TRIODITIS_NETWORKS',

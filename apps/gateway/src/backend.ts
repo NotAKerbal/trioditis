@@ -11,8 +11,8 @@ type Result<F extends keyof Gateway> = FunctionReturnType<Gateway[F]>
 
 export interface Backend {
   ingest(args: Args<'ingest'>): Promise<Result<'ingest'>>
+  quarantineInvalid(args: Args<'quarantineInvalid'>): Promise<Result<'quarantineInvalid'>>
   recipientKeys(args: Args<'recipientKeys'>): Promise<Result<'recipientKeys'>>
-  hosts(): Promise<Result<'hosts'>>
   claimCommands(args: Args<'claimCommands'>): Promise<Result<'claimCommands'>>
   commandResult(args: Args<'commandResult'>): Promise<Result<'commandResult'>>
   /**
@@ -30,8 +30,8 @@ export function convexBackend(url: string, secret: string): Backend {
   const live = new ConvexClient(url)
   return {
     ingest: (args) => http.mutation(api.gateway.ingest, { secret, ...args }),
+    quarantineInvalid: (args) => http.mutation(api.gateway.quarantineInvalid, { secret, ...args }),
     recipientKeys: (args) => http.query(api.gateway.recipientKeys, { secret, ...args }),
-    hosts: () => http.query(api.gateway.hosts, { secret }),
     claimCommands: (args) => http.mutation(api.gateway.claimCommands, { secret, ...args }),
     commandResult: (args) => http.mutation(api.gateway.commandResult, { secret, ...args }),
     watchPendingCommands: (onChange, onError) =>

@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { Backend } from './backend.ts'
 import { handleEvents, type Reply } from './events.ts'
 import { handleKeys } from './keys.ts'
+import { describeError } from './log.ts'
 
 // The gateway's internal HTTP API for bridge hosts. It listens only on the internal network.
 
@@ -49,7 +50,7 @@ export function createGatewayServer(backend: Backend, options: ServerOptions): S
         try {
           body = await readJson(request)
         } catch {
-          return reply({ status: 400, body: { error: 'Invalid JSON' } })
+          return reply({ status: 400, body: { error: 'invalid_command' } })
         }
         return reply(await handleEvents(backend, body))
       }
@@ -59,11 +60,7 @@ export function createGatewayServer(backend: Backend, options: ServerOptions): S
       }
       return reply({ status: 404, body: { error: 'Not found' } })
     } catch (error) {
-      log(`${request.method} ${url.pathname} failed: ${String(error)}`)
-      // Events the backend's validators refuse are a bug in the bridge host, not an outage.
-      if (String(error).includes('ArgumentValidationError')) {
-        return reply({ status: 400, body: { error: 'Events failed validation' } })
-      }
+      log(`${request.method} ${url.pathname} failed: ${describeError(error)}`)
       // The backend couldn't be reached. Nothing was acknowledged; the bridge host keeps the
       // events and tries again.
       return reply({ status: 503, body: { error: 'Backend unavailable' } })

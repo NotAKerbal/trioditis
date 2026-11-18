@@ -2,8 +2,10 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { generateKeyPair, keyId, ready, toBase64Url } from '@trioditis/crypto'
 import type { Backend, ClaimedCommand } from '../src/backend.ts'
+import { parseBridgeHosts } from '../src/config.ts'
 import { Dispatcher } from '../src/dispatcher.ts'
 import { CHUNK } from '../src/events.ts'
+import { describeError } from '../src/log.ts'
 import { createGatewayServer } from '../src/server.ts'
 
 const TOKEN = 'internal-token'
@@ -19,8 +21,8 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend & { ingested: un
       const last = (args.events as { seq: number }[]).at(-1)
       return { ackedThrough: last?.seq ?? 0 }
     }),
+    quarantineInvalid: vi.fn(async (args) => ({ ackedThrough: args.seq })),
     recipientKeys: vi.fn(async () => null),
-    hosts: vi.fn(async () => []),
     claimCommands: vi.fn(async () => []),
     commandResult: vi.fn(async () => null),
     watchPendingCommands: () => () => {},
@@ -41,12 +43,7 @@ async function serve(backend: Backend, agentAccessPublicKey = toBase64Url(genera
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 }
 
-const batch = (events: unknown[]) => ({
-  hostId: 'whatsapp-1',
-  network: 'whatsapp',
-  commandAddr: 'http://127.0.0.1:8611',
-  events,
-})
+const batch = (events: unknown[]) => ({ hostId: 'whatsapp-1', network: 'whatsapp', events })
 const event = (seq: number) => ({
   seq,
   type: 'typing',
@@ -79,6 +76,13 @@ describe('events', () => {
     expect((await post(base, { events: [] })).status).toBe(400)
   })
 
+  it('refuses a batch whose sequence numbers are unusable', async () => {
+    const base = await serve(fakeBackend())
+    expect((await post(base, batch([{ ...event(1), seq: 0 }]))).status).toBe(400)
+    expect((await post(base, batch([{ ...event(1), seq: 1.5 }]))).status).toBe(400)
+    expect((await post(base, batch([{ seq: 2 }]))).status).toBe(400)
+  })
+
   it('applies a big batch in chunks, in order, and acknowledges the last', async () => {
     const backend = fakeBackend()
     const base = await serve(backend)
@@ -88,7 +92,7 @@ describe('events', () => {
     expect((backend.ingested[0]![0] as { seq: number }).seq).toBe(1)
   })
 
-  it('answers an empty batch with where Convex is, as a handshake', async () => {
+  it('answers an empty batch with where Convex is, as a heartbeat', async () => {
     const backend = fakeBackend({ ingest: vi.fn(async () => ({ ackedThrough: 41 })) })
     expect(await post(await serve(backend), batch([]))).toEqual({ status: 200, body: { ackedThrough: 41 } })
   })
@@ -103,11 +107,21 @@ describe('events', () => {
     expect((await post(await serve(backend), batch([event(1)]))).status).toBe(503)
   })
 
-  it('reports events the backend refuses as a bridge host bug', async () => {
-    const backend = fakeBackend({
-      ingest: vi.fn(async () => Promise.reject(new Error('ArgumentValidationError: ...'))),
+  it('quarantines the one event the backend refuses and applies the rest', async () => {
+    const backend = fakeBackend()
+    backend.ingest = vi.fn(async (args) => {
+      const events = args.events as { seq: number; bad?: boolean }[]
+      if (events.some((e) => e.bad)) throw new Error('ArgumentValidationError: Value does not match validator.')
+      return { ackedThrough: events.at(-1)?.seq ?? 0 }
     })
-    expect((await post(await serve(backend), batch([event(1)]))).status).toBe(400)
+    const result = await post(await serve(backend), batch([event(1), { ...event(2), bad: true }, event(3)]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 3 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 2,
+      type: 'typing',
+    })
   })
 })
 
@@ -135,9 +149,12 @@ describe('keys', () => {
 })
 
 describe('dispatcher', () => {
-  const command = (id: string): ClaimedCommand =>
+  const hosts = new Map([['whatsapp-1', 'http://host']])
+  const command = (id: string, hostId = 'whatsapp-1'): ClaimedCommand =>
     ({
       commandId: id,
+      lease: 3,
+      hostId,
       userId: 'u',
       network: 'whatsapp',
       loginId: 'l',
@@ -147,9 +164,6 @@ describe('dispatcher', () => {
   function backendWith(commands: ClaimedCommand[]) {
     let handedOut = false
     return fakeBackend({
-      hosts: vi.fn(async () => [
-        { hostId: 'whatsapp-1', network: 'whatsapp' as const, commandAddr: 'http://host', updatedAt: 1 },
-      ]),
       claimCommands: vi.fn(async () => {
         if (handedOut) return []
         handedOut = true
@@ -158,34 +172,50 @@ describe('dispatcher', () => {
     })
   }
 
-  it('records accepted and rejected commands, and leaves unreachable ones for their lease', async () => {
-    const backend = backendWith([command('ok'), command('bad'), command('down'), command('busy')])
+  const dispatcher = (backend: Backend, fetch: unknown) =>
+    new Dispatcher(backend, {
+      internalToken: TOKEN,
+      bridgeHosts: hosts,
+      fetch: fetch as typeof globalThis.fetch,
+      log: () => {},
+    })
+
+  it('records accepted and rejected commands with their lease, and leaves unreachable ones for their lease', async () => {
+    const backend = backendWith([command('ok'), command('bad'), command('text'), command('down'), command('busy')])
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const { commandId } = JSON.parse(init?.body as string)
+      const { commandId } = JSON.parse(init?.body as string) as { commandId: string }
       expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${TOKEN}`)
+      expect(init?.redirect).toBe('error')
       if (commandId === 'ok') return new Response(null, { status: 202 })
-      if (commandId === 'bad') return new Response('unknown portal', { status: 400 })
+      if (commandId === 'bad') return Response.json({ error: 'unsupported' }, { status: 400 })
+      // A host answering with free text (which could quote what the person typed) is recorded
+      // only as an invalid command.
+      if (commandId === 'text') return new Response('your code 123456 was wrong', { status: 400 })
       if (commandId === 'busy') return new Response(null, { status: 503 })
       throw new TypeError('fetch failed')
     })
-    await new Dispatcher(backend, {
-      internalToken: TOKEN,
-      fetch: fetch as typeof globalThis.fetch,
-      log: () => {},
-    }).drain()
-    expect(backend.commandResult).toHaveBeenCalledTimes(2)
-    expect(backend.commandResult).toHaveBeenCalledWith({ commandId: 'ok', accepted: true })
-    expect(backend.commandResult).toHaveBeenCalledWith({ commandId: 'bad', accepted: false, error: 'unknown portal' })
+    await dispatcher(backend, fetch).drain()
+    expect(backend.commandResult).toHaveBeenCalledTimes(3)
+    expect(backend.commandResult).toHaveBeenCalledWith({ commandId: 'ok', lease: 3, accepted: true })
+    expect(backend.commandResult).toHaveBeenCalledWith({
+      commandId: 'bad',
+      lease: 3,
+      accepted: false,
+      error: 'unsupported',
+    })
+    expect(backend.commandResult).toHaveBeenCalledWith({
+      commandId: 'text',
+      lease: 3,
+      accepted: false,
+      error: 'invalid_command',
+    })
   })
 
-  it('sends the payload flattened into the command, with its ID', async () => {
-    const backend = backendWith([command('c1')])
+  it('sends the payload, sealed part and deadline flattened into the command, to the configured address', async () => {
+    const sealedPart = { v: 1 as const, nonce: 'n', ct: 'c', keys: [] }
+    const backend = backendWith([{ ...command('c1'), sealed: sealedPart, notAfter: 99 }])
     const fetch = vi.fn(async () => new Response(null, { status: 202 }))
-    await new Dispatcher(backend, {
-      internalToken: TOKEN,
-      fetch: fetch as typeof globalThis.fetch,
-      log: () => {},
-    }).drain()
+    await dispatcher(backend, fetch).drain()
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('http://host/v1/commands')
     expect(JSON.parse(init.body as string)).toEqual({
@@ -195,19 +225,37 @@ describe('dispatcher', () => {
       type: 'markRead',
       portalId: 'p',
       upToEventId: 'e',
+      sealed: sealedPart,
+      notAfter: 99,
     })
   })
 
-  it('holds commands for a network with no bridge host', async () => {
-    const backend = backendWith([command('c1')])
-    backend.hosts = vi.fn(async () => [])
+  it('holds a command for a host it has no address for', async () => {
+    const backend = backendWith([command('c1', 'unknown-host')])
     const fetch = vi.fn()
-    await new Dispatcher(backend, {
-      internalToken: TOKEN,
-      fetch: fetch as typeof globalThis.fetch,
-      log: () => {},
-    }).drain()
+    await dispatcher(backend, fetch).drain()
     expect(fetch).not.toHaveBeenCalled()
     expect(backend.commandResult).not.toHaveBeenCalled()
+  })
+})
+
+describe('config and logs', () => {
+  it('reads bridge host addresses and refuses anything else', () => {
+    expect(parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611, fake-1=http://bridge:8612')).toEqual(
+      new Map([
+        ['whatsapp-1', 'http://127.0.0.1:8611'],
+        ['fake-1', 'http://bridge:8612'],
+      ]),
+    )
+    expect(() => parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611/path')).toThrow()
+    expect(() => parseBridgeHosts('whatsapp-1')).toThrow()
+  })
+
+  it('logs errors without the values they quote', () => {
+    const error = new Error(
+      'ArgumentValidationError: Value does not match validator.\nPath: .events[0]\nValue: {"body":"secret"}',
+    )
+    expect(describeError(error)).toBe('Error: ArgumentValidationError: Value does not match validator.')
+    expect(describeError(new Error('refused. Value: {"body":"secret"}'))).toBe('Error: refused.')
   })
 })

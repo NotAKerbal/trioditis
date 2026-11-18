@@ -11,7 +11,7 @@ const server = createGatewayServer(backend, {
   internalToken: config.internalToken,
   agentAccessPublicKey: config.agentAccessPublicKey,
 })
-const dispatcher = new Dispatcher(backend, { internalToken: config.internalToken })
+const dispatcher = new Dispatcher(backend, { internalToken: config.internalToken, bridgeHosts: config.bridgeHosts })
 
 server.listen(config.listen.port, config.listen.host, () => {
   console.log(`Gateway listening on ${config.listen.host}:${config.listen.port}`)

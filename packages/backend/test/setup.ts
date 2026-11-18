@@ -1,7 +1,7 @@
 /// <reference types="vitest/importMeta" />
 import { convexTest } from 'convex-test'
 import mcpTest from '@convex-dev/mcp/test'
-import { components } from '../convex/_generated/api'
+import { api, components } from '../convex/_generated/api'
 import schema from '../convex/schema'
 import betterAuthSchema from '../convex/betterAuth/schema'
 
@@ -51,7 +51,28 @@ export async function signIn(t: T, userId: string, role: 'admin' | 'member' = 'm
   return t.withIdentity({ subject: userId, sessionId: session._id })
 }
 
-/** A stand-in envelope. The backend never opens envelopes, so its contents don't matter here. */
+function base64url(length: number, tag: string) {
+  const bytes = new Uint8Array(length)
+  bytes.set(new TextEncoder().encode(tag).subarray(0, length))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
+/**
+ * A stand-in envelope with the right shape (field lengths as sealing.md gives them). The
+ * backend never opens envelopes, so what they hold doesn't matter here.
+ */
 export function sealed(tag = 'x') {
-  return { v: 1 as const, nonce: `nonce-${tag}`, ct: `ct-${tag}`, keys: [{ kid: 'kid', sk: `sk-${tag}` }] }
+  return {
+    v: 1 as const,
+    nonce: base64url(24, `n${tag}`),
+    ct: base64url(40, `c${tag}`),
+    keys: [{ kid: base64url(16, 'kid'), sk: base64url(80, `s${tag}`) }],
+  }
+}
+
+/** Reports a bridge host in, as its heartbeat does, so commands can be claimed for it. */
+export async function heartbeat(t: T, hostId = 'whatsapp-1', network: 'whatsapp' | 'fake' = 'whatsapp') {
+  return await t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId, network, events: [] })
 }

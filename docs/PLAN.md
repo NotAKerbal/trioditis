@@ -633,6 +633,11 @@ minutes.
 
 ## Open questions
 
+0. **Connector state at rest:** bridgev2's portal and ghost tables and WhatsApp's
+   history-sync table hold chat names, contact names, phone numbers and raw history in
+   plaintext. Options: rely on the encrypted volume, prune history-sync rows once
+   imported, and/or seal those columns with a server key. Found in the Phase 0 spike.
+
 1. **Bridge host spike:** does bridgev2 run fully without a homeserver (provisioning,
    commands, backfill, media), and how much of `MatrixAPI` each connector actually
    exercises?

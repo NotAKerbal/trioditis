@@ -1,6 +1,6 @@
 import { v, type Infer } from 'convex/values'
 import { DELIVERY_STATES, NETWORKS } from '@trioditis/core'
-import { LOGIN_STATES } from '@trioditis/core/bridge-protocol'
+import { ERROR_CODES, LOGIN_STATES } from '@trioditis/core/bridge-protocol'
 
 // Validators shared by the schema and the functions. Wire shapes follow
 // docs/architecture/bridge-protocol.md; sealed shapes follow docs/architecture/sealing.md.
@@ -20,6 +20,9 @@ export const sender = v.union(v.object({ self: v.literal(true) }), v.object({ gh
 export const deliveryState = v.union(...DELIVERY_STATES.map((state) => v.literal(state)))
 
 export const loginState = v.union(...LOGIN_STATES.map((state) => v.literal(state)))
+
+/** Why something failed: a fixed code, never free text. See bridge-protocol.md, Errors. */
+export const errorCode = v.union(...ERROR_CODES.map((code) => v.literal(code)))
 
 export const chatKind = v.union(v.literal('dm'), v.literal('group'), v.literal('channel'), v.literal('space'))
 
@@ -59,7 +62,7 @@ export const loginStep = v.object({
     }),
   ),
   loginId: v.optional(v.string()),
-  error: v.optional(v.string()),
+  error: v.optional(errorCode),
 })
 
 const base = { seq: v.number(), userId: v.string(), loginId: v.string(), at: v.number() }
@@ -144,8 +147,7 @@ export const bridgeEvent = v.union(
     ...base,
     type: v.literal('loginState'),
     state: loginState,
-    error: v.optional(v.string()),
-    message: v.optional(v.string()),
+    error: v.optional(errorCode),
   }),
   v.object({ ...base, type: v.literal('loginStep'), loginSessionId: v.string(), step: loginStep }),
   v.object({
@@ -161,7 +163,7 @@ export const bridgeEvent = v.union(
       v.literal('unknown'),
     ),
     eventId: v.optional(v.string()),
-    error: v.optional(v.string()),
+    error: v.optional(errorCode),
   }),
   v.object({
     ...base,
@@ -173,13 +175,16 @@ export const bridgeEvent = v.union(
 )
 export type BridgeEventDoc = Infer<typeof bridgeEvent>
 
-/** What a queued command asks the bridge host to do. `commandId` is the outbox row's ID. */
+/**
+ * What a queued command asks the bridge host to do. `commandId` is the outbox row's ID. The
+ * bridge-readable part of a send, edit or login input is kept apart, in the outbox row's
+ * `sealedPayload`, so it can be deleted as soon as the bridge host has it.
+ */
 export const commandPayload = v.union(
   v.object({
     type: v.literal('send'),
     portalId: v.string(),
     clientMessageId: v.string(),
-    sealed: envelope,
     replyTo: v.optional(v.string()),
   }),
   v.object({
@@ -187,7 +192,6 @@ export const commandPayload = v.union(
     portalId: v.string(),
     targetEventId: v.string(),
     clientMessageId: v.string(),
-    sealed: envelope,
   }),
   v.object({
     type: v.union(v.literal('react'), v.literal('unreact')),
@@ -199,7 +203,7 @@ export const commandPayload = v.union(
   v.object({ type: v.literal('markRead'), portalId: v.string(), upToEventId: v.string() }),
   v.object({ type: v.literal('typing'), portalId: v.string(), typing: v.boolean() }),
   v.object({ type: v.literal('loginStart'), loginSessionId: v.string(), network, flowId: v.optional(v.string()) }),
-  v.object({ type: v.literal('loginSubmit'), loginSessionId: v.string(), stepId: v.string(), sealed: envelope }),
+  v.object({ type: v.literal('loginSubmit'), loginSessionId: v.string(), stepId: v.string() }),
   v.object({ type: v.literal('loginCancel'), loginSessionId: v.string() }),
   v.object({ type: v.literal('logout') }),
   v.object({

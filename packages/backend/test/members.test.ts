@@ -1,28 +1,32 @@
 import { describe, expect, it } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
+import { fromBase64Url, generateKeyPair, keyId, ready, toBase64Url } from '@trioditis/crypto'
 import { SETUP_TOKEN, sealed, setup, signIn } from './setup'
 
 describe('accounts', () => {
-  it('lets only the setup token create the first account, as admin', async () => {
-    const t = setup()
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'a@example.com' })).toEqual({ allowed: false })
-    expect(
-      await t.query(internal.members.mayCreateAccount, { email: 'a@example.com', tokenHash: await sha256Hex('wrong') }),
-    ).toEqual({ allowed: false })
-    const tokenHash = await sha256Hex(SETUP_TOKEN)
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'a@example.com', tokenHash })).toEqual({
-      allowed: true,
-    })
+  const reserve = (t: ReturnType<typeof setup>, email: string, tokenHash?: string) =>
+    t.mutation(internal.members.reserveAdmission, { email, ...(tokenHash ? { tokenHash } : {}) })
 
-    await t.mutation(internal.members.onAccountCreated, { userId: 'admin', email: 'a@example.com', tokenHash })
-    // The setup token works once: a second account racing for it gets no membership.
-    await t.mutation(internal.members.onAccountCreated, { userId: 'late', email: 'b@example.com', tokenHash })
-    const members = await t.run(async (ctx) => await ctx.db.query('members').collect())
-    expect(members).toMatchObject([{ userId: 'admin', role: 'admin' }])
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'b@example.com', tokenHash })).toEqual({
-      allowed: false,
+  it('admits only the setup token’s first sign-up, as admin', async () => {
+    const t = setup()
+    expect(await reserve(t, 'a@example.com')).toEqual({ allowed: false })
+    expect(await reserve(t, 'a@example.com', await sha256Hex('wrong'))).toEqual({ allowed: false })
+    const tokenHash = await sha256Hex(SETUP_TOKEN)
+    expect(await reserve(t, 'a@example.com', tokenHash)).toEqual({ allowed: true })
+    // A second sign-up racing for the setup token is refused before it gets an account.
+    expect(await reserve(t, 'b@example.com', tokenHash)).toEqual({ allowed: false })
+
+    expect(
+      await t.mutation(internal.members.onAccountCreated, { userId: 'admin', email: 'A@example.com', tokenHash }),
+    ).toEqual({
+      admitted: true,
     })
+    expect(await t.run(async (ctx) => await ctx.db.query('members').collect())).toMatchObject([
+      { userId: 'admin', role: 'admin' },
+    ])
+    // Once there is an admin, the setup token admits nobody.
+    expect(await reserve(t, 'b@example.com', tokenHash)).toEqual({ allowed: false })
   })
 
   it('admits an invited person once, by email and token', async () => {
@@ -31,20 +35,23 @@ describe('accounts', () => {
     const { token } = await admin.mutation(api.members.invite, { email: 'Sam@Example.com', role: 'member' })
     const tokenHash = await sha256Hex(token)
 
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'other@example.com', tokenHash })).toEqual({
-      allowed: false,
-    })
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'sam@example.com', tokenHash })).toEqual({
-      allowed: true,
-    })
-    await t.mutation(internal.members.onAccountCreated, { userId: 'sam', email: 'sam@example.com', tokenHash })
-    expect(await t.query(internal.members.mayCreateAccount, { email: 'sam@example.com', tokenHash })).toEqual({
-      allowed: false,
-    })
+    expect(await reserve(t, 'other@example.com', tokenHash)).toEqual({ allowed: false })
+    expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: true })
+    expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
+    await expect(
+      admin.mutation(api.members.revokeInvitation, {
+        invitationId: (await admin.query(api.members.invitations, {}))[0]!._id,
+      }),
+    ).rejects.toThrow(/right now/)
+    expect(
+      await t.mutation(internal.members.onAccountCreated, { userId: 'sam', email: 'sam@example.com', tokenHash }),
+    ).toEqual({ admitted: true })
+    expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
 
     const invitations = await admin.query(api.members.invitations, {})
     expect(invitations[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
     expect(invitations[0]).not.toHaveProperty('tokenHash')
+    expect(await t.query(internal.members.isMember, { userId: 'sam' })).toBe(true)
   })
 
   it('only lets admins invite', async () => {
@@ -63,15 +70,18 @@ describe('accounts', () => {
     await expect(ended.query(api.chats.list, {})).rejects.toThrow(/signed out/)
   })
 
-  it('sets the identity key once', async () => {
+  it('sets a valid identity key once, deriving its key ID', async () => {
+    await ready()
     const t = setup()
     const sam = await signIn(t, 'sam', 'member', false)
-    const publicKey = 'B'.repeat(43)
-    await sam.mutation(api.members.setIdentityKey, { publicKey, kid: 'C'.repeat(22) })
-    await sam.mutation(api.members.setIdentityKey, { publicKey, kid: 'C'.repeat(22) })
-    await expect(
-      sam.mutation(api.members.setIdentityKey, { publicKey: 'D'.repeat(43), kid: 'E'.repeat(22) }),
-    ).rejects.toThrow(/already/)
+    // libsodium can't decode a non-canonical key, so the bridge host couldn't seal to it.
+    await expect(sam.mutation(api.members.setIdentityKey, { publicKey: 'B'.repeat(43) })).rejects.toThrow(/valid/)
+    const publicKey = toBase64Url(generateKeyPair().publicKey)
+    const { kid } = await sam.mutation(api.members.setIdentityKey, { publicKey })
+    expect(kid).toBe(keyId(fromBase64Url(publicKey)))
+    await sam.mutation(api.members.setIdentityKey, { publicKey })
+    const other = toBase64Url(generateKeyPair().publicKey)
+    await expect(sam.mutation(api.members.setIdentityKey, { publicKey: other })).rejects.toThrow(/already/)
   })
 })
 

@@ -75,8 +75,15 @@ export const mcp: McpServer<string> = new McpServer<string>(components.mcp, {
 
 // For the consent page and Settings → Agents. A connection acts for the Better Auth user
 // whose live session approved it.
+// Only a member of this server can approve an agent.
 export const { getAuthRequest, authorize, listConnections, revokeConnection } = mcp.api({
-  getUserId: async (ctx) => await currentUserId(ctx as GenericCtx<DataModel>),
+  getUserId: async (ctx) => {
+    // The component types `ctx` as only `auth`, but these run as Convex functions.
+    const functionCtx = ctx as GenericCtx<DataModel>
+    const userId = await currentUserId(functionCtx)
+    if (!userId) return null
+    return (await functionCtx.runQuery(internal.members.isMember, { userId })) ? userId : null
+  },
 })
 
 // For tests and the CLI only (deploy credentials): `npx convex run mcp:createApiKeyForUser`.

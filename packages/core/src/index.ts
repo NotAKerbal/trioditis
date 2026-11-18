@@ -52,13 +52,15 @@ export interface MessagePlaintext {
 export interface ChatPlaintext {
   name?: string
   topic?: string
-  avatarMediaId?: string
+  /** The avatar file, with its key and nonce. */
+  avatar?: Attachment
   [extra: string]: unknown
 }
 
 export interface ContactPlaintext {
   name?: string
   handle?: string
-  avatarMediaId?: string
+  /** The avatar file, with its key and nonce. */
+  avatar?: Attachment
   [extra: string]: unknown
 }
