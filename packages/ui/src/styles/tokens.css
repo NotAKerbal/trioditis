@@ -1,0 +1,110 @@
+/*
+ * Trioditis design tokens. The only place colours, type, radii and control sizes are defined.
+ * Light is the default; dark is `data-theme="dark"` on the root, set by the app from the
+ * person's choice or the device setting. Change a token here, and in the design docs, nowhere else.
+ */
+:root {
+  /* Surfaces, from the page outwards. `--rail` is the sidebar and other quiet panels. */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --rail: #f4f5f7;
+  --rail-hover: #e9ecf0;
+  --border: #e6e8ed;
+  --border-strong: #d9dde4;
+  --scrim: rgb(15 23 42 / 0.32);
+
+  /* Text. */
+  --fg: #0f172a;
+  --fg-muted: #475569;
+  --fg-subtle: #94a3b8;
+
+  /* The brand accent: the one primary action, selection, unread counts, links. */
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-fg: #ffffff;
+  --accent-soft: #e0f2fe;
+  --accent-ring: #0ea5e9;
+  --accent-ink: #075985;
+
+  /* Status colours carry meaning only. */
+  --success: #16a34a;
+  --warning: #d97706;
+  --warning-soft: #fef3c7;
+  --warning-ink: #92400e;
+  --danger: #dc2626;
+
+  /* Networks, for their small badges. Same in both themes. */
+  --net-whatsapp: #25d366;
+  --net-signal: #3a76f0;
+  --net-gmessages: #f4b400;
+  --net-telegram: #2aabee;
+  --net-messenger: #a334fa;
+  --net-instagram: #e1306c;
+  --net-discord: #5865f2;
+  --net-agents: #0ea5e9;
+  --net-fake: #64748b;
+
+  --font-sans: 'DM Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-size-xs: 11.5px;
+  --font-size-sm: 12.5px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 999px;
+
+  --control-sm: 28px;
+  --control-md: 34px;
+  --control-lg: 40px;
+
+  --elevation-sm: 0 1px 2px rgb(15 23 42 / 0.06);
+  --elevation-md: 0 14px 36px rgb(15 23 42 / 0.16);
+  --elevation-lg: 0 30px 80px rgb(15 23 42 / 0.3);
+
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0f1115;
+  --surface: #161920;
+  --surface-2: #1b1f27;
+  --rail: #121419;
+  --rail-hover: #1d2129;
+  --border: #252a33;
+  --border-strong: #333944;
+  --scrim: rgb(0 0 0 / 0.55);
+
+  --fg: #e9ebf0;
+  --fg-muted: #a3aab6;
+  --fg-subtle: #6b7380;
+
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-fg: #04131c;
+  --accent-soft: rgb(56 189 248 / 0.14);
+  --accent-ring: #38bdf8;
+  --accent-ink: #bae6fd;
+
+  --success: #34d399;
+  --warning: #fbbf24;
+  --warning-soft: rgb(251 191 36 / 0.14);
+  --warning-ink: #fde68a;
+  --danger: #f87171;
+
+  --elevation-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --elevation-md: 0 14px 36px rgb(0 0 0 / 0.5);
+  --elevation-lg: 0 30px 80px rgb(0 0 0 / 0.6);
+
+  color-scheme: dark;
+}

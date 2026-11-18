@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trioditis</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <script>
+      // Set the theme before the first paint so the page never flashes the wrong one.
+      try {
+        const saved = localStorage.getItem('trioditis.theme')
+        const dark = saved === 'dark' || ((!saved || saved === 'system') && matchMedia('(prefers-color-scheme: dark)').matches)
+        if (dark) document.documentElement.dataset.theme = 'dark'
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
