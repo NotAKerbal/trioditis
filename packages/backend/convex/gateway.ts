@@ -281,15 +281,16 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await expireLogin(ctx, command)
 }
 
-/** How long after its deadline a send the bridge host accepted may go without an outcome. */
+/** How long after its deadline a command the bridge host accepted may go without an outcome. */
 const OVERDUE_GRACE_MS = 60 * 60 * 1000
 
 /**
- * A send the bridge host accepted but never reported on (it went away) would stay "Sending"
- * forever. Once well past its deadline it becomes `unknown`, so the person can choose. It is
- * never sent again, and a late outcome from the bridge host still settles it.
+ * A command the bridge host accepted but never reported on (it went away) would wait forever.
+ * Once well past its deadline, a send becomes `unknown`, so the person can choose; it is never
+ * sent again, and a late outcome from the bridge host still settles it. A login still waiting
+ * on the command ends with `expired`, so the person can start it again.
  */
-async function settleOverdueSends(ctx: MutationCtx, now: number) {
+async function settleOverdue(ctx: MutationCtx, now: number) {
   const overdue = await ctx.db
     .query('outbox')
     // From 0: a send settled here has no `expiresAt`, which sorts before every number, so
@@ -306,6 +307,7 @@ async function settleOverdueSends(ctx: MutationCtx, now: number) {
       command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
     await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
     if (unsettled) await markCopy(ctx, command, 'unknown')
+    await expireLogin(ctx, command)
   }
 }
 
@@ -385,7 +387,7 @@ export const claimCommands = mutation({
       return owner ? liveHosts.get(owner) : undefined
     }
 
-    await settleOverdueSends(ctx, now)
+    await settleOverdue(ctx, now)
 
     // Queued commands are scanned a window at a time, carrying on from where the last claim
     // stopped and wrapping round, so commands that can't go out yet (their host is down) never
@@ -414,28 +416,49 @@ export const claimCommands = mutation({
     else await ctx.db.insert('claimCursor', { key: 'queued', after: nextAfter })
 
     // Expired leases the same way: those pinned to a host that's down mustn't hide the rest.
+    // The cursor is a deadline and a creation time, since many leases can share a deadline.
     const leaseCursor = await ctx.db
       .query('claimCursor')
       .withIndex('by_key', (q) => q.eq('key', 'leases'))
       .unique()
-    const leaseAfter = Math.min(leaseCursor?.after ?? 0, now)
-    let leases = await ctx.db
-      .query('outbox')
-      .withIndex('by_lease', (q) => q.eq('state', 'claimed').gt('leaseUntil', leaseAfter).lte('leaseUntil', now))
-      .take(SCAN_EXPIRED_LEASES)
-    let nextLeaseAfter = leases.at(-1)?.leaseUntil ?? 0
-    if (leases.length < SCAN_EXPIRED_LEASES) {
-      if (leaseAfter > 0) {
-        const wrapped = await ctx.db
+    const leaseAt = Math.min(leaseCursor?.after ?? 0, now)
+    const leaseTie = leaseCursor?.afterCreation ?? 0
+    const leaseRows = new Map<Id<'outbox'>, Doc<'outbox'>>()
+    const addLeases = (rows: Doc<'outbox'>[]) => rows.forEach((row) => leaseRows.set(row._id, row))
+    if (leaseAt > 0) {
+      addLeases(
+        await ctx.db
           .query('outbox')
-          .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', leaseAfter))
-          .take(SCAN_EXPIRED_LEASES - leases.length)
-        leases = [...wrapped, ...leases]
-      }
-      nextLeaseAfter = 0
+          .withIndex('by_lease', (q) =>
+            q.eq('state', 'claimed').eq('leaseUntil', leaseAt).gt('_creationTime', leaseTie),
+          )
+          .take(SCAN_EXPIRED_LEASES),
+      )
     }
-    if (leaseCursor) await ctx.db.patch(leaseCursor._id, { after: nextLeaseAfter })
-    else await ctx.db.insert('claimCursor', { key: 'leases', after: nextLeaseAfter })
+    addLeases(
+      await ctx.db
+        .query('outbox')
+        .withIndex('by_lease', (q) => q.eq('state', 'claimed').gt('leaseUntil', leaseAt).lte('leaseUntil', now))
+        .take(SCAN_EXPIRED_LEASES - leaseRows.size),
+    )
+    const pastCursor = [...leaseRows.values()]
+    const last = pastCursor.at(-1)
+    let nextLease = { after: last?.leaseUntil ?? 0, afterCreation: last?._creationTime ?? 0 }
+    if (leaseRows.size < SCAN_EXPIRED_LEASES) {
+      // Round again from the start, up to where this scan began.
+      if (leaseAt > 0) {
+        addLeases(
+          await ctx.db
+            .query('outbox')
+            .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', leaseAt))
+            .take(SCAN_EXPIRED_LEASES - leaseRows.size),
+        )
+      }
+      nextLease = { after: 0, afterCreation: 0 }
+    }
+    const leases = [...leaseRows.values()]
+    if (leaseCursor) await ctx.db.patch(leaseCursor._id, nextLease)
+    else await ctx.db.insert('claimCursor', { key: 'leases', ...nextLease })
 
     const candidates = [...leases, ...queued].sort((a, b) => a._creationTime - b._creationTime)
 
