@@ -106,18 +106,15 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
   // `tick` is a dependency so it looks again when a kept list runs out.
   const { shown, expires } = useMemo(() => {
     // A failed request counts as neither an answer nor one on its way, even with data from
-    // before it failed. A live one's answer is current now: its watch would have brought any
-    // change. A list kept after its request is replaced keeps that time, so its limit runs from
-    // the last moment it was known to be right.
-    const now = Date.now()
-    const fresh = new Map<string, Shown<ReactionAnswer[string]>>()
+    // before it failed. A live one's answer stays current: its watch would bring any change.
+    const fresh = new Map<string, ReactionAnswer[string]>()
     const waiting = new Set<string>()
     results.forEach((r, i) => {
       if (r.failed) return
-      if (r.data) for (const [id, list] of Object.entries(r.data)) fresh.set(id, { list, at: now })
+      if (r.data) for (const [id, list] of Object.entries(r.data)) fresh.set(id, list)
       else if (r.pending) for (const id of asked.split('|')[i]?.split(',') ?? []) waiting.add(id)
     })
-    return showReactions(ids ? ids.split(',') : [], fresh, waiting, before.current, now)
+    return showReactions(ids ? ids.split(',') : [], fresh, waiting, before.current, Date.now())
   }, [results, ids, asked, tick])
   useEffect(() => {
     before.current = shown

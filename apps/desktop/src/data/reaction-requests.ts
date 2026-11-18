@@ -61,21 +61,22 @@ export const KEEP_SHOWN_MS = 5000
 
 export interface Shown<L> {
   list: L
-  /** When an answer last gave this list. */
-  at: number
+  /** Null while a live answer gives this list; once its request was replaced, since when it's kept. */
+  keptSince: number | null
 }
 
 /**
- * What each of `ids` shows: its answer, when one is in from a request that hasn't failed, with
- * when that answer came (`fresh`). Otherwise, only while the request for it is still on its way
- * (`waiting`) and for at most KEEP_SHOWN_MS since an answer last gave it, the list it showed
- * before, so moving a group to a new request doesn't blank it. A failed request, or one that
- * takes longer, shows nothing rather than reactions that may since have gone. `expires` is when
- * the next kept list runs out, to look again then.
+ * What each of `ids` shows: its answer, when one is in from a request that hasn't failed
+ * (`fresh`), which is current for as long as its watch is live. Otherwise, while a new request
+ * for it is on its way (`waiting`), the list it showed before, so moving a group to a new
+ * request doesn't blank it: for KEEP_SHOWN_MS from the moment it stopped being a live answer,
+ * however long it was shown before and however often this runs since. A failed request, or one
+ * that takes longer, shows nothing rather than reactions that may since have gone. `expires` is
+ * when the next kept list runs out, to look again then.
  */
 export function showReactions<L>(
   ids: readonly string[],
-  fresh: ReadonlyMap<string, Shown<L>>,
+  fresh: ReadonlyMap<string, L>,
   waiting: ReadonlySet<string>,
   before: ReadonlyMap<string, Shown<L>>,
   now: number,
@@ -83,15 +84,16 @@ export function showReactions<L>(
   const shown = new Map<string, Shown<L>>()
   let expires: number | null = null
   for (const id of ids) {
-    const answer = fresh.get(id)
-    if (answer) {
-      shown.set(id, answer)
+    if (fresh.has(id)) {
+      shown.set(id, { list: fresh.get(id)!, keptSince: null })
       continue
     }
-    const kept = before.get(id)
-    if (!kept || !waiting.has(id) || now - kept.at >= KEEP_SHOWN_MS) continue
-    shown.set(id, kept)
-    expires = Math.min(expires ?? Infinity, kept.at + KEEP_SHOWN_MS)
+    const prior = before.get(id)
+    if (!prior || !waiting.has(id)) continue
+    const keptSince = prior.keptSince ?? now
+    if (now - keptSince >= KEEP_SHOWN_MS) continue
+    shown.set(id, { list: prior.list, keptSince })
+    expires = Math.min(expires ?? Infinity, keptSince + KEEP_SHOWN_MS)
   }
   return { shown, expires }
 }

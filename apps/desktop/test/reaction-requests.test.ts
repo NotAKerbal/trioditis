@@ -114,43 +114,45 @@ describe('grouping messages so requests stay put as the list grows', () => {
 describe('what a message shows while its reactions are asked for again', () => {
   const t0 = 1_000_000
   const heart = [{ key: '❤️' }]
-  const before = new Map([['m1', { list: heart, at: t0 }]])
+  // Shown from a live answer, however long ago.
+  const live = new Map([['m1', { list: heart, keptSince: null }]])
 
-  it('keeps the last list while the new request is on its way', () => {
-    const { shown, expires } = showReactions(['m1'], new Map(), new Set(['m1']), before, t0 + 1000)
-    expect(shown.get('m1')?.list).toBe(heart)
+  it('keeps the last list while the new request is on its way, from the moment it was replaced', () => {
+    const { shown, expires } = showReactions(['m1'], new Map(), new Set(['m1']), live, t0)
+    expect(shown.get('m1')).toEqual({ list: heart, keptSince: t0 })
     expect(expires).toBe(t0 + KEEP_SHOWN_MS)
   })
 
-  it('takes a new answer at once, an empty one too', () => {
-    const fresh = new Map([['m1', { list: [], at: t0 + 900 }]])
-    const { shown, expires } = showReactions(['m1'], fresh, new Set(), before, t0 + 1000)
-    expect(shown.get('m1')).toEqual({ list: [], at: t0 + 900 })
-    expect(expires).toBeNull()
+  it('doesn’t blink after an idle while: the limit starts at the replacement, not the last answer', () => {
+    // A live answer shown for a minute without change, then its group is asked for anew.
+    const later = t0 + 60_000
+    const { shown } = showReactions(['m1'], new Map(), new Set(['m1']), live, later)
+    expect(shown.get('m1')?.list).toBe(heart)
   })
 
-  it('shows nothing once the request has failed', () => {
-    const { shown } = showReactions(['m1'], new Map(), new Set(), before, t0 + 1000)
-    expect(shown.has('m1')).toBe(false)
-  })
-
-  it('shows nothing once the wait runs past the limit', () => {
-    const { shown } = showReactions(['m1'], new Map(), new Set(['m1']), before, t0 + KEEP_SHOWN_MS)
-    expect(shown.has('m1')).toBe(false)
-  })
-
-  it('keeps nothing for a message no longer passed in', () => {
-    expect(showReactions([], new Map(), new Set(['m1']), before, t0).shown.size).toBe(0)
-  })
-
-  it('never renews a kept list: its limit runs from the last answer, however often it’s looked at', () => {
-    // An answer at t0, then other groups answering keep re-running the merge.
-    let state = showReactions(['m1'], new Map([['m1', { list: heart, at: t0 }]]), new Set(), new Map(), t0)
+  it('never renews a kept list, however often it’s looked at since', () => {
+    let state = showReactions(['m1'], new Map(), new Set(['m1']), live, t0)
     state = showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + 3000)
     state = showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + 4000)
     expect(state.expires).toBe(t0 + KEEP_SHOWN_MS)
     expect(showReactions(['m1'], new Map(), new Set(['m1']), state.shown, t0 + KEEP_SHOWN_MS).shown.has('m1')).toBe(
       false,
     )
+  })
+
+  it('takes a new answer at once, an empty one too', () => {
+    const kept = new Map([['m1', { list: heart, keptSince: t0 }]])
+    const { shown, expires } = showReactions(['m1'], new Map([['m1', []]]), new Set(), kept, t0 + 1000)
+    expect(shown.get('m1')).toEqual({ list: [], keptSince: null })
+    expect(expires).toBeNull()
+  })
+
+  it('shows nothing once the request has failed', () => {
+    const { shown } = showReactions(['m1'], new Map(), new Set(), live, t0)
+    expect(shown.has('m1')).toBe(false)
+  })
+
+  it('keeps nothing for a message no longer passed in', () => {
+    expect(showReactions([], new Map(), new Set(['m1']), live, t0).shown.size).toBe(0)
   })
 })
