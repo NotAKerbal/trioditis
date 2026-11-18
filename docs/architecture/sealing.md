@@ -118,7 +118,10 @@ file.
 ```
 
 Chat and contact metadata carry their avatar as an attachment (with its key and nonce)
-in `avatar`, for the same reason.
+in `avatar`, for the same reason. When the avatar is unchanged but the bridge host can't
+include it this time, the metadata says `avatarUnchanged: true` instead, and clients keep
+the avatar they have (a device seeing the chat for the first time has none until it
+changes).
 
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.

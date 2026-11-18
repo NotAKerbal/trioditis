@@ -54,6 +54,11 @@ export interface ChatPlaintext {
   topic?: string
   /** The avatar file, with its key and nonce. */
   avatar?: Attachment
+  /**
+   * The avatar is unchanged but couldn't be included this time: keep the one you have
+   * rather than clearing it.
+   */
+  avatarUnchanged?: boolean
   [extra: string]: unknown
 }
 
@@ -62,5 +67,10 @@ export interface ContactPlaintext {
   handle?: string
   /** The avatar file, with its key and nonce. */
   avatar?: Attachment
+  /**
+   * The avatar is unchanged but couldn't be included this time: keep the one you have
+   * rather than clearing it.
+   */
+  avatarUnchanged?: boolean
   [extra: string]: unknown
 }
