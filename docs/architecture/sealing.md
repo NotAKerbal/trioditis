@@ -57,7 +57,7 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`. The object ID
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`. The object ID
 for each:
 
 | Object                              | Kind       | Object ID                   |
@@ -70,6 +70,7 @@ for each:
 | A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
 | Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
 | A file                              | `media`    | its `mediaId`               |
+| A label (name and colour)           | `label`    | its `labelKey`              |
 
 ## Recipients
 
@@ -138,7 +139,10 @@ later addition.
 ## What else is stored in plaintext
 
 The network connectors keep their own state in the bridge host's database, and some of it
-is plaintext the operator could read with database access: bridgev2's portal and ghost
-tables (chat names, contact names, phone numbers), and WhatsApp's history-sync table (raw
-history until it is imported). That database must live on an encrypted volume; pruning or
-sealing those columns is an open question in docs/PLAN.md.
+is plaintext the operator could read with database access: bridgev2's portal, ghost and
+login tables (chat names, contact names, phone numbers), WhatsApp's history-sync table (raw
+history until it is imported) and whatsmeow's contacts.
+
+**Phase 0:** that database lives on an **encrypted disk, with encrypted backups**; the
+installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
+columns are sealed with a server-held key. See docs/PLAN.md, Open questions.

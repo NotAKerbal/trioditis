@@ -690,4 +690,115 @@ describe('sending', () => {
     await status(t, id(1), 'sent')
     expect(await outboxRow(t, id(1))).toMatchObject({ state: 'dispatched', delivery: 'sent' })
   })
+
+  it('ends a page of large messages early instead of failing', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
+    // One transaction per message: seeding them all at once would itself exceed the limits.
+    for (let i = 0; i < 40; i++) {
+      await t.run(async (ctx) => {
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId: `m${i}`,
+          networkTs: i,
+          sortKey: `${String(i).padStart(16, '0')}:m${i}`,
+          sender: { ghostId: 'g' },
+          sealed: big(`m${i}`),
+          sealedObjectId: `m${i}`,
+          sealedEdit: big(`e${i}`),
+          editEventId: `e${i}`,
+          historical: false,
+        })
+      })
+    }
+    let cursor: string | null = null
+    let seen = 0
+    for (let pages = 0; pages < 20; pages++) {
+      const page: { page: unknown[]; isDone: boolean; continueCursor: string } = await as.query(api.messages.list, {
+        chatId,
+        paginationOpts: { numItems: 40, cursor },
+      })
+      seen += page.page.length
+      if (page.isDone) break
+      cursor = page.continueCursor
+    }
+    expect(seen).toBe(40)
+  })
+
+  it('ends a login the bridge host rejects outright', async () => {
+    const { t, as } = await ready()
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    const [command] = await claim(t)
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: command!.commandId,
+      lease: command!.lease,
+      accepted: false,
+      error: 'unsupported',
+    })
+    expect(await as.query(api.logins.session, { loginSessionId })).toMatchObject({
+      state: 'error',
+      step: { error: 'unsupported' },
+    })
+  })
+
+  it('marks a send the bridge host accepted but never reported on unknown, well past its deadline', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    await send(as, await aChat(t, 'user_a'), 1)
+    const [command] = await claim(t)
+    await accept(t, command!)
+    vi.advanceTimersByTime(26 * 60 * 60 * 1000)
+    await loginOn(t, 'whatsapp-1')
+    await claim(t)
+    expect(await delivery(t, id(1))).toBe('unknown')
+    expect(await outboxRow(t, id(1))).toMatchObject({ state: 'dispatched' })
+  })
+
+  it('doesn’t let commands for an unavailable account hold back a healthy host', async () => {
+    const { t, as } = await ready()
+    // A backlog for an account whose host is gone, bigger than one scan window.
+    await t.run(async (ctx) => {
+      await ctx.db.insert('networkAccounts', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        loginId: 'gone',
+        hostId: 'whatsapp-9',
+        state: 'CONNECTED',
+        updatedAt: 1,
+      })
+    })
+    for (let batch = 0; batch < 5; batch++) {
+      await t.run(async (ctx) => {
+        for (let i = 0; i < 500; i++) {
+          await ctx.db.insert('outbox', {
+            userId: 'user_a',
+            network: 'whatsapp',
+            loginId: 'gone',
+            payload: { type: 'markRead', portalId: 'p', upToEventId: 'e' },
+            state: 'queued',
+            attempts: 0,
+            createdAt: 1,
+          })
+        }
+      })
+    }
+    await as.mutation(api.logins.start, { network: 'whatsapp' })
+    let started = false
+    for (let sweep = 0; sweep < 4 && !started; sweep++) {
+      started = (await claim(t)).some((command) => command.payload.type === 'loginStart')
+    }
+    expect(started).toBe(true)
+  })
+
+  it('refuses an invitation email too long to be one', async () => {
+    const { t } = await ready()
+    const admin = await signIn(t, 'admin', 'admin')
+    await expect(
+      admin.mutation(api.members.invite, { email: `${'a'.repeat(300)}@example.com`, role: 'member' }),
+    ).rejects.toThrow(/email/)
+  })
 })

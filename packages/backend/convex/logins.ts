@@ -1,6 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { requireMember } from './lib/access'
+import { backupsOf, keyState } from './keys'
 import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
@@ -22,6 +23,10 @@ export const accounts = query({
       error: v.union(v.null(), errorCode),
       lastHealthyAt: v.union(v.null(), v.number()),
       updatedAt: v.number(),
+      /** A logout was asked for and hasn't been confirmed yet. */
+      logoutPending: v.boolean(),
+      /** Why the last logout didn't happen, if it didn't. */
+      logoutError: v.union(v.null(), errorCode),
     }),
   ),
   handler: async (ctx) => {
@@ -37,6 +42,8 @@ export const accounts = query({
       error: row.error ?? null,
       lastHealthyAt: row.lastHealthyAt ?? null,
       updatedAt: row.updatedAt,
+      logoutPending: row.logoutPending ?? false,
+      logoutError: row.logoutError ?? null,
     }))
   },
 })
@@ -87,9 +94,13 @@ export const start = mutation({
       throw new ConvexError('That isn’t a login method this network offers.')
     }
     if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
-    // Nothing can be sealed to someone without an identity key, so no network can be
-    // connected until their first device has set one.
-    if (!member.identityPublicKey) throw new ConvexError('Finish setting up this device before connecting a network.')
+    // Nothing can be sealed to someone without an identity key, and a key without both backups
+    // could be lost with the device, so no network can be connected until both exist.
+    if (keyState(member, await backupsOf(ctx, member.userId)) !== 'ready') {
+      throw new ConvexError(
+        'Finish setting up your key, with its password and recovery key, before connecting a network.',
+      )
+    }
     const now = Date.now()
     const loginSessionId = await ctx.db.insert('loginSessions', {
       userId: member.userId,
@@ -184,8 +195,9 @@ export const logout = mutation({
     const member = await requireMember(ctx)
     const account = await ctx.db.get(networkAccountId)
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
-    if (account.state === 'LOGGED_OUT') return null
+    if (account.state === 'LOGGED_OUT' || account.logoutPending) return null
     const now = Date.now()
+    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined })
     await queueCommand(ctx, {
       userId: member.userId,
       network: account.network,

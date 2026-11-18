@@ -24,6 +24,15 @@ export const loginState = v.union(...LOGIN_STATES.map((state) => v.literal(state
 /** Why something failed: a fixed code, never free text. See bridge-protocol.md, Errors. */
 export const errorCode = v.union(...ERROR_CODES.map((code) => v.literal(code)))
 
+/** Which list a chat is in. See lib/chatView.ts. */
+export const chatView = v.union(
+  v.literal('inbox'),
+  v.literal('snoozed'),
+  v.literal('archived'),
+  v.literal('requests'),
+  v.literal('blocked'),
+)
+
 export const chatKind = v.union(v.literal('dm'), v.literal('group'), v.literal('channel'), v.literal('space'))
 
 export const loginStep = v.object({

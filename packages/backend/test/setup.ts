@@ -16,7 +16,8 @@ export function setup() {
   process.env.TRIODITIS_SETUP_TOKEN = SETUP_TOKEN
   process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
   process.env.SITE_URL = 'https://trioditis.test'
-  const t = convexTest(schema, modules)
+  // Real Convex transaction limits, so a test can't pass by doing what a deployment refuses.
+  const t = convexTest({ schema, modules, transactionLimits: true })
   t.registerComponent('betterAuth', betterAuthSchema, betterAuthModules)
   mcpTest.register(t, 'mcp')
   return t
@@ -47,6 +48,23 @@ export async function signIn(t: T, userId: string, role: 'admin' | 'member' = 'm
       createdAt: Date.now(),
       ...(identity ? { identityPublicKey: 'A'.repeat(43), identityKid: 'K'.repeat(22) } : {}),
     })
+    // A member with a key has both its backups, as `keys.setup` leaves it.
+    if (identity) {
+      for (const kind of ['password', 'recovery'] as const) {
+        await ctx.db.insert('keyBackups', {
+          userId,
+          kid: 'K'.repeat(22),
+          kind,
+          nonce: 'n'.repeat(32),
+          ct: 'c'.repeat(64),
+          ...(kind === 'password'
+            ? { params: { alg: 'argon2id13' as const, salt: 's'.repeat(22), opslimit: 3, memlimit: 64 * 1024 * 1024 } }
+            : {}),
+          revision: 1,
+          createdAt: Date.now(),
+        })
+      }
+    }
   })
   return t.withIdentity({ subject: userId, sessionId: session._id })
 }

@@ -3,7 +3,6 @@ import { internalMutation, internalQuery, mutation, query, type QueryCtx } from 
 import { requireAdmin, requireMember } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
-import { isPublicKey, keyIdOf } from './lib/envelope'
 
 // Who is on this server. Accounts start from an invitation; the first account, the admin,
 // starts from the setup token the installer generates (TRIODITIS_SETUP_TOKEN).
@@ -138,28 +137,6 @@ export const me = query({
 })
 
 /**
- * Records the person's identity public key, from their first device. It can't be replaced
- * here: a new identity key would orphan everything sealed to the old one, so that goes
- * through key recovery instead.
- */
-export const setIdentityKey = mutation({
-  args: { publicKey: v.string() },
-  returns: v.object({ kid: v.string() }),
-  handler: async (ctx, { publicKey }) => {
-    const member = await requireMember(ctx)
-    if (!isPublicKey(publicKey)) throw new ConvexError('That isn’t a valid public key.')
-    if (member.identityPublicKey && member.identityPublicKey !== publicKey) {
-      throw new ConvexError('This account already has an identity key.')
-    }
-    // Derived here rather than taken from the client, so it always matches the key.
-    const kid = keyIdOf(publicKey)
-    await ctx.db.patch(member._id, { identityPublicKey: publicKey, identityKid: kid })
-    await audit(ctx, { kind: 'user', id: member.userId }, 'identity.set', kid)
-    return { kid }
-  },
-})
-
-/**
  * Creates an invitation and returns its token, once. The admin shares the link; only the
  * token's hash is stored.
  */
@@ -168,8 +145,11 @@ export const invite = mutation({
   returns: v.object({ invitationId: v.id('invitations'), token: v.string() }),
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx)
+    // A demo deployment (previews, nightly) has a shared, published login; nobody can be
+    // invited into it, so it can never hold a real person's account.
+    if (process.env.TRIODITIS_DEMO === '1') throw new ConvexError('Invitations are turned off on demo servers.')
     const email = normalizeEmail(args.email)
-    if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConvexError('That isn’t an email address.')
     const token = randomToken()
     const invitationId = await ctx.db.insert('invitations', {
       email,

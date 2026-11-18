@@ -2,8 +2,10 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual } from './lib/hash'
+import { onCommandExpired, onCommandRejected } from './lib/commandOutcome'
 import { Unmappable, applyEvent, byteSize, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
+import { enabledNetworks } from './lib/networks'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -97,6 +99,9 @@ export const ingest = mutation({
   handler: async (ctx, args) => {
     assertGateway(args.secret)
     if (args.events.length > MAX_BATCH) throw new ConvexError('Batch too large')
+    // Only networks this server offers. A demo deployment (fake only) so never stores events
+    // from a real network, whoever holds the gateway secret.
+    if (!enabledNetworks().has(args.network)) throw new ConvexError('Network not enabled')
     const now = Date.now()
     const host = await registerHost(ctx, args.hostId, args.network, now)
 
@@ -275,6 +280,42 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
   await expireLogin(ctx, command)
+  await onCommandExpired(ctx, command)
+}
+
+/** How long after its deadline a send the bridge host accepted may go without an outcome. */
+const OVERDUE_GRACE_MS = 60 * 60 * 1000
+
+/**
+ * A send the bridge host accepted but never reported on (it went away) would stay "Sending"
+ * forever. Once well past its deadline it becomes `unknown`, so the person can choose. It is
+ * never sent again, and a late outcome from the bridge host still settles it.
+ */
+async function settleOverdueSends(ctx: MutationCtx, now: number) {
+  const overdue = await ctx.db
+    .query('outbox')
+    .withIndex('by_expiry', (q) => q.eq('state', 'dispatched').lte('expiresAt', now - OVERDUE_GRACE_MS))
+    .take(MAX_EXPIRIES)
+  for (const command of overdue) {
+    const unsettled =
+      command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
+    await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
+    if (unsettled) await markCopy(ctx, command, 'unknown')
+  }
+}
+
+/** A login command the bridge host refused ends that login with its error. */
+async function failLogin(ctx: MutationCtx, command: Doc<'outbox'>, error: Doc<'outbox'>['lastError']) {
+  const { payload } = command
+  if (payload.type !== 'loginStart' && payload.type !== 'loginSubmit' && payload.type !== 'loginCancel') return
+  const sessionId = ctx.db.normalizeId('loginSessions', payload.loginSessionId)
+  const session = sessionId ? await ctx.db.get(sessionId) : null
+  if (!session || session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
+  await ctx.db.patch(session._id, {
+    state: 'error',
+    step: { stepId: 'rejected', type: 'error', error: error ?? 'invalid_command' },
+    updatedAt: Date.now(),
+  })
 }
 
 /**
@@ -309,8 +350,10 @@ export const claimCommands = mutation({
 
     const liveHosts = new Map<string, Doc<'bridgeHosts'>>()
     const liveByNetwork = new Map<string, Doc<'bridgeHosts'>>()
-    for (const host of await ctx.db.query('bridgeHosts').take(100)) {
-      if (!reachable.has(host.hostId) || now - host.lastSeenAt > HOST_STALE_MS) continue
+    // The gateway's configured hosts, looked up directly, however many others have come and gone.
+    for (const hostId of [...reachable].slice(0, 100)) {
+      const host = await hostRow(ctx, hostId)
+      if (!host || now - host.lastSeenAt > HOST_STALE_MS) continue
       liveHosts.set(host.hostId, host)
       const current = liveByNetwork.get(host.network)
       if (!current || host.lastSeenAt > current.lastSeenAt) liveByNetwork.set(host.network, host)
@@ -333,15 +376,40 @@ export const claimCommands = mutation({
       return owner ? liveHosts.get(owner) : undefined
     }
 
+    await settleOverdueSends(ctx, now)
+
+    // Queued commands are scanned a window at a time, carrying on from where the last claim
+    // stopped and wrapping round, so commands that can't go out yet (their host is down) never
+    // keep everything behind them waiting.
+    const cursor = await ctx.db
+      .query('claimCursor')
+      .withIndex('by_key', (q) => q.eq('key', 'queued'))
+      .unique()
+    const after = cursor?.after ?? 0
+    let queued = await ctx.db
+      .query('outbox')
+      .withIndex('by_state', (q) => q.eq('state', 'queued').gt('_creationTime', after))
+      .take(SCAN)
+    let nextAfter = queued.at(-1)?._creationTime ?? 0
+    if (queued.length < SCAN && after > 0) {
+      const wrapped = await ctx.db
+        .query('outbox')
+        .withIndex('by_state', (q) => q.eq('state', 'queued').lte('_creationTime', after))
+        .take(SCAN - queued.length)
+      queued = [...wrapped, ...queued]
+      nextAfter = 0
+    } else if (queued.length < SCAN) {
+      nextAfter = 0
+    }
+    if (cursor) await ctx.db.patch(cursor._id, { after: nextAfter })
+    else await ctx.db.insert('claimCursor', { key: 'queued', after: nextAfter })
+
     const candidates = [
       ...(await ctx.db
         .query('outbox')
         .withIndex('by_lease', (q) => q.eq('state', 'claimed').lte('leaseUntil', now))
         .take(SCAN_EXPIRED_LEASES)),
-      ...(await ctx.db
-        .query('outbox')
-        .withIndex('by_state', (q) => q.eq('state', 'queued'))
-        .take(SCAN)),
+      ...queued,
     ].sort((a, b) => a._creationTime - b._creationTime)
 
     const claimed = []
@@ -427,6 +495,8 @@ export const commandResult = mutation({
       ...(command.delivery ? { delivery: 'failed' as const } : {}),
     })
     await markCopy(ctx, command, 'failed')
+    await failLogin(ctx, command, error ?? 'invalid_command')
+    await onCommandRejected(ctx, command, error ?? 'invalid_command')
     return null
   },
 })

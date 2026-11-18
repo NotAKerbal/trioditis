@@ -29,7 +29,7 @@ export const networksForUser = internalQuery({
     const accounts = await ctx.db
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect()
+      .take(100)
     return accounts.map((account) => ({
       network: account.network,
       state: account.state,
