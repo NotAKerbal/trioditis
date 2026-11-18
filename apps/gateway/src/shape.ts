@@ -47,14 +47,15 @@ function matches(node: Node, value: unknown): boolean {
       if (!isRecord(value)) return false
       const fields = node.fields!
       // No field the validator doesn't know, nested or not: that is where plaintext would hide.
-      if (Object.keys(value).some((key) => !(key in fields))) return false
+      if (Object.keys(value).some((key) => !Object.hasOwn(fields, key))) return false
       return Object.entries(fields).every(([key, field]) =>
         value[key] === undefined ? field.isOptional === 'optional' : matches(field, value[key]),
       )
     }
     default:
-      // A kind this check doesn't know (bytes, say): leave it to the backend's validators.
-      return true
+      // A kind this check doesn't know (bytes, say) fails closed: the event is quarantined
+      // rather than sent unchecked. Teach `matches` the kind before an event uses it.
+      return false
   }
 }
 

@@ -113,6 +113,35 @@ describe('events', () => {
     expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 4])
   })
 
+  it('never sends a field named like an inherited property, or a ciphertext that isn’t one', async () => {
+    const backend = fakeBackend()
+    const secret = 'plaintext the bridge host should have sealed'
+    const envelope = {
+      v: 1,
+      nonce: 'A'.repeat(32),
+      ct: 'A'.repeat(64),
+      keys: [{ kid: 'A'.repeat(22), sk: 'A'.repeat(107) }],
+    }
+    const contact = (seq: number, sealed: unknown) => ({
+      seq,
+      type: 'contact',
+      userId: 'u',
+      loginId: 'l',
+      at: 1,
+      ghostId: 'g',
+      sealed,
+    })
+    const events = [
+      contact(1, envelope),
+      contact(2, { ...envelope, keys: [{ ...envelope.keys[0], constructor: secret }] }),
+      contact(3, { ...envelope, ct: secret }),
+      contact(4, envelope),
+    ]
+    expect(await post(await serve(backend), batch(events))).toEqual({ status: 200, body: { ackedThrough: 4 } })
+    expect(JSON.stringify((backend.ingest as ReturnType<typeof vi.fn>).mock.calls)).not.toContain(secret)
+    expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 4])
+  })
+
   it('quarantines an unknown type as unknown, never passing it on', async () => {
     const backend = fakeBackend()
     backend.ingest = vi.fn(async () => Promise.reject(new Error('ArgumentValidationError')))

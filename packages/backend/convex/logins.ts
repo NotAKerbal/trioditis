@@ -82,9 +82,14 @@ export const submit = mutation({
     if (args.stepId.length > 256 || session.state !== 'active' || session.step?.stepId !== args.stepId) {
       throw new ConvexError('That step of the login is over. Start again if it didn’t finish.')
     }
+    // A step takes one submission: the bridge host refuses a second, and that refusal would
+    // otherwise end a login the first submission is still moving along.
+    if (session.submittedStepId === args.stepId)
+      throw new ConvexError('That’s already been sent. Wait for the next step.')
     if (!isEnvelope(args.sealed, MAX_CLIENT_SEALED_BYTES))
       throw new ConvexError('That input isn’t sealed, or is too long.')
     const now = Date.now()
+    await ctx.db.patch(session._id, { submittedStepId: args.stepId })
     await queueCommand(
       ctx,
       {
