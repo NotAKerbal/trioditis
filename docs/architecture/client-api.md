@@ -531,7 +531,10 @@ it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` 
 one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
 bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
 hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why. Both
-happen on time whether or not a gateway is running.
+happen on time whether or not a gateway is running, with the same two exceptions as sends: a
+logout a gateway is handing over at the deadline waits for that lease (at most 30 seconds),
+and one queued before deadline jobs existed waits for the migrations (`migrations:runAll`,
+which `pnpm dev` and the installer run after each deploy).
 
 Errors: `That network isn’t enabled on this server.` · `Finish setting up your key, with
 its password and recovery key, before connecting a network.` · `That isn’t a login method

@@ -340,7 +340,7 @@ describe('reads that large messages could push past the read limit', () => {
         })
       }
       // A deleted message's reactions are hidden while its clean-up runs.
-      await ctx.db.insert('reactionCleanups', { messageId: ids[0]! })
+      await ctx.db.insert('reactionCleanups', { messageId: ids[0]!, chatId })
     })
     const result = await a.query(api.messages.reactions, { chatId, messageIds: ids })
     expect(Object.keys(result)).toHaveLength(29)
@@ -353,8 +353,9 @@ describe('reads that large messages could push past the read limit', () => {
     expect(Object.values(seen).flat()).toEqual([])
     // Nor does the same person asking from another of their chats.
     const other = await aChat(t, 'user_a', 'other')
-    const elsewhere = await a.query(api.messages.reactions, { chatId: other, messageIds: ids.slice(1, 3) })
-    expect(elsewhere).toEqual({ [ids[1]!]: [], [ids[2]!]: [] })
+    const elsewhere = await a.query(api.messages.reactions, { chatId: other, messageIds: ids.slice(0, 3) })
+    // Including the deleted one: from another chat it isn't a message there, not a deleted one.
+    expect(elsewhere).toEqual({ [ids[0]!]: [], [ids[1]!]: [], [ids[2]!]: [] })
   })
 })
 

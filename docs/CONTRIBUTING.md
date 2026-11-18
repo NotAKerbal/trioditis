@@ -247,7 +247,9 @@ One-off fixes for rows an older version wrote are internal functions in
 `migrations:runAll` runs them all in order: add a new one there too. `pnpm dev` (and
 `--setup`) calls `runAll` once its functions are pushed, directly on this checkout's backend
 with its own admin key, so a backend that keeps its data is always caught up; after adding a
-migration while `pnpm dev` runs, restart it. The self-hosted installer calls it after each of
+migration while `pnpm dev` runs, restart it. `runAll` waits for each migration's first
+batch; a migration that goes on in further scheduled batches finishes in the background, so
+a later batch's failure shows in the backend's logs rather than stopping setup. The self-hosted installer calls it after each of
 its deploys as well: see `docs/deploy.md`.
 
 ### End-to-end check

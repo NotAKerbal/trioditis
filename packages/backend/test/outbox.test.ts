@@ -1232,6 +1232,97 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     })
   })
 
+  it('leaves a login that moved past an accepted submission alone when that submission goes overdue', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await accept(t, (await claim(t))[0]!)
+    const step = (n: number, stepId: string) =>
+      t.mutation(api.gateway.ingest, {
+        secret: GATEWAY_SECRET,
+        ...HOST,
+        events: [
+          {
+            seq: n,
+            type: 'loginStep',
+            userId: 'user_a',
+            loginId: '',
+            at: Date.now(),
+            loginSessionId,
+            step: { stepId, type: 'userInput' },
+          },
+        ],
+      })
+    await step(1, 's1')
+    await as.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed('a') })
+    await accept(t, (await claim(t))[0]!)
+    await step(2, 's2')
+    vi.advanceTimersByTime(10 * 60 * 1000 + 60 * 60 * 1000 + 1000)
+    await heartbeat(t)
+    await claim(t)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.get(loginSessionId))).toMatchObject({
+      state: 'active',
+      step: { stepId: 's2' },
+    })
+  })
+
+  it('cancels a login whose accepted cancel never got an answer', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    await heartbeat(t)
+    const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
+    await accept(t, (await claim(t))[0]!)
+    await as.mutation(api.logins.cancel, { loginSessionId })
+    const [cancel] = (await claim(t)).filter((command) => command.payload.type === 'loginCancel')
+    await accept(t, cancel!)
+    vi.advanceTimersByTime(10 * 60 * 1000 + 60 * 60 * 1000 + 1000)
+    await heartbeat(t)
+    await claim(t)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(await t.run(async (ctx) => await ctx.db.get(loginSessionId))).toMatchObject({ state: 'cancelled' })
+  })
+
+  it('settles overdue accepted commands a bounded number per sweep, until all are settled', async () => {
+    const { t } = await ready()
+    // Accepted login commands from before deadline jobs, long overdue: only the sweep ends them.
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 41; i++) {
+        const loginSessionId = await ctx.db.insert('loginSessions', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          state: 'pending',
+          updatedAt: 1,
+        })
+        await ctx.db.insert('outbox', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          hostId: 'whatsapp-1',
+          payload: { type: 'loginStart', loginSessionId, network: 'whatsapp' },
+          state: 'dispatched',
+          attempts: 1,
+          createdAt: 1,
+          expiresAt: 1 + i,
+        })
+      }
+    })
+    const settled = async () =>
+      (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter((row) => row.expiresAt === undefined)
+        .length
+    await claim(t)
+    expect(await settled()).toBe(20)
+    await claim(t)
+    await claim(t)
+    expect(await settled()).toBe(41)
+    const sessions = await t.run(async (ctx) => await ctx.db.query('loginSessions').collect())
+    expect(sessions.every((session) => session.state === 'error')).toBe(true)
+  })
+
   it('reaches an expired lease that shares its deadline with a window of leases for a host that’s down', async () => {
     const { t } = await ready()
     const expiredLease = (hostId: string) => ({
