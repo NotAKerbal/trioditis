@@ -28,13 +28,21 @@ function openDb(): Promise<IDBDatabase> {
   })
 }
 
+/**
+ * Runs one request on the store. It answers once the transaction has committed, not when the
+ * request succeeds: a write (keeping or forgetting a key) isn't done until then, and can still
+ * be aborted.
+ */
 async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   const db = await openDb()
   try {
     return await new Promise<T>((resolve, reject) => {
-      const request = run(db.transaction(STORE, mode).objectStore(STORE))
-      request.onsuccess = () => resolve(request.result)
-      request.onerror = () => reject(request.error)
+      const transaction = db.transaction(STORE, mode)
+      const request = run(transaction.objectStore(STORE))
+      transaction.oncomplete = () => resolve(request.result)
+      transaction.onerror = () => reject(transaction.error ?? request.error)
+      transaction.onabort = () =>
+        reject(transaction.error ?? new Error('the change to this device’s storage was undone'))
     })
   } finally {
     db.close()

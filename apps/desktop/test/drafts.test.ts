@@ -1,40 +1,42 @@
 import { describe, expect, it } from 'vitest'
-import {
-  appendToDraft,
-  claimDraft,
-  clearDraftIf,
-  getDraft,
-  releaseDraft,
-  restoreDraft,
-  setDraftReply,
-  setDraftText,
-  takeDraft,
-} from '../src/data/drafts.ts'
+import { appendToDraft, getDraft, restoreDraft, setDraftReply, setDraftText, takeDraft } from '../src/data/drafts.ts'
 
 let n = 0
 const chat = () => `chat-${++n}`
 
 describe('drafts, wherever the action that changes them finishes', () => {
+  it('takes a draft once: what was taken can’t be taken again', () => {
+    const a = chat()
+    setDraftText(a, 'happy birthday')
+    expect(takeDraft(a)).toEqual({ text: 'happy birthday', reply: null })
+    // A second schedule, or a send, finds nothing to send.
+    expect(takeDraft(a)).toBeNull()
+  })
+
+  it('never sends what was scheduled again, though an earlier send fails meanwhile', () => {
+    const a = chat()
+    // Send A; while it's on its way, schedule B.
+    setDraftText(a, 'A')
+    const sent = takeDraft(a)!
+    setDraftText(a, 'B')
+    const scheduled = takeDraft(a)!
+    expect(scheduled.text).toBe('B')
+    // A doesn't go and comes back; then B's schedule succeeds, leaving it out of the composer.
+    restoreDraft(a, sent.text, sent.reply)
+    expect(getDraft(a).text).toBe('A')
+    expect(takeDraft(a)).toEqual({ text: 'A', reply: null })
+  })
+
   it('keeps text typed after a schedule began, even across leaving the chat and coming back', () => {
     const a = chat()
     setDraftText(a, 'happy birthday')
-    // Scheduling starts: it notes the draft's revision.
-    const rev = getDraft(a).rev
-    // The person opens another chat, comes back to this one (the store outlives both panes)…
+    const scheduled = takeDraft(a)!
+    // The person opens another chat, comes back (the store outlives both panes), and types.
     setDraftText(chat(), 'elsewhere')
-    // …and types before the schedule answers.
-    setDraftText(a, 'happy birthday, and see you Sunday')
-    clearDraftIf(a, rev)
-    expect(getDraft(a).text).toBe('happy birthday, and see you Sunday')
-  })
-
-  it('clears what was scheduled when nothing was typed since', () => {
-    const a = chat()
-    setDraftText(a, 'see you then')
-    setDraftReply(a, { id: 'm1' })
-    const rev = getDraft(a).rev
-    clearDraftIf(a, rev)
-    expect(getDraft(a)).toMatchObject({ text: '', reply: null })
+    setDraftText(a, 'and see you Sunday')
+    // The schedule fails: its text comes back ahead of the new text, which stays.
+    restoreDraft(a, scheduled.text, scheduled.reply)
+    expect(getDraft(a).text).toBe('happy birthday\nand see you Sunday')
   })
 
   it('puts a failed send back ahead of anything typed since, and its reply only if none is set', () => {
@@ -72,29 +74,5 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '')
     setDraftText(a, 'x')
     expect(getDraft(a).rev).toBeGreaterThan(before)
-  })
-})
-
-describe('a draft being scheduled', () => {
-  it('can’t be sent or scheduled again until the schedule answers', () => {
-    const a = `chat-claim-${Date.now()}`
-    setDraftText(a, 'see you tomorrow')
-    const rev = claimDraft(a)
-    expect(rev).not.toBeNull()
-    expect(claimDraft(a)).toBeNull()
-    expect(takeDraft(a)).toBeNull()
-    expect(getDraft(a).text).toBe('see you tomorrow')
-    releaseDraft(a, rev!)
-    expect(takeDraft(a)).toEqual({ text: 'see you tomorrow', reply: null })
-  })
-
-  it('keeps its revision while claimed, so a schedule still clears it on success', () => {
-    const a = `chat-claim-rev-${Date.now()}`
-    setDraftText(a, 'happy birthday')
-    const rev = claimDraft(a)!
-    expect(getDraft(a).rev).toBe(rev)
-    clearDraftIf(a, rev)
-    releaseDraft(a, rev)
-    expect(getDraft(a)).toMatchObject({ text: '', scheduling: null })
   })
 })

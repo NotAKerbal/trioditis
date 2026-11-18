@@ -10,10 +10,11 @@ import {
 } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
+import { toast } from '@trioditis/ui/toast'
 import { KeyRound, LogOut, Plus, Settings, Users } from 'lucide-react'
 import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
-import { signOut } from '~/lib/sign-out.ts'
+import { SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
 import { useSession } from '~/lib/session.tsx'
 
 const STATUS_TEXT = {
@@ -81,7 +82,9 @@ export function BottomBar({
             <KeyRound /> Keys and devices
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => void signOut(session.userId)}>
+          <DropdownMenuItem
+            onSelect={() => void signOut(session.userId).then((ended) => ended || toast(SIGN_OUT_FAILED))}
+          >
             <LogOut /> Sign out of this device
           </DropdownMenuItem>
         </DropdownMenuContent>

@@ -25,7 +25,7 @@ import { authClient } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, loadIdentity, storeIdentity } from '~/lib/keys.ts'
-import { signOut } from '~/lib/sign-out.ts'
+import { SIGN_OUT_FAILED, signOut } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
@@ -244,20 +244,26 @@ function KeySetup({
   const [uncheckedKid, setUncheckedKid] = useState<string | null>(null)
   // Another device set up a different key for the account first: this one can't be used.
   const [keyTaken, setKeyTaken] = useState(false)
-  // Signing out from setup waits for a save still under way, and forgets the key once the
-  // server holds its backups (before that, this device's copy may be the only one). While it
-  // runs, nothing else on these screens starts.
+  // Signing out from setup waits for a backup call or save still under way, and forgets the
+  // key once the server holds its backups (before that, this device's copy may be the only
+  // one). While it runs, nothing else on these screens starts.
+  const backingUp = useRef<Promise<unknown> | null>(null)
   const saving = useRef<Promise<unknown> | null>(null)
   const backupsSaved = useRef(false)
   const leavingRef = useRef(false)
   const [leaving, setLeaving] = useState(false)
-  const leave = () => {
+  const leave = async () => {
     leavingRef.current = true
     setLeaving(true)
-    void signOut(backupsSaved.current ? userId : undefined, { waitFor: saving.current })
+    // Whether the backups exist is known only once a keys.setup on its way has answered.
+    await backingUp.current?.catch(() => undefined)
+    if (await signOut(backupsSaved.current ? userId : undefined, { waitFor: saving.current })) return
+    leavingRef.current = false
+    setLeaving(false)
+    setError(SIGN_OUT_FAILED)
   }
   const signOutButton = (label = 'Sign out') => (
-    <Button block loading={leaving} disabled={leaving} onClick={leave}>
+    <Button block loading={leaving} disabled={leaving} onClick={() => void leave()}>
       {label}
     </Button>
   )
@@ -344,7 +350,9 @@ function KeySetup({
     let kid: string
     onSaving()
     try {
-      kid = (await setup({ ...job.setup.args, proof })).kid
+      const call = setup({ ...job.setup.args, proof })
+      backingUp.current = call
+      kid = (await call).kid
       backupsSaved.current = true
     } catch (e) {
       if (await takenElsewhere(job)) return
@@ -527,9 +535,10 @@ function KeySetup({
       >
         <form onSubmit={prepare}>
           <FormError message={error} />
-          <Button type="submit" variant="primary" size="lg" block loading={busy}>
+          <Button type="submit" variant="primary" size="lg" block loading={busy} disabled={leaving}>
             {busy ? 'Securing your key…' : 'Continue'}
           </Button>
+          <div className="mt-2">{signOutButton()}</div>
         </form>
       </AuthCard>
     )
@@ -707,10 +716,29 @@ function Unlock({
 }
 
 export function SignOutButton({ userId, label = 'Sign out' }: { userId?: string; label?: string }) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
   return (
-    <Button block onClick={() => void signOut(userId)}>
-      {label}
-    </Button>
+    <>
+      {failed ? (
+        <p role="alert" className="mb-2 text-sm text-danger">
+          {SIGN_OUT_FAILED}
+        </p>
+      ) : null}
+      <Button
+        block
+        loading={busy}
+        onClick={async () => {
+          setBusy(true)
+          setFailed(false)
+          if (await signOut(userId)) return
+          setFailed(true)
+          setBusy(false)
+        }}
+      >
+        {label}
+      </Button>
+    </>
   )
 }
 

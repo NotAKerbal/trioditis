@@ -36,17 +36,7 @@ import {
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
-import {
-  appendToDraft,
-  claimDraft,
-  clearDraftIf,
-  releaseDraft,
-  restoreDraft,
-  setDraftReply,
-  setDraftText,
-  takeDraft,
-  useDraft,
-} from '~/data/drafts.ts'
+import { appendToDraft, restoreDraft, setDraftReply, setDraftText, takeDraft, useDraft } from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
@@ -95,7 +85,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const { send, discard, schedule, cancelScheduled, sendScheduledNow } = useSendMutations()
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen.
-  const { text: draft, reply: replyTo, scheduling } = useDraft<Message>(chat.id)
+  const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
   const setDraft = (text: string) => setDraftText(chat.id, text)
   const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
   const [details, setDetails] = useState(true)
@@ -132,33 +122,32 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   }
 
   async function onSchedule(sendAt: number) {
-    const text = draft.trim()
-    if (!text) return
+    if (!draft.trim()) return
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
-    const chatId = chat.id
-    // Claimed until it answers: a second pick, or Send, would put the same message out twice.
-    const rev = claimDraft(chatId)
-    if (rev === null) return
-    const reply = replyTo
     try {
-      // Inside try, so a sealing failure is said and lets the draft be scheduled again.
-      const clientMessageId = newClientId()
-      const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
       checkWithinAYear(sendAt)
+    } catch (e) {
+      return toast(errorMessage(e, 'That time can’t be used.'))
+    }
+    const chatId = chat.id
+    // Taken out of the composer as it goes, like a send: it can't be sent or scheduled twice, and
+    // it comes back, ahead of anything typed since, only if it doesn't go.
+    const taken = takeDraft<Message>(chatId)
+    if (!taken) return
+    try {
+      const clientMessageId = newClientId()
+      const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
       await schedule({
         chatId,
         clientMessageId,
         sendAt,
         ...sealed,
-        ...(reply ? { replyTo: reply.eventId } : {}),
+        ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
       })
-      // Clear what was scheduled, unless the person has typed since: then that stays.
-      clearDraftIf(chatId, rev)
       toast(`Scheduled for ${formatWhen(sendAt)}`)
     } catch (e) {
+      restoreDraft(chatId, taken.text, taken.reply)
       toast(errorMessage(e, 'That message couldn’t be scheduled.'))
-    } finally {
-      releaseDraft(chatId, rev)
     }
   }
 
@@ -349,7 +338,6 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onDraft={setDraft}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
-          holding={scheduling !== null}
           onSend={() => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
           disabled={composerBlocked(chat.row, bridge.status)}
