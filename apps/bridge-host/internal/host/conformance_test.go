@@ -632,6 +632,25 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("a send or edit sealing more than a client may is refused before it runs", func(t *testing.T) {
+		before := len(h.net.Sent())
+		huge := sendCommand("cm-huge", strings.Repeat("x", 70*1024))
+		if status, body := h.command(huge); status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("expected 400 invalid_command for an oversized send, got %d %s", status, body)
+		}
+		edit := sendCommand("cm-huge-edit", strings.Repeat("x", 70*1024))
+		edit.Type, edit.TargetEventID = protocol.CommandEdit, gw.waitFor(t, "a message in this chat", isMessage("from my phone", h, "alice")).EventID
+		if status, _ := h.command(edit); status != http.StatusBadRequest {
+			t.Fatalf("expected 400 for an oversized edit, got %d", status)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if len(h.net.Sent()) != before || gw.count(func(e *protocol.Event) bool {
+			return e.Type == protocol.EventSendStatus && strings.HasPrefix(e.ClientMessageID, "cm-huge")
+		}) != 0 {
+			t.Fatal("an oversized send was run")
+		}
+	})
+
 	t.Run("a reply to a message in another chat is refused", func(t *testing.T) {
 		if err := h.net.Incoming(aliceNet, "other-chat", "peer-other", "o1", "in another chat", time.Now()); err != nil {
 			t.Fatal(err)

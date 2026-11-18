@@ -115,6 +115,9 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start the bridge host")
 	}
 	defer h.Stop()
+	if wa, ok := netConn.(*connector.WhatsAppConnector); ok {
+		sweepWhatsAppEventBuffer(ctx, wa, log)
+	}
 	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
 		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
 	}
@@ -150,6 +153,31 @@ func networkConnector(network string) (bridgev2.NetworkConnector, error) {
 		return fakenet.New(), nil
 	default:
 		return nil, fmt.Errorf("%q isn't a supported network", network)
+	}
+}
+
+// sweepWhatsAppEventBuffer deletes whatsmeow's buffered incoming events older than 14
+// days, the longest WhatsApp keeps an unacknowledged message for redelivery.
+//
+// whatsmeow keeps each decrypted incoming message (plaintext) in whatsmeow_event_buffer from
+// decryption until its handler, which journals it sealed, returns, and then clears the
+// plaintext. A row keeps its plaintext only if the handler failed or the process stopped in
+// between; WhatsApp then redelivers the message, unacknowledged, and the buffered copy is
+// what lets it be bridged, since the Signal session can't decrypt it twice. Such a row can't
+// be cleared early: it holds no message ID, so the host can't tell it was bridged, and a row
+// without plaintext makes whatsmeow drop the redelivery as already handled. Past 14 days no
+// redelivery can come, so whatsmeow deletes those rows, but only after its next successful
+// decryption; this does it at start-up instead. The query covers every login's rows.
+func sweepWhatsAppEventBuffer(ctx context.Context, wa *connector.WhatsAppConnector, log zerolog.Logger) {
+	devices, err := wa.DeviceStore.GetAllDevices(ctx)
+	if err != nil {
+		log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Failed to list WhatsApp devices to sweep their event buffer")
+		return
+	} else if len(devices) == 0 {
+		return
+	}
+	if err = devices[0].EventBuffer.DeleteOldBufferedHashes(ctx); err != nil {
+		log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Failed to sweep WhatsApp's event buffer")
 	}
 }
 

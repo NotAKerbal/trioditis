@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -373,6 +374,12 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 	if cmd.Type == protocol.CommandSend && cmd.NotAfter <= 0 {
 		return badRequest("notAfter is required")
 	}
+	// A client seals at most 64 KiB into a send (the backend refuses more), so a bigger one
+	// didn't come from a client's outbox. It is refused before it can reach the network:
+	// the person's sealed copy of it couldn't be journaled.
+	if cmd.Sealed != nil && seal.DecodedLen(cmd.Sealed.CT) > protocol.MaxClientSealedBytes {
+		return badRequest("sealed is over %d bytes", protocol.MaxClientSealedBytes)
+	}
 	t, err := c.resolve(ctx, cmd, true)
 	if err != nil {
 		return err
@@ -430,8 +437,11 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(id.EventID(cmd.ReplyTo))
 	}
 	// The person's copy is sealed now, while the plaintext is in hand, and recorded with
-	// the `sent` outcome. Then the plaintext is dropped.
-	if pending.echo, err = c.seal(ctx, t.owner, seal.KindMessage, string(eventID), &plain); err != nil {
+	// the `sent` outcome. Then the plaintext is dropped. It is fitted like an incoming
+	// message, so the outcome can always be journaled.
+	echo := plain
+	echo.Attachments = slices.Clone(plain.Attachments)
+	if pending.echo, err = c.seal(ctx, t.owner, seal.KindMessage, string(eventID), fitMessage(&echo)); err != nil {
 		return err
 	}
 	out.Status = protocol.StatusSubmitted
@@ -765,7 +775,9 @@ func (c *Connector) settle(ctx context.Context, eventID id.EventID, pending *pen
 			UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
 			Status: status, Error: code,
 		}
-		if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); err != nil {
+		if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); isPermanent(err) {
+			c.Log.Error().Str("code", "invalid_event").Stringer("event_id", eventID).Msg("A send's outcome can't be recorded; releasing its chat anyway")
+		} else if err != nil {
 			c.Log.Err(err).Stringer("event_id", eventID).Msg("Failed to record a send's outcome")
 			return
 		}
@@ -834,7 +846,9 @@ func (c *Connector) expirePending(eventID id.EventID) {
 			UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
 			Status: protocol.StatusUnknown, Error: protocol.ErrTimeout,
 		}
-		if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); err != nil {
+		if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); isPermanent(err) {
+			c.Log.Error().Str("code", "invalid_event").Stringer("event_id", eventID).Msg("A send can't be marked unknown; carrying on as if it were")
+		} else if err != nil {
 			c.Log.Err(err).Msg("Failed to mark send unknown")
 			return
 		}
@@ -893,7 +907,7 @@ func (c *Connector) releaseDeletedChat(portalID string) {
 			Status: protocol.StatusUnknown, Error: protocol.ErrInternal,
 		}
 		if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); err != nil {
-			c.Log.Err(err).Stringer("event_id", eventID).Msg("Failed to mark a send in a deleted chat unknown")
+			c.Log.Error().Str("error_type", errorType(err)).Stringer("event_id", eventID).Msg("Failed to mark a send in a deleted chat unknown")
 		}
 	}
 	c.Log.Debug().Stringer("event_id", eventID).Msg("Chat deleted while a command was out; releasing it")
@@ -926,7 +940,26 @@ func (c *Connector) SendMessageStatus(ctx context.Context, ms *bridgev2.MessageS
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
-	if err := c.recordUntilCommitted(func(ctx context.Context) error { return c.handleOutcome(ctx, pending, ms, info) }); err != nil {
+	err := c.recordUntilCommitted(func(ctx context.Context) error { return c.handleOutcome(ctx, pending, ms, info) })
+	if isPermanent(err) {
+		// The outcome's events can never be journaled (the backend would refuse them), so
+		// retrying is pointless and would hold the chat for good. A send is recorded as what
+		// can still be said about it, `unknown`, and the chat goes on. Only a code is logged:
+		// the error describes the event.
+		c.Log.Error().Str("code", "invalid_event").Stringer("event_id", info.SourceEventID).
+			Msg("A command's outcome can't be recorded as reported; recording it as unknown")
+		err = nil
+		if isSendKind(pending.kind) {
+			out := &store.Outgoing{
+				UserID: pending.owner.userID, LoginID: pending.owner.loginID, ClientMessageID: pending.clientMessageID,
+				Status: protocol.StatusUnknown, Error: protocol.ErrInternal,
+			}
+			if err = c.recordUntilCommitted(func(ctx context.Context) error { return c.recordSend(ctx, pending.owner, out, false) }); isPermanent(err) {
+				err = nil
+			}
+		}
+	}
+	if err != nil {
 		c.Log.Err(err).Stringer("event_id", info.SourceEventID).Msg("Failed to record command outcome; it is settled at the next start")
 		return
 	}
@@ -941,7 +974,12 @@ func (c *Connector) SendMessageStatus(ctx context.Context, ms *bridgev2.MessageS
 // outcomeAttemptTimeout bounds one attempt at writing an outcome.
 const outcomeAttemptTimeout = 30 * time.Second
 
-// recordUntilCommitted retries writing an outcome until it commits or the bridge stops.
+// isPermanent is a failure to write an outcome that writing again can't fix: an event the
+// backend would refuse, which the journal won't take.
+func isPermanent(err error) bool { return errors.Is(err, protocol.ErrInvalidEvent) }
+
+// recordUntilCommitted retries writing an outcome until it commits or the bridge stops. A
+// permanent failure (isPermanent) is returned at once, for the caller to record what it can.
 // Every attempt gets a fresh context from the bridge's lifetime, never the caller's: bridgev2
 // reports an outcome with the chat's context, which is cancelled if the chat is deleted, and
 // an outcome the network confirmed must still be recorded then. A send left unrecorded when
@@ -955,6 +993,8 @@ func (c *Connector) recordUntilCommitted(write func(ctx context.Context) error) 
 		cancel()
 		if err == nil || errors.Is(err, errAlreadyRecorded) {
 			return nil
+		} else if isPermanent(err) {
+			return err
 		}
 		c.Log.Warn().Str("error_type", errorType(err)).Dur("retry_in", delay).Msg("Recording an outcome failed; retrying")
 		select {

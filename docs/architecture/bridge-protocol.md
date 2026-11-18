@@ -144,6 +144,9 @@ and on login commands, and may be on others.
 ### Command validation
 
 - `send` needs `notAfter`; without it the command is refused (`400 invalid_command`).
+- A `send` or `edit` whose `sealed` holds more than 64 KiB (the client limit, see Sizes) is
+  refused (`400 invalid_command`) before it runs: only a client's outbox may send, and the
+  backend never accepts more from a client.
 - Targets must be bridged messages in the command's own chat: `replyTo`, `targetEventId`
   (edit, react, unreact, redact), `upToEventId` (markRead) and `beforeEventId` (backfill).
   A `pending:` ID, a deleted message or a message from another chat is refused
@@ -168,25 +171,31 @@ and on login commands, and may be on others.
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- `notAfter` is checked when the send starts and again as the bridge host's last step before
-  handing it to bridgev2, both with an 11-minute margin for what bridgev2 may still wait on,
-  and once more, with a 2-minute margin, if the connector reads the send's attachment (the
-  last code of the bridge host's that runs before a media send is uploaded and transmitted).
-  A send refused at any of these never reaches the network: `failed` with `expired`. So a
-  send can be refused as `expired` before `notAfter`.
+- `notAfter` (ms since the epoch) is **best effort**, not a hard deadline, for any send
+  handed to bridgev2, and for WhatsApp sends in Phase 0 in particular. The bridge host checks
+  it when the send starts and again as its last step before handing the send to bridgev2,
+  both with an 11-minute margin for what bridgev2 may still wait on, and once more, with a
+  2-minute margin, if the connector reads the send's attachment (the last code of the bridge
+  host's that runs before a media send is uploaded and transmitted). A send refused at any
+  of these never reaches the network: the bridge host emits `failed` with error `expired`,
+  and the person decides. So a send can be refused as `expired` before `notAfter`.
 - **Limit:** past those checks the bridge host can't stop a send, and it can go out after
-  `notAfter`. bridgev2 calls the connector with its own context, which carries no deadline,
-  and for a text send no code of the bridge host's runs between the hand-off and the
-  transmission. What can delay it: waiting behind more than two incoming events that each
-  hit bridgev2's 5-minute handler limit, a slow media upload, and (WhatsApp) whatsmeow's send
-  lock, one per login, which every send in all of the person's chats takes in turn: a send
-  stalled in another chat holds it while each of its network requests waits up to 75
-  seconds, with no bound on how many are queued ahead. A late transmission is reported as
-  what happened, never as `expired`: `sent` once the network confirms it (even after the send
-  was marked `unknown`), or `unknown` if no outcome arrives. Closing this needs a pre-send hook
-  in bridgev2 or the connector (bridge host README, Known follow-ups).
-- A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
-  the bridge host emits `failed` with error `expired`, and the person decides.
+  `notAfter`, by any amount. bridgev2 calls the connector with its own context, which
+  carries no deadline, and for a text send no code of the bridge host's runs between the
+  hand-off and the transmission. What can delay it: waiting behind more than two incoming
+  events that each hit bridgev2's 5-minute handler limit, a slow media upload, and
+  (WhatsApp) whatsmeow's send lock. That lock is one per login: every send in all of the
+  person's chats takes it in turn, and holds it until the server acknowledges the message.
+  The first wait for that acknowledgement is 75 seconds, but if the connection drops first,
+  whatsmeow sends the frame again after reconnecting and then waits for its
+  acknowledgement **with no time limit**, still holding the lock. If the new connection stays
+  open and that acknowledgement never comes, every send on the login waits indefinitely
+  (until the chat is deleted, the login disconnects again, or the bridge host stops), and a
+  send waiting behind it is transmitted, after `notAfter`, once the lock clears. A late
+  transmission is reported as what happened, never as `expired`: `sent` once the network
+  confirms it (even after the send was marked `unknown`), or `unknown` if no outcome
+  arrives. Closing this needs a pre-send hook in bridgev2 or the connector, and a bounded
+  retransmit wait in whatsmeow (bridge host README, Known follow-ups).
 
 ## Errors
 

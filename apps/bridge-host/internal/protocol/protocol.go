@@ -89,6 +89,9 @@ const (
 	MaxMetadataSealedBytes = 8 * 1024
 	// MaxEventBytes is the most one event's JSON may hold (the gateway quarantines more).
 	MaxEventBytes = 1024 * 1024
+	// MaxClientSealedBytes is the most a client may seal into a send, an edit or login
+	// input (the backend refuses more, so a bigger one didn't come from a client).
+	MaxClientSealedBytes = 64 * 1024
 )
 
 // eventShape is what one event type carries beyond seq, type, userId, loginId and at.
@@ -212,8 +215,12 @@ func Bare(evt *Event) *Event {
 	return &Event{Seq: evt.Seq, Type: evt.Type, UserID: evt.UserID, LoginID: evt.LoginID, At: evt.At, bare: true}
 }
 
+// ErrInvalidEvent is an event the backend would refuse. Writing it again can't succeed, so
+// callers treat it as permanent rather than retrying.
+var ErrInvalidEvent = errors.New("event the backend would refuse")
+
 // ErrTooLarge is an event over one of the size limits.
-var ErrTooLarge = errors.New("event is over the protocol's size limit")
+var ErrTooLarge = fmt.Errorf("%w: over the protocol's size limit", ErrInvalidEvent)
 
 // Validate checks an event before it is journaled: a known type with every field the
 // backend requires, and within the size limits. An event that fails it is a bug in the
@@ -221,15 +228,15 @@ var ErrTooLarge = errors.New("event is over the protocol's size limit")
 func (e *Event) Validate() error {
 	shape, ok := eventShapes[e.Type]
 	if !ok {
-		return fmt.Errorf("unknown event type %q", e.Type)
+		return fmt.Errorf("%w: unknown event type %q", ErrInvalidEvent, e.Type)
 	}
 	if e.UserID == "" {
-		return fmt.Errorf("%s event has no userId", e.Type)
+		return fmt.Errorf("%w: %s event has no userId", ErrInvalidEvent, e.Type)
 	}
 	for _, name := range shape.required {
 		// A network timestamp of 0 is odd but valid; every other required field must be set.
 		if _, set := e.field(name); !set && name != "networkTs" {
-			return fmt.Errorf("%s event is missing %s", e.Type, name)
+			return fmt.Errorf("%w: %s event is missing %s", ErrInvalidEvent, e.Type, name)
 		}
 	}
 	if e.Sealed != nil {
@@ -243,7 +250,7 @@ func (e *Event) Validate() error {
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
 	}
 	if len(data) > MaxEventBytes {
 		return fmt.Errorf("%s event: %w", e.Type, ErrTooLarge)

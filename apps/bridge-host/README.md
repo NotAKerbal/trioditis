@@ -119,14 +119,15 @@ identity keys kept in the data directory (never do that in production):
   settled at the next start.
 - **Synchronous chats.** bridgev2 runs with `PortalEventBuffer: 0`: a chat's events are
   handled in the goroutine that queues them, so a send reaches the connector as soon as its
-  lane lets it go, with no queue in between.
+  lane lets it go, with no queue in between. For WhatsApp this also keeps whatsmeow's
+  decrypted-event buffer on (see Plaintext at rest).
 - **One writer.** The bridge host's own write transactions run one at a time in the
   process (a transaction inside another joins it), so they can't take the journal counter and
   ID rows in opposite orders and deadlock on PostgreSQL.
 - **Sends, one at a time per chat, in order.** Only a chat's earliest waiting command is
   ever started, so commands for one chat can't overtake each other, and the next command
   waits until a send, edit, reaction or redaction has an outcome. `notAfter` (required on
-  every send) is checked when the send starts and again as the last step before it is
+  every send, and best effort once a send is handed off; see Spike findings) is checked when the send starts and again as the last step before it is
   handed to bridgev2, after sealing and recording, with a margin (`HandoffMargin`, 11
   minutes) for what bridgev2 may still wait on before the connector transmits: the chat's
   lock, which an incoming event holds for at most bridgev2's handler limit (5 minutes) before
@@ -163,8 +164,12 @@ identity keys kept in the data directory (never do that in production):
   (`Event.Validate`; the JSON carries exactly its type's fields), and what is sealed is
   measured as sealed: chat and contact metadata fits 8 KiB (topic or handle cut first, then
   the name), and a message or edit fits 256 KiB (formatted body dropped, then the body cut at
-  a character boundary, marked `truncated`). The pusher never sends an event over 1 MiB; an
-  older journal row that big goes as a bare stand-in the gateway quarantines.
+  a character boundary, marked `truncated`); the person's own copy of a send is fitted the
+  same way. A send or edit sealing more than a client may (64 KiB) is refused with `400`.
+  The pusher never sends an event over 1 MiB; an older journal row that big goes as a bare
+  stand-in the gateway quarantines. An outcome whose events the journal refuses is never
+  retried (that would hold its chat for good): a send is recorded `unknown` and the chat
+  goes on, with only a code logged.
 - **Errors are codes.** Events and 4xx bodies carry only protocol error codes. Details are
   logged locally.
 - **Logins** follow bridgev2's login process API, emitting `loginStep` events; input
@@ -202,6 +207,7 @@ The conformance suite (`internal/host/conformance_test.go`) runs a real bridge h
 - the send states (`sent`, `unknown`, `failed`, expired), repeated sends and idempotent command IDs
 - `notAfter` required, checked at hand-off behind a slow send in the same chat, and again
   when the connector reads an attachment
+- a send or edit sealing more than a client may (64 KiB) refused with `400`
 - a reaction still running after bridgev2 stops waiting holding its chat, with its late
   outcome recorded
 - a send in a chat deleted while it runs (no outcome from bridgev2) ending `unknown` and
@@ -224,7 +230,8 @@ core flow on PostgreSQL when `TRIODITIS_TEST_POSTGRES_URI` names a scratch datab
 `internal/store` tests the portal-value migration, the gap-free journal and the ID key.
 `internal/protocol` tests each event type's exact JSON fields and the checks before
 journaling; `internal/connector` that escaped metadata and oversized messages seal within
-their limits; `internal/gateway` that an event too large to send goes as a stand-in.
+their limits, and that an outcome the journal can never take is recorded as `unknown` and
+releases its chat; `internal/gateway` that an event too large to send goes as a stand-in.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
@@ -269,14 +276,18 @@ suite. WhatsApp additionally uses:
   (`unsupported`) for WhatsApp: its connector treats an empty result for the requested range
   as the end of history and deletes every cached history row for the chat, including newer
   ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
-- A send handed to bridgev2 can still reach the network after `notAfter` (bridge-protocol.md,
-  Deadlines and Delivery rules): behind more than two incoming events that each hit
-  bridgev2's 5-minute handler limit, after a slow media upload, or, on WhatsApp, behind
-  whatsmeow's send lock. That lock is one per login (`go.mau.fi/whatsmeow` `send.go`,
-  `messageSendLock`), taken by every send in all of the person's chats, and doesn't honour a
-  context; a send stalled in another chat holds it while each of its requests waits up to 75
-  seconds. A late send is reported truthfully: `sent` when the network confirms it, else
-  `unknown`, never `expired`.
+- **`notAfter` is best effort for WhatsApp sends in Phase 0.** A send handed to bridgev2 can
+  still reach the network after `notAfter`, by any amount (bridge-protocol.md, Delivery
+  rules): behind more than two incoming events that each hit bridgev2's 5-minute handler
+  limit, after a slow media upload, or behind whatsmeow's send lock. That lock is one per
+  login (`go.mau.fi/whatsmeow` `send.go`, `messageSendLock`), taken by every send in all of
+  the person's chats and held until the server acknowledges the message, and it doesn't
+  honour a context. The first wait for that acknowledgement is 75 seconds, but after a
+  disconnect whatsmeow resends the frame and waits for it with no timeout (`retryFrame` is
+  called with timeout 0, `request.go`), still holding the lock: if the new connection stays
+  up and the acknowledgement never comes, every chat on that login waits indefinitely, and a
+  send queued behind it transmits after `notAfter` once the lock clears. A late send is
+  reported truthfully: `sent` when the network confirms it, else `unknown`, never `expired`.
 - **whatsmeow resends a frame after a disconnect.** If the connection drops after a message
   frame went out but before WhatsApp acknowledged it, whatsmeow waits up to 5 seconds for a
   reconnect and sends the same frame again, with the same message ID, inside the same
@@ -307,13 +318,30 @@ suite). But the connectors' own storage, in the same database, does:
   imported. Deleting them earlier would lose that history, so the host doesn't.
 - whatsmeow's store holds the session keys (expected; it is what makes the bridge work)
   and its contacts table, which has push names and phone numbers.
+- **whatsmeow's `whatsmeow_event_buffer`** holds each incoming message's decrypted protobuf
+  (`plaintext`, content included). mautrix-whatsapp turns it on because the host runs
+  bridgev2 with `PortalEventBuffer: 0` (`EnableDecryptedEventBuffer`), and the host keeps it
+  that way: a Signal message can be decrypted only once, so the buffered copy is what lets a
+  message whose handling failed, or was cut off by a crash, be bridged when WhatsApp
+  redelivers it (it isn't acknowledged until it is handled). Turning it off would lose that
+  message. The row is written in the decrypting transaction and its plaintext cleared as soon
+  as the handler returns, which is once the message is journaled sealed (usually moments; at
+  most bridgev2's 5-minute handler limit, after which bridgev2 reports success and carries
+  on). Plaintext stays only after a failure or crash in between, until the redelivery is
+  bridged, or at most 14 days (WhatsApp's redelivery window), when whatsmeow deletes the row;
+  `run` does that sweep at start-up too, rather than waiting for the next message. A row
+  can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a
+  row without plaintext makes whatsmeow drop the redelivery as already handled. Outgoing
+  messages kept for retry receipts stay in memory (`use_whatsapp_retry_store` is off).
 - A connector's media conversion can write a replacement file (for example a converted
   voice note) wherever the connector chooses; the host reads and removes it, but doesn't
   choose where it was written.
 
-Options:
+Phase 0 decision: all of these are covered by keeping the bridge host database on an
+encrypted disk with encrypted backups (`docs/architecture/sealing.md`, What else is stored in
+plaintext). Options for Phase 1:
 
-- an encrypted volume for the bridge host database (assumed by the plan)
+- an encrypted volume for the bridge host database (the Phase 0 decision)
 - pruning or minimizing those columns where bridgev2 allows
 - configuring WhatsApp's history sync to keep the window short
 
@@ -336,11 +364,12 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   can't prune outside it (an upstream change, or a guard around its history store).
 - **Live checks.** WhatsApp pairing, messaging and history, and the conformance suite on
   PostgreSQL (`TRIODITIS_TEST_POSTGRES_URI`), haven't been run.
-- **Deadline at transmission.** `notAfter` is enforced at hand-off with an 11-minute margin,
-  and for media again when the attachment is read. Enforcing it at the moment of
-  transmission needs a pre-send hook in bridgev2 that takes a deadline (or a connector that
-  tolerates a wrapped client, or whatsmeow honouring a context while it waits for its send
-  lock); propose one upstream.
+- **Deadline at transmission.** `notAfter` is checked at hand-off with an 11-minute margin,
+  and for media again when the attachment is read; after that it is best effort. Enforcing
+  it at the moment of transmission needs a pre-send hook in bridgev2 that takes a deadline
+  (or a connector that tolerates a wrapped client, or whatsmeow honouring a context while it
+  waits for its send lock), and whatsmeow bounding its wait for a retransmitted frame's
+  acknowledgement; propose both upstream.
 - **A chat held by a stuck connector.** A command whose handler never returns holds its chat
   for up to `holdLimit` (about 40 minutes from the hand-off by default) before the chat is
   released. Add an operator command to release one sooner, and a metric for it.

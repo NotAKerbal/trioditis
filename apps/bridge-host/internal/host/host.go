@@ -87,8 +87,11 @@ func BridgeConfig() *bridgeconfig.BridgeConfig {
 		SplitPortals:          true,
 		PrivateChatPortalMeta: true,
 		// A chat's events are handled synchronously, in the goroutine that queues them. A send
-		// is then handed to the connector the moment the bridge host lets it go, so its
-		// deadline holds, and a chat stuck inside a connector holds only that chat's lane.
+		// is then handed to the connector the moment the bridge host lets it go, right after
+		// its deadline is checked, and a chat stuck inside a connector holds only that chat's
+		// lane. It also makes mautrix-whatsapp keep whatsmeow's decrypted-event buffer, so a
+		// message whose handling a crash cuts off is bridged when WhatsApp redelivers it (see
+		// the README, Plaintext at rest).
 		PortalEventBuffer: 0,
 		// How long a send waits for a login that is reconnecting before it fails. Bounded, so
 		// a send checked against its deadline can't wait long after the check.

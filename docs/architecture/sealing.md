@@ -144,8 +144,17 @@ later addition.
 The network connectors keep their own state in the bridge host's database, and some of it
 is plaintext the operator could read with database access: bridgev2's portal, ghost and
 login tables (chat names, contact names, phone numbers), WhatsApp's history-sync table (raw
-history until it is imported) and whatsmeow's contacts.
+history until it is imported), whatsmeow's contacts, and whatsmeow's decrypted-event buffer
+(`whatsmeow_event_buffer`). That buffer holds each incoming WhatsApp message's decrypted
+protobuf (content included) from decryption until the bridge host has journaled it sealed
+(usually moments; at most bridgev2's 5-minute handler limit), and whatsmeow then clears the
+plaintext. It stays only if
+handling failed or the process stopped in between: until WhatsApp redelivers the message
+(it wasn't acknowledged) and it is bridged, or for at most 14 days, after which the row is
+deleted. It is kept on purpose: a message can be decrypted only once, so without it a crash
+mid-message would lose that message. See the bridge host README, Plaintext at rest.
 
-**Phase 0:** that database lives on an **encrypted disk, with encrypted backups**; the
+**Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
+encrypted backups**; the
 installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
 columns are sealed with a server-held key. See docs/PLAN.md, Open questions.
