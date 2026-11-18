@@ -46,6 +46,22 @@ func Sweep(ctx context.Context, devices Devices) error {
 	return all[0].EventBuffer.DeleteOldBufferedHashes(ctx)
 }
 
+// Start runs Run in the background. The function it returns stops it and waits for it to
+// finish, so the caller can then close the database; call it before stopping the host,
+// whatever ctx is doing.
+func Start(ctx context.Context, devices Devices, interval time.Duration, log zerolog.Logger) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(ctx, devices, interval, log)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // Run sweeps now and then every interval, until ctx ends. Only an error's type is logged.
 func Run(ctx context.Context, devices Devices, interval time.Duration, log zerolog.Logger) {
 	ticker := time.NewTicker(interval)

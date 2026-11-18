@@ -266,6 +266,6 @@ The bridge host's journal stores events **after** sealing: the bridge host itsel
 writes plaintext content to its journal or its own tables. The network connectors' own
 storage, in the same database, is the exception: bridgev2's chat and contact tables, and for
 WhatsApp its history-sync table and whatsmeow's decrypted-event buffer, which holds an
-incoming message's plaintext until it is journaled and, after a failure, for up to about 14
-days. See `sealing.md`, What else is stored in plaintext, and the bridge host README,
+incoming message's plaintext until its handler returns success and, after a failure, until
+a sweep succeeds once the row is about 14 days old. See `sealing.md`, What else is stored in plaintext, and the bridge host README,
 Plaintext at rest.

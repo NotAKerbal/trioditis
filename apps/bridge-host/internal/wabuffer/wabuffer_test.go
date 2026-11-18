@@ -19,12 +19,24 @@ import (
 // seeded is a whatsmeow store on SQLite with one login.
 func seeded(t *testing.T) (*sqlstore.Container, *dbutil.Database, types.JID) {
 	t.Helper()
-	uri := "file:" + filepath.Join(t.TempDir(), "wa.db") + "?_txlock=immediate"
-	db, err := dbutil.NewFromConfig("test", dbutil.Config{PoolConfig: dbutil.PoolConfig{Type: "sqlite3-fk-wal", URI: uri, MaxOpenConns: 1}}, dbutil.NoopLogger)
+	path := filepath.Join(t.TempDir(), "wa.db")
+	db, err := dbutil.NewFromConfig("test", dbutil.Config{PoolConfig: dbutil.PoolConfig{Type: "sqlite3-fk-wal", URI: "file:" + path + "?_txlock=immediate", MaxOpenConns: 1}}, dbutil.NoopLogger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	// Registered after TempDir's, so it runs before the directory is removed. A query whose
+	// context was cancelled mid-way (the sweeper stopping) can leave database/sql opening a
+	// replacement connection in the background, which Close doesn't wait for, and SQLite then
+	// creates its -wal and -shm files while the directory is being removed. One more query
+	// first takes that connection, and Close then closes it.
+	t.Cleanup(func() {
+		if _, err := db.Exec(context.Background(), "SELECT 1"); err != nil {
+			t.Errorf("database unusable before closing: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Errorf("failed to close the database: %v", err)
+		}
+	})
 	// As mautrix-whatsapp opens it: a child of the bridge's database with whatsmeow's tables.
 	container := sqlstore.NewWithWrappedDB(db.Child("whatsmeow_version", upgrades.Table, dbutil.NoopLogger), waLog.Noop)
 	ctx := context.Background()
@@ -99,5 +111,22 @@ func TestRunKeepsSweepingUntilStopped(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the sweeper didn't stop")
+	}
+}
+
+// The bridge host stops the sweeper before it stops the host and closes the database, on
+// every way out, including while its own context (the signal context) is still live.
+func TestStopEndsTheSweeperWhileItsContextIsLive(t *testing.T) {
+	container, _, _ := seeded(t)
+	stop := Start(context.Background(), container, time.Hour, zerolog.Nop())
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopping the sweeper waited on its parent context")
 	}
 }

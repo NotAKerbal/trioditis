@@ -58,6 +58,16 @@ func main() {
 		level = zerolog.DebugLevel
 	}
 	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}).Level(level).With().Timestamp().Logger()
+	// Checked before anything starts, so a usage error never leaves a host running.
+	switch command {
+	case "run", "inspect":
+	case "login":
+		if *user == "" {
+			log.Fatal().Msg("login needs --user")
+		}
+	default:
+		log.Fatal().Str("command", command).Msg("Unknown command")
+	}
 
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		log.Fatal().Err(err).Msg("Failed to create data directory")
@@ -115,17 +125,18 @@ func main() {
 	if err = h.Start(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start the bridge host")
 	}
-	defer h.Stop()
+	// Shutdown, on every return from here: the sweeper is stopped (cancelled, then waited
+	// for) before the host and its database stop.
+	stopSweeping := func() {}
+	defer func() {
+		stopSweeping()
+		h.Stop()
+	}()
 	if wa, ok := netConn.(*connector.WhatsAppConnector); ok {
 		// Plaintext left in whatsmeow's decrypted-event buffer is deleted once it is past
 		// WhatsApp's redelivery window: now, and hourly, rather than only when a message
-		// arrives. The sweep finishes before the host (and its database) stops.
-		sweeping := make(chan struct{})
-		go func() {
-			defer close(sweeping)
-			wabuffer.Run(ctx, wa.DeviceStore, wabuffer.Interval, log.With().Str("component", "whatsapp buffer").Logger())
-		}()
-		defer func() { <-sweeping }()
+		// arrives.
+		stopSweeping = wabuffer.Start(ctx, wa.DeviceStore, wabuffer.Interval, log.With().Str("component", "whatsapp buffer").Logger())
 	}
 	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
 		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
@@ -134,16 +145,11 @@ func main() {
 	case "run":
 		log.Info().Str("network", *network).Str("addr", h.Addr()).Msg("Bridge host running")
 	case "login":
-		if *user == "" {
-			log.Fatal().Msg("login needs --user")
-		}
 		if err = terminalLogin(ctx, h, *network, *user, *flow, bridgeKey); err != nil {
 			log.Error().Err(err).Msg("Login failed")
 			return
 		}
 		log.Info().Msg("Logged in. Messages are being bridged into the journal; run `inspect` in another terminal to read them. Ctrl+C to stop.")
-	default:
-		log.Fatal().Str("command", command).Msg("Unknown command")
 	}
 	<-ctx.Done()
 }

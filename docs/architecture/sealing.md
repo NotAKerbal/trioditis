@@ -146,9 +146,10 @@ is plaintext the operator could read with database access: bridgev2's portal, gh
 login tables (chat names, contact names, phone numbers), WhatsApp's history-sync table (raw
 history until it is imported), whatsmeow's contacts, and whatsmeow's decrypted-event buffer
 (`whatsmeow_event_buffer`). That buffer holds each incoming WhatsApp message's decrypted
-protobuf (content included) from decryption until the bridge host has journaled it sealed
-(usually moments; at most bridgev2's 5-minute handler limit), and whatsmeow then clears the
-plaintext. It is kept on purpose: a message can be decrypted only once, so without it a
+protobuf (content included) from decryption until its handler returns success, and
+whatsmeow then clears the plaintext. That is normally once the bridge host has journaled it
+sealed (usually moments), but bridgev2 also reports success when its 5-minute handler limit
+passes, while handling carries on (see below). It is kept on purpose: a message can be decrypted only once, so without it a
 crash mid-message would lose that message. Plaintext stays in a row only when:
 
 - handling failed, or the process stopped before it finished: the message wasn't
@@ -156,13 +157,14 @@ crash mid-message would lose that message. Plaintext stays in a row only when:
 - clearing the plaintext failed with a database error: whatsmeow still acknowledges the
   message, so no redelivery clears it.
 
-Either way the row is deleted, plaintext and all, once it is about 14 days old (WhatsApp's
-redelivery window), checked hourly by the bridge host. One case loses a message rather than
+Either way the row is deleted, plaintext and all, by the first sweep that succeeds once it
+is about 14 days old (WhatsApp's redelivery window); the bridge host sweeps at start-up and
+hourly, and a sweep that fails leaves the row for the next. One case loses a message rather than
 keeping it: after bridgev2's 5-minute handler limit it reports success while handling
 carries on in the background, so whatsmeow clears the plaintext and acknowledges the
 message; if the process stops before the sealed event is journaled, WhatsApp doesn't
 redeliver it. See the bridge host README, Plaintext at rest.
 
 **Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
-encrypted backups**; the installer warns when its data directory isn't on an encrypted volume. **Phase 1:** those
-columns are sealed with a server-held key. See docs/PLAN.md, Open questions.
+encrypted backups**; the installer warns when its data directory isn't on an encrypted
+volume. **Phase 1:** those columns are sealed with a server-held key. See docs/PLAN.md, Open questions.

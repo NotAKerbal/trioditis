@@ -188,7 +188,7 @@ identity keys kept in the data directory (never do that in production):
 ```sh
 go vet ./...
 go test ./...                       # seal vectors both ways, and the conformance suite
-go test -race -count=3 ./internal/host/
+go test -race -count=3 ./internal/host/  # all but background_test.go (see Known follow-ups)
 pnpm --filter @trioditis/crypto test  # TypeScript opens vectors-go.json
 ```
 
@@ -208,10 +208,11 @@ The conformance suite (`internal/host/conformance_test.go`) runs a real bridge h
 - `notAfter` required, checked at hand-off behind a slow send in the same chat, and again
   when the connector reads an attachment
 - a send or edit sealing more than a client may (64 KiB) refused with `400`
-- a reaction still running after bridgev2 stops waiting holding its chat, with its late
-  outcome recorded
-- a send in a chat deleted while it runs (no outcome from bridgev2) ending `unknown` and
-  releasing the chat; a connector that never returns releasing it after `holdLimit`
+- (in `background_test.go`, without `-race`; see Known follow-ups) a send or reaction still
+  running after bridgev2 stops waiting holding its chat, with a reaction's late outcome
+  recorded; a send in a chat deleted while it runs (no outcome from bridgev2) ending
+  `unknown` and releasing the chat; a connector that never returns releasing it after
+  `holdLimit`
 - a late outcome after a timeout still recorded as `sent`
 - replies refused into another chat
 - a send in flight at a restart ends `unknown` and is never sent
@@ -231,7 +232,9 @@ core flow on PostgreSQL when `TRIODITIS_TEST_POSTGRES_URI` names a scratch datab
 `internal/protocol` tests each event type's exact JSON fields and the checks before
 journaling; `internal/connector` that escaped metadata and oversized messages seal within
 their limits, and that an outcome the journal can never take is recorded as `unknown` and
-releases its chat; `internal/gateway` that an event too large to send goes as a stand-in.
+releases its chat; `internal/gateway` that an event too large to send goes as a stand-in;
+`internal/wabuffer`, on a seeded whatsmeow store, that the sweep deletes only rows past 14
+days, keeps sweeping, and stops while its parent context is live.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
@@ -326,15 +329,18 @@ suite). But the connectors' own storage, in the same database, does:
   that way: a Signal message can be decrypted only once, so the buffered copy is what lets a
   message whose handling failed, or was cut off by a crash, be bridged when WhatsApp
   redelivers it (it isn't acknowledged until it is handled). Turning it off would lose that
-  message. The row is written in the decrypting transaction and its plaintext cleared as soon
-  as the handler returns, which is once the message is journaled sealed (usually moments; at
-  most bridgev2's 5-minute handler limit). Plaintext stays in a row only when handling failed
+  message. The row is written in the decrypting transaction, and its plaintext is cleared
+  when the handler returns success: normally once the message is journaled sealed (usually
+  moments), but bridgev2 also reports success when its 5-minute handler limit passes, while
+  handling carries on (see below). Plaintext stays in a row only when handling failed
   or the process stopped in between (the message wasn't acknowledged, so WhatsApp redelivers
   it, and the redelivery is bridged and cleared), or when clearing it failed with a database
   error (whatsmeow logs it and still acknowledges the message, so nothing clears it). Either
-  way the row is deleted once it is about 14 days old (WhatsApp's redelivery window): whatsmeow
-  sweeps only after an incoming message, at most every 12 hours, so the host runs the same
-  sweep itself, at start-up and hourly (`internal/wabuffer`), and stops it on shutdown. A row
+  way the row is deleted by the first sweep that succeeds once it is about 14 days old
+  (WhatsApp's redelivery window): whatsmeow sweeps only after an incoming message, at most
+  every 12 hours, so the host runs the same sweep itself, at start-up and hourly
+  (`internal/wabuffer`), and stops it before the host on shutdown. A sweep that fails (the
+  database unavailable, say) leaves the row for the next one. A row
   can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a row
   without plaintext makes whatsmeow drop the redelivery as already handled. One case loses a
   message instead: after its 5-minute handler limit bridgev2 reports success while handling
@@ -371,8 +377,8 @@ Accepted for the Phase 0 spike, to do in Phase 1:
 - **Explicit WhatsApp backfill.** Re-enable "load older" for WhatsApp once fetching a range
   can't prune outside it (an upstream change, or a guard around its history store).
 - **Live checks.** WhatsApp pairing, messaging and history haven't been run. On PostgreSQL,
-  `TestPostgres` (the core flow) has passed on PostgreSQL 16.15 and 17.7; the rest of the
-  conformance suite hasn't been run there.
+  `TestPostgres` (the core flow) has passed on PostgreSQL 16.15 at `793c3eb` and on 17.7 at
+  an earlier revision; the rest of the conformance suite hasn't been run there.
 - **Deadline at transmission.** `notAfter` is checked at hand-off with an 11-minute margin,
   and for media again when the attachment is read; after that it is best effort. Enforcing
   it at the moment of transmission needs a pre-send hook in bridgev2 that takes a deadline
@@ -385,6 +391,13 @@ Accepted for the Phase 0 spike, to do in Phase 1:
 - **Login recovery edge cases.** A submit for a login that recovery already ended gets
   `invalid_command` rather than `login_failed`, and a login started before the v3 migration
   has no row to recover, so it isn't ended with an error.
+- **bridgev2 race on a backgrounded handler (upstream).** When bridgev2 stops waiting on a
+  handler (`handleSingleEventWithDelayLogging`, mautrix v0.33.0 `bridgev2/portal.go`), the
+  handler's goroutine still writes the result the caller is returning, unsynchronized. In
+  production that needs a handler to finish just as its 5-minute limit passes; the tests that
+  make bridgev2 background every handler at once hit it often, so they live in
+  `internal/host/background_test.go` behind `//go:build !race` and run only without
+  `-race`. Report it upstream, and move them back once it is fixed.
 - **Shutdown and stuck connectors.** A connector call that never returns leaves its chat's
   goroutine (and the wait for it) behind when the host stops in-process; process exit
   reclaims them.
