@@ -335,6 +335,11 @@ if (stopping) {
     launch('web', 'pnpm', ['--filter', web.name, 'run', 'dev'], {
       env: {
         PORT: String(ports.web),
+        // Temporary: apps/desktop at ec949e6 reads its port from VITE_PORT and forwards only
+        // /api/auth, to AUTH_PROXY_TARGET. Remove both once it takes PORT and proxies to
+        // VITE_CONVEX_SITE_URL, as agreed.
+        VITE_PORT: String(ports.web),
+        AUTH_PROXY_TARGET: convexSiteUrl,
         VITE_CONVEX_URL: convexUrl,
         VITE_CONVEX_SITE_URL: convexSiteUrl,
         VITE_TRIODITIS_ENVIRONMENT: 'development',

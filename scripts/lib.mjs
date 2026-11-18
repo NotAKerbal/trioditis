@@ -467,7 +467,10 @@ export function cloudPrerequisites() {
  */
 export async function signInPassword(typed, email) {
   const crypto = await import('@trioditis/crypto')
-  return typeof crypto.authPassword === 'function' ? await crypto.authPassword(typed, email) : typed
+  if (typeof crypto.authPassword !== 'function') return typed
+  // All of packages/crypto is synchronous once libsodium has loaded.
+  await crypto.ready()
+  return crypto.authPassword(typed, email)
 }
 
 /**
