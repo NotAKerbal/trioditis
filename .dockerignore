@@ -8,8 +8,12 @@
 .data
 **/.env
 **/.env.*
+**/*.env
 !**/.env.example
-deploy/.env
+deploy/.env*
+deploy/runtime
+**/*.tgz
+**/*.tar.gz
 packages/backend/.convex
 packages/backend/.env.local
 apps/bridge-host/bin

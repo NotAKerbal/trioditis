@@ -24,13 +24,24 @@ The installer:
 4. starts Postgres and the Convex backend, creates their databases and the Convex admin key;
 5. deploys the backend's functions and starts the gateway, one bridge host per network, and
    Caddy;
-6. waits until everything is healthy, then prints the server's address and the **admin setup
+6. waits until everything is healthy, checks the backend can reach the server's public
+   address, then prints the address and, until the admin account exists, the **admin setup
    link**.
 
 Open the setup link to create the admin account. It carries the setup token in the part of
 the URL after `#`, which browsers never send to the server, and it works once: as soon as an
 account exists, it stops working. The token itself is in `deploy/.env`
-(`TRIODITIS_SETUP_TOKEN`); running the installer again prints the link again.
+(`TRIODITIS_SETUP_TOKEN`); running the installer again prints the link again until the
+account exists, and says setup is done after that.
+
+The setup form sends the token and the admin's password to the server over whatever the
+address uses. Over plain HTTP from another device, anyone on the path can read them, so serve
+the server over HTTPS ([HTTPS in local mode](#https-in-local-mode), or
+[domain mode](#domain-mode)) before the first sign-up from anywhere but this machine.
+
+Every option is saved in `deploy/.env` and kept on later runs, so a rerun with no options
+leaves the install as it is, and an option changes only its own setting. See
+[Upgrade](#upgrade).
 
 ### Local mode
 
@@ -43,9 +54,10 @@ deploy/install/install.sh --port 9000 --host 192.168.1.20
 ```
 
 The address defaults to this machine's Tailscale IP when Tailscale is running, and its first
-LAN IP otherwise. Pick one address and use it everywhere: sign-in is tied to one origin, so
-the server answers at its address and not at others. Run the installer again with `--host`
-to change it.
+LAN IP otherwise, and is kept from then on. Pick one address and use it everywhere: sign-in
+is tied to one origin, so the server answers at its address and not at others. Run the
+installer again with `--host` to change it (`--host ''` detects it again). `--bind` picks
+the interface the port listens on (default all of them).
 
 #### HTTPS in local mode
 
@@ -60,13 +72,19 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8080
 deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
 ```
 
-`--public-url` makes that the server's address, and binds the port to `127.0.0.1` so it's
-only reachable through the proxy (pass `--bind` for a proxy on another machine). When the
-proxy runs on this machine, as Tailscale Serve does, the installer also starts a small
-`hairpin` forwarder: Tailscale only answers people on the tailnet, and the backend has to
-reach the public address to check sign-ins. Any reverse
-proxy that serves HTTPS works the same way. Reruns keep it; `--public-url ''` goes back to
-plain HTTP.
+`--public-url` makes that the server's address. It must be an `https://` origin, with no
+path. The port is bound to `127.0.0.1`, so it's only reachable through the proxy; for a
+proxy on another machine, pass `--bind` with an address that proxy can reach, and keep the
+port firewalled from everything else. Caddy trusts the `X-Forwarded-For` and
+`X-Forwarded-Proto` headers from private addresses in this mode, since requests come through
+the proxy, so anything else that can reach the port could set them.
+
+The backend has to reach the public address to check sign-ins. When the proxy runs on this
+machine, as Tailscale Serve does, it only answers people on the tailnet, so the installer
+also starts a small `hairpin` forwarder (`compose.hairpin.yml`) and points the public host
+name at it inside the backend's container. A proxy on another machine is reached the
+ordinary way. Any reverse proxy that serves HTTPS works the same way. Reruns keep the
+address; `--public-url ''` goes back to plain HTTP.
 
 ### Domain mode
 
@@ -76,6 +94,7 @@ deploy/install/install.sh --domain chat.example.com
 
 Caddy listens on ports 80 and 443 and gets a certificate for the domain with ACME, so the
 domain's DNS must point at this machine and both ports must be reachable from the internet.
+`--local` (or `--public-url`) switches back to local mode.
 
 ### Networks
 
@@ -86,13 +105,15 @@ deploy/install/install.sh --networks whatsapp,fake     # also the fake network
 
 Each network gets its own bridge host. The fake network logs in with any username and never
 talks to anything real: use it to try the server out. Signal and Google Messages join the
-list when the bridge host runs their connectors.
+list when the bridge host runs their connectors. Dropping a network from the list stops and
+removes its bridge host; its volume and database stay, in case you add it back.
 
 ## What's running
 
 | Service            | What it is                                                    | Exposed                      |
 | ------------------ | ------------------------------------------------------------- | ---------------------------- |
 | `caddy`            | The web app, and the proxy to everything below                | Yes: the only published port |
+| `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode  | On Docker's host address     |
 | `backend`          | The Convex backend, on Postgres                               | No                           |
 | `postgres`         | Postgres 17: Convex's data and each bridge host's             | No                           |
 | `functions`        | One-shot: sets Convex's environment and deploys the functions | No                           |
@@ -122,9 +143,14 @@ Everything is on one origin, so the web app's auth cookies are first-party:
 | Everything else                          | The web app's static files, falling back to `index.html`                                                                                                                     |
 
 The Convex backend also calls its own public origin: it checks sign-in tokens against the
-signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`. The bundle maps the
-public host name to this machine inside the backend's container, so that works without the
-router looping traffic back.
+signing keys Better Auth publishes at `<origin>/api/auth/convex/jwks`. In domain mode the
+bundle maps the domain to this machine inside the backend's container, so that works without
+the router looping traffic back; behind a proxy on this machine it maps it to the `hairpin`
+forwarder. Otherwise the name resolves as it does anywhere else. The installer checks the
+backend can reach the address and warns if it can't.
+
+Caddy also listens on `127.0.0.1:8090` inside its container, for its healthcheck only: the
+site itself may only answer HTTPS for its domain.
 
 ### The web app
 
@@ -140,9 +166,12 @@ git pull
 deploy/install/install.sh
 ```
 
-The rerun keeps every secret, rebuilds the images from the new checkout, redeploys the
-functions and restarts what changed. The Convex backend migrates its database in place on
-start; the image is pinned, and only moves when the bundle changes it.
+The rerun keeps every secret and every setting the last run saved in `deploy/.env`: the
+mode, the domain or public URL, the port, the bind address and host, the networks, and
+`--e2e`. Pass an option only to change that one. It rebuilds the images from the new
+checkout, redeploys the functions, restarts what changed, and removes services that are no
+longer enabled. The Convex backend migrates its database in place on start; the image is
+pinned, and only moves when the bundle changes it.
 
 Back up before upgrading (below).
 
@@ -154,9 +183,12 @@ own state in the bridge database, and some of it is plaintext, including chat na
 names, phone numbers, and history the connector has received but not yet imported.
 
 So in this version, **the server's disk must be encrypted**, and so must its backups.
-The installer warns when Docker's data isn't on an encrypted volume (LUKS / dm-crypt). On a
-VM, encrypt the guest's disk or the storage it lives on. On Proxmox, use encrypted storage
-for the VM. Encrypting those connector tables with a server-held key is planned for Phase 1
+The installer warns when Docker's data isn't on an encrypted volume (LUKS / dm-crypt). It
+only sees dm-crypt on this machine's own block devices, so it warns about a VM whose host
+encrypts its storage, or about encryption it doesn't recognise (such as ZFS native
+encryption or a self-encrypting drive), and it doesn't check backups: treat it as a
+reminder, not a guarantee. On a VM, encrypt the guest's disk or the storage it lives on. On
+Proxmox, use encrypted storage for the VM. Encrypting those connector tables with a server-held key is planned for Phase 1
 (`docs/PLAN.md`, Known follow-ups).
 
 ## Backup and restore
@@ -165,12 +197,20 @@ Built-in `backup` and `restore` commands are Phase 1. Until then, back up while 
 is stopped, so the databases are consistent:
 
 ```sh
+mkdir -p ~/trioditis-backups && chmod 700 ~/trioditis-backups
 deploy/trioditis down
-sudo tar -C /var/lib/docker/volumes -czf trioditis-$(date +%F).tgz \
-  trioditis_postgres trioditis_convex trioditis_bridge-whatsapp trioditis_caddy-data
-cp deploy/.env trioditis-$(date +%F).env      # the secrets: keep them with the backup, encrypted
+sudo tar -C /var/lib/docker/volumes -czf ~/trioditis-backups/trioditis-$(date +%F).tgz \
+  trioditis_postgres trioditis_convex trioditis_caddy-data \
+  $(deploy/trioditis config --volumes | grep '^bridge-' | sed 's/^/trioditis_/')
+cp deploy/.env ~/trioditis-backups/trioditis-$(date +%F).env   # the secrets
 deploy/trioditis up -d
 ```
+
+The archive takes every enabled network's bridge volume (`trioditis_bridge-whatsapp`, and
+`trioditis_bridge-fake` with the fake network); add the volume of a network you've dropped
+if you want to keep its state. Keep backups outside the checkout, as above: the image builds
+copy the checkout, and although the ignore files exclude `deploy/.env*`, `*.env` and
+`*.tgz`, a backup elsewhere can't end up in an image or a commit by mistake.
 
 Restore by stopping the server, extracting the archive back into
 `/var/lib/docker/volumes`, putting `deploy/.env` back, and running the installer. Keep
@@ -189,7 +229,12 @@ bash deploy/install/proxmox.sh --storage local-zfs --bridge vmbr1
 ```
 
 A VM is the default: Docker in an LXC depends on the host's kernel and storage driver, and an
-encrypted disk is simpler to give a VM. The script isn't exercised in CI.
+encrypted disk is simpler to give a VM. The script drives the VM through the QEMU guest
+agent, which cloud-init installs on first boot from a snippet, so the storage named by
+`--snippets` (default `local`) must allow the snippets content type
+(`pvesm set local --content iso,vztmpl,backup,snippets`). It checks the cloud image against
+Ubuntu's published checksum. If a step fails after the VM exists, it says how to look at the
+VM and remove it. The script isn't exercised in CI.
 
 ## Verifying an install
 
@@ -210,5 +255,6 @@ SITE_URL=http://<address>:8080 CONVEX_URL=http://<address>:8080/convex \
 ```
 
 It signs in, connects the fake network through a sealed login, receives a message, sends a
-reply, and checks that nothing readable reached Convex. Run the installer again without
-`--e2e` afterwards to remove the test endpoint.
+reply, and checks that nothing readable reached Convex. `--e2e` is kept for reruns like
+every option: run the installer again with `--no-e2e` afterwards to remove the test
+endpoint.
