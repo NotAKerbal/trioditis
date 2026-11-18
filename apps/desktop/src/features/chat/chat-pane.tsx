@@ -73,9 +73,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadMore } = useMessages(chat.id)
+  // A deleted message has no reactions: leaving it out saves the server a request for nothing.
   const reactions = useReactions(
     chat.id,
-    messages.map((m) => m.id),
+    messages.filter((m) => !m.deleted).map((m) => m.id),
   )
   const typing = useTyping(chat.id)
   const scheduledRows = useScheduled(chat.id)

@@ -2,12 +2,13 @@ import { api } from '@trioditis/backend/api'
 import type { Doc, Id } from '@trioditis/backend/dataModel'
 import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import { useEffect, useMemo, useState } from 'react'
 import { tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
+import { reactionRequests } from './reaction-requests.ts'
 
 export interface Message {
   id: Id<'messages'>
@@ -68,15 +69,26 @@ export function useMessages(chatId: ChatId) {
   }
 }
 
-/** Reactions on the loaded messages, grouped by key with who reacted. */
+type ReactionAnswer = Record<string, { key: string; senderKey: string }[]>
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const answersOf = (results: { data?: ReactionAnswer | undefined }[]) => results.map((r) => r.data)
+
+/**
+ * Reactions on the loaded messages, grouped by key with who reacted. They're asked for 100
+ * messages at a time, and again for any an answer didn't reach (reaction-requests.ts): each
+ * request's answer is read from the cache, so the requests grow as answers come.
+ */
 export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
-  const ids = messageIds.slice(-100)
-  const { data } = useQuery({
-    ...convexQuery(api.messages.reactions, ids.length > 0 ? { chatId, messageIds: ids } : 'skip'),
-  })
+  const queryClient = useQueryClient()
+  const request = (asked: Id<'messages'>[]) => convexQuery(api.messages.reactions, { chatId, messageIds: asked })
+  const requests = reactionRequests(messageIds, (asked) =>
+    queryClient.getQueryData<ReactionAnswer>(request(asked).queryKey),
+  )
+  const answers = useQueries({ queries: requests.map(request), combine: answersOf })
   return useMemo(() => {
     const out = new Map<string, { key: string; count: number; mine: boolean }[]>()
-    for (const [messageId, list] of Object.entries(data ?? {})) {
+    const data: ReactionAnswer = Object.assign({}, ...answers.filter(Boolean))
+    for (const [messageId, list] of Object.entries(data)) {
       const byKey = new Map<string, { key: string; count: number; mine: boolean }>()
       for (const r of list) {
         const entry = byKey.get(r.key) ?? { key: r.key, count: 0, mine: false }
@@ -87,7 +99,7 @@ export function useReactions(chatId: ChatId, messageIds: Id<'messages'>[]) {
       out.set(messageId, [...byKey.values()])
     }
     return out
-  }, [data])
+  }, [answers])
 }
 
 /** Who is typing now. Queries don't rerun as time passes, so expiry is checked here. */
