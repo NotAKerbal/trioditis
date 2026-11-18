@@ -105,8 +105,14 @@ and on login commands, and may be on others.
   are accepted only from the host its start command was handed to.
 - **Sizes:** a sealed message or edit in an event may be at most 256 KiB; files travel
   separately. Chat and contact metadata (`chat`, `contact`) may be at most **8 KiB** sealed:
-  a name, a topic and an avatar's file reference. A bridge host with longer metadata
-  truncates the name or topic to fit; anything over the limit is quarantined as `too_large`.
+  a name, a topic and an avatar's file reference. Anything over the limit is quarantined as
+  `too_large`, so the bridge host measures what it seals (JSON escaping can make text several
+  times longer): longer metadata has its topic (a contact's handle), then its name, cut to
+  fit. A message or edit over 256 KiB loses its formatted body, then has its body cut short
+  at a character boundary, and its plaintext says `truncated: true`. No event the bridge host
+  sends is over 1 MiB of JSON; a journal event from an older host that is goes as a stand-in
+  with only `seq`, `type`, `userId`, `loginId` and `at`, which the gateway quarantines, so
+  it can't hold up the events after it.
   A login step may be at most 64 KiB (UTF-8), and a `hostId` at most 64 characters.
   Clients may seal at most 64 KiB into a send or login input.
 - **Routing:** a command for a connected login goes to the host that reported that login's
@@ -114,7 +120,8 @@ and on login commands, and may be on others.
   gateway's `BRIDGE_HOSTS` and heard from recently are used.
 - **Deadlines:** sends carry `notAfter` (24 hours). Login commands carry one too, 10 minutes
   out: undelivered by then, they expire, ending the login with error `expired`, so
-  credentials don't wait for a host that never returns.
+  credentials don't wait for a host that never returns. How far the bridge host can enforce
+  a send's deadline is under Delivery rules for `send`.
 - A status or echo for a send proves the host has the command, even if its `202` was lost;
   the backend then never delivers it again.
 - Once a command has run (sent, failed or expired), the bridge host keeps only its IDs and
@@ -137,6 +144,9 @@ and on login commands, and may be on others.
 ### Command validation
 
 - `send` needs `notAfter`; without it the command is refused (`400 invalid_command`).
+- A `send` or `edit` whose `sealed` holds more than 64 KiB (the client limit, see Sizes) is
+  refused (`400 invalid_command`) before it runs: only a client's outbox may send, and the
+  backend never accepts more from a client.
 - Targets must be bridged messages in the command's own chat: `replyTo`, `targetEventId`
   (edit, react, unreact, redact), `upToEventId` (markRead) and `beforeEventId` (backfill).
   A `pending:` ID, a deleted message or a message from another chat is refused
@@ -161,13 +171,32 @@ and on login commands, and may be on others.
   **It never retries a send on its own.**
 - A `send` whose `clientMessageId` the bridge host has already seen is not sent again;
   the bridge host re-emits the last known `sendStatus`.
-- The bridge host keeps a safety margin (currently 11 minutes) before `notAfter` for the
-  connector's own waits, so a send can be refused as `expired` before `notAfter`. Phase 0
-  limit: a send already handed to the connector can still go out after `notAfter` if it waits
-  behind more than two incoming events that each hit bridgev2's 5-minute handler limit;
-  closing that needs a pre-send hook in bridgev2 (bridge host README, Known follow-ups).
-- A `send` not handed to the network by `notAfter` (ms since the epoch) is never sent:
-  the bridge host emits `failed` with error `expired`, and the person decides.
+- `notAfter` (ms since the epoch) is **best effort**, not a hard deadline, for any send
+  handed to bridgev2, and for WhatsApp sends in Phase 0 in particular. The bridge host checks
+  it when the send starts and again as its last step before handing the send to bridgev2,
+  both with an 11-minute margin for what bridgev2 may still wait on, and once more, with a
+  2-minute margin, if the connector reads the send's attachment (the last code of the bridge
+  host's that runs before a media send is uploaded and transmitted). A send refused at any
+  of these never reaches the network: the bridge host emits `failed` with error `expired`,
+  and the person decides. So a send can be refused as `expired` before `notAfter`.
+- **Limit:** past those checks the bridge host can't stop a send, and it can go out after
+  `notAfter`, by any amount. bridgev2 calls the connector with its own context, which
+  carries no deadline, and for a text send no code of the bridge host's runs between the
+  hand-off and the transmission. What can delay it: waiting behind more than two incoming
+  events that each hit bridgev2's 5-minute handler limit, a slow media upload, and
+  (WhatsApp) whatsmeow's send lock. That lock is one per login: every send in all of the
+  person's chats takes it in turn, and holds it until the server acknowledges the message.
+  The first wait for that acknowledgement is 75 seconds, but if the connection drops first,
+  whatsmeow sends the frame again after reconnecting and then waits for its
+  acknowledgement **with no time limit**, still holding the lock. If the new connection stays
+  open and that acknowledgement never comes, every send on the login waits indefinitely
+  (until the chat is deleted, the login disconnects again, or the bridge host stops), and a
+  send waiting behind it is transmitted, after `notAfter`, once the lock clears. A late
+  transmission is reported as what happened, never as `expired`: `sent` if the network
+  confirms it while the bridge host still remembers the send (even after it was marked
+  `unknown`, for up to an hour after its chat was released without an outcome), and
+  otherwise `unknown`. Closing this needs a pre-send hook in bridgev2 or the connector, and a bounded
+  retransmit wait in whatsmeow (bridge host README, Known follow-ups).
 
 ## Errors
 
@@ -233,5 +262,10 @@ The bridge host caches the response for 60 seconds. A person with no identity ke
 (signed up but not finished device setup) gets `409`, and `loginStart` for them is
 refused, so no network events can exist for someone the bridge host can't seal to.
 
-The bridge host's journal stores events **after** sealing. Plaintext content is never
-written to disk.
+The bridge host's journal stores events **after** sealing: the bridge host itself never
+writes plaintext content to its journal or its own tables. The network connectors' own
+storage, in the same database, is the exception: bridgev2's chat and contact tables, and for
+WhatsApp its history-sync table and whatsmeow's decrypted-event buffer, which holds an
+incoming message's plaintext until its handler returns success and, after a failure, until
+a sweep succeeds once the row is about 14 days old. See `sealing.md`, What else is stored in plaintext, and the bridge host README,
+Plaintext at rest.
