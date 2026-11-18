@@ -252,6 +252,20 @@ export async function claimSlot() {
     if (lockHolder(saved) === null && tryLock(saved)) return saved
     console.log(`Slot ${saved} now belongs to ${lockHolder(saved) ?? 'another checkout'}: taking a new one.`)
   }
+  // A slot this checkout already holds but forgot (its .data/dev.json was deleted): take it back
+  // rather than claim another and leave the old lock behind for good.
+  const held = existsSync(slotsDir)
+    ? readdirSync(slotsDir)
+        .map((file) => Number.parseInt(file, 10))
+        .filter((slot) => Number.isInteger(slot) && lockHolder(slot) === root)
+        .sort((a, b) => a - b)
+    : []
+  if (held.length > 0) {
+    for (const extra of held.slice(1)) rmSync(slotLock(extra), { force: true })
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(instanceFile, JSON.stringify({ slot: held[0] }, null, 2) + '\n')
+    return held[0]
+  }
   const main = capture('git', ['worktree', 'list', '--porcelain'], { quiet: true })
     .split('\n')
     .find((line) => line.startsWith('worktree '))
@@ -491,6 +505,25 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
     console.log('Already there from an earlier run.')
     return (await signIn.json()).user.id
   }
+  // A test account made before sign-in derived its password (authPassword) still has the typed
+  // one: sign in with that and move it to the derived password, as the app now sends.
+  if (password !== TESTER.password) {
+    const legacy = await post('sign-in/email', { email: TESTER.email, password: TESTER.password })
+    if (legacy.ok) {
+      const cookie = legacy.headers
+        .getSetCookie()
+        .map((value) => value.split(';')[0])
+        .join('; ')
+      const changed = await post(
+        'change-password',
+        { currentPassword: TESTER.password, newPassword: password, revokeOtherSessions: true },
+        { cookie },
+      )
+      if (!changed.ok) throw new Error(`Updating the test account's password failed (${changed.status}).`)
+      console.log('Already there from an earlier run; moved it to the derived password.')
+      return (await legacy.json()).user.id
+    }
+  }
   const signUp = await post('sign-up/email', { ...TESTER, password }, { 'x-trioditis-invite': setupToken })
   if (signUp.ok) {
     console.log('Created, as the admin.')
@@ -498,7 +531,7 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
   }
   if (signUp.status === 403) {
     throw new Error(
-      `This backend already has an admin, so the test account can't be created. Use that account, or throw this instance's data away (docs/CONTRIBUTING.md, "Starting over").`,
+      `This backend already has an admin who isn't the test account. Sign in as that admin, or start this checkout's backend over with "pnpm dev --setup --reset" (docs/CONTRIBUTING.md, "Starting over").`,
     )
   }
   throw new Error(`Creating the test account failed (${signUp.status}): ${await signUp.text()}`)

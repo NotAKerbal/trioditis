@@ -5,6 +5,7 @@
 //   pnpm dev --network whatsapp    a real WhatsApp bridge host instead (needs your phone)
 //   pnpm dev --network fake,whatsapp
 //   pnpm dev --setup               set up and stop; run for each new worktree
+//   pnpm dev --setup --reset       throw this checkout's backend data away first, then set up
 //
 // Every checkout of the repository, the main one and each git worktree, has its own backend,
 // data and ports, so branches run side by side without touching each other (scripts/lib.mjs,
@@ -12,7 +13,7 @@
 // account: its data lives in packages/backend/.convex/local, and everything else this instance
 // keeps (secrets, bridge host databases) in .data/. Git ignores both. It never acts on any
 // other backend: see `assertLocalBackend`.
-import { chmodSync, existsSync, readFileSync, watch } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, readdirSync, rmSync, watch } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   TESTER,
@@ -28,6 +29,7 @@ import {
   devSecrets,
   ensureTester,
   gatewayDir,
+  isFree,
   localConvex,
   portsFor,
   root,
@@ -45,6 +47,7 @@ const NETWORKS = ['fake', 'whatsapp']
 
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')
+const reset = args.includes('--reset')
 const networkArg =
   args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
 const networks = (networkArg ?? 'fake')
@@ -72,6 +75,20 @@ try {
 
 const slot = await claimSlot()
 const ports = portsFor(slot)
+
+// Starting over: this checkout's backend (its data, admin key and deployment) and the bridge
+// hosts' logins, which belong to that backend. The slot and the secrets in .data stay.
+if (reset) {
+  if (!(await isFree(ports.convexCloud))) fail('Stop this checkout’s `pnpm dev` first: its backend is running.')
+  step('Throwing this checkout’s backend data away')
+  rmSync(resolve(backendDir, '.convex/local'), { recursive: true, force: true })
+  rmSync(resolve(backendDir, '.env.local'), { force: true })
+  if (existsSync(dataDir)) {
+    for (const name of readdirSync(dataDir)) {
+      if (name.startsWith('bridge-')) rmSync(resolve(dataDir, name), { recursive: true, force: true })
+    }
+  }
+}
 const desktop = desktopPackage()
 const web = desktop?.scripts?.dev ? desktop : null
 const convexUrl = `http://127.0.0.1:${ports.convexCloud}`
