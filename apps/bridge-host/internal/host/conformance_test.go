@@ -806,7 +806,9 @@ func TestConformance(t *testing.T) {
 		h.net.SetSendDelay(0)
 		h.mustCommand(inDoomed("cm-doomed-next", "queued behind it"))
 		time.Sleep(200 * time.Millisecond)
-		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventSendStatus && e.ClientMessageID == "cm-doomed-next" }); n != 0 {
+		if n := gw.count(func(e *protocol.Event) bool {
+			return e.Type == protocol.EventSendStatus && e.ClientMessageID == "cm-doomed-next"
+		}); n != 0 {
 			t.Fatal("the next send started while the first was still out")
 		}
 		if err := h.net.DeleteChat(aliceNet, "doomed"); err != nil {
