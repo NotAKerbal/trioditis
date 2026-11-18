@@ -242,14 +242,17 @@ Fuller `backup` and `restore` commands (online, encrypted, scheduled) are Phase 
 deploy/trioditis backup ~/trioditis-backups
 ```
 
-It takes a lock in `deploy/`, so only one backup or restore of the install runs at a time.
+It takes a lock in `deploy/` (the installer takes it too), so only one backup, restore or
+install of the install runs at a time.
 It stops the server, archives every Docker volume of this install's Compose project (found
 by the label Compose gives them, so it never takes another install's, and it includes the
 volume of a network you've dropped), copies `deploy/.env` beside it, and starts again what
 was running. The two files are `<project>-<date>-<time>.tgz` and `.env` (with `-2`, `-3`…
 added rather than replace earlier ones), yours and readable only by you from the start, in
-any directory (`/tmp` included). The archive is written under a unique temporary name and
-only takes its own once complete, and its last entry is a manifest of
+any directory (`/tmp` included). Both are written in a private directory of the backup's own
+and only published once complete, as links that fail rather than replace anything already at
+the name (a file, a directory or a link), and always as a pair: if the `.env` can't be
+published, the archive is taken back. The archive's last entry is a manifest of
 every volume with its number of entries and bytes. An interrupted backup (Ctrl-C), even while
 the server is still stopping, leaves no archive behind and starts again what was running;
 if the server doesn't start again, the backup counts as failed.
@@ -269,13 +272,15 @@ file changed afterwards can't be the one applied. It checks the whole copy befor
 anything, and refuses one that's damaged or cut short (its manifest must be its last entry),
 one whose volumes belong to another project, or one that would overwrite an existing volume
 Compose didn't label as this install's. It creates any missing volume itself, labelled with a
-nonce of its own, and writes a marker with that nonce into every volume it will replace. It
-asks before it stops the server (`--yes` skips the question). Then one worker, holding every
-volume so none can be swapped, checks each is still the one marked, extracts into temporary
-volumes, checks every volume against the manifest, and only then replaces the volumes'
-contents. So a bad archive never costs the data you have. That needs free space for two more
-copies of the data while it runs (the archive's and the extracted one). Archives from before the manifest can't be
-restored this way. Keep backups
+key unique to this restore. Before it checks any volume, one worker container already holds
+them all (Docker won't remove or replace a volume a container uses), so the volumes it checks
+are the ones it writes. It asks before it stops the server (`--yes` skips the question).
+Then the worker extracts into temporary volumes, checks every volume against the manifest,
+and only then replaces the volumes' contents. So a bad archive never costs the data you
+have. Whatever happens, it removes only volumes carrying its own key: its temporary ones,
+and the ones it created unless the restore finished. That needs free space for two more
+copies of the data while it runs (the archive's and the extracted one). Archives from before
+the manifest can't be restored this way. Keep backups
 encrypted: they contain the connector state above, and `deploy/.env` holds every secret the
 server has.
 

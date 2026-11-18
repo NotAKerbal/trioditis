@@ -112,6 +112,15 @@ if ! encrypted_volume "$docker_root"; then
   warn "Docker's data ($docker_root) doesn't look like it's on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. If it's encrypted in a way this can't see, such as on the VM host, ignore this. See docs/deploy.md, Encryption at rest."
 fi
 
+# One install, backup or restore of this install at a time (deploy/trioditis takes the same
+# lock): they stop and start the server under each other.
+if command -v flock >/dev/null; then
+  exec 9>"$here/.operation.lock"
+  flock -n 9 || die "Another install, backup or restore of this install is running."
+else
+  warn "flock (util-linux) isn't installed, so nothing stops a backup or restore running during this install."
+fi
+
 # --- Settings -----------------------------------------------------------------------------
 
 # deploy/.env appears with the first setting saved, after the options are checked, so an

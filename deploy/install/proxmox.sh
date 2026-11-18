@@ -181,6 +181,7 @@ else
 fi
 
 say "Done. Trioditis is at http://${address:-GUEST-ADDRESS}:8080"
-echo "The admin setup link is in the install output above. Until the admin account exists,"
-echo "running deploy/install/install.sh again inside the guest (/opt/trioditis) prints it too."
+echo "The install output above says how to create the admin account: with the setup link, or,"
+echo "while the checkout has no web app, by running deploy/trioditis create-admin <email> in"
+echo "the guest (/opt/trioditis). Running deploy/install/install.sh there again says it again."
 echo "Serve it over HTTPS before signing up from another device: see docs/deploy.md."
