@@ -495,13 +495,55 @@ Contact profiles (name, handle, avatar) are sealed with kind `contact`, object I
    recounts unread and mentions after it.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
-3. **A contacts query** (`contacts.list` / `contacts.get` by `ghostId`) for showing who sent
-   a message. Not built yet; say if the UI needs it now.
+3. **A contacts query**: planned, see Next.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
-5. **Media**: uploading and downloading attachments needs the gateway's media proxy, which
-   isn't built yet.
+5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
 7. **Passkey PRF unlock**: the backup storage exists (`putBackup` with `kind: 'passkey'`),
    but the PRF flow in the UI doesn't yet.
 8. **Label filter order**: a label view is in labelling order, not recency. Sorting it by
    recency needs a per-label recency index.
+
+## Next: after Phase 0
+
+The UI asked for these. They come in this order, on `api/client-next`, each with its
+backend tests; the ones that need the bridge host change the protocol in the same pull
+request. Until one lands, the UI keeps the control disabled or shows the fallback named
+here.
+
+1. **Server info.** `api.server.info` (a query, no sign-in needed) returns
+   `{ demo, invitations, networks }`: whether this is a demo server, whether an admin can
+   invite here, and the networks it has enabled. The client hides demo-only and invite
+   controls from it instead of waiting for the mutation's error. Fallback: none needed;
+   this lands first.
+2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
+   returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
+   `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
+   the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
+   needs a new `members` event from the bridge host, so it comes later. Fallback: the
+   sender shows as "Someone".
+3. **Last-message preview.** Chat rows gain `sealedPreview`: the newest message's body cut
+   to 200 characters plus its sender (`ghostId` or self), sealed with a new kind `preview`
+   and object ID `portalId`, at most 2 KiB. The bridge host seals it with each `message`
+   event; the person's own sends seal one alongside `copy`. Deleting or editing the newest
+   message replaces it. It stays small so a page of 50 rows stays well inside the read
+   limit. Fallback: no preview line.
+4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
+   email, sealed to the bridge key) and `startChat`, following bridgev2's
+   `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls
+   `api.chats.start({ networkAccountId, sealedIdentifier })` and watches the returned
+   `commandId` until it gives a `chatId` or an error code (`not_found`, `unsupported`).
+   Networks that can't resolve identifiers report `unsupported`, and the button stays
+   disabled for them (`api.networks.list` gains `canStartChats`). Fallback: "New message"
+   disabled.
+5. **Media.** Files go through Convex file storage as ciphertext only (the key and nonce
+   stay in the sealed message, see `sealing.md`, Media):
+   - **Download:** `api.media.url({ chatId, mediaId })` returns a short-lived URL for the
+     encrypted file, which the client decrypts. The bridge host uploads incoming files
+     encrypted through the gateway (`POST /v1/media`), before the `message` event that
+     names them.
+   - **Upload:** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
+     URL for the encrypted file; the send's attachment names the returned `mediaId`, and
+     the bridge host fetches it through the gateway and decrypts it with the key in the
+     outbound plaintext. Unsent uploads are deleted after a day.
+   - Fallback: an attachment shows as a "can't open yet" tile with its name and size.
