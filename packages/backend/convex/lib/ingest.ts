@@ -362,19 +362,52 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 }
 
 /**
+ * The most a recount reads. A message row can hold two sealed objects near 256 KiB, so a
+ * recount by count alone could pass a transaction's read limit and stall the host's journal.
+ */
+const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
+/** The largest a message row can be: two sealed objects at the cap, their keys and IDs. */
+export const MAX_MESSAGE_ROW_BYTES = 768 * 1024
+
+/**
  * How many messages from other people, and how many of those mention the person, newer than
- * `eventId` the chat holds (counted up to 100).
+ * `eventId` the chat holds (counted up to 100). It reads a few rows at a time, only as many as
+ * can't pass `MAX_RECOUNT_BYTES` however large they are. If the newer messages are more than
+ * that allows, the chat keeps at least the counts it had: a receipt only ever clears what it
+ * was seen to cover.
  */
 async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
   const read = await findMessage(ctx, userId, network, eventId)
   if (!read) return { unreadCount: 0, mentionCount: 0 }
-  const newer = await ctx.db
-    .query('messages')
-    .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', read.sortKey))
-    .take(100)
-  charge(ctx, newer)
-  const unread = newer.filter((message) => !('self' in message.sender) && !message.historical)
-  return { unreadCount: unread.length, mentionCount: unread.filter((message) => message.mentionsMe).length }
+  let after = read.sortKey
+  let seen = 0
+  let unread = 0
+  let mentions = 0
+  let bytes = 0
+  while (seen < 100) {
+    const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), 100 - seen)
+    if (room < 1) {
+      return {
+        unreadCount: Math.max(unread, chat.unreadCount),
+        mentionCount: Math.max(mentions, chat.mentionCount ?? 0),
+      }
+    }
+    const batch = await ctx.db
+      .query('messages')
+      .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).gt('sortKey', after))
+      .take(room)
+    charge(ctx, batch)
+    for (const message of batch) {
+      bytes += byteSize(message)
+      if ('self' in message.sender || message.historical) continue
+      unread++
+      if (message.mentionsMe) mentions++
+    }
+    seen += batch.length
+    if (batch.length < room) break
+    after = batch.at(-1)!.sortKey
+  }
+  return { unreadCount: unread, mentionCount: mentions }
 }
 
 async function applyTyping(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'typing' }>, network: Network) {
