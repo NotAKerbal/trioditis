@@ -6,6 +6,7 @@ import { parseBridgeHosts } from '../src/config.ts'
 import { Dispatcher } from '../src/dispatcher.ts'
 import { CHUNK } from '../src/events.ts'
 import { describeError } from '../src/log.ts'
+import { ConvexError } from 'convex/values'
 import { createGatewayServer } from '../src/server.ts'
 
 const TOKEN = 'internal-token'
@@ -81,6 +82,36 @@ describe('events', () => {
     expect((await post(base, batch([{ ...event(1), seq: 0 }]))).status).toBe(400)
     expect((await post(base, batch([{ ...event(1), seq: 1.5 }]))).status).toBe(400)
     expect((await post(base, batch([{ type: 'typing' }]))).status).toBe(400)
+  })
+
+  it('quarantines an event the Convex client can’t encode, without sending it', async () => {
+    const backend = fakeBackend()
+    const result = await post(await serve(backend), batch([event(1), { ...event(2), $weird: 'x' }, event(3)]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 3 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 2,
+      type: 'typing',
+    })
+    expect(backend.ingested.flat().map((e) => (e as { seq: number }).seq)).toEqual([1, 3])
+  })
+
+  it('quarantines an event whose type isn’t a string', async () => {
+    const backend = fakeBackend()
+    backend.ingest = vi.fn(async (args) => {
+      const events = args.events as { seq: number; type?: unknown }[]
+      if (events.some((e) => typeof e.type !== 'string')) throw new Error('ArgumentValidationError')
+      return { ackedThrough: events.at(-1)?.seq ?? 0 }
+    })
+    const result = await post(await serve(backend), batch([{ ...event(1), type: { toString: 1 } }]))
+    expect(result).toEqual({ status: 200, body: { ackedThrough: 1 } })
+    expect(backend.quarantineInvalid).toHaveBeenCalledWith({
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      seq: 1,
+      type: 'unknown',
+    })
   })
 
   it('quarantines an event with a sequence number but no type', async () => {
@@ -284,12 +315,13 @@ describe('config and logs', () => {
     expect(() => parseBridgeHosts('whatsapp-1')).toThrow()
   })
 
-  it('logs errors without the values they quote', () => {
+  it('logs errors without anything they quote', () => {
     const error = new Error(
       'ArgumentValidationError: Value does not match validator.\nPath: .events[0]\nValue: {"body":"secret"}',
     )
-    expect(describeError(error)).toBe('Error: ArgumentValidationError: Value does not match validator.')
-    expect(describeError(new Error('refused. Value: {"body":"secret"}'))).toBe('Error: refused.')
-    expect(describeError(new Error('bad input "my password" in {"a":1}'))).toBe('Error: bad input … in …')
+    expect(describeError(error)).toBe('Error: ArgumentValidationError')
+    expect(describeError(new TypeError('fetch failed'))).toBe('TypeError: fetch failed')
+    expect(describeError(new Error('Field name my secret starts with a $'))).toBe('Error')
+    expect(describeError(new ConvexError('Not the gateway'))).toBe('ConvexError: Not the gateway')
   })
 })

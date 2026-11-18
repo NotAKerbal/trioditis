@@ -56,6 +56,8 @@ export default defineSchema({
     loginId: v.string(),
     /** The bridge host that runs this login; its commands go there. */
     hostId: v.optional(v.string()),
+    /** When that host last took the login over (bridge host time). */
+    hostSince: v.optional(v.number()),
     state: loginState,
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),

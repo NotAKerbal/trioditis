@@ -2,7 +2,7 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
-import { isEnvelope } from './lib/envelope'
+import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { queueCommand } from './lib/outbox'
 import { sortKey } from './lib/ingest'
 import { envelope } from './validators'
@@ -48,7 +48,9 @@ export const send = mutation({
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, args.chatId)
     if (!CLIENT_MESSAGE_ID.test(args.clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
-    if (!isEnvelope(args.forBridge) || !isEnvelope(args.copy)) throw new ConvexError('That message isn’t sealed.')
+    if (!isEnvelope(args.forBridge, MAX_CLIENT_SEALED_BYTES) || !isEnvelope(args.copy, MAX_CLIENT_SEALED_BYTES)) {
+      throw new ConvexError('That message isn’t sealed, or is too long.')
+    }
     // A reply must quote a message in this chat that reached the network.
     if (args.replyTo) {
       const replyTo = args.replyTo

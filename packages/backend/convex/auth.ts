@@ -82,10 +82,14 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
             // What admitted it in `before` no longer holds (which the reservation makes
             // unlikely). Remove the account rather than leave one that can do nothing and
             // keeps its email taken, and fail the sign-up.
-            await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-              input: { model: 'account', where: [{ field: 'userId', value: user.id }] },
-              paginationOpts: { cursor: null, numItems: 100 },
-            })
+            // Better Auth runs this hook after it has made the account's session, so that
+            // goes too.
+            for (const model of ['session', 'account'] as const) {
+              await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
+                input: { model, where: [{ field: 'userId', value: user.id }] },
+                paginationOpts: { cursor: null, numItems: 100 },
+              })
+            }
             await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
               input: { model: 'user', where: [{ field: '_id', value: user.id }] },
             })

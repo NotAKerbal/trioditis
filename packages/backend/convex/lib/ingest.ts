@@ -111,7 +111,8 @@ async function findOutboxSend(ctx: MutationCtx, userId: string, clientMessageId:
 async function sendFrom(ctx: MutationCtx, userId: string, clientMessageId: string, origin: Origin) {
   const send = await findOutboxSend(ctx, userId, clientMessageId)
   if (!send) return null
-  if (send.network !== origin.network || (send.hostId !== undefined && send.hostId !== origin.hostId)) return null
+  // A send is pinned to a host when first handed out; before that no host can have it.
+  if (send.network !== origin.network || send.hostId !== origin.hostId) return null
   return send
 }
 
@@ -163,6 +164,14 @@ async function settleSend(ctx: MutationCtx, send: Doc<'outbox'>, delivery: Deliv
 async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'message' }>, origin: Origin) {
   const { network } = origin
   if (await findMessage(ctx, event.userId, network, event.eventId)) return
+  // The echo of a send from Trioditis must come from the host the send went to. One from
+  // anywhere else is refused before anything is written, so the right host's echo, with the
+  // same event ID, can still settle it.
+  const clientMessageId = 'self' in event.sender ? event.clientMessageId : undefined
+  const send = clientMessageId ? await sendFrom(ctx, event.userId, clientMessageId, origin) : null
+  if (clientMessageId && !send && (await findOutboxSend(ctx, event.userId, clientMessageId))) {
+    throw new Unmappable('foreign_host')
+  }
   const chat = await chatFor(ctx, event, network)
   const fields = {
     eventId: event.eventId,
@@ -179,9 +188,7 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   // The echo of a send from Trioditis replaces the person's pending copy: only a copy still
   // pending, of their own message, in this chat, echoed by the host the send went to.
   // Anything else is stored as a new message.
-  const clientMessageId = 'self' in event.sender ? event.clientMessageId : undefined
   const pending = clientMessageId ? await findPersonsCopy(ctx, event.userId, clientMessageId) : null
-  const send = clientMessageId ? await sendFrom(ctx, event.userId, clientMessageId, origin) : null
   if (pending && send && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
     await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, 'sent') })
     await settleSend(ctx, send, 'sent')
@@ -254,8 +261,8 @@ async function applyReactionRemove(
   const message = await findMessage(ctx, event.userId, network, event.targetEventId)
   if (!message) return
   const existing = await findReaction(ctx, message._id, event.sender, event.key)
-  // A removal older than the add it would undo (a replay) leaves the reaction alone.
-  if (!existing || existing.removedAt !== undefined || existing.addedAt > event.at) return
+  // A removal no newer than the add it would undo (a replay) leaves the reaction alone.
+  if (!existing || existing.removedAt !== undefined || existing.addedAt >= event.at) return
   await ctx.db.patch(existing._id, { removedAt: event.at })
 }
 
@@ -357,22 +364,32 @@ async function applyLoginState(
     .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', event.loginId))
     .unique()
   if (existing && existing.userId !== event.userId) throw new Unmappable('foreign_login')
+  // A login's commands go to the host that last reported it connected. A delayed report
+  // from a host that ran it before can't take it back.
+  const takesOver =
+    event.state === 'CONNECTED' &&
+    (!existing?.hostId || existing.hostId === origin.hostId || event.at > (existing.hostSince ?? 0))
+  if (existing?.hostId && existing.hostId !== origin.hostId && !takesOver) return
   const fields = {
     state: event.state,
     error: event.error,
-    // The host reporting on a login is the one running it; its commands go there.
-    hostId: origin.hostId,
     updatedAt: event.at,
+    ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
   }
   if (existing) await ctx.db.patch(existing._id, fields)
   else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
 }
 
-async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, hostId: string) {
+async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
+  const { hostId } = origin
   const sessionId = ctx.db.normalizeId('loginSessions', event.loginSessionId)
   const session = sessionId ? await ctx.db.get(sessionId) : null
   if (!session || session.userId !== event.userId) throw new Unmappable('unknown_login_session')
+  // Once a host is running the login, only it speaks for it.
+  if (session.network !== origin.network || (session.hostId && session.hostId !== origin.hostId)) {
+    throw new Unmappable('foreign_host')
+  }
   const state =
     event.step.type === 'complete'
       ? 'complete'
@@ -407,7 +424,7 @@ async function applySendStatus(
 }
 
 export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
-  const { network, hostId } = origin
+  const { network } = origin
   if ('sealed' in event && !isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
   switch (event.type) {
     case 'message':
@@ -431,7 +448,7 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':
-      return await applyLoginStep(ctx, event, hostId)
+      return await applyLoginStep(ctx, event, origin)
     case 'sendStatus':
       return await applySendStatus(ctx, event, origin)
     case 'backfillDone':

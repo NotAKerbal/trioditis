@@ -22,6 +22,11 @@ export const MAX_BATCH = 100
  */
 const SCAN = 2_000
 const SCAN_EXPIRED_LEASES = 200
+/**
+ * How many commands one claim may expire. Expiring reads and deletes a payload, so it is
+ * bounded like claiming; the rest expire on the next sweep.
+ */
+const MAX_EXPIRIES = 50
 
 const EVENT_TYPES = new Set([
   'message',
@@ -203,17 +208,32 @@ async function markCopy(ctx: MutationCtx, command: Doc<'outbox'>, delivery: 'fai
   if (message && message.eventId.startsWith('pending:')) await ctx.db.patch(message._id, { delivery })
 }
 
-/** A login whose command ran out of time ends with an error the person can start again from. */
+/**
+ * A login whose command ran out of time ends with an error the person can start again from,
+ * but only if that command is still what the login is waiting on: an old submission for a
+ * step the login has moved past changes nothing. A cancel that never arrived still cancels
+ * here, as the person asked.
+ */
 async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
   const { payload } = command
   if (payload.type !== 'loginStart' && payload.type !== 'loginSubmit' && payload.type !== 'loginCancel') return
   const sessionId = ctx.db.normalizeId('loginSessions', payload.loginSessionId)
   const session = sessionId ? await ctx.db.get(sessionId) : null
   if (!session || session.state === 'complete' || session.state === 'cancelled') return
+  const now = Date.now()
+  if (payload.type === 'loginCancel') {
+    await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: now })
+    return
+  }
+  const waitingOnIt =
+    payload.type === 'loginStart'
+      ? session.state === 'pending'
+      : session.state === 'active' && session.step?.stepId === payload.stepId
+  if (!waitingOnIt) return
   await ctx.db.patch(session._id, {
     state: 'error',
     step: { stepId: 'expired', type: 'error', error: 'expired' },
-    updatedAt: Date.now(),
+    updatedAt: now,
   })
 }
 
@@ -302,10 +322,14 @@ export const claimCommands = mutation({
 
     const claimed = []
     const heldChats = new Set<Id<'chats'>>()
+    let expired = 0
     for (const command of candidates) {
       if (claimed.length >= take) break
       if (command.expiresAt !== undefined && command.expiresAt <= now) {
-        await expire(ctx, command)
+        if (expired < MAX_EXPIRIES) {
+          await expire(ctx, command)
+          expired++
+        }
         continue
       }
       const host = await hostFor(command)
@@ -323,6 +347,12 @@ export const claimCommands = mutation({
         hostId: host.hostId,
         ...(command.delivery === 'queued' ? { delivery: 'claimed' as const } : {}),
       })
+      // A new login runs on the host it starts on, so only that host speaks for it.
+      if (command.payload.type === 'loginStart') {
+        const sessionId = ctx.db.normalizeId('loginSessions', command.payload.loginSessionId)
+        const session = sessionId ? await ctx.db.get(sessionId) : null
+        if (session && !session.hostId) await ctx.db.patch(session._id, { hostId: host.hostId })
+      }
       const payload = await payloadOf(ctx, command._id)
       claimed.push({
         commandId: command._id,
