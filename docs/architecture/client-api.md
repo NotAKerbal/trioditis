@@ -30,6 +30,13 @@ origin**: in the self-hosted bundle Caddy proxies that path to the Convex site, 
 development the Vite dev server does. Cookies and passkeys then belong to the app's origin,
 and no cross-origin auth is configured or supported.
 
+Better Auth trusts only `SITE_URL`, the app's origin, and refuses a request from any other
+`Origin` (`/end-session` requires one even without a cookie). Per-worktree `pnpm dev` sets
+`SITE_URL` to that worktree's own web app address, or to the backend's HTTP address when
+there is no `apps/desktop`. The Electron shell, when it comes, loads the app from
+`SITE_URL` with `loadURL`, never from `file://` or a custom scheme, which would send another
+`Origin` (or `null`) and be refused.
+
 ```ts
 import { ConvexReactClient } from 'convex/react'
 import { ConvexQueryClient } from '@convex-dev/react-query'
@@ -111,14 +118,14 @@ end may no longer be the cookie's, for example after another tab signed in as so
 Better Auth's own `revokeSession` can't do this: it acts only on the cookie's account and
 answers `status: true` even when it deleted nothing.
 
-| Status | Body                                                       | Meaning                                                     |
-| ------ | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| 200    | `{ "result": "ended" }`                                    | This request deleted the session                            |
-| 200    | `{ "result": "absent" }`                                   | There is no session with that token (already ended)         |
-| 400    | Better Auth's error body, `"A session token is required."` | No token, or not a string of 1 to 256 characters            |
-| 403    | Better Auth's error body, `"Invalid origin"`               | No `Origin` header, `null`, or not the server's own origin  |
-| 429    | The rate limit answer, with `Retry-After`                  | Over 10 requests a minute from one address: see Rate limits |
-| 5xx    | Any                                                        | It couldn't tell: try again                                 |
+| Status | Body                                                                       | Meaning                                                                                                                                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "result": "ended" }`                                                    | This request deleted the session                                                                                                                                                |
+| 200    | `{ "result": "absent" }`                                                   | There is no session with that token (already ended)                                                                                                                             |
+| 400    | Better Auth's error body, `"A session token is required."`                 | No token, or not a string of 1 to 256 characters                                                                                                                                |
+| 403    | Better Auth's error body, `"Invalid origin"` or `"Missing or null Origin"` | No `Origin` header, `null`, or not the server's own origin. Go by the status, not the message: which one comes depends on whether a cookie, an `Origin` or a `Referer` was sent |
+| 429    | The rate limit answer, with `Retry-After`                                  | Over 10 requests a minute from one address: see Rate limits                                                                                                                     |
+| 5xx    | Any                                                                        | It couldn't tell: try again                                                                                                                                                     |
 
 Only a 200 changed anything (`ended`) or confirmed there was nothing to change (`absent`);
 any other answer means nothing was changed, or that it couldn't tell. The response never
