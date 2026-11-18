@@ -19,8 +19,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, watch } fr
 import { resolve } from 'node:path'
 import {
   TESTER,
+  assertCheckoutPaths,
   assertLocalBackend,
   backendDir,
+  backendInUse,
   bridgeDir,
   buildBridgeHost,
   capture,
@@ -74,6 +76,13 @@ const fail = (message) => {
 
 if (reset && !setupOnly) fail('`--reset` only goes with `--setup`: run `pnpm dev --setup --reset`.')
 
+// Before anything is written: this checkout's data must really be in this checkout.
+try {
+  assertCheckoutPaths()
+} catch (error) {
+  fail(error.message)
+}
+
 // One run at a time for this checkout, so a reset can never delete what another run is using.
 try {
   ensureDataDir()
@@ -85,21 +94,17 @@ try {
   fail(error.message)
 }
 
-// Before anything: the Convex CLI must only be able to reach this checkout's own backend.
-try {
-  assertLocalBackend({ requireConfigured: false })
-} catch (error) {
-  fail(error.message)
-}
-
 const slot = await claimSlot()
 const ports = portsFor(slot)
 
 // Starting over: this checkout's backend (its data, admin key and deployment) and the bridge
 // hosts' logins, which belong to that backend. The slot and the secrets in .data stay.
 if (reset) {
-  // The lock above keeps out this checkout's own runs; this catches a backend started by hand.
+  // The lock above keeps out this checkout's own runs; this catches a backend started by hand,
+  // on this slot's ports or any others.
   if (!(await isFree(ports.convexCloud))) fail('Stop this checkout’s backend first: something is using its port.')
+  const inUse = await backendInUse()
+  if (inUse) fail(`Stop this checkout’s backend first: ${inUse}.`)
   step('Throwing this checkout’s backend data away')
   try {
     removeFromCheckout(resolve(backendDir, '.convex/local'))
@@ -155,6 +160,8 @@ const configured = () => {
 }
 
 try {
+  // Before any Convex command: the CLI must only be able to reach this checkout's own backend.
+  assertLocalBackend({ requireConfigured: false })
   // The backend's data, keys and admin key: yours only, from before the CLI first writes there.
   mkdirSync(resolve(backendDir, '.convex'), { recursive: true, mode: 0o700 })
   chmodSync(resolve(backendDir, '.convex'), 0o700)

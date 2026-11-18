@@ -123,12 +123,21 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   `CONVEX_SELF_HOSTED_ADMIN_KEY` and every other `CONVEX_` variable), so a key in your shell
   can't send its pushes anywhere.
 - The Convex CLI also loads `packages/backend/.env.local` and `packages/backend/.env`, and a
-  deploy key in either overrides `CONVEX_DEPLOYMENT`. So before it pushes functions or changes
-  a setting, `pnpm dev` reads both files the way the CLI's dotenv does (`export` prefixes,
-  quotes, comments) and refuses any `CONVEX_` variable in them, except what the CLI writes to
-  `.env.local` for this checkout's local deployment: `CONVEX_DEPLOYMENT` naming it, and
-  `CONVEX_URL` and `CONVEX_SITE_URL` on this machine. A dotenv vault (`.env.vault`,
-  `.env.local.vault`) is refused too. Otherwise it stops and says why.
+  deploy key in either overrides `CONVEX_DEPLOYMENT`. So before it runs any Convex command,
+  `pnpm dev` reads both files the way the CLI's dotenv does (`export` prefixes, quotes,
+  comments) and refuses any `CONVEX_` variable in them, except what the CLI writes to
+  `.env.local` for this checkout's local deployment: `CONVEX_DEPLOYMENT` naming the one in
+  `packages/backend/.convex/local`, and `CONVEX_URL` and `CONVEX_SITE_URL` on this machine. A
+  dotenv vault (`.env.vault`, `.env.local.vault`) is refused too.
+- Until `packages/backend/.convex/local` holds this checkout's backend, the CLI looks for the
+  deployment it is about to use in `~/.convex/anonymous-convex-backend-state`, where older
+  versions kept backends for every project, and would push to it. So then `.env.local` may name
+  no deployment, and `pnpm dev` refuses if `~/.convex/anonymous-convex-backend-state/anonymous-agent`
+  (the name a new one gets) exists: move it aside.
+- Before it writes anything, it refuses if `.data`, `packages/backend/.convex`, `.convex/local`
+  or `packages/backend/.env.local` is a symlink or leads outside the checkout, so a backend's
+  database and settings elsewhere are never changed.
+- If any of these fails, it stops and says why.
 - Settings are passed to Convex through stdin, not as arguments, so secrets don't show up in
   a process list, and the settings already there are read without being printed.
   `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
@@ -161,14 +170,16 @@ builds to `apps/desktop/dist`, a static single-page app.
 
 ### Starting over
 
-To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset` (it
-refuses while that checkout's `pnpm dev` runs, and `--reset` on its own is refused). It
+To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset`. It
 deletes this checkout's backend (`packages/backend/.convex/local` and `.env.local`) and the
 bridge hosts' logins (`.data/bridge-<network>`), then sets up again with a new test account.
-It deletes nothing a symlink leads to outside the checkout: a symlink there is removed itself,
-and one that leads the path out of the checkout stops the reset.
 It keeps `.data/dev.json`, which holds this checkout's slot and ports, and the secrets in
 `.data/`. Deleting only `.data/bridge-<network>` forgets that network's logins.
+
+A reset refuses while this checkout's `pnpm dev` runs, and while any backend is using this
+checkout's data: a process given its database (one you started by hand with `npx convex dev`
+on other ports, say), or something listening on the ports in `.convex/local/default/config.json`.
+It deletes nothing a symlink leads to outside the checkout. `--reset` on its own is refused.
 
 Don't delete all of `.data/`: the next run would claim the slot again, but you'd lose the
 secrets the backend was set up with. If you did, `pnpm dev --setup --reset` starts cleanly.

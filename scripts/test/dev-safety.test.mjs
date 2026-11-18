@@ -3,15 +3,27 @@
 // packages/backend points at any other backend is refused before anything is pushed or set,
 // slots and run locks are released only when their holder is really gone, and a reset deletes
 // nothing outside the checkout.
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  assertCheckoutPaths,
   assertLocalBackend,
+  backendInUse,
   holdLock,
   parseDotenv,
   releaseStaleSlots,
@@ -39,8 +51,31 @@ void test('accepts this checkout’s anonymous local backend', () => {
 
 void test('accepts a checkout with no backend yet, only while creating it', () => {
   const dir = backend({})
-  assertLocalBackend({ dir, requireConfigured: false })
-  assert.throws(() => assertLocalBackend({ dir }), /\.env\.local is missing/)
+  const home = backend({})
+  assertLocalBackend({ dir, home, requireConfigured: false })
+  assert.throws(() => assertLocalBackend({ dir, home }), /\.env\.local is missing/)
+})
+
+// Without a backend in .convex/local, the Convex CLI finds a deployment of the same name in
+// ~/.convex (older versions kept them there) and pushes to it.
+void test('refuses, before creating the backend, anything the CLI would find in your home directory', () => {
+  const home = backend({ '.convex/anonymous-convex-backend-state/anonymous-agent/config.json': '{}' })
+  const empty = backend({})
+  assert.throws(
+    () => assertLocalBackend({ dir: empty, home, requireConfigured: false }),
+    /anonymous-convex-backend-state\/anonymous-agent holds a backend from outside this checkout/,
+  )
+  // Once .convex/local holds this checkout's backend, the CLI uses only that.
+  assertLocalBackend({ dir: backend({ ...configured, '.env.local': ours }), home })
+  // A selector for a deployment .convex/local doesn't hold sends the CLI looking in ~/.convex.
+  const cleanHome = backend({})
+  for (const files of [{ '.env.local': ours }, { '.convex/local/default/config.json': '{}', '.env.local': ours }]) {
+    const dir = backend(files)
+    assert.throws(
+      () => assertLocalBackend({ dir, home: cleanHome, requireConfigured: false }),
+      /which this checkout's \.convex\/local doesn't hold/,
+    )
+  }
 })
 
 void test('refuses a cloud or self-hosted deployment in .env.local', () => {
@@ -182,7 +217,7 @@ void test('a slot being released by another process is left to it', () => {
       released = removeStaleLock(join(slots, '1.lock'), () => true)
     },
   })
-  assert.equal(released, true)
+  assert.equal(released.status, 'removed')
   assert.equal(slotHolder(1, slots), null)
   assert.equal(existsSync(join(slots, 'releasing', '1.lock')), false)
 })
@@ -284,5 +319,144 @@ void test('waiting gives up on time even when a request never gets an answer', a
   } finally {
     server.closeAllConnections()
     server.close()
+  }
+})
+
+void test('a guard left by a stopped run says which file to delete', () => {
+  const dir = temp()
+  const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim()
+  writeFileSync(join(dir, 'dev.lock'), `${dead}\n`)
+  mkdirSync(join(dir, 'releasing'))
+  const guard = join(dir, 'releasing', 'dev.lock')
+  // Left by a stopped process: stuck, and the run lock's message names the guard.
+  writeFileSync(guard, `${dead}\n`)
+  assert.equal(removeStaleLock(join(dir, 'dev.lock'), () => true).status, 'stuck')
+  assert.throws(
+    () => holdLock('dev', { dir }),
+    (error) => error.message.includes(`Delete that file`) && error.message.includes(guard),
+  )
+  // Empty and fresh: another process is between creating it and writing its pid.
+  writeFileSync(guard, '')
+  assert.equal(removeStaleLock(join(dir, 'dev.lock'), () => true).status, 'busy')
+  assert.throws(() => holdLock('dev', { dir }), /taking over .* right now/)
+  // Empty for longer than that takes: left behind.
+  utimesSync(guard, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+  assert.equal(removeStaleLock(join(dir, 'dev.lock'), () => true).status, 'stuck')
+  // Nothing is removed automatically; once the guard is deleted, the lock is taken over.
+  assert.equal(readFileSync(join(dir, 'dev.lock'), 'utf8'), `${dead}\n`)
+  rmSync(guard)
+  assert.equal(holdLock('dev', { dir }), join(dir, 'dev.lock'))
+})
+
+void test('refuses a checkout whose data would be written through a symlink', () => {
+  const dir = temp()
+  const top = join(dir, 'checkout')
+  const outside = join(dir, 'outside')
+  mkdirSync(join(top, 'packages/backend'), { recursive: true })
+  mkdirSync(join(outside, 'local'), { recursive: true })
+  assertCheckoutPaths(top)
+  for (const [name, target] of [
+    ['packages/backend/.convex', outside],
+    ['packages/backend/.convex/local', join(outside, 'local')],
+    ['.data', outside],
+    ['packages/backend/.env.local', join(outside, 'env')],
+  ]) {
+    mkdirSync(join(top, name, '..'), { recursive: true })
+    symlinkSync(target, join(top, name))
+    assert.throws(() => assertCheckoutPaths(top), new RegExp(`${name.replaceAll('.', '\\.')} is a symlink`), name)
+    rmSync(join(top, name))
+  }
+  // A link inside the checkout is refused too: the CLI would still write where it leads.
+  mkdirSync(join(top, 'elsewhere'))
+  symlinkSync(join(top, 'elsewhere'), join(top, '.data'))
+  assert.throws(() => assertCheckoutPaths(top), /\.data is a symlink/)
+})
+
+/**
+ * Runs this dev.mjs in a throwaway checkout (a git repository with only the scripts), with its
+ * own state directory and home, so what it would do to a checkout's data can be seen.
+ */
+function throwawayCheckout() {
+  const dir = temp()
+  const top = join(dir, 'checkout')
+  mkdirSync(join(top, 'scripts'), { recursive: true })
+  mkdirSync(join(top, 'packages/backend'), { recursive: true })
+  for (const file of ['dev.mjs', 'lib.mjs']) {
+    writeFileSync(join(top, 'scripts', file), readFileSync(new URL(`../${file}`, import.meta.url)))
+  }
+  spawnSync('git', ['init', '-q', top])
+  const home = join(dir, 'home')
+  mkdirSync(home)
+  const run = (args) =>
+    spawnSync(process.execPath, [join(top, 'scripts/dev.mjs'), ...args], {
+      cwd: top,
+      env: { ...process.env, HOME: home, XDG_STATE_HOME: join(dir, 'state') },
+      encoding: 'utf8',
+    })
+  return { dir, top, home, run }
+}
+
+void test('setup, start and reset refuse a symlinked .convex before writing anything', () => {
+  const { dir, top, run } = throwawayCheckout()
+  const outside = join(dir, 'outside')
+  mkdirSync(join(outside, 'local/default'), { recursive: true })
+  writeFileSync(join(outside, 'local/default/config.json'), '{"deploymentName":"anonymous-agent"}')
+  symlinkSync(outside, join(top, 'packages/backend/.convex'))
+  for (const args of [['--setup'], [], ['--setup', '--reset']]) {
+    const result = run(args)
+    assert.equal(result.status, 1, args.join(' '))
+    assert.match(result.stderr, /packages\/backend\/\.convex is a symlink/)
+  }
+  assert.equal(existsSync(join(top, '.data')), false, 'nothing was written to the checkout')
+  assert.deepEqual(
+    readFileSync(join(outside, 'local/default/config.json'), 'utf8'),
+    '{"deploymentName":"anonymous-agent"}',
+  )
+  assert.ok(existsSync(join(outside, 'local/default')), 'the reset deleted nothing')
+})
+
+void test('setup refuses a deployment in your home directory before any Convex command', () => {
+  const { top, home, run } = throwawayCheckout()
+  const legacy = join(home, '.convex/anonymous-convex-backend-state/anonymous-agent')
+  mkdirSync(legacy, { recursive: true })
+  writeFileSync(join(legacy, 'config.json'), '{}')
+  writeFileSync(join(top, 'packages/backend/.env.local'), 'CONVEX_DEPLOYMENT=anonymous:anonymous-agent\n')
+  const result = run(['--setup'])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /which this checkout's \.convex\/local doesn't hold/)
+  assert.match(result.stderr, /anonymous-agent holds a backend from outside this checkout/)
+  // No Convex command ran: it would have made packages/backend/.convex or written to ~/.convex.
+  assert.equal(existsSync(join(top, 'packages/backend/.convex')), false)
+  assert.deepEqual(readdirSync(legacy), ['config.json'])
+})
+
+void test('a reset sees a backend using this checkout’s data, on any port', async () => {
+  const dir = temp()
+  const local = join(dir, '.convex/local/default')
+  mkdirSync(local, { recursive: true })
+  assert.equal(await backendInUse(dir), null)
+  // Something listening where the backend last ran, which isn't this slot's port.
+  const server = createServer(() => {})
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  const { port } = server.address()
+  writeFileSync(join(local, 'config.json'), JSON.stringify({ ports: { cloud: port, site: port + 1 } }))
+  try {
+    assert.match(await backendInUse(dir), new RegExp(`port ${port}`))
+  } finally {
+    server.close()
+  }
+  writeFileSync(join(local, 'config.json'), '{}')
+  // A process given this checkout's database, as the Convex local backend is, on whatever ports.
+  const backendLike = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', join(local, 'db.sqlite3')], {
+    stdio: 'ignore',
+  })
+  try {
+    for (let i = 0; i < 50 && (await backendInUse(dir)) === null; i++)
+      await new Promise((done) => setTimeout(done, 100))
+    const found = await backendInUse(dir)
+    assert.match(found ?? '', new RegExp(`process ${backendLike.pid} \\(node\\) is using its data`))
+    assert.ok(!found.includes('db.sqlite3'), 'its arguments are not shown')
+  } finally {
+    backendLike.kill()
   }
 })

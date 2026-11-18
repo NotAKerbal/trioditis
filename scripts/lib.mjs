@@ -254,30 +254,40 @@ function createLock(path, holder) {
  * a guard file created with O_EXCL, and the holder is read again under it: only a guard holder
  * removes another's lock, so the lock can't change between that read and the removal.
  *
- * A guard is held for a few system calls. One left behind by a run that was killed in between
- * stops that lock from being released automatically, and the message says which file to delete.
- * `beforeGuard` is for tests, to run another process's steps between the two reads.
+ * Says what happened: `removed`; `kept` (its holder is there); `busy` (another process is
+ * releasing it now); or `stuck`, when the guard was left by a run that was killed while holding
+ * it. A guard is never removed automatically: a second process doing so could remove the guard
+ * a third had just taken, and two would release at once again. So `stuck` stays until someone
+ * deletes `guard`. `beforeGuard` is for tests, to run another process's steps between the reads.
  */
 export function removeStaleLock(path, isStale, { beforeGuard } = {}) {
   const stale = (holder) => holder !== null && holder !== '' && isStale(holder)
-  if (!stale(readLock(path))) return false
+  const guard = resolve(dirname(path), 'releasing', basename(path))
+  if (!stale(readLock(path))) return { status: 'kept', guard }
   beforeGuard?.()
-  const guardDir = resolve(dirname(path), 'releasing')
-  const guard = resolve(guardDir, basename(path))
-  mkdirSync(guardDir, { recursive: true, mode: 0o700 })
-  if (!createLock(guard, process.pid)) {
-    const pid = readLock(guard)
-    if (pid !== '' && !processAlive(pid)) {
-      console.warn(`${guard} was left by a run that stopped while releasing ${path}. Delete it to release that lock.`)
-    }
-    return false
-  }
+  mkdirSync(dirname(guard), { recursive: true, mode: 0o700 })
+  if (!createLock(guard, process.pid)) return { status: guardAbandoned(guard) ? 'stuck' : 'busy', guard }
   try {
-    if (!stale(readLock(path))) return false
+    if (!stale(readLock(path))) return { status: 'kept', guard }
     rmSync(path, { force: true })
-    return true
+    return { status: 'removed', guard }
   } finally {
     rmSync(guard, { force: true })
+  }
+}
+
+/**
+ * Whether a guard was left behind: its process has stopped, or it is still empty some seconds
+ * after it was made (a guard is empty only between its creation and writing its pid).
+ */
+function guardAbandoned(guard) {
+  const pid = readLock(guard)
+  if (pid === null) return false
+  if (pid !== '') return !processAlive(pid)
+  try {
+    return Date.now() - lstatSync(guard).mtimeMs > 5000
+  } catch {
+    return false
   }
 }
 
@@ -309,7 +319,14 @@ export function takeSlot(slot, owner = root, dir = slotsDir) {
 export function releaseStaleSlots(dir = slotsDir, options = {}) {
   if (!existsSync(dir)) return
   for (const file of readdirSync(dir)) {
-    if (slotLockName.test(file)) removeStaleLock(resolve(dir, file), checkoutGone, options)
+    if (!slotLockName.test(file)) continue
+    const { status, guard } = removeStaleLock(resolve(dir, file), checkoutGone, options)
+    if (status === 'stuck') {
+      console.warn(
+        `The checkout holding ${resolve(dir, file)} is gone, but a run that stopped left ${guard}, ` +
+          'which keeps it from being released. Delete that file to release the slot.',
+      )
+    }
   }
 }
 
@@ -359,6 +376,90 @@ export async function claimSlot() {
     return save(slot)
   }
   throw new Error('Every dev slot is taken by another checkout or program.')
+}
+
+/**
+ * Where `pnpm dev` keeps this checkout's data, relative to the checkout. The Convex CLI writes
+ * the backend's database and settings under packages/backend/.convex and its address to
+ * .env.local; the dev scripts write secrets and bridge logins to .data.
+ */
+const DATA_PATHS = [
+  '.data',
+  'packages/backend',
+  'packages/backend/.convex',
+  'packages/backend/.convex/local',
+  'packages/backend/.convex/local/default',
+  'packages/backend/.env.local',
+]
+
+/**
+ * Refuses unless every place in DATA_PATHS that exists is really in this checkout (`top`): not
+ * a symlink, and not reached through one that leads outside. Otherwise setting up would change
+ * a database or settings somewhere else. Checked before anything is written.
+ */
+export function assertCheckoutPaths(top = root) {
+  const inside = realpathSync(top)
+  const problems = []
+  for (const name of DATA_PATHS) {
+    const path = resolve(top, name)
+    let link
+    try {
+      link = lstatSync(path).isSymbolicLink()
+    } catch (error) {
+      if (error.code === 'ENOENT') continue
+      throw error
+    }
+    let real = null
+    try {
+      real = realpathSync(path)
+    } catch {}
+    if (link) problems.push(`${name} is a symlink${real ? ` to ${real}` : ''}`)
+    else if (real !== inside && !real?.startsWith(inside + sep)) problems.push(`${name} leads outside it, to ${real}`)
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `pnpm dev keeps this checkout's data inside the checkout, and won't write anywhere else:\n  - ${problems.join('\n  - ')}\n` +
+        'Replace those with real directories (or files) in the checkout.',
+    )
+  }
+}
+
+/**
+ * Whether a backend is using this checkout's backend data (`dir`/.convex/local), on any port: a
+ * process whose arguments name that data (the Convex local backend is given its database's
+ * path), or something listening on the ports it last ran on (.convex/local/default/config.json).
+ * Says which, or null. Before a reset deletes the data from under it.
+ */
+export async function backendInUse(dir = backendDir) {
+  const local = resolve(dir, '.convex/local')
+  let config = null
+  try {
+    config = JSON.parse(readFileSync(resolve(local, 'default/config.json'), 'utf8'))
+  } catch {}
+  for (const port of [config?.ports?.cloud, config?.ports?.site]) {
+    if (Number.isInteger(port) && !(await isFree(port))) {
+      return `something is listening on port ${port}, where this checkout's backend last ran`
+    }
+  }
+  const paths = new Set([local])
+  try {
+    paths.add(realpathSync(local))
+  } catch {}
+  const listed = spawnSync('ps', ['-A', '-o', 'pid=,args='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  if (listed.status !== 0) {
+    console.warn("Couldn't list processes, so only the backend's ports were checked.")
+    return null
+  }
+  for (const line of listed.stdout.split('\n')) {
+    const match = line.match(/^\s*(\d+)\s+(\S+)(.*)$/)
+    if (!match || Number(match[1]) === process.pid) continue
+    const args = match[2] + match[3]
+    // Only the program's name is shown: the local backend's arguments include its instance secret.
+    if ([...paths].some((path) => args.includes(path + sep) || args.endsWith(path))) {
+      return `process ${match[1]} (${basename(match[2])}) is using its data`
+    }
+  }
+  return null
 }
 
 /**
@@ -513,9 +614,17 @@ const assignedNames = (text) =>
  * there overrides any CONVEX_DEPLOYMENT, so neither file may set a CONVEX_ variable except, in
  * .env.local, what the CLI itself writes for a local anonymous deployment: CONVEX_DEPLOYMENT
  * naming this checkout's (the one in .convex/local), and CONVEX_URL and CONVEX_SITE_URL on this
- * machine. Checked before every push or settings change.
+ * machine.
+ *
+ * Until .convex/local holds a deployment, the CLI also looks for the one it is about to use in
+ * your home directory (~/.convex/anonymous-convex-backend-state, where older versions kept
+ * them, shared by every project), and would push to it and change its data. So then
+ * .env.local may name no deployment at all, and there must be none there under the name the
+ * CLI gives a new one in agent mode (anonymous-agent).
+ *
+ * Checked before every Convex command, and after creating the backend with `requireConfigured`.
  */
-export function assertLocalBackend({ requireConfigured = true, dir = backendDir } = {}) {
+export function assertLocalBackend({ requireConfigured = true, dir = backendDir, home = homedir() } = {}) {
   const problems = []
   let local = null
   try {
@@ -523,10 +632,15 @@ export function assertLocalBackend({ requireConfigured = true, dir = backendDir 
   } catch {}
   const ours = local?.deploymentName ? `anonymous:${local.deploymentName}` : null
   const allowed = {
-    CONVEX_DEPLOYMENT: (value) =>
-      /^anonymous:anonymous-[\w-]+$/.test(value) && (ours === null || value === ours)
-        ? null
-        : `names the deployment "${value}", not this checkout's local backend`,
+    CONVEX_DEPLOYMENT: (value) => {
+      if (ours === null && value.startsWith('anonymous:')) {
+        return (
+          `names the deployment "${value}", which this checkout's .convex/local doesn't hold: ` +
+          'the Convex CLI would look for it in your home directory. Delete packages/backend/.env.local'
+        )
+      }
+      return value === ours ? null : `names the deployment "${value}", not this checkout's local backend`
+    },
     CONVEX_URL: (value) => (LOOPBACK_URL.test(value) ? null : `sets CONVEX_URL to ${value}, not this machine`),
     CONVEX_SITE_URL: (value) =>
       LOOPBACK_URL.test(value) ? null : `sets CONVEX_SITE_URL to ${value}, not this machine`,
@@ -553,8 +667,15 @@ export function assertLocalBackend({ requireConfigured = true, dir = backendDir 
       problems.push("packages/backend/.env.local names no deployment, not this checkout's local backend")
     }
   }
-  if (requireConfigured && local === null) {
+  if (requireConfigured && ours === null) {
     problems.push('this checkout has no local backend in packages/backend/.convex/local')
+  }
+  const legacy = resolve(home, '.convex/anonymous-convex-backend-state/anonymous-agent')
+  if (ours === null && existsSync(legacy)) {
+    problems.push(
+      `${legacy} holds a backend from outside this checkout, which the Convex CLI would use instead of ` +
+        "creating this checkout's own. Move it aside",
+    )
   }
   if (problems.length > 0) {
     throw new Error(
@@ -660,6 +781,8 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
       method: 'POST',
       headers: { 'content-type': 'application/json', origin, ...headers },
       body: JSON.stringify(body),
+      // A backend that accepts the request and never answers mustn't hold setup up for good.
+      signal: AbortSignal.timeout(30_000),
     })
   const signIn = await post('sign-in/email', { email: TESTER.email, password })
   if (signIn.ok) {
@@ -713,7 +836,15 @@ export function holdLock(name, { dir = resolve(stateDir, 'locks'), busy } = {}) 
       })
       return path
     }
-    if (removeStaleLock(path, (pid) => !processAlive(pid))) continue
+    const { status, guard } = removeStaleLock(path, (pid) => !processAlive(pid))
+    if (status === 'removed') continue
+    if (status === 'stuck') {
+      throw new Error(
+        `${path} was left by a run that stopped, but so was ${guard}, which keeps it from being taken over. ` +
+          'Delete that file and try again.',
+      )
+    }
+    if (status === 'busy') throw new Error(`Another run is taking over ${path} right now. Try again.`)
     const pid = readLock(path)
     if (pid !== null) {
       throw new Error(
