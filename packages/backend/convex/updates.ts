@@ -75,13 +75,17 @@ export const setChannel = mutation({
     const row = await ensureSettingsRow(ctx)
     if (row.channel === args.channel) return null
     // The updater looks at the new channel's branch right away rather than at its next
-    // hourly check. A request already waiting is made again, under a new ID, so the updater
-    // can't claim the one it may be working on for the old channel.
-    const request = row.request
-      ? newRequest(row.request.kind, admin.userId)
-      : process.env.UPDATER_SECRET
-        ? newRequest('check', admin.userId)
-        : undefined
+    // hourly check. A request still waiting is made again, under a new ID, so the updater
+    // can't claim the one it may be working on for the old channel. One it has claimed (an
+    // update running) is left as it is: the update finishes, and its report clears it.
+    const running = row.updater?.state === 'updating'
+    const request = running
+      ? undefined
+      : row.request
+        ? newRequest(row.request.kind, admin.userId)
+        : process.env.UPDATER_SECRET
+          ? newRequest('check', admin.userId)
+          : undefined
     await ctx.db.patch(row._id, { channel: args.channel, ...(request ? { request } : {}) })
     await audit(ctx, { kind: 'user', id: admin.userId }, `updates.channel.${args.channel}`)
     return null

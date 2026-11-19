@@ -170,4 +170,22 @@ describe('updates', () => {
       claimChannel: 'stable',
     })
   })
+
+  it('leaves an update that’s running alone when the channel changes', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    await admin.mutation(api.updates.request, { kind: 'update' })
+    const claimed = (await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request!
+    await t.mutation(api.updates.report, {
+      secret: UPDATER_SECRET,
+      state: 'updating',
+      claim: claimed.id,
+      claimChannel: 'stable',
+    })
+    await admin.mutation(api.updates.setChannel, { channel: 'nightly' })
+    expect((await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request).toEqual(claimed)
+    // Its report clears it, and nothing is left to install a second time.
+    await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'idle', done: claimed.id })
+    expect((await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request).toBeNull()
+  })
 })
