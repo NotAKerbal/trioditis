@@ -328,19 +328,24 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
             )
           }
           onCancelScheduled={(id, body) =>
-            void cancelScheduled({ scheduledId: id }).then(
-              () => {
-                // Keep anything in the composer by now; add the cancelled text below it. A copy
-                // this device couldn't open, or that hadn't come yet, has nothing to put back.
-                if (body === null) return toast('Cancelled. It won’t be sent.')
-                if (body === undefined) return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
-                toast(
-                  appendToDraft(chat.id, body)
-                    ? 'Cancelled. The message was added below your draft.'
-                    : 'Cancelled. The message is back in the composer.',
-                )
-              },
-              (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
+            // Counted like a send until its text is back in the composer: the server's copy is
+            // gone once the cancel goes through, so a reload in between would lose it.
+            void whileSending(() =>
+              cancelScheduled({ scheduledId: id }).then(
+                () => {
+                  // Keep anything in the composer by now; add the cancelled text below it. A copy
+                  // this device couldn't open, or that hadn't come yet, has nothing to put back.
+                  if (body === null) return toast('Cancelled. It won’t be sent.')
+                  if (body === undefined)
+                    return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
+                  toast(
+                    appendToDraft(chat.id, body)
+                      ? 'Cancelled. The message was added below your draft.'
+                      : 'Cancelled. The message is back in the composer.',
+                  )
+                },
+                (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
+              ),
             )
           }
         />

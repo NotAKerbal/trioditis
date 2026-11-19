@@ -52,7 +52,7 @@ load_settings() {
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
 # The secret and a report's values reach it as UPDATER_* variables, never as arguments (an
 # unset one isn't passed); --init so it stops on a signal.
-AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
+AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CLAIM_CHANNEL CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
   LATEST_SUBJECT BEHIND AHEAD CHECKED_AT'
 agent() {
   local passed=() name
@@ -203,11 +203,12 @@ update() {
   fi
   target=$latest
   previous=$current
-  # Claimed before anything moves: an admin who cancelled meanwhile gets their way. The
-  # request stays until the update is over, so it isn't marked done yet.
-  if ! UPDATER_CLAIM=$done_id done_id='' report updating "Installing ${target:0:7}." && [ -n "$done_id" ]; then
+  # Claimed before anything moves, request and channel both: an admin who cancelled or chose
+  # another channel meanwhile gets their way, and an update the backend can't hear about
+  # doesn't start. The request stays until the update is over, so it isn't marked done yet.
+  if ! UPDATER_CLAIM=$done_id UPDATER_CLAIM_CHANNEL=$channel done_id='' report updating "Installing ${target:0:7}."; then
     release_lock
-    outcome idle "The update was cancelled before it started."
+    outcome idle "The update didn't start: it was cancelled, the channel changed, or the server couldn't be reached."
     return
   fi
   pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install

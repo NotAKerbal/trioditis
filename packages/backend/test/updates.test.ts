@@ -145,4 +145,29 @@ describe('updates', () => {
     await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'updating', claim: next.id })
     await expect(admin.mutation(api.updates.cancelRequest, {})).rejects.toThrow(/already started/)
   })
+
+  it('makes a waiting request again when the channel changes, so the old one can’t be claimed', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    await admin.mutation(api.updates.setChannel, { channel: 'nightly' })
+    await admin.mutation(api.updates.request, { kind: 'update' })
+    const old = (await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request!
+    await admin.mutation(api.updates.setChannel, { channel: 'stable' })
+    const renewed = (await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request!
+    expect(renewed).toMatchObject({ kind: 'update' })
+    expect(renewed.id).not.toBe(old.id)
+    await expect(
+      t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'updating', claim: old.id }),
+    ).rejects.toThrow(/cancelled/)
+    // An update for the channel admins left, automatic ones included, can't start either.
+    await expect(
+      t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'updating', claimChannel: 'nightly' }),
+    ).rejects.toThrow(/channel changed/)
+    await t.mutation(api.updates.report, {
+      secret: UPDATER_SECRET,
+      state: 'updating',
+      claim: renewed.id,
+      claimChannel: 'stable',
+    })
+  })
 })

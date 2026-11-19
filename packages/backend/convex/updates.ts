@@ -75,8 +75,13 @@ export const setChannel = mutation({
     const row = await ensureSettingsRow(ctx)
     if (row.channel === args.channel) return null
     // The updater looks at the new channel's branch right away rather than at its next
-    // hourly check, unless an update is already waiting (which checks first anyway).
-    const request = row.request ?? (process.env.UPDATER_SECRET ? newRequest('check', admin.userId) : undefined)
+    // hourly check. A request already waiting is made again, under a new ID, so the updater
+    // can't claim the one it may be working on for the old channel.
+    const request = row.request
+      ? newRequest(row.request.kind, admin.userId)
+      : process.env.UPDATER_SECRET
+        ? newRequest('check', admin.userId)
+        : undefined
     await ctx.db.patch(row._id, { channel: args.channel, ...(request ? { request } : {}) })
     await audit(ctx, { kind: 'user', id: admin.userId }, `updates.channel.${args.channel}`)
     return null
@@ -172,6 +177,8 @@ export const report = mutation({
     done: v.optional(v.string()),
     /** The request this report starts on: refused if it was cancelled meanwhile. */
     claim: v.optional(v.string()),
+    /** The channel an update it starts is for: refused if admins have chosen another since. */
+    claimChannel: v.optional(updateChannel),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -181,6 +188,8 @@ export const report = mutation({
     }
     const row = await ensureSettingsRow(ctx)
     if (args.claim !== undefined && row.request?.id !== args.claim) throw new ConvexError('That request was cancelled.')
+    if (args.claimChannel !== undefined && row.channel !== args.claimChannel)
+      throw new ConvexError('The channel changed.')
     const previous = row.updater
     const now = Date.now()
     // An update's start is when it was first reported; a failure keeps the start of the update

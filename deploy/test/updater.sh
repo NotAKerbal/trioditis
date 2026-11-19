@@ -61,6 +61,8 @@ case " $* " in
   *' report '*)
     # A request an admin cancelled can't be claimed.
     [ "${UPDATER_CLAIM:-}" != cancelled ] || exit 1
+    # Admins chose stable after the updater began on nightly.
+    [ "${UPDATER_CLAIM_CHANNEL:-}" != nightly ] || [ ! -e "$REPORT_LOG.stable" ] || exit 1
     # The backend out of reach, for one test.
     [ ! -e "$REPORT_LOG.down" ] || exit 1
     echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
@@ -116,9 +118,15 @@ grep -qx "failed_target=$c3" "$state" && grep -qx 'pending_target=' "$state" &&
 # by someone else, both leave the checkout where it is.
 git_ -C "$work/checkout" checkout -q --detach "$c1"
 TEST_REQUEST=cancelled run update nightly
-head_is "$c1" && grep -q '^idle|The update was cancelled' "$work/out" && [ ! -s "$work/installs" ] &&
+head_is "$c1" && grep -q "^idle|The update didn't start" "$work/out" && [ ! -s "$work/installs" ] &&
   check ok "a request cancelled before it starts installs nothing" ||
   check fail "a request cancelled before it starts installs nothing ($(cat "$work/out"))"
+touch "$work/reports.stable"
+run update nightly
+rm -f "$work/reports.stable"
+head_is "$c1" && grep -q "^idle|The update didn't start" "$work/out" && [ ! -s "$work/installs" ] &&
+  check ok "an update for a channel admins have since left installs nothing" ||
+  check fail "an update for a channel admins have since left installs nothing ($(cat "$work/out"))"
 flock "$work/checkout/deploy/.operation.lock" sleep 5 &
 holder=$!
 sleep 0.5

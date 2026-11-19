@@ -7,13 +7,14 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useMutation } from 'convex/react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   CHANNELS,
   channelName,
   runningVersion,
   shortCommit,
   updaterStale,
+  UPDATER_STALE_MS,
   updateView,
   when,
   type Channel,
@@ -117,6 +118,17 @@ function UpdateState({ status }: { status: UpdateStatus }) {
   const request = useMutation(api.updates.request)
   const cancel = useMutation(api.updates.cancelRequest)
   const [busy, setBusy] = useState(false)
+  // Renders again when the updater's last report goes stale: with no new report, nothing else
+  // would, and the warning would never show.
+  const [, recheck] = useState(0)
+  const seenAt = status.updater?.seenAt
+  useEffect(() => {
+    if (seenAt === undefined) return
+    const wait = seenAt + UPDATER_STALE_MS - Date.now() + 1000
+    if (wait <= 0) return
+    const timer = setTimeout(() => recheck((n) => n + 1), wait)
+    return () => clearTimeout(timer)
+  }, [seenAt])
   const view = updateView(status)
   const stale = updaterStale(status)
   const channel = channelName(status.channel)

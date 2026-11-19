@@ -9,7 +9,7 @@
 //     the backend answers).
 //   updater-agent.mjs report
 //     Sends the updater's report (updates:report) from UPDATER_* variables: UPDATER_STATE,
-//     UPDATER_MESSAGE, UPDATER_DONE, UPDATER_CLAIM, UPDATER_CURRENT and UPDATER_CURRENT_AT, and
+//     UPDATER_MESSAGE, UPDATER_DONE, UPDATER_CLAIM, UPDATER_CLAIM_CHANNEL, UPDATER_CURRENT and UPDATER_CURRENT_AT, and
 //     UPDATER_LATEST_CHANNEL, UPDATER_LATEST, UPDATER_LATEST_AT, UPDATER_LATEST_SUBJECT,
 //     UPDATER_BEHIND, UPDATER_AHEAD and UPDATER_CHECKED_AT. Times are Unix seconds.
 //
@@ -97,6 +97,7 @@ async function report() {
   if (env.UPDATER_MESSAGE) args.message = env.UPDATER_MESSAGE
   if (env.UPDATER_DONE) args.done = env.UPDATER_DONE
   if (env.UPDATER_CLAIM) args.claim = env.UPDATER_CLAIM
+  if (env.UPDATER_CLAIM_CHANNEL) args.claimChannel = env.UPDATER_CLAIM_CHANNEL
   if (env.UPDATER_CURRENT) {
     args.current = { commit: env.UPDATER_CURRENT, committedAt: seconds('UPDATER_CURRENT_AT') }
   }
