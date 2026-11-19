@@ -36,6 +36,16 @@ const verify = (t: T, cookie: string, headers: Record<string, string> = {}) =>
     body: JSON.stringify({ response: {} }),
   })
 
+async function challengeRows(t: T) {
+  return await t.run(async (ctx) => {
+    const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: 'verification',
+      paginationOpts: { cursor: null, numItems: 100 },
+    })) as { page: Record<string, unknown>[] }
+    return page
+  })
+}
+
 async function challenges(t: T) {
   return await t.run(async (ctx) => {
     const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
@@ -47,6 +57,31 @@ async function challenges(t: T) {
 }
 
 describe('adding a passkey', () => {
+  it('refuses a session about to expire, setting no cookie and keeping it', async () => {
+    const t = setup()
+    const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, {
+        input: {
+          model: 'session',
+          where: [{ field: '_id', value: alex.session.id as never }],
+          update: { expiresAt: Date.now() + 10_000 },
+        },
+      })
+    })
+    const response = await options(t, alex.cookie, { [SESSION_HEADER]: alex.session.id })
+    expect(response.status).toBe(409)
+    expect(response.headers.getSetCookie()).toEqual([])
+    const kept = await t.run(
+      async (ctx) =>
+        await ctx.runQuery(components.betterAuth.adapter.findOne, {
+          model: 'session',
+          where: [{ field: '_id', value: alex.session.id as never }],
+        }),
+    )
+    expect(kept).not.toBeNull()
+  })
+
   it('gives options for the page’s own session, and without the header as before', async () => {
     const t = setup()
     const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
@@ -93,7 +128,8 @@ describe('adding a passkey', () => {
       .map((value) => value.split(';')[0])
       .join('; ')
     expect(challengeCookie).not.toBe('')
-    const live = await challenges(t)
+    const live = await challengeRows(t)
+    expect(live).toHaveLength(1)
     // Bea's session is due for a refresh, which a refused request mustn't give it.
     const beaBefore = await t.run(async (ctx) => {
       const id = bea.session.id as never
@@ -119,7 +155,8 @@ describe('adding a passkey', () => {
     const refusedVerify = await verify(t, switched, { [SESSION_HEADER]: alex.session.id })
     expect(refusedVerify.status).toBe(409)
     expect(refusedVerify.headers.getSetCookie()).toEqual([])
-    expect(await challenges(t)).toBe(live)
+    // Alex's challenge, the same row, untouched.
+    expect(await challengeRows(t)).toEqual(live)
     const beaAfter = await t.run(
       async (ctx) =>
         await ctx.runQuery(components.betterAuth.adapter.findOne, {
@@ -138,5 +175,7 @@ describe('adding a passkey', () => {
       authorization: 'Bearer someone-else',
     })
     expect(response.status).toBe(409)
+    const empty = await options(t, alex.cookie, { [SESSION_HEADER]: alex.session.id, authorization: '' })
+    expect(empty.status).toBe(409)
   })
 })

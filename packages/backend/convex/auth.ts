@@ -58,6 +58,9 @@ const MAX_SESSION_TOKEN_LENGTH = 256
  */
 export const SESSION_HEADER = 'x-trioditis-session-id'
 
+/** How close to expiring a session may be and still add a passkey. */
+const EXPIRY_MARGIN_MS = 60 * 1000
+
 /** Better Auth's passkey registration: the options that hold the challenge, and the answer. */
 const PASSKEY_REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
 
@@ -78,12 +81,11 @@ const passkeySessionBinding = {
         handler: createAuthMiddleware(async (context) => {
           const expected = context.headers?.get(SESSION_HEADER)
           if (expected === null || expected === undefined) return
-          const refuse = () => {
-            throw new APIError('CONFLICT', { code: SESSION_CHANGED.code, message: SESSION_CHANGED.message })
-          }
+          const changed = () =>
+            new APIError('CONFLICT', { code: SESSION_CHANGED.code, message: SESSION_CHANGED.message })
           // A page signs in with its cookie. A bearer token as well would make Better Auth act
           // on that session instead, after this check, so it isn't taken here.
-          if (context.headers?.get('authorization')) refuse()
+          if (context.headers?.has('authorization')) throw changed()
           // The cookie's session, read as it is: looking it up the usual way would also extend
           // or end it, which a refused request mustn't do to someone else's session.
           const token = await context.getSignedCookie(
@@ -91,7 +93,11 @@ const passkeySessionBinding = {
             context.context.secret,
           )
           const found = token ? await context.context.internalAdapter.findSession(token) : null
-          if (found?.session.id !== expected) refuse()
+          if (!found || found.session.id !== expected) throw changed()
+          // An expired one is refused here too: Better Auth would otherwise delete it and clear
+          // the session cookie, and a late answer could clear a sign-in made meanwhile in
+          // another tab. The margin covers it expiring between this read and Better Auth's.
+          if (new Date(found.session.expiresAt).getTime() <= Date.now() + EXPIRY_MARGIN_MS) throw changed()
         }),
       },
     ],
