@@ -303,6 +303,9 @@ export default defineSchema({
   })
     .index('by_event', ['userId', 'network', 'eventId'])
     .index('by_chat_sort', ['chatId', 'sortKey'])
+    // Newest arrivals first (the index ends in `_creationTime`), without imported history,
+    // for notifications (`messages.arrivals`).
+    .index('by_user_live', ['userId', 'historical'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
   reactions: defineTable({

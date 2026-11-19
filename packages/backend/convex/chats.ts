@@ -8,7 +8,7 @@ import { ownChat, requireMember } from './lib/access'
 import { newestMessageWhere } from './lib/bounded'
 import { patchChat } from './lib/chatView'
 import { queueCommand } from './lib/outbox'
-import { chatKind, chatView, envelope, network } from './validators'
+import { chatKind, chatView, envelope, network, storedLastMessage } from './validators'
 
 // The inbox, and what the person does to a chat. Names, topics and avatars are sealed; the
 // client opens `sealedMeta`. Each chat's list (`view`) is kept by lib/chatView.ts, so every
@@ -33,7 +33,7 @@ const READ_SCAN_BYTES = 4 * 1024 * 1024
 
 // Matches `LastMessage` in @trioditis/core. `sealed` and `objectId` open as a message does in
 // `messages.list`: `sealedEdit ?? sealed`, with `editEventId` or `sealedObjectId`.
-const lastMessage = v.object({
+export const lastMessage = v.object({
   messageId: v.id('messages'),
   at: v.number(),
   self: v.boolean(),
@@ -44,7 +44,7 @@ const lastMessage = v.object({
 })
 
 // Matches `ChatRow` in @trioditis/core; the check at the end of this file keeps them in step.
-const chatRow = v.object({
+export const chatRow = v.object({
   _id: v.id('chats'),
   network,
   networkAccountId: v.union(v.null(), v.id('networkAccounts')),
@@ -68,8 +68,11 @@ const chatRow = v.object({
 
 /** The chat's preview, from the pointer kept on it (lib/lastMessage.ts): no message is read. */
 function lastMessageOf(chat: Doc<'chats'>): Infer<typeof lastMessage> | null {
-  const last = chat.last
-  if (!last) return null
+  return chat.last ? clientLastMessage(chat.last) : null
+}
+
+/** A stored pointer (lib/lastMessage.ts) as the client is given it. */
+export function clientLastMessage(last: Infer<typeof storedLastMessage>): Infer<typeof lastMessage> {
   return {
     messageId: last.messageId,
     at: last.at,
@@ -81,7 +84,7 @@ function lastMessageOf(chat: Doc<'chats'>): Infer<typeof lastMessage> | null {
   }
 }
 
-async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
   const accountKey = `${chat.network}:${chat.loginId}`
   if (!accounts.has(accountKey)) {
     const account = await ctx.db

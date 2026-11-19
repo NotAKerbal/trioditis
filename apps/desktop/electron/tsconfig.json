@@ -1,0 +1,17 @@
+{
+  // The desktop app's main process and preload, compiled to ../dist-electron. The preload is
+  // CommonJS (.cts), as Electron's sandbox needs; the main process is an ES module.
+  "extends": "@trioditis/config/tsconfig.node.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "outDir": "../dist-electron",
+    "rootDir": ".",
+    // The preload runs in the page, beside its DOM.
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["*.ts", "*.cts"]
+}

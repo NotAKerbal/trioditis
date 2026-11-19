@@ -219,6 +219,29 @@ export interface ChatRow {
   lastMessage: LastMessage | null
 }
 
+/**
+ * A message that just arrived from someone else, as `messages.arrivals` returns it, for a
+ * notification. Never imported history or the person's own.
+ */
+export interface Arrival {
+  /** When the server stored it: arrivals are newest first by this, not by network time. */
+  arrivedAt: number
+  /** Its latest content, opened as `LastMessage` is: `sealed` is null when too large to show. */
+  message: LastMessage
+  chat: ChatRow
+}
+
+/** What `messages.arrivals` returns. */
+export interface ArrivalFeed {
+  /**
+   * When the newest live message of any kind arrived (null: none yet). Notify only for
+   * arrivals after the `latest` of the first answer.
+   */
+  latest: number | null
+  /** Newest first, at most ten. */
+  arrivals: Arrival[]
+}
+
 export type SidebarLayout = 'focused' | 'simple'
 
 export interface Preferences {

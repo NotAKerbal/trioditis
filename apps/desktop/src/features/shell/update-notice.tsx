@@ -54,11 +54,19 @@ function reloadedFor() {
 }
 
 function reload(build: string) {
-  try {
-    sessionStorage.setItem(RELOADED_FOR, build)
-  } catch {
-    // Without session storage, it only loses the guard against reloading twice.
-  }
+  // Marked only once the page really goes: the desktop app can keep it for unsent text, and a
+  // reload that stayed mustn't stop the next one.
+  window.addEventListener(
+    'pagehide',
+    () => {
+      try {
+        sessionStorage.setItem(RELOADED_FOR, build)
+      } catch {
+        // Without session storage, it only loses the guard against reloading twice.
+      }
+    },
+    { once: true },
+  )
   window.location.reload()
 }
 

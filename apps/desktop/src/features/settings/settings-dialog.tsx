@@ -27,6 +27,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import {
+  Bell,
   Check,
   Copy,
   Eye,
@@ -47,7 +48,9 @@ import {
   useServerInfo,
   useSidebarLayout,
 } from '~/data/chats.ts'
+import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { passkeysUnavailable } from '~/lib/desktop.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import {
   addPasskey,
@@ -69,6 +72,7 @@ import { Updates } from './updates.tsx'
 // admins only (Admin settings).
 export const SETTINGS_SECTIONS = [
   { id: 'appearance', name: 'Appearance', icon: <Eye /> },
+  { id: 'notifications', name: 'Notifications', icon: <Bell /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
@@ -133,6 +137,8 @@ export function SettingsDialog({
         <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
           {current.id === 'appearance' ? (
             <Appearance />
+          ) : current.id === 'notifications' ? (
+            <Notifications />
           ) : current.id === 'accounts' ? (
             <Accounts />
           ) : current.id === 'members' ? (
@@ -221,6 +227,43 @@ function Appearance() {
           checked={prefs.networkBadges}
           onCheckedChange={(v) => setPref('networkBadges', v)}
           aria-label="Network badges"
+        />
+      </Setting>
+    </>
+  )
+}
+
+function Notifications() {
+  const prefs = usePrefs()
+  const supported = notificationsAvailable()
+  // The browser's answer, asked again only when the person turns notifications on.
+  const [allowed, setAllowed] = useState(canNotify)
+  async function turn(on: boolean) {
+    if (!on) return setPref('notifications', false)
+    const granted = allowed || (await Notification.requestPermission()) === 'granted'
+    setAllowed(granted)
+    if (granted) setPref('notifications', true)
+    else toast('Notifications are blocked for this site. Allow them in your browser’s site settings, then try again.')
+  }
+  return (
+    <>
+      <Heading
+        title="Notifications"
+        lead="A notification when a message arrives in a chat that isn’t muted. These settings are for this device."
+      />
+      <Setting
+        title="Desktop notifications"
+        about={
+          supported
+            ? 'Show each new message and who sent it (in a group, the group’s name), while Trioditis is open.'
+            : 'This browser can’t show notifications.'
+        }
+      >
+        <Switch
+          checked={prefs.notifications && allowed}
+          disabled={!supported}
+          onCheckedChange={(v) => void turn(v)}
+          aria-label="Desktop notifications"
         />
       </Setting>
     </>
@@ -945,6 +988,11 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
         <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
           Add a passkey
         </Button>
+        {passkeysUnavailable ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            {passkeysUnavailable} Add them, and set them to unlock, in a browser.
+          </p>
+        ) : null}
       </div>
     </Setting>
   )

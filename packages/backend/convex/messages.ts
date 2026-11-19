@@ -1,9 +1,12 @@
 import { paginationOptsValidator } from 'convex/server'
-import { ConvexError, v } from 'convex/values'
+import { ConvexError, v, type Infer } from 'convex/values'
+import type { Arrival, ArrivalFeed } from '@trioditis/core'
+import type { Id } from './_generated/dataModel'
 import { mutation, query } from './_generated/server'
+import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
-import { byteSize } from './lib/bounded'
-import { forgetMessage } from './lib/lastMessage'
+import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
+import { forgetMessage, lastOf } from './lib/lastMessage'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -32,6 +35,74 @@ export const list = query({
       })
   },
 })
+
+/** The most arrivals `arrivals` returns: more between two answers notify for the newest. */
+const ARRIVALS = 10
+/**
+ * The most live messages it looks through to find them (the person's own sends and other
+ * views' messages are skipped), and the most bytes of them, well under a query's 16 MiB.
+ */
+const ARRIVALS_SCAN = 50
+const ARRIVALS_BYTES = 8 * 1024 * 1024
+
+const arrival = v.object({ arrivedAt: v.number(), message: lastMessage, chat: chatRow })
+const arrivalFeed = v.object({ latest: v.union(v.null(), v.number()), arrivals: v.array(arrival) })
+
+/**
+ * The newest messages from other people, by when they arrived, for notifications: never
+ * imported history, the person's own, deleted ones, or chats outside the inbox. `latest` is
+ * when the newest live message of any kind arrived, a cursor that doesn't move when a chat
+ * changes view, so the client notifies only for what arrived after its first answer. See
+ * client-api.md, Arrivals.
+ */
+export const arrivals = query({
+  args: {},
+  returns: arrivalFeed,
+  handler: async (ctx) => {
+    const member = await requireMember(ctx)
+    const accounts = new Map<string, Id<'networkAccounts'> | null>()
+    const out: Infer<typeof arrival>[] = []
+    let latest: number | null = null
+    let before: number | undefined
+    let seen = 0
+    let bytes = 0
+    // A few rows at a time, only as many as can't pass the byte budget however large they are.
+    scan: while (seen < ARRIVALS_SCAN) {
+      const room = Math.min(Math.floor((ARRIVALS_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), ARRIVALS_SCAN - seen)
+      if (room < 1) break
+      const batch = await ctx.db
+        .query('messages')
+        .withIndex('by_user_live', (q) => {
+          const live = q.eq('userId', member.userId).eq('historical', false)
+          return before === undefined ? live : live.lt('_creationTime', before)
+        })
+        .order('desc')
+        .take(room)
+      for (const message of batch) {
+        latest ??= message._creationTime
+        seen++
+        bytes += byteSize(message)
+        if ('self' in message.sender || message.redactedAt !== undefined) continue
+        const chat = await ctx.db.get(message.chatId)
+        if (!chat || chat.userId !== member.userId || chat.view !== 'inbox') continue
+        out.push({
+          arrivedAt: message._creationTime,
+          message: clientLastMessage(lastOf(message)),
+          chat: await rowFor(ctx, chat, accounts),
+        })
+        if (out.length === ARRIVALS) break scan
+      }
+      if (batch.length < room) break
+      before = batch.at(-1)!._creationTime
+    }
+    return { latest, arrivals: out }
+  },
+})
+
+// `messages.arrivals` returns exactly what @trioditis/core calls an `ArrivalFeed` of `Arrival`s.
+type SameShape<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+const _arrivalMatchesCore: SameShape<keyof Infer<typeof arrival>, keyof Arrival> = true
+const _feedMatchesCore: SameShape<keyof Infer<typeof arrivalFeed>, keyof ArrivalFeed> = true
 
 /**
  * Sends a message. The client seals it twice: once to the bridge key (`forBridge`, kind

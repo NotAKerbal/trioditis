@@ -9,15 +9,24 @@ export interface Prefs {
   theme: Theme
   previews: boolean
   networkBadges: boolean
+  /** Notify for new messages, once the browser allows it. */
+  notifications: boolean
 }
 
-const DEFAULTS: Prefs = { theme: 'system', previews: true, networkBadges: true }
+const DEFAULTS: Prefs = {
+  theme: 'system',
+  previews: true,
+  networkBadges: true,
+  notifications: true,
+}
 const KEY = 'trioditis.prefs'
 
 function load(): Prefs {
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Prefs>
-    return { ...DEFAULTS, ...saved }
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>
+    // Only today's preferences: one that's gone (notificationContent, say) isn't kept or saved.
+    const known = Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
+    return { ...DEFAULTS, ...known } as Prefs
   } catch {
     return DEFAULTS
   }
