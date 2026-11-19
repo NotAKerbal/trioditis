@@ -226,7 +226,8 @@ try {
 
   if (hasBridgeHost) {
     step('Building the bridge host')
-    buildBridgeHost()
+    // Signal links libsignal (Rust), so it is only built in when it is asked for.
+    buildBridgeHost({ signal: networks.includes('signal') })
   }
 } catch (error) {
   fail(error.message)
