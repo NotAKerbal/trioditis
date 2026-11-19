@@ -51,9 +51,16 @@ for name in $names; do
   printf '%s=%s\n' "$name" "$(printenv "$name")"
 done | npx convex env set --force >/dev/null
 # With the updater off, a secret set while it was on is removed, so nothing can act as it.
-# Names only: `env get` succeeds whether or not it's set, and would print the value.
-if [ "${TRIODITIS_UPDATER:-0}" != 1 ] && npx convex env list --names-only | grep -qx UPDATER_SECRET; then
-  npx convex env remove UPDATER_SECRET >/dev/null
+# Names only: `env get` succeeds whether or not it's set, and would print the value. A list that
+# fails stops the job, rather than reading as no secret and leaving one in place.
+if [ "${TRIODITIS_UPDATER:-0}" != 1 ]; then
+  set_names=$(npx convex env list --names-only) || {
+    echo "deploy-functions: couldn't list the backend's environment, to remove UPDATER_SECRET" >&2
+    exit 1
+  }
+  if printf '%s\n' "$set_names" | grep -qx UPDATER_SECRET; then
+    npx convex env remove UPDATER_SECRET >/dev/null
+  fi
 fi
 echo "deploy-functions: environment set"
 

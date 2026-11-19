@@ -6,7 +6,7 @@
 #   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
 #   deploy/install/install.sh --networks whatsapp,signal  # only these bridge hosts, not all
-#   deploy/install/install.sh --updater                   # let admins update it from the app
+#   deploy/install/install.sh --no-updater                # update it by hand, not from the app
 #
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
 # options keeps the install as it is, and an option changes only its own setting. A rerun
@@ -60,7 +60,8 @@ Options (each one is kept for later reruns):
   --updater, --no-updater
                        Run the updater, a systemd service that updates this install from
                        its git remote when admins ask in the app or on their schedule, or
-                       stop and remove it (default off; docs/deploy.md, Updates)
+                       stop and remove it (default on, where systemd can run it;
+                       docs/deploy.md, Updates)
   --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
                        goes to a log). Not kept for reruns
 EOF
@@ -341,11 +342,28 @@ fi
 # The bridged networks, comma-separated, as Compose (profiles) and the backend (what admins
 # may install) read them.
 bridged=$(IFS=,; echo "${network_list[*]}")
+updater_asked=${updater+1}
 updater=${updater-$(get INSTALL_UPDATER)}
-updater=${updater:-0}
-# The updater is a systemd service; refused here, before anything changes, where there's none.
-if [ "$updater" = 1 ] && ! command -v systemctl >/dev/null; then
-  die "--updater runs a systemd service, and this machine has no systemctl."
+# A saved 1 whose service was never set up (enabled), as after a first install cut off before
+# then, is still only the default, not the operator's choice.
+if [ -z "$updater_asked" ] && [ "$updater" = 1 ] && ! bash "$here/updater/service.sh" installed "$project" 2>/dev/null; then
+  updater=''
+fi
+# The updater is on unless the install turned it off. Where it can't run (no systemd, or not a
+# git checkout), a new install, or one from before the updater, gets it off and says why; one
+# that asks for it stops here, before any setting is saved or the server touched.
+updater_default=0
+if [ -z "$updater" ]; then
+  if reason=$(bash "$here/updater/service.sh" check "$project" 2>&1); then
+    updater=1
+    updater_default=1
+  else
+    updater=0
+    warn "The updater is off, so admins can't update the server from the app: ${reason:-its check failed}. Once it can run, run this again with --updater."
+  fi
+elif [ "$updater" = 1 ]; then
+  reason=$(bash "$here/updater/service.sh" check "$project" 2>&1) ||
+    die "The updater can't run here: ${reason:-its check failed}. Fix that, or run this with --no-updater to update by hand."
 fi
 # The commit this checkout is at: the web app and the functions are built from it, and an open
 # page compares the two to see the server was updated under it.
@@ -733,7 +751,18 @@ fi
 # may be the updater that's running this install. See deploy/updater/service.sh.
 if [ "$updater" = 1 ]; then
   say "Starting the updater (trioditis-updater-$project)"
-  bash "$here/updater/service.sh" install "$project" || die "Couldn't install the updater's service (above)."
+  if ! bash "$here/updater/service.sh" install "$project"; then
+    [ "$updater_default" = 1 ] || die "Couldn't install the updater's service (above)."
+    # On by default, not asked for: the server is up, so it stays up, and the updater goes off
+    # instead. Its secret is taken back from the backend (deploy-functions.sh removes it with
+    # the updater off), so the app doesn't offer updates that nothing would run.
+    bash "$here/updater/service.sh" remove "$project" >/dev/null 2>&1 || true
+    updater=0
+    set_var INSTALL_UPDATER 0
+    compose run --rm --no-deps -T functions >/dev/null 2>&1 ||
+      warn "Couldn't take the updater's secret back from the backend: run this again."
+    warn "The updater is off, so admins can't update the server from the app: its service couldn't be installed (above). Once it can, run this again with --updater."
+  fi
 else
   bash "$here/updater/service.sh" remove "$project" || warn "Couldn't remove the updater's service (above)."
 fi

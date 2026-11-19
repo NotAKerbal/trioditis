@@ -40,8 +40,15 @@ checkout() {
   cp "$installer" "$work/checkout/deploy/install/install.sh"
   cp -r "$repo/deploy/compose" "$work/checkout/deploy/compose"
   cp -r "$repo/deploy/scripts" "$work/checkout/deploy/scripts"
+  cp -r "$repo/deploy/updater" "$work/checkout/deploy/updater"
   cp "$repo/deploy/install/env-names" "$work/checkout/deploy/install/env-names"
 }
+# A systemd whose user manager answers, or doesn't with STUB_SYSTEMCTL=fail.
+cat >"$work/bin/systemctl" <<'EOF'
+#!/bin/sh
+[ "${STUB_SYSTEMCTL:-ok}" = ok ]
+EOF
+chmod +x "$work/bin/systemctl"
 cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -63,7 +70,10 @@ EOF
 chmod +x "$work/bin/docker"
 install() {
   runs=$((${runs:-0} + 1))
-  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
+  # Its own systemd config directory (test_config, else $work/config), never the caller's, so no
+  # updater unit of this machine's is seen.
+  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" XDG_CONFIG_HOME="${test_config:-$work/config}" \
+    bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
   cp "$work/checkout/deploy/.env" "$work/env.$runs" 2>/dev/null || true
   return "$status"
 }
@@ -259,6 +269,84 @@ install || true
   [ "$(value COMPOSE_FILE)" = compose.yml:compose.loopback.yml ] &&
   check ok "without the fake network or its test endpoint" ||
   { check fail "without the fake network or its test endpoint"; grep -E 'fake|E2E|COMPOSE_FILE' "$work/checkout/deploy/.env" >&2; }
+
+# The updater is on by default where it can run: a new install in a git checkout with an origin
+# remote turns it on, and one in a directory that isn't a git checkout gets it off and says why.
+# A saved choice stays, and --updater where it can't run stops the install, changing nothing.
+checkout
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one" "$work/out" &&
+  check ok "outside a git checkout, the updater is off, saying why" ||
+  { check fail "outside a git checkout, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work/checkout" init -q
+git -C "$work/checkout" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m test
+git -C "$work/checkout" remote add origin https://example.invalid/trioditis.git
+install || true
+[ "$(value INSTALL_UPDATER)" = 1 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "in a git checkout with an origin remote, the updater is on" ||
+  { check fail "in a git checkout with an origin remote, the updater is on"; tail -2 "$work/out" >&2; }
+sed -i 's/^INSTALL_UPDATER=.*/INSTALL_UPDATER=0/' "$work/checkout/deploy/.env"
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "an install that turned it off keeps it off" || check fail "an install that turned it off keeps it off"
+cp "$work/checkout/deploy/.env" "$work/env.updater"
+if STUB_SYSTEMCTL=fail install --updater; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "The updater can't run here: .*user manager" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
+  check ok "--updater where it can't run stops the install, unchanged" ||
+  { check fail "--updater where it can't run stops the install, unchanged"; tail -2 "$work/out" >&2; }
+
+# A saved 1 whose service was never set up (a first install cut off before then, even after it
+# wrote the unit) is still the default, so where the updater can't run it goes off; once the
+# service is enabled, it's the install's choice, and the install stops instead.
+unit_dir="$work/config/systemd/user"
+mkdir -p "$unit_dir/default.target.wants"
+for setup in 'not written' 'written, not enabled'; do
+  [ "$setup" = 'not written' ] || : >"$unit_dir/trioditis-updater-trioditis-test.service"
+  printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
+  if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
+  [ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*user manager" "$work/out" && ! grep -q "can't run here" "$work/out" &&
+    check ok "a saved 1 with its unit $setup is still the default" ||
+    { check fail "a saved 1 with its unit $setup is still the default"; tail -2 "$work/out" >&2; }
+done
+ln -s "$unit_dir/trioditis-updater-trioditis-test.service" "$unit_dir/default.target.wants/trioditis-updater-trioditis-test.service"
+printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
+cp "$work/checkout/deploy/.env" "$work/env.updater"
+if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "The updater can't run here" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
+  check ok "a saved 1 with its service enabled stops the install where it can't run" ||
+  { check fail "a saved 1 with its service enabled stops the install where it can't run"; tail -2 "$work/out" >&2; }
+rm -rf "$work/config"
+
+# A unit directory it can't write or search, and a copy unpacked inside another repository (git
+# would find that one, and the updater would update it), get the updater off by default too.
+mkdir -p "$work/xdg/systemd"
+: >"$work/xdg/systemd/user"
+rm -f "$work/checkout/deploy/.env"
+test_config=$work/xdg
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
+  check ok "with a unit directory it can't write, the updater is off, saying why" ||
+  { check fail "with a unit directory it can't write, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+mkdir -p "$work/xdg-closed/systemd/user"
+chmod 600 "$work/xdg-closed/systemd/user"
+rm -f "$work/checkout/deploy/.env"
+test_config=$work/xdg-closed
+install || true
+unset test_config
+chmod 700 "$work/xdg-closed/systemd/user"
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
+  check ok "with a unit directory it can't search, the updater is off, saying why" ||
+  { check fail "with a unit directory it can't search, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work" init -q
+git -C "$work" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m parent
+git -C "$work" remote add origin https://example.invalid/other.git
+install || true
+rm -rf "$work/.git"
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one of its own" "$work/out" &&
+  check ok "inside another repository, the updater is off, saying why" ||
+  { check fail "inside another repository, the updater is off, saying why"; tail -2 "$work/out" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]
