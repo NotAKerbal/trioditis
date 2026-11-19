@@ -257,7 +257,8 @@ conclude() {
 report_done() {
   [ -n "$done_result" ] || return 0
   local target=${done_target:0:7} previous=${done_previous:0:7}
-  local detail=${failure_detail:+: $failure_detail} back=${rollback_detail:+: $rollback_detail}
+  # Each error gets its own share of the 500 characters the backend keeps.
+  local detail=${failure_detail:+: ${failure_detail:0:160}} back=${rollback_detail:+: ${rollback_detail:0:160}}
   case "$done_result" in
     updated) outcome idle "Updated to $target." ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
