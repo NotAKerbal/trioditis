@@ -311,10 +311,14 @@ const { data, webauthn } = await authClient.passkey.addPasskey({
   extensions: { prf: { eval: { first } } },
   returnWebAuthnResponse: true,
 }) // with the page's session in x-trioditis-session-id (Key writes are bound to the page's session)
-const output = webauthn.clientExtensionResults.prf?.results?.first // may be missing, see below
+const output = webauthn.clientExtensionResults.prf?.results?.first
+// No output: the passkey signs in, but makes no backup yet (see below).
+if (!output) return
 const context = { userId, kid, kind: 'passkey' } as const
-const wrap = wrapIdentityKey(identity.privateKey, passkeyKey(new Uint8Array(output)), context)
+const wrappingKey = passkeyKey(new Uint8Array(output))
+const wrap = wrapIdentityKey(identity.privateKey, wrappingKey, context)
 // Open it again before sending, as for every backup: the server can't check a wrap.
+unwrapIdentityKey(wrap, wrappingKey, context, identity.publicKey)
 await convex.mutation(api.keys.putBackup, {
   kind: 'passkey',
   ...wrap,
@@ -344,16 +348,27 @@ await convex.mutation(api.keys.putBackup, {
   `navigator.credentials.get()` naming this key's passkey backups and their inputs. The
   credential that answered picks the backup. A passkey backup opens without its passkey being
   registered for sign-in: it's the output that opens it.
-- **Removing a passkey** removes its backup first (`keys.removePasskeyBackup`), then the
-  passkey (`POST /passkey/delete-passkey { id }`), so a half-done removal leaves a passkey that
-  signs in but no longer unlocks, not one that unlocks but the person thinks is gone.
-  `GET /passkey/list-user-passkeys` lists them; each has its `credentialID`, which a backup's
-  `credentialId` matches.
+- **A passkey backup is only for a passkey on the account.** `keys.putBackup` with
+  `kind: 'passkey'` is refused (`That passkey isn’t on your account any more…`) unless
+  `credentialId` is a passkey Better Auth has for the signed-in person, checked in the same
+  transaction as the write: so a backup is never made for another account's credential, nor
+  lands after its passkey was removed.
+- **Listing**: `api.keys.passkeys({ sessionId })` returns the person's passkeys as
+  `{ credentialId, name, createdAt, backedUp }[]`, where `credentialId` matches a backup's.
+  Use it rather than Better Auth's `/passkey/list-user-passkeys`, which answers for whoever the
+  cookie signs in as by now.
+- **Removing**: `api.keys.removePasskey({ credentialId, proof, sessionId })` removes the
+  passkey's backups and its sign-in credential in one transaction, so nothing is left half
+  removed. A credential no longer registered just loses its backups. Better Auth's own
+  `/passkey/delete-passkey` removes only the sign-in credential; don't use it.
+- **Adding one at a time.** The registration header is the page's, so the desktop app refuses a
+  second registration while one is under way rather than let one's end leave the other without
+  it.
 
 ### Key writes are bound to the page's session
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
-`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`keys.removePasskey`, `keys.passkeys` (a query), `account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
 `preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
 take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab

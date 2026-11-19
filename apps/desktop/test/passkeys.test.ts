@@ -72,6 +72,16 @@ describe('adding a passkey', () => {
     ])
   })
 
+  it('adds one at a time, so a second can’t lose the first’s header', async () => {
+    let finish!: () => void
+    const first = asSession('session-1', () => new Promise<void>((resolve) => (finish = resolve)))
+    await expect(asSession('session-1', async () => undefined)).rejects.toThrow(/already being added/)
+    finish()
+    await first
+    // Once it's done, the next may start.
+    await expect(asSession('session-1', async () => 'ok')).resolves.toBe('ok')
+  })
+
   it('treats Better Auth’s session refusal as the page’s session having changed', () => {
     expect(sessionChanged({ code: 'sessionChanged', message: 'This page’s session has changed.', status: 409 })).toBe(
       true,

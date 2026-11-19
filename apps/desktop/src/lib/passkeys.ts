@@ -17,16 +17,6 @@ import { asSession, authClient } from './auth-client.ts'
  * device. See docs/architecture/client-api.md, Passkeys.
  */
 
-/** A passkey Better Auth has for the signed-in person (`/passkey/list-user-passkeys`). */
-export interface Passkey {
-  id: string
-  name?: string | null
-  credentialID: string
-  deviceType?: string | null
-  backedUp?: boolean | null
-  createdAt: string | Date
-}
-
 /** A passkey backup of the identity key, as `keys.identity` lists it. */
 export interface PasskeyBackup {
   kid: string
@@ -201,19 +191,6 @@ export async function openPasskeyBackup(
 ): Promise<KeyPair> {
   await ready()
   return unwrapIdentityKey(backup, passkeyKey(prf.output), { userId, kid: backup.kid, kind: 'passkey' }, publicKey)
-}
-
-/** The person's passkeys, as Better Auth has them. */
-export async function listPasskeys(): Promise<Passkey[]> {
-  const { data, error } = await authClient.$fetch<Passkey[]>('/passkey/list-user-passkeys', { method: 'GET' })
-  if (error) throw failure(error, 'Your passkeys couldn’t be listed.')
-  return data ?? []
-}
-
-/** Removes a passkey from the account, so it no longer signs in. */
-export async function deletePasskey(id: string): Promise<void> {
-  const { error } = await authClient.$fetch('/passkey/delete-passkey', { method: 'POST', body: { id } })
-  if (error) throw failure(error, 'The passkey couldn’t be removed.')
 }
 
 // The PRF output from signing in with a passkey, held in memory for the moment it takes to

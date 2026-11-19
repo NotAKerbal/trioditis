@@ -40,9 +40,7 @@ import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import {
   addPasskey,
-  deletePasskey,
   evaluatePasskeys,
-  listPasskeys,
   NoPrf,
   PasskeyCancelled,
   passkeyBackup,
@@ -778,8 +776,9 @@ function Keys() {
 function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
   const session = useSession()
   const putBackup = useMutation(api.keys.putBackup)
-  const removeBackup = useMutation(api.keys.removePasskeyBackup)
-  const passkeys = useQuery({ queryKey: ['passkeys', session.sessionId], queryFn: listPasskeys })
+  const removePasskey = useMutation(api.keys.removePasskey)
+  // Read for the page's own session, so another tab's sign-in never shows its passkeys here.
+  const passkeys = useQuery(convexQuery(api.keys.passkeys, { sessionId: session.sessionId }))
   const [busy, setBusy] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   // This key's passkey backups, by credential. One for an older key no longer opens anything.
@@ -788,7 +787,7 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
       .filter((b) => b.kind === 'passkey' && b.kid === session.kid && b.credentialId)
       .map((b) => [b.credentialId!, b]),
   )
-  const registered = new Set((passkeys.data ?? []).map((p) => p.credentialID))
+  const registered = new Set((passkeys.data ?? []).map((p) => p.credentialId))
   // A backup whose passkey no longer signs in (removed elsewhere) still opens the key with it.
   const unlockOnly = [...backupOf.keys()].filter((id) => passkeys.data && !registered.has(id))
 
@@ -826,7 +825,6 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
       report(e, 'The passkey couldn’t be added.')
       return setBusy(null)
     }
-    void passkeys.refetch()
     if (!added.prf) {
       toast('Passkey added. It signs you in. To let it unlock your key too, choose “Use to unlock”.')
       return setBusy(null)
@@ -858,31 +856,24 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
     setBusy(null)
   }
 
-  /**
-   * Removes the passkey's backup first, then the passkey itself: if only the first goes through,
-   * the passkey still signs in but no longer unlocks, never the other way round.
-   */
-  async function remove(credentialId: string, passkeyId: string | null) {
+  /** Removes the passkey and its backup, together, in one step on the server. */
+  async function remove(credentialId: string) {
     setConfirming(null)
     setBusy(credentialId)
     try {
-      if (backupOf.has(credentialId)) {
-        await removeBackup({
-          credentialId,
-          proof: await proveKey(session.keyPair, session.sessionId),
-          sessionId: session.sessionId,
-        })
-      }
-      if (passkeyId) await deletePasskey(passkeyId)
+      await removePasskey({
+        credentialId,
+        proof: await proveKey(session.keyPair, session.sessionId),
+        sessionId: session.sessionId,
+      })
       toast('Passkey removed.')
     } catch (e) {
       report(e, 'The passkey couldn’t be removed.')
     }
-    void passkeys.refetch()
     setBusy(null)
   }
 
-  const row = (credentialId: string, title: string, detail: string, passkeyId: string | null) => {
+  const row = (credentialId: string, title: string, detail: string, registeredHere: boolean) => {
     const unlocks = backupOf.has(credentialId)
     return (
       <div key={credentialId} className="flex items-center gap-3 border-t border-border py-2.5">
@@ -899,13 +890,13 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
             <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
               Keep
             </Button>
-            <Button size="sm" onClick={() => void remove(credentialId, passkeyId)}>
+            <Button size="sm" onClick={() => void remove(credentialId)}>
               Remove it
             </Button>
           </>
         ) : (
           <>
-            {!unlocks && passkeyId ? (
+            {!unlocks && registeredHere ? (
               <Button
                 size="sm"
                 loading={busy === credentialId}
@@ -933,19 +924,16 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
       <div className="mt-3">
         {(passkeys.data ?? []).map((p) =>
           row(
-            p.credentialID,
+            p.credentialId,
             p.name || 'Passkey',
-            `Added ${new Date(p.createdAt).toLocaleDateString()}${p.backedUp ? ' · Synced' : ''}`,
-            p.id,
+            `${p.createdAt ? `Added ${new Date(p.createdAt).toLocaleDateString()}` : 'Added'}${p.backedUp ? ' · Synced' : ''}`,
+            true,
           ),
         )}
-        {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', null))}
+        {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', false))}
         {passkeys.isError ? (
           <p className="border-t border-border py-2.5 text-sm text-muted-foreground">
-            Your passkeys couldn’t be listed.{' '}
-            <Button variant="link" size="sm" onClick={() => void passkeys.refetch()}>
-              Try again
-            </Button>
+            Your passkeys couldn’t be listed. Reload the page to try again.
           </p>
         ) : passkeys.data?.length === 0 && unlockOnly.length === 0 ? (
           <p className="border-t border-border py-2.5 text-sm text-muted-foreground">No passkeys yet.</p>

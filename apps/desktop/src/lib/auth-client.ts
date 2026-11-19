@@ -45,9 +45,11 @@ const REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/veri
 /**
  * Runs `register` (which adds a passkey) as `sessionId`, the session the page opened with: if
  * the browser is in another by now, the server refuses both steps (409, sessionChanged) and
- * changes nothing.
+ * changes nothing. One at a time: the header is the page's, so a second registration starting
+ * meanwhile is refused, rather than one ending and leaving the other's later step without it.
  */
 export async function asSession<T>(sessionId: string, register: () => Promise<T>): Promise<T> {
+  if (registeringAs !== null) throw new Error('A passkey is already being added here. Wait for it to finish.')
   registeringAs = sessionId
   try {
     return await register()
