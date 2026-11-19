@@ -232,7 +232,12 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
             <form
               onSubmit={(e) => {
                 e.preventDefault()
-                void send(values)
+                // An optional cookie left blank is one the person doesn't have: it isn't sent.
+                void send(
+                  step.type === 'cookies'
+                    ? Object.fromEntries(Object.entries(values).filter(([, v]) => v !== ''))
+                    : values,
+                )
               }}
             >
               {step.type === 'cookies' && step.cookies ? (
@@ -246,8 +251,9 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                 : (step.cookies?.fields ?? []).map((f) => ({
                     id: f.id,
                     type: 'password',
-                    name: f.id,
+                    name: f.required ? f.id : `${f.id} (optional)`,
                     description: undefined,
+                    required: f.required,
                   }))
               ).map((f) => (
                 <label key={f.id} className="mb-3 block">
@@ -256,7 +262,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                     type={INPUT_TYPE[f.type] ?? 'text'}
                     autoComplete="off"
                     spellCheck={false}
-                    required
+                    required={'required' in f ? f.required : true}
                     disabled={submission.sentStepId === step.stepId || !!loginInputBlocked(bridge.status)}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}

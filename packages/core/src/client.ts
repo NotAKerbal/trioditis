@@ -45,7 +45,11 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   gmessages: {
     network: 'gmessages',
     name: 'Google Messages',
-    maturity: 'stable',
+    // Stable is the v1 target (docs/PLAN.md), reached after the conformance suite and a week on
+    // the canary ledger with a real account. See docs/networks/gmessages.md.
+    maturity: 'beta',
+    // The connector's only flow: Google account cookies, then an emoji tapped on the phone.
+    // Its QR flow is switched off upstream.
     flows: [{ id: 'google', kind: 'cookies', name: 'Sign in with Google' }],
     termsRisk: false,
   },
@@ -116,9 +120,10 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'gvoice',
     name: 'Google Voice',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/gvoice.md.
-    flows: [],
-    termsRisk: false,
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // Google account cookies driving voice.google.com's own API as an unofficial client, which
+    // Google checks for. See docs/networks/gvoice.md.
+    termsRisk: true,
   },
   linkedin: {
     network: 'linkedin',
