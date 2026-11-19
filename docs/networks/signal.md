@@ -125,9 +125,15 @@ and CI) fails if it is anything else. The patch (every change is marked `Triodit
 | `senderkey.go`, `sendToGroupWithSenderKey`          | 500 and 503 are sent again; the websocket's error is ignored    | 500, 502, 503 and 504 are reported with `ErrSendUncertain`; the websocket's error is returned      |
 | `sending.go`, `GroupMessageSendResult.FailureError` | the first failure that isn't an unregistered member             | an uncertain failure first, so one member's certain refusal doesn't make the whole send certain    |
 | `connector/errors.go`, `wrapSendError`              | (no such error)                                                 | `ErrSendUncertain` becomes an uncertain `MessageStatus`, checked before the cases that are certain |
+| `sending.go`, `withdrawSendCache` and `retry.go`    | a retry receipt resends a cached message whatever its outcome   | a send that ended uncertain is withdrawn from the cache, so a retry receipt doesn't resend it      |
+| `sending.go`, `sendToGroup`                         | a group with nobody else reports success whatever happened      | the copy to your own devices is the only send there, so its failure is the send's                  |
+| `web/signalwebsocket.go`, `connectLoop` clean-up    | outstanding requests answered before the loops stop             | the loops are joined first, so no request is registered after the clean-up or answered mid-write   |
+| `web/signalwebsocket.go`, the request loop          | reads a variable the clean-up sets to nil (a data race)         | reads its own copy of the channel                                                                  |
 
-`ErrSendUncertain` is `web.ErrRequestUncertain`, so `errors.Is` finds either. An uncertain
-`MessageStatus` is recorded `unknown`, as for every network (`connector.handleOutcome`).
+`ErrSendUncertain` is `web.ErrRequestUncertain`, so `errors.Is` finds either. As for every
+network (`connector.handleOutcome`), a send or edit with an uncertain `MessageStatus` is
+recorded `unknown`; a reaction or deletion has no delivery state in the protocol, so one
+with an uncertain outcome isn't recorded at all, and isn't sent again either.
 Upstream's other retries stay, as they follow a request that never went out or that Signal
 refused: a request lost before it was written is submitted on the next connection; 409 and
 410 (the recipient's device list changed) and a 401 on sealed sender (sent again without it)
@@ -137,17 +143,25 @@ loses one of those instead of sending it twice: a lost read receipt or typing no
 nothing, and a lost sync copy means your phone doesn't show that one message.
 
 `internal/networks/signalsend_libsignal_test.go` drives the patched websocket against a fake
-Signal that answers one send and drops the connection on the next: the second is reported
-uncertain at once, and the fake receives it once. Against upstream the same test waits for
-the next connection and sends it again.
+Signal. One that answers one send and drops the connection on the next: the second is
+reported uncertain at once, and the fake receives it once; against upstream the same test
+waits for the next connection and sends it again. One that drops every connection after
+its first request: six concurrent sends all come back uncertain, across a reconnect, and
+none reaches it twice. The clean-up ordering's window is too narrow for a test to hit
+reliably; it rests on the loops being joined before the drain.
 
 What stays as upstream has it:
 
 - **A group send that reached some members** is reported sent; signalmeow logs each member
   it failed for. Nothing is sent again.
-- **Signal's own retry receipts.** A recipient whose device couldn't decrypt a message asks
-  for it again (a `DecryptionErrorMessage`), and signalmeow resends it to that device from
-  its send cache (`retry.go`). That is Signal's protocol: the device never got it.
+- **Signal's own retry receipts, after a send that went through.** A recipient's device that
+  couldn't decrypt a message asks for it again (a `DecryptionErrorMessage`), and signalmeow
+  resends it from its send cache (`retry.go`) with the original timestamp. Signal's server
+  takes a message only for all of an account's devices, so it goes to every one of them;
+  Signal's apps drop a copy they already have by its timestamp, as they do for Signal's own
+  clients' retries. A send whose outcome was uncertain is withdrawn from the cache first, so
+  it isn't resent this way; a device that couldn't decrypt it gets at most a session reset
+  or the group's sender key, not the message, and the person decides about it.
 
 **Updating mautrix-signal:** change the version in `apps/bridge-host/go.mod`, run
 `node scripts/signal-fork.mjs update` (it copies the new upstream and applies the patch, and

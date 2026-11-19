@@ -229,13 +229,16 @@ func (s *SignalWebsocket) connectLoop(
 
 	// First set up request handler loop. This exists outside of the
 	// connection loops because we want to maintain it across reconnections
+	// Trioditis: the loop reads its own copy of the channel; the cleanup above sets
+	// incomingRequestChan to nil, a data race with this goroutine.
+	requests := incomingRequestChan
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				log.Info().Msg("ctx done, stopping request loop")
 				return
-			case request, ok := <-incomingRequestChan:
+			case request, ok := <-requests:
 				if !ok {
 					// Main connection loop must have closed, so we should stop
 					log.Info().Msg("incomingRequestChan closed, stopping request loop")
@@ -449,11 +452,16 @@ func (s *SignalWebsocket) connectLoop(
 
 		// Clean up
 		ws.Close(websocket.StatusGoingAway, "Going away")
+		// Trioditis: the loops are stopped before the outstanding requests are answered.
+		// Upstream drained first, so a request the write loop registered after the drain was
+		// never answered (its caller waited forever), and one it registered just before could
+		// be answered while still unmarked as written, then resubmitted while the old loop
+		// was still writing it.
+		loopCancel(nil)
+		wg.Wait()
 		for _, responseChannel := range responseChannels.SwapData(nil) {
 			close(responseChannel)
 		}
-		loopCancel(nil)
-		wg.Wait()
 		log.Debug().Msg("Finished websocket cleanup")
 		if errorCount > 500 {
 			// Something is really wrong, stop reconnecting.

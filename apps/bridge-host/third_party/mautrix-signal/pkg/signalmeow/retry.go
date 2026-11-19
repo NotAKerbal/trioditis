@@ -194,6 +194,8 @@ func (cli *Client) handleRetryRequest(
 			recipient: serviceID,
 			timestamp: ts,
 		})
+		// Trioditis: withdrawn after an uncertain outcome (withdrawSendCache).
+		cacheHit = cacheHit && retryContent != nil
 		if !cacheHit {
 			// TODO add support for external caches
 		}

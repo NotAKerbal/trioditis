@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,37 +55,10 @@ func TestSignalSendIsNotResubmittedAfterADroppedConnection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// signalmeow always dials chat.signal.org over TLS; this hands it the fake's plain
-	// connection instead, which net/http then speaks HTTP/1.1 over.
-	before := web.SignalHTTPClient
-	web.SignalHTTPClient = &http.Client{Transport: &http.Transport{
-		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "tcp", srv.Listener.Addr().String())
-		},
-	}}
-	defer func() { web.SignalHTTPClient = before }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	ws := web.NewSignalWebsocket(nil)
-	statuses := ws.Connect(ctx, nil)
-	connected := make(chan struct{})
-	go func() {
-		for status := range statuses {
-			if status.Event == web.SignalWebsocketConnectionEventConnected {
-				select {
-				case connected <- struct{}{}:
-				default:
-				}
-			}
-		}
-	}()
+	ws := connectToFake(t, ctx, srv)
 	defer ws.Close()
-	select {
-	case <-connected:
-	case <-ctx.Done():
-		t.Fatal("never connected to the fake Signal")
-	}
 
 	resp, err := ws.SendRequest(ctx, http.MethodPut, "/v1/messages/first", []byte(`{}`), nil)
 	if err != nil || resp.GetStatus() != 200 {
@@ -114,4 +88,99 @@ func TestSignalGroupFailurePrefersTheUncertainOne(t *testing.T) {
 	if err := result.FailureError(); !errors.Is(err, signalmeow.ErrSendUncertain) {
 		t.Fatalf("got %v, want the uncertain failure", err)
 	}
+}
+
+// Sends in flight when connections keep dropping each come back uncertain, those written to
+// a connection that dropped as well as those that waited for the next, and none reaches
+// Signal twice. (The patch also stops the write loop before answering the outstanding
+// requests, so one registered meanwhile isn't left unanswered; that window is too narrow for
+// this test to hit reliably.)
+func TestSignalSendsAllComeBackWhenConnectionsDrop(t *testing.T) {
+	var mu sync.Mutex
+	received := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		// Each connection takes one request, answers nothing, and drops while the client is
+		// still writing the others.
+		var msg signalpb.WebSocketMessage
+		if err := wspb.Read(r.Context(), ws, &msg); err != nil {
+			return
+		}
+		mu.Lock()
+		received[msg.GetRequest().GetPath()]++
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	// Each reconnect waits 10 seconds, and a connection takes at least one send, so the
+	// sends all come back within a few reconnects.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	ws := connectToFake(t, ctx, srv)
+	defer ws.Close()
+
+	const sends = 6
+	errs := make(chan error, sends)
+	for i := range sends {
+		go func() {
+			_, err := ws.SendRequest(ctx, http.MethodPut, fmt.Sprintf("/v1/messages/%d", i), []byte(`{}`), nil)
+			errs <- err
+		}()
+	}
+	for range sends {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, web.ErrRequestUncertain) {
+				t.Errorf("a send came back with %v, want it uncertain", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("a send never came back")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for path, n := range received {
+		if n > 1 {
+			t.Errorf("%s reached the fake %d times", path, n)
+		}
+	}
+}
+
+// connectToFake connects a signalmeow websocket to srv, a fake Signal, and waits until it is
+// connected.
+func connectToFake(t *testing.T, ctx context.Context, srv *httptest.Server) *web.SignalWebsocket {
+	t.Helper()
+	// signalmeow always dials chat.signal.org over TLS; this hands it the fake's plain
+	// connection instead, which net/http then speaks HTTP/1.1 over.
+	before := web.SignalHTTPClient
+	web.SignalHTTPClient = &http.Client{Transport: &http.Transport{
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", srv.Listener.Addr().String())
+		},
+	}}
+	t.Cleanup(func() { web.SignalHTTPClient = before })
+
+	ws := web.NewSignalWebsocket(nil)
+	statuses := ws.Connect(ctx, nil)
+	connected := make(chan struct{})
+	go func() {
+		for status := range statuses {
+			if status.Event == web.SignalWebsocketConnectionEventConnected {
+				select {
+				case connected <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("never connected to the fake Signal")
+	}
+	return ws
 }

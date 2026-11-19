@@ -550,6 +550,19 @@ func (cli *Client) addSendCache(recipient libsignalgo.ServiceID, groupID types.G
 	}, content)
 }
 
+// withdrawSendCache keeps a send's content from being resent on a retry receipt.
+// Trioditis: done when the send's outcome is uncertain. A retry receipt resends to every one
+// of the recipient's devices, so it would submit again to devices that already have the
+// message; the send is reported instead, and the person decides. A withdrawn entry holds nil,
+// which handleRetryRequest treats as not cached.
+func (cli *Client) withdrawSendCache(recipient libsignalgo.ServiceID, groupID types.GroupIdentifier, ts uint64) {
+	cli.sendCache.Replace(sendCacheKey{
+		recipient: recipient,
+		groupID:   groupID,
+		timestamp: ts,
+	}, nil)
+}
+
 func (cli *Client) SendGroupUpdate(ctx context.Context, group *Group, groupContext *signalpb.GroupContextV2, groupChange *GroupChange) (*GroupMessageSendResult, error) {
 	log := zerolog.Ctx(ctx).With().
 		Str("action", "send group change message").
@@ -627,7 +640,15 @@ func (cli *Client) SendGroupMessage(ctx context.Context, gid types.GroupIdentifi
 		return nil, err
 	}
 	if enableSenderKeySend {
-		return cli.sendToGroupWithSenderKey(ctx, &gidBytes, recipients, ptr.Val(endorsement), content, messageTimestamp, 0)
+		result, err := cli.sendToGroupWithSenderKey(ctx, &gidBytes, recipients, ptr.Val(endorsement), content, messageTimestamp, 0)
+		if errors.Is(err, ErrSendUncertain) {
+			// Trioditis: see withdrawSendCache. The key is the one sendToGroupWithSenderKey
+			// cached it under.
+			for _, recipient := range recipients {
+				cli.withdrawSendCache(recipient, types.GroupIdentifier(gidBytes.String()), messageTimestamp)
+			}
+		}
+		return result, err
 	}
 	return cli.sendToGroup(ctx, recipients, content, messageTimestamp, nil, &gidBytes)
 }
@@ -673,9 +694,15 @@ func (cli *Client) sendToGroup(
 		}
 	}
 
-	cli.sendGroupSyncCopy(ctx, content, messageTimestamp, result, groupID)
+	syncErr := cli.sendGroupSyncCopy(ctx, content, messageTimestamp, result, groupID)
 
 	if len(result.FailedToSendTo) == 0 && len(result.SuccessfullySentTo) == 0 {
+		// Trioditis: with nobody else in the group, the copy to your own devices is the only
+		// thing sent, so its failure (uncertain or not) is the send's. Upstream reported
+		// success whatever happened to it.
+		if syncErr != nil {
+			return nil, fmt.Errorf("failed to send to own devices: %w", syncErr)
+		}
 		return result, nil // I only sent to myself
 	}
 	if len(result.SuccessfullySentTo) == 0 {
@@ -691,7 +718,7 @@ func (cli *Client) sendGroupSyncCopy(
 	messageTimestamp uint64,
 	result *GroupMessageSendResult,
 	groupID *libsignalgo.GroupIdentifier,
-) {
+) error {
 	var syncContent *signalpb.Content
 	switch content := rawContent.Content.(type) {
 	case *signalpb.Content_DataMessage:
@@ -703,8 +730,10 @@ func (cli *Client) sendGroupSyncCopy(
 		_, selfSendErr := cli.sendContent(ctx, cli.Store.ACIServiceID(), messageTimestamp, syncContent, 0, true, groupID, nil)
 		if selfSendErr != nil {
 			zerolog.Ctx(ctx).Err(selfSendErr).Msg("Failed to send sync message to myself")
+			return selfSendErr
 		}
 	}
+	return nil
 }
 
 func (cli *Client) sendSyncCopy(ctx context.Context, rawContent *signalpb.Content, messageTS uint64, result *SuccessfulSendResult) bool {
@@ -827,6 +856,9 @@ func (cli *Client) SendMessage(ctx context.Context, recipientID libsignalgo.Serv
 	// Send to the recipient
 	sentUnidentified, err := cli.sendContent(ctx, recipientID, messageTimestamp, content, 0, true, nil, nil)
 	if err != nil {
+		if errors.Is(err, ErrSendUncertain) {
+			cli.withdrawSendCache(recipientID, "", messageTimestamp)
+		}
 		return SendMessageResult{
 			WasSuccessful: false,
 			FailedSendResult: FailedSendResult{

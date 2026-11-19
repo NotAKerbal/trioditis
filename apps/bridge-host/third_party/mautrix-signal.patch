@@ -1,5 +1,5 @@
 diff --git a/pkg/connector/errors.go b/pkg/connector/errors.go
-index e723f44..4136f4b 100644
+index e723f4464b401c3bff254eb403a6d3be60f06ad3..4136f4b60da33077adfcd94c274ef08a60b0ae4a 100644
 --- a/pkg/connector/errors.go
 +++ b/pkg/connector/errors.go
 @@ -106,6 +106,13 @@ func wrapSendError(err error) error {
@@ -17,7 +17,7 @@ index e723f44..4136f4b 100644
  		return bridgev2.WrapErrorInStatus(err).
  			WithMessage("recipient isn't registered on Signal").
 diff --git a/pkg/signalmeow/keys.go b/pkg/signalmeow/keys.go
-index 1b2370a..8841bf7 100644
+index 1b2370aeb4bdd5ed198f8d3a9234a5d54b99232f..8841bf724185c11a8d8639b4e49918047f9e7b5f 100644
 --- a/pkg/signalmeow/keys.go
 +++ b/pkg/signalmeow/keys.go
 @@ -416,6 +416,10 @@ var (
@@ -31,8 +31,21 @@ index 1b2370a..8841bf7 100644
  )
  
  func (cli *Client) FetchAndProcessPreKey(ctx context.Context, theirServiceID libsignalgo.ServiceID, specificDeviceID int) error {
+diff --git a/pkg/signalmeow/retry.go b/pkg/signalmeow/retry.go
+index ed4c36b1e1481061dc40c114e97e309ca3af6e92..6325816e1b228d8e6e0dff19b579af44f4567170 100644
+--- a/pkg/signalmeow/retry.go
++++ b/pkg/signalmeow/retry.go
+@@ -194,6 +194,8 @@ func (cli *Client) handleRetryRequest(
+ 			recipient: serviceID,
+ 			timestamp: ts,
+ 		})
++		// Trioditis: withdrawn after an uncertain outcome (withdrawSendCache).
++		cacheHit = cacheHit && retryContent != nil
+ 		if !cacheHit {
+ 			// TODO add support for external caches
+ 		}
 diff --git a/pkg/signalmeow/senderkey.go b/pkg/signalmeow/senderkey.go
-index 322fcc8..bda887a 100644
+index 322fcc8eff3bfb654338253637d2b21df403520f..bda887abd19a5fa4c4a747f6db96f6149e20089d 100644
 --- a/pkg/signalmeow/senderkey.go
 +++ b/pkg/signalmeow/senderkey.go
 @@ -229,6 +229,11 @@ func (cli *Client) sendToGroupWithSenderKey(
@@ -66,7 +79,7 @@ index 322fcc8..bda887a 100644
  		return nil, fmt.Errorf("unexpected status code %d in multi-recipient send", resp.GetStatus())
  	}
 diff --git a/pkg/signalmeow/sending.go b/pkg/signalmeow/sending.go
-index dce4eea..e00f320 100644
+index dce4eea244d5f4a7701d06bc528275f6332d724d..96efdc07407f968874cf9c1465ffa4f2fdd0ab8a 100644
 --- a/pkg/signalmeow/sending.go
 +++ b/pkg/signalmeow/sending.go
 @@ -303,6 +303,13 @@ func (r *GroupMessageSendResult) FailureError() error {
@@ -83,7 +96,91 @@ index dce4eea..e00f320 100644
  	for _, failure := range r.FailedToSendTo {
  		if !errors.Is(failure.Error, ErrUnregisteredUser) {
  			return failure.Error
-@@ -1000,7 +1007,10 @@ func (cli *Client) sendContent(
+@@ -543,6 +550,19 @@ func (cli *Client) addSendCache(recipient libsignalgo.ServiceID, groupID types.G
+ 	}, content)
+ }
+ 
++// withdrawSendCache keeps a send's content from being resent on a retry receipt.
++// Trioditis: done when the send's outcome is uncertain. A retry receipt resends to every one
++// of the recipient's devices, so it would submit again to devices that already have the
++// message; the send is reported instead, and the person decides. A withdrawn entry holds nil,
++// which handleRetryRequest treats as not cached.
++func (cli *Client) withdrawSendCache(recipient libsignalgo.ServiceID, groupID types.GroupIdentifier, ts uint64) {
++	cli.sendCache.Replace(sendCacheKey{
++		recipient: recipient,
++		groupID:   groupID,
++		timestamp: ts,
++	}, nil)
++}
++
+ func (cli *Client) SendGroupUpdate(ctx context.Context, group *Group, groupContext *signalpb.GroupContextV2, groupChange *GroupChange) (*GroupMessageSendResult, error) {
+ 	log := zerolog.Ctx(ctx).With().
+ 		Str("action", "send group change message").
+@@ -620,7 +640,15 @@ func (cli *Client) SendGroupMessage(ctx context.Context, gid types.GroupIdentifi
+ 		return nil, err
+ 	}
+ 	if enableSenderKeySend {
+-		return cli.sendToGroupWithSenderKey(ctx, &gidBytes, recipients, ptr.Val(endorsement), content, messageTimestamp, 0)
++		result, err := cli.sendToGroupWithSenderKey(ctx, &gidBytes, recipients, ptr.Val(endorsement), content, messageTimestamp, 0)
++		if errors.Is(err, ErrSendUncertain) {
++			// Trioditis: see withdrawSendCache. The key is the one sendToGroupWithSenderKey
++			// cached it under.
++			for _, recipient := range recipients {
++				cli.withdrawSendCache(recipient, types.GroupIdentifier(gidBytes.String()), messageTimestamp)
++			}
++		}
++		return result, err
+ 	}
+ 	return cli.sendToGroup(ctx, recipients, content, messageTimestamp, nil, &gidBytes)
+ }
+@@ -666,9 +694,15 @@ func (cli *Client) sendToGroup(
+ 		}
+ 	}
+ 
+-	cli.sendGroupSyncCopy(ctx, content, messageTimestamp, result, groupID)
++	syncErr := cli.sendGroupSyncCopy(ctx, content, messageTimestamp, result, groupID)
+ 
+ 	if len(result.FailedToSendTo) == 0 && len(result.SuccessfullySentTo) == 0 {
++		// Trioditis: with nobody else in the group, the copy to your own devices is the only
++		// thing sent, so its failure (uncertain or not) is the send's. Upstream reported
++		// success whatever happened to it.
++		if syncErr != nil {
++			return nil, fmt.Errorf("failed to send to own devices: %w", syncErr)
++		}
+ 		return result, nil // I only sent to myself
+ 	}
+ 	if len(result.SuccessfullySentTo) == 0 {
+@@ -684,7 +718,7 @@ func (cli *Client) sendGroupSyncCopy(
+ 	messageTimestamp uint64,
+ 	result *GroupMessageSendResult,
+ 	groupID *libsignalgo.GroupIdentifier,
+-) {
++) error {
+ 	var syncContent *signalpb.Content
+ 	switch content := rawContent.Content.(type) {
+ 	case *signalpb.Content_DataMessage:
+@@ -696,8 +730,10 @@ func (cli *Client) sendGroupSyncCopy(
+ 		_, selfSendErr := cli.sendContent(ctx, cli.Store.ACIServiceID(), messageTimestamp, syncContent, 0, true, groupID, nil)
+ 		if selfSendErr != nil {
+ 			zerolog.Ctx(ctx).Err(selfSendErr).Msg("Failed to send sync message to myself")
++			return selfSendErr
+ 		}
+ 	}
++	return nil
+ }
+ 
+ func (cli *Client) sendSyncCopy(ctx context.Context, rawContent *signalpb.Content, messageTS uint64, result *SuccessfulSendResult) bool {
+@@ -820,6 +856,9 @@ func (cli *Client) SendMessage(ctx context.Context, recipientID libsignalgo.Serv
+ 	// Send to the recipient
+ 	sentUnidentified, err := cli.sendContent(ctx, recipientID, messageTimestamp, content, 0, true, nil, nil)
+ 	if err != nil {
++		if errors.Is(err, ErrSendUncertain) {
++			cli.withdrawSendCache(recipientID, "", messageTimestamp)
++		}
+ 		return SendMessageResult{
+ 			WasSuccessful: false,
+ 			FailedSendResult: FailedSendResult{
+@@ -1000,7 +1039,10 @@ func (cli *Client) sendContent(
  	}
  	log.Trace().Msg("Received a response to a message send")
  
@@ -95,7 +192,7 @@ index dce4eea..e00f320 100644
  
  	// Check to see if our status is retryable
  	needToRetry := false
-@@ -1052,6 +1062,8 @@ func (cli *Client) sendContent(
+@@ -1052,6 +1094,8 @@ func (cli *Client) sendContent(
  		return sentUnidentified, fmt.Errorf("%w (send returned 404)", ErrUnregisteredUser)
  	} else if *response.Status == 413 || *response.Status == 429 {
  		return sentUnidentified, fmt.Errorf("%w (send returned %d)", ErrRateLimited, *response.Status)
@@ -105,7 +202,7 @@ index dce4eea..e00f320 100644
  		return sentUnidentified, fmt.Errorf("unexpected status code while sending: %d", *response.Status)
  	}
 diff --git a/pkg/signalmeow/web/signalwebsocket.go b/pkg/signalmeow/web/signalwebsocket.go
-index a575ab0..14225a6 100644
+index a575ab0f1c35eb252c5b4eace4b7a8036ca2898e..69df844be40724d770ca7380c69df38a39adee42 100644
 --- a/pkg/signalmeow/web/signalwebsocket.go
 +++ b/pkg/signalmeow/web/signalwebsocket.go
 @@ -178,6 +178,11 @@ func (s *SignalWebsocket) pushOutgoing(ctx context.Context, send SignalWebsocket
@@ -120,7 +217,44 @@ index a575ab0..14225a6 100644
  func (s *SignalWebsocket) ForceReconnect() {
  	if s == nil {
  		return
-@@ -547,6 +552,9 @@ type SignalWebsocketSendMessage struct {
+@@ -224,13 +229,16 @@ func (s *SignalWebsocket) connectLoop(
+ 
+ 	// First set up request handler loop. This exists outside of the
+ 	// connection loops because we want to maintain it across reconnections
++	// Trioditis: the loop reads its own copy of the channel; the cleanup above sets
++	// incomingRequestChan to nil, a data race with this goroutine.
++	requests := incomingRequestChan
+ 	go func() {
+ 		for {
+ 			select {
+ 			case <-ctx.Done():
+ 				log.Info().Msg("ctx done, stopping request loop")
+ 				return
+-			case request, ok := <-incomingRequestChan:
++			case request, ok := <-requests:
+ 				if !ok {
+ 					// Main connection loop must have closed, so we should stop
+ 					log.Info().Msg("incomingRequestChan closed, stopping request loop")
+@@ -444,11 +452,16 @@ func (s *SignalWebsocket) connectLoop(
+ 
+ 		// Clean up
+ 		ws.Close(websocket.StatusGoingAway, "Going away")
++		// Trioditis: the loops are stopped before the outstanding requests are answered.
++		// Upstream drained first, so a request the write loop registered after the drain was
++		// never answered (its caller waited forever), and one it registered just before could
++		// be answered while still unmarked as written, then resubmitted while the old loop
++		// was still writing it.
++		loopCancel(nil)
++		wg.Wait()
+ 		for _, responseChannel := range responseChannels.SwapData(nil) {
+ 			close(responseChannel)
+ 		}
+-		loopCancel(nil)
+-		wg.Wait()
+ 		log.Debug().Msg("Finished websocket cleanup")
+ 		if errorCount > 500 {
+ 			// Something is really wrong, stop reconnecting.
+@@ -547,6 +560,9 @@ type SignalWebsocketSendMessage struct {
  	ResponseMessage *SimpleResponse
  	// Populate this for request AND response
  	RequestMessage *signalpb.WebSocketRequestMessage
@@ -130,7 +264,7 @@ index a575ab0..14225a6 100644
  }
  
  func writeLoop(
-@@ -597,6 +605,10 @@ func writeLoop(
+@@ -597,6 +613,10 @@ func writeLoop(
  							Msg("Sending WS request")
  					}
  				}
@@ -141,7 +275,7 @@ index a575ab0..14225a6 100644
  				err := wspb.Write(ctx, ws, message)
  				if err != nil {
  					if ctx.Err() != nil && ctx.Err() != context.Canceled {
-@@ -665,10 +677,12 @@ func (s *SignalWebsocket) sendRequestInternal(
+@@ -665,10 +685,12 @@ func (s *SignalWebsocket) sendRequestInternal(
  		request.Headers = append(request.Headers, "authorization:Basic "+s.basicAuth.String())
  	}
  	responseChannel := make(chan *signalpb.WebSocketResponseMessage, 1)
@@ -154,7 +288,7 @@ index a575ab0..14225a6 100644
  	})
  	if err != nil {
  		return nil, err
-@@ -676,6 +690,13 @@ func (s *SignalWebsocket) sendRequestInternal(
+@@ -676,6 +698,13 @@ func (s *SignalWebsocket) sendRequestInternal(
  	response := <-responseChannel
  
  	isSelfDelete := request.GetVerb() == http.MethodDelete && strings.HasPrefix(request.GetPath(), "/v1/devices/")
@@ -168,7 +302,7 @@ index a575ab0..14225a6 100644
  	if response == nil && !isSelfDelete {
  		// If out of retries, return error no matter what
  		if retryCount >= 3 {
-@@ -698,6 +719,12 @@ func (s *SignalWebsocket) sendRequestInternal(
+@@ -698,6 +727,12 @@ func (s *SignalWebsocket) sendRequestInternal(
  	return response, nil
  }
  
