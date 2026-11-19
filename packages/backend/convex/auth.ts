@@ -1,4 +1,4 @@
-import { APIError, createAuthEndpoint, getIP } from 'better-auth/api'
+import { APIError, createAuthEndpoint, createAuthMiddleware, getIP } from 'better-auth/api'
 import type { BetterAuthPlugin } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
@@ -52,6 +52,58 @@ const MAX_SESSION_TOKEN_LENGTH = 256
  * error and nothing was changed, or it couldn't tell. It sets no cookie, not even an expired
  * one: a late answer could otherwise clear a sign-in made meanwhile in another tab.
  */
+/**
+ * The header a page sends its session in (`members.me`'s `sessionId`) on Better Auth routes
+ * that take no body of ours, as `sessionId` binds Convex calls.
+ */
+export const SESSION_HEADER = 'x-trioditis-session-id'
+
+/** How close to expiring a session may be and still add a passkey. */
+const EXPIRY_MARGIN_MS = 60 * 1000
+
+/** Better Auth's passkey registration: the options that hold the challenge, and the answer. */
+const PASSKEY_REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
+
+/**
+ * Adding a passkey, bound to the page's session like the key writes: a page another tab's
+ * sign-in has switched would otherwise ask for options, and so a challenge, for the other
+ * account. Both steps are refused (409, code `sessionChanged`) before anything is written when
+ * the header names another session than the cookie's, or a bearer token comes as well. The
+ * passkey plugin itself already refuses an answer from another account than the one its
+ * challenge was made for. Without the header nothing is checked, as before.
+ */
+const passkeySessionBinding = {
+  id: 'trioditis-passkey-session',
+  hooks: {
+    before: [
+      {
+        matcher: (context) => PASSKEY_REGISTRATION_PATHS.includes(context.path ?? ''),
+        handler: createAuthMiddleware(async (context) => {
+          const expected = context.headers?.get(SESSION_HEADER)
+          if (expected === null || expected === undefined) return
+          const changed = () =>
+            new APIError('CONFLICT', { code: SESSION_CHANGED.code, message: SESSION_CHANGED.message })
+          // A page signs in with its cookie. A bearer token as well would make Better Auth act
+          // on that session instead, after this check, so it isn't taken here.
+          if (context.headers?.has('authorization')) throw changed()
+          // The cookie's session, read as it is: looking it up the usual way would also extend
+          // or end it, which a refused request mustn't do to someone else's session.
+          const token = await context.getSignedCookie(
+            context.context.authCookies.sessionToken.name,
+            context.context.secret,
+          )
+          const found = token ? await context.context.internalAdapter.findSession(token) : null
+          if (!found || found.session.id !== expected) throw changed()
+          // An expired one is refused here too: Better Auth would otherwise delete it and clear
+          // the session cookie, and a late answer could clear a sign-in made meanwhile in
+          // another tab. The margin covers it expiring between this read and Better Auth's.
+          if (new Date(found.session.expiresAt).getTime() <= Date.now() + EXPIRY_MARGIN_MS) throw changed()
+        }),
+      },
+    ],
+  },
+} satisfies BetterAuthPlugin
+
 const endSession = (ctx: GenericCtx<DataModel>) =>
   ({
     id: 'trioditis-session',
@@ -249,6 +301,32 @@ function tooManyRequests(retryAfter: number) {
   )
 }
 
+/**
+ * The cookies that carry a sign-in: Better Auth's session token, its cache, its "don't
+ * remember me" marker and account cookie (off here, but cleared with the rest), and the
+ * Convex JWT.
+ */
+const SESSION_COOKIE = /^(?:__Secure-)?[^=]*\.(?:session_token|session_data|dont_remember|account_data|convex_jwt)=/
+
+/**
+ * A failed passkey registration from a page bound to its session (`passkeySessionBinding`)
+ * keeps every cookie but the sign-in ones. Better Auth answers a session that ended between
+ * the binding's read and its own by clearing them, and in the shared browser that late answer
+ * would clear a sign-in made meanwhile in another tab. The challenge cookie is kept.
+ */
+export function withoutSessionClears(request: Request, response: Response, baseURL: string) {
+  if (response.status < 400 || !request.headers.has(SESSION_HEADER)) return response
+  const path = routedPath(request.url, baseURL)
+  if (path === null || !PASSKEY_REGISTRATION_PATHS.includes(path)) return response
+  const cookies = response.headers.getSetCookie()
+  const kept = cookies.filter((cookie) => !SESSION_COOKIE.test(cookie))
+  if (kept.length === cookies.length) return response
+  const headers = new Headers(response.headers)
+  headers.delete('set-cookie')
+  for (const cookie of kept) headers.append('set-cookie', cookie)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
 /** Better Auth's own 429 gives the wait only in X-Retry-After. */
 function withRetryAfter(response: Response) {
   const retryAfter = response.headers.get('x-retry-after')
@@ -416,6 +494,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       convex({ authConfig }),
       endSession(ctx),
       accountRateLimit(ctx),
+      passkeySessionBinding,
     ],
   } satisfies BetterAuthOptions
 }
@@ -440,7 +519,8 @@ export const createAuth = (ctx: GenericCtx<DataModel>) => {
       // The base Better Auth routes under, from its own context, so the limits match the router
       // whatever path SITE_URL has.
       authBase ??= (await auth.$context).baseURL
-      return withRetryAfter(await auth.handler(request))
+      const response = await auth.handler(request)
+      return withRetryAfter(withoutSessionClears(request, response, authBase))
     },
   }
 }

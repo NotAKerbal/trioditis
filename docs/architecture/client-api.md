@@ -96,7 +96,7 @@ the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 | First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members |
 | Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                |
 | Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
-| Add a passkey       | `authClient.passkey.addPasskey()` while signed in                                                                                                                             |
+| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                           |
 | Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
 | Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
 | Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
@@ -316,6 +316,36 @@ while one runs is refused there too. Reload the page then: it reads `members.me`
 again. Without `sessionId` the call isn't bound to a session, though it still needs a
 signed-in member as usual; it will become required once every client sends it. Pass it on
 every one of these calls.
+
+Adding a passkey goes through Better Auth's routes, not Convex, so the page's session goes in
+a header instead: `x-trioditis-session-id: <sessionId>` on `/passkey/generate-register-options`
+and `/passkey/verify-registration`. If the cookie's session isn't that one, both answer 409
+with `{ "code": "sessionChanged", "message": "This page’s session has changed. Reload the
+page." }`. That refusal stores and refreshes nothing: no challenge is made, no session is
+extended or ended, and no cookie is set (the rate limit may still count the request, and a 429
+can come first). A bearer token sent alongside is refused the same way, since the page signs
+in with its cookie. So is a session within a minute of expiring: if it had expired by the time
+Better Auth reads it again, Better Auth would answer by clearing the sign-in cookies, and a late
+answer like that could clear another tab's newer sign-in. For the same reason, any failed answer
+on these two routes, with the header, never carries a cookie that clears the sign-in; the
+passkey challenge's own cookie is kept. (The
+passkey plugin already refuses an answer from another account than its challenge's.)
+`addPasskey` passes its own fetch options only to the second step, so set the header for both
+in the auth client's `fetchOptions.onRequest`, from the session the page opened with:
+
+```ts
+createAuthClient({
+  plugins: [convexClient(), passkeyClient()],
+  fetchOptions: {
+    onRequest: (context) => {
+      if (context.url.toString().includes('/passkey/') && pageSessionId)
+        context.headers.set('x-trioditis-session-id', pageSessionId)
+    },
+  },
+})
+```
+
+Without the header nothing is checked, as before.
 
 ### Changing the password
 
