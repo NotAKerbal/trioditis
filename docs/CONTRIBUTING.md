@@ -494,7 +494,7 @@ pnpm check
 ```
 
 It runs exactly what CI runs (`.github/workflows/checks.yml`): `pnpm typecheck`, `pnpm lint`,
-`pnpm test`, `pnpm test:scripts`, and `go vet ./...` and `go test ./...` in `apps/bridge-host`,
+`pnpm test`, `pnpm test:scripts`, and `go vet ./...`, `go vet -tags libsignal ./...` and `go test ./...` in `apps/bridge-host`,
 then prints each as Passed or Failed. Use it when CI can't run, and report its results.
 
 `pnpm lint` also checks the design system's rules in `apps/desktop` and `packages/ui`
