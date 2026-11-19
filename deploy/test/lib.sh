@@ -49,9 +49,9 @@ make_install() {
 TRIODITIS_SETUP_TOKEN=test-setup-token
 COMPOSE_PROJECT_NAME=$project
 COMPOSE_FILE=compose.yml
-COMPOSE_PROFILES=whatsapp,fake
-TRIODITIS_NETWORKS=whatsapp,fake
-BRIDGE_HOSTS=whatsapp-1=http://bridge-whatsapp:8611
+COMPOSE_PROFILES=whatsapp,signal
+TRIODITIS_NETWORKS=whatsapp,signal
+BRIDGE_HOSTS=whatsapp-1=http://bridge-whatsapp:8611,signal-1=http://bridge-signal:8611
 PUBLIC_HOST=127.0.0.1
 PUBLIC_URL=http://127.0.0.1:1
 EOF

@@ -23,7 +23,7 @@ internal/keys/         recipient keys, cached in memory and in the database
 internal/ids/          Matrix-shaped IDs on a fake server; opaque protocol IDs
 internal/devkeys/      dev identity keys, for trying it without the gateway
 internal/host/         assembles a process; the conformance suite
-pkg/fakenet/           a fake network connector for tests and the dev stack
+internal/testconnector/ the connector the host's tests drive; not a network, never built in
 ```
 
 ## Run it
@@ -38,16 +38,13 @@ go build -o bin/bridge-host ./cmd/bridge-host
 GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVATE_KEY=… \
   ./bin/bridge-host --network whatsapp run
 
-# The fake network, for the dev stack without a real account:
-./bin/bridge-host --network fake run
-
 # Without a gateway at all, sealing to dev keys kept in the data directory:
-./bin/bridge-host --network fake --dev-keys run
+./bin/bridge-host --network whatsapp --dev-keys run
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BRIDGE_NETWORK` | `whatsapp` | Network (`--network`): `whatsapp` or `fake` |
+| `BRIDGE_NETWORK` | `whatsapp` | Network (`--network`, listed by `--help`), such as `whatsapp`, `signal` or `telegram` |
 | `BRIDGE_HOST_ID` | `<network>-1` | Stable host ID; the gateway maps it to this host's URL |
 | `BRIDGE_HOST_ADDR` | `127.0.0.1:8611` | Command server address |
 | `BRIDGE_DATA_DIR` | `.data/bridge-host` | Database, media and dev files |
@@ -55,7 +52,6 @@ GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVAT
 | `GATEWAY_URL` | none | Required, unless `--dev-keys` is given (then nothing is pushed) |
 | `TRIODITIS_INTERNAL_TOKEN` | none | Bearer token both ways |
 | `BRIDGE_PUBLIC_KEY` / `BRIDGE_PRIVATE_KEY` | generated in dev | Bridge key pair, base64url X25519. In dev it is generated once into `bridge-key.json` and kept. Opaque IDs don't depend on it (see Design), so it can be rotated |
-| `BRIDGE_FAKE_CONTROL_ADDR` | none | `--network fake` only: a loopback endpoint (`POST /fake/incoming`, internal token) for the end-to-end script to deliver messages. Dev only |
 
 ### Try WhatsApp from the terminal
 
@@ -196,7 +192,7 @@ pnpm --filter @trioditis/crypto test  # TypeScript opens vectors-go.json
 ```
 
 The conformance suite (`internal/host/conformance_test.go`) runs a real bridge host with
-`fakenet` against a fake gateway and checks:
+`internal/testconnector` against a fake gateway and checks:
 
 - every event against the backend's field validators
 - registration heartbeat
@@ -245,8 +241,7 @@ SIGINT or SIGTERM at a login prompt, with stdin left open, stops the host and ex
 
 ### Verified
 
-- bridgev2 runs with this connector and no homeserver: the fake-network conformance suite
-  passes (also under the race detector).
+- bridgev2 runs with this connector and no homeserver: the conformance suite passes (also under the race detector).
 - The WhatsApp connector (`mautrix-whatsapp v0.2611.0`, `mautrix v0.33.0`) builds, starts,
   creates its schemas, and reaches the QR login step against WhatsApp's servers under this
   connector. **Not verified:** completing a pairing, live messages, history sync, media and

@@ -7,6 +7,16 @@ import { ERROR_CODES, LOGIN_STATES } from '@trioditis/core/bridge-protocol'
 
 export const network = v.union(...NETWORKS.map((name) => v.literal(name)))
 
+/**
+ * The network a stored row is on: a real one, or `fake`, a test network Trioditis no longer
+ * has. Rows on it can only be deleted (migrations.purgeFakeNetwork), and the schema has to
+ * accept them until every deployment has run that, since a schema its rows don't match won't
+ * deploy. Its type is `network`'s, so nothing else handles `fake`: the purge runs right after
+ * the deploy, and only it looks for those rows. Once every deployment has run it, this
+ * becomes `network` again.
+ */
+export const storedNetwork = v.union(network, v.literal('fake')) as unknown as typeof network
+
 /** A sealed object. Only ciphertext and recipients' key IDs; never plaintext. */
 export const envelope = v.object({
   v: v.literal(1),
@@ -247,6 +257,17 @@ export const commandPayload = v.union(
   }),
 )
 export type CommandPayload = Infer<typeof commandPayload>
+
+/** A stored command's payload: also a login on the fake network, until it's purged (`storedNetwork`). */
+export const storedCommandPayload = v.union(
+  commandPayload,
+  v.object({
+    type: v.literal('loginStart'),
+    loginSessionId: v.string(),
+    network: v.literal('fake'),
+    flowId: v.optional(v.string()),
+  }),
+) as unknown as typeof commandPayload
 
 /**
  * A release channel: `stable` follows the repository's `main` branch, `nightly` its `dev`

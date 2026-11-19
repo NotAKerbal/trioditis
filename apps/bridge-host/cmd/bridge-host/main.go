@@ -29,7 +29,6 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/networks"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
 )
 
 func env(name, fallback string) string {
@@ -150,9 +149,6 @@ func main() {
 	}()
 	if spec.Background != nil {
 		stopBackground = spec.Background(ctx, netConn, log)
-	}
-	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
-		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
 	}
 	switch command {
 	case "run":

@@ -24,8 +24,8 @@ The installer:
 2. generates the server's secrets and key pairs into `deploy/.env` (readable only by you);
 3. builds the images from this checkout;
 4. starts Postgres and the Convex backend, creates their databases and the Convex admin key;
-5. deploys the backend's functions and starts the gateway, one bridge host per network, and
-   Caddy;
+5. deploys the backend's functions and starts the gateway, a bridge host for every network
+   (see [Networks](#networks)), and Caddy;
 6. waits until everything is healthy, checks the backend can reach the server's public
    address, then prints the address and, until the admin account exists, the **admin setup
    link**.
@@ -143,22 +143,45 @@ domain's DNS must point at this machine and both ports must be reachable from th
 
 ### Networks
 
+The server runs a bridge host for every network this version supports: WhatsApp, Signal,
+Google Messages, Google Voice, Telegram, Meta (Facebook Messenger), Instagram, Slack, GroupMe,
+LinkedIn, X (Twitter) and Bluesky. Which of them people can connect is up to the admins, in
+the app: **Admin settings → Networks** installs a network, so it's offered to members, and
+removes it again, with nothing to change on the server. A bridge host for a network nobody
+has installed or connected sits idle.
+
+Running them all takes memory, and Signal's bridge host links libsignal, which the first
+install builds from source (Rust): that adds several minutes and a few GiB of memory to the
+first build. On a small machine, `--networks` limits the bridge hosts to the ones you name,
+and with that the networks admins can install:
+
 ```sh
-deploy/install/install.sh --networks whatsapp          # the default
-deploy/install/install.sh --networks whatsapp,fake     # also the fake network
+deploy/install/install.sh                              # every network (the default)
+deploy/install/install.sh --networks whatsapp,signal   # only these
+deploy/install/install.sh --networks all               # every network again
 ```
 
-Each network gets its own bridge host. The fake network logs in with any username and never
-talks to anything real: use it to try the server out. Signal and Google Messages join the
-list when the bridge host runs their connectors. Dropping a network from the list stops and
-removes its bridge host; its volume and database stay, in case you add it back.
+The choice is kept for later reruns (`INSTALL_NETWORKS` in `deploy/.env`). Dropping a network
+from it stops and removes its bridge host; its volume and database stay, in case you add it
+back. The backend is told which networks have a bridge host (`TRIODITIS_NETWORKS`), so admins
+can only install those.
 
 Telegram also needs your own app credentials from <https://my.telegram.org/apps>, which the
-installer keeps for later reruns (docs/networks/telegram.md):
+installer keeps for later reruns (docs/networks/telegram.md). Without them, the default leaves
+Telegram out and says so; with them, it's included:
 
 ```sh
-deploy/install/install.sh --networks whatsapp,telegram --telegram-api-id <api_id> --telegram-api-hash <api_hash>
+deploy/install/install.sh --telegram-api-id <api_id> --telegram-api-hash <api_hash>
 ```
+
+Naming `telegram` in `--networks` without them stops the install.
+
+An install from before networks were chosen in the app kept the networks it offered in
+`TRIODITIS_NETWORKS`. The installer no longer reads that as its choice, so the first rerun
+moves it to every network (pass `--networks` to limit it again), and admins install the ones
+they want in the app. It also removes the fake network, which this version no longer has: its
+bridge host, its database and its volume, which only ever held made-up chats, and the test
+endpoint that `--e2e` added.
 
 ## What's running
 
@@ -217,8 +240,7 @@ the rightmost entry the proxy didn't add (`trusted_proxies_strict`), not the lef
 which the client controls. So the Convex backend must never be reachable except through
 Caddy: the bundle publishes only Caddy's port, and anything else in front of the backend
 could set the header to any address. The installer checks the compose files publish nothing
-else (`deploy/scripts/check-ports.sh`; the one exception is `--e2e`'s test endpoint, on the
-loopback).
+else (`deploy/scripts/check-ports.sh`).
 
 What Caddy takes as the client's address, as observed with Docker 29 (`deploy/test/caddy-headers.sh`):
 
@@ -256,8 +278,8 @@ deploy/install/install.sh
 ```
 
 The rerun keeps every secret and every setting the last run saved in `deploy/.env`: the
-mode, the domain or public URL, the port, the bind address and host, the networks, `--e2e`
-and `--updater`. Pass an option only to change that one. It rebuilds the images from the new
+mode, the domain or public URL, the port, the bind address and host, the networks
+(`--networks`) and `--updater`. Pass an option only to change that one. It rebuilds the images from the new
 checkout, redeploys the functions, restarts what changed, and removes services that are no
 longer enabled. After each deploy of the functions, it runs pending migrations, which fix rows
 an older version wrote, so an upgrade needs nothing run by hand. It calls their one entry
@@ -522,17 +544,17 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
 `docker` and needs none of that, and `updater.sh` a stub `docker` and git.
 
-| Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused |
-| `backup-restart.sh`   | A backup starts again only the containers that were running: not a finished one-shot job a running service depends on, nor a stopped service                                                                                                                                                                                                                                                                                                             |
-| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                             |
-| `lock.sh`             | Nothing may come before the command (`-p`, `-f`, `--env-file`, `--project-directory`, `--dry-run`, an unknown option) and unknown commands are refused; `logs -f` passes; while the lock is held, `start`, `up`, `stop`, `create-admin` and `backup` are refused and `ps`, `config` and `logs` run; `restore` with no install says it isn't available yet                                                                                                |
-| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                |
-| `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                   |
-| `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                   |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                                                                                                                                                                |
-| `updater.sh`          | Against a throwaway git remote and a stub installer: the updater moves the checkout to the channel's newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, installs that, and reports the installer's error; it leaves a checkout that's up to date, ahead of the channel, diverged from it, or has local changes where it is                                                                     |
+| Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused                                            |
+| `backup-restart.sh`   | A backup starts again only the containers that were running: not a finished one-shot job a running service depends on, nor a stopped service                                                                                                                                                                                                                                                                                                                                                        |
+| `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                                                                        |
+| `lock.sh`             | Nothing may come before the command (`-p`, `-f`, `--env-file`, `--project-directory`, `--dry-run`, an unknown option) and unknown commands are refused; `logs -f` passes; while the lock is held, `start`, `up`, `stop`, `create-admin` and `backup` are refused and `ps`, `config` and `logs` run; `restore` with no install says it isn't available yet                                                                                                                                           |
+| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                                                           |
+| `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                                                              |
+| `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                                                              |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one; every network is bridged by default, but Telegram only with its credentials; `--networks` limits them and is kept, and an unknown one (`fake`) stops the installer; an install from before moves to every network and loses the fake network and `--e2e` |
+| `updater.sh`          | Against a throwaway git remote and a stub installer: the updater moves the checkout to the channel's newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, installs that, and reports the installer's error; it leaves a checkout that's up to date, ahead of the channel, diverged from it, or has local changes where it is                                                                                                                |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).
@@ -556,27 +578,7 @@ agent, which cloud-init installs on first boot from a snippet, so the storage na
 Ubuntu's published checksum. If a step fails after the VM exists, it says how to look at the
 VM and remove it. The script isn't exercised in CI.
 
-## Verifying an install
-
-The end-to-end check (`apps/gateway/scripts/e2e-fake.ts`) runs against an installed server
-with the fake network. The fake network's control endpoint only listens on its container's
-loopback, so install with `--e2e`: it adds a sidecar that forwards that endpoint to this
-machine's loopback (`127.0.0.1:18621`), and nowhere else.
-
-```sh
-deploy/install/install.sh --networks whatsapp,fake --e2e
-# create the admin account with the setup link, or, before the checkout has the web app,
-# deploy/trioditis create-admin <admin email>; then:
-cd apps/gateway
-SITE_URL=http://<address>:8080 CONVEX_URL=http://<address>:8080/convex \
-  BRIDGE_FAKE_CONTROL_ADDR=127.0.0.1:18621 \
-  TRIODITIS_INTERNAL_TOKEN=<from deploy/.env> \
-  E2E_IDENTITY_FILE=/tmp/e2e-identity.json \
-  node scripts/e2e-fake.ts <admin email> <password>
-```
-
-It signs in, connects the fake network through a sealed login, receives a message, sends a
-reply, and checks that nothing readable reached Convex.
+## A second, test install
 
 To run a second, throwaway install on the same machine without touching the first, give it
 its own Compose project (which also names its images and volumes) and port, from a separate
@@ -590,6 +592,4 @@ server beside it. `deploy/trioditis` always uses the saved project, whatever
 TRIODITIS_PROJECT=trioditis-test deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1 --port 18080
 ```
 
-Remove it with `deploy/trioditis down -v` in that checkout. `--e2e` is kept for reruns like
-every option: run the installer again with `--no-e2e` afterwards to remove the test
-endpoint.
+Remove it with `deploy/trioditis down -v` in that checkout.

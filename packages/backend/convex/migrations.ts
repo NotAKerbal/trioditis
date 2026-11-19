@@ -1,6 +1,8 @@
 import { v } from 'convex/values'
+import type { Network } from '@trioditis/core'
 import { internal } from './_generated/api'
-import { internalAction, internalMutation } from './_generated/server'
+import type { Id } from './_generated/dataModel'
+import { internalAction, internalMutation, type MutationCtx } from './_generated/server'
 import { refreshLast } from './lib/lastMessage'
 
 // One-off fixes for rows written by an older version. Each is safe to run any number of times.
@@ -68,6 +70,205 @@ export const backfillChatLast = internalMutation({
   },
 })
 
+/** The fake network's name, which the schema's types no longer have (validators.ts, `storedNetwork`). */
+const FAKE = 'fake' as Network
+
+/**
+ * Installs the networks people connected before admins installed networks themselves, so
+ * those accounts keep working and people can reconnect them: each network with an account
+ * that isn't logged out, unless an admin has decided on it already. A server that offered a
+ * network nobody connected leaves it to the admins: `npx convex run migrations:installConnectedNetworks`.
+ */
+export const installConnectedNetworks = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const decided = new Set((await ctx.db.query('serverNetworks').collect()).map((row) => row.network))
+    const now = Date.now()
+    for (const account of await ctx.db.query('networkAccounts').collect()) {
+      if (decided.has(account.network) || account.state === 'LOGGED_OUT' || account.network === FAKE) {
+        continue
+      }
+      decided.add(account.network)
+      await ctx.db.insert('serverNetworks', {
+        network: account.network,
+        installed: true,
+        updatedAt: now,
+        updatedBy: 'migration',
+      })
+    }
+    return null
+  },
+})
+
+/** How many rows one purge batch deletes, about. */
+const PURGE_BATCH = 200
+
+/**
+ * Deletes everything on the fake network, the test network Trioditis no longer has: its
+ * accounts, logins, chats with everything in them, contacts, commands and bridge hosts. It
+ * starts from the accounts (every fake row belongs to someone who had one, the demo data
+ * included), a batch at a time, carrying on until there's none left; each run finds what's
+ * left by looking, so it needs no cursor: `npx convex run migrations:purgeFakeNetwork`.
+ */
+export const purgeFakeNetwork = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const budget = { left: PURGE_BATCH }
+    const account = await ctx.db
+      .query('networkAccounts')
+      .withIndex('by_login', (q) => q.eq('network', FAKE))
+      .first()
+    if (account) {
+      if (await purgeFakeOf(ctx, account.userId, budget)) await ctx.db.delete(account._id)
+    } else {
+      // Logins that never made an account, and the hosts and anything they quarantined.
+      for (const session of await ctx.db.query('loginSessions').collect()) {
+        if (session.network === FAKE) await ctx.db.delete(session._id)
+      }
+      for (const host of await ctx.db.query('bridgeHosts').collect()) {
+        if (host.network !== FAKE) continue
+        const held = await ctx.db
+          .query('quarantine')
+          .withIndex('by_host', (q) => q.eq('hostId', host.hostId))
+          .take(budget.left)
+        for (const row of held) await ctx.db.delete(row._id)
+        budget.left -= held.length
+        if (budget.left > 0) await ctx.db.delete(host._id)
+      }
+      if (budget.left > 0) return null
+    }
+    await ctx.scheduler.runAfter(0, internal.migrations.purgeFakeNetwork, {})
+    return null
+  },
+})
+
+/** Deletes some of one person's fake-network rows, within the budget. True once there are none left. */
+async function purgeFakeOf(ctx: MutationCtx, userId: string, budget: { left: number }) {
+  const chats = await ctx.db
+    .query('chats')
+    .withIndex('by_portal', (q) => q.eq('userId', userId).eq('network', FAKE))
+    .take(5)
+  for (const chat of chats) {
+    if (!(await purgeChat(ctx, chat._id, budget))) return false
+    await ctx.db.delete(chat._id)
+    budget.left--
+  }
+  if (chats.length === 5 || budget.left <= 0) return false
+  const rows = [
+    ...(await ctx.db
+      .query('messages')
+      .withIndex('by_event', (q) => q.eq('userId', userId).eq('network', FAKE))
+      .take(budget.left)),
+    ...(await ctx.db
+      .query('contacts')
+      .withIndex('by_ghost', (q) => q.eq('userId', userId).eq('network', FAKE))
+      .take(budget.left)),
+    ...(await ctx.db
+      .query('reactionEvents')
+      .withIndex('by_event', (q) => q.eq('userId', userId).eq('network', FAKE))
+      .take(budget.left)),
+  ]
+  for (const row of rows) {
+    if (budget.left <= 0) return false
+    await ctx.db.delete(row._id)
+    budget.left--
+  }
+  // Commands outside any chat: logins and logouts.
+  const commands = await ctx.db
+    .query('outbox')
+    .withIndex('by_chat', (q) => q.eq('chatId', undefined))
+    .collect()
+  for (const command of commands) {
+    if (command.userId !== userId || command.network !== FAKE) continue
+    if (budget.left <= 0) return false
+    await deleteCommand(ctx, command._id)
+    budget.left--
+  }
+  for (const session of await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .collect()) {
+    if (session.network === FAKE) await ctx.db.delete(session._id)
+  }
+  return budget.left > 0
+}
+
+async function deleteCommand(ctx: MutationCtx, commandId: Id<'outbox'>) {
+  const payload = await ctx.db
+    .query('outboxPayloads')
+    .withIndex('by_command', (q) => q.eq('commandId', commandId))
+    .unique()
+  if (payload) await ctx.db.delete(payload._id)
+  await ctx.db.delete(commandId)
+}
+
+/** Deletes what's in a chat, within the budget. True once nothing is left but the chat itself. */
+async function purgeChat(ctx: MutationCtx, chatId: Id<'chats'>, budget: { left: number }) {
+  const messages = await ctx.db
+    .query('messages')
+    .withIndex('by_chat_sort', (q) => q.eq('chatId', chatId))
+    .take(Math.max(budget.left, 0))
+  for (const message of messages) {
+    for (const reaction of await ctx.db
+      .query('reactions')
+      .withIndex('by_message', (q) => q.eq('messageId', message._id))
+      .collect()) {
+      await ctx.db.delete(reaction._id)
+      budget.left--
+    }
+    for (const cleanup of await ctx.db
+      .query('reactionCleanups')
+      .withIndex('by_message', (q) => q.eq('messageId', message._id))
+      .collect()) {
+      await ctx.db.delete(cleanup._id)
+    }
+    await ctx.db.delete(message._id)
+    budget.left--
+  }
+  if (budget.left <= 0) return false
+  const rows = [
+    ...(await ctx.db
+      .query('receipts')
+      .withIndex('by_chat_sender', (q) => q.eq('chatId', chatId))
+      .take(budget.left)),
+    ...(await ctx.db
+      .query('typing')
+      .withIndex('by_chat_sender', (q) => q.eq('chatId', chatId))
+      .take(budget.left)),
+    ...(await ctx.db
+      .query('chatLabels')
+      .withIndex('by_chat', (q) => q.eq('chatId', chatId))
+      .take(budget.left)),
+  ]
+  for (const row of rows) {
+    if (budget.left <= 0) return false
+    await ctx.db.delete(row._id)
+    budget.left--
+  }
+  for (const scheduled of await ctx.db
+    .query('scheduledSends')
+    .withIndex('by_chat', (q) => q.eq('chatId', chatId))
+    .take(Math.max(budget.left, 0))) {
+    const payload = await ctx.db
+      .query('scheduledPayloads')
+      .withIndex('by_scheduled', (q) => q.eq('scheduledId', scheduled._id))
+      .unique()
+    if (payload) await ctx.db.delete(payload._id)
+    await ctx.db.delete(scheduled._id)
+    budget.left--
+  }
+  for (const command of await ctx.db
+    .query('outbox')
+    .withIndex('by_chat', (q) => q.eq('chatId', chatId))
+    .take(Math.max(budget.left, 0))) {
+    await deleteCommand(ctx, command._id)
+    budget.left--
+  }
+  return budget.left > 0
+}
+
 /**
  * Every migration, in order: the one entry point `pnpm dev` and the installer call. A new
  * migration must be added here as well as defined above, or it never runs on its own.
@@ -78,6 +279,8 @@ export const runAll = internalAction({
   handler: async (ctx) => {
     await ctx.runMutation(internal.migrations.scheduleCommandDeadlines, {})
     await ctx.runMutation(internal.migrations.backfillChatLast, {})
+    await ctx.runMutation(internal.migrations.installConnectedNetworks, {})
+    await ctx.runMutation(internal.migrations.purgeFakeNetwork, {})
     return null
   },
 })

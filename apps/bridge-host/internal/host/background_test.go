@@ -26,8 +26,8 @@ func TestBackgroundedHandlers(t *testing.T) {
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
 	defer h.host.Stop()
-	aliceLogin := h.login("alice", "alice-fake")
-	const aliceNet = networkid.UserLoginID("alice-fake")
+	aliceLogin := h.login("alice", "alice-testnet")
+	const aliceNet = networkid.UserLoginID("alice-testnet")
 	if err := h.net.Incoming(aliceNet, "family", networkid.UserID(aliceNet), "m-self", "from my phone", time.Now()); err != nil {
 		t.Fatal(err)
 	}

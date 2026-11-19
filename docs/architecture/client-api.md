@@ -60,11 +60,11 @@ once before any sealing or password derivation.
 
 ### Server settings that matter to the client
 
-| Convex env                             | Must be                                                                                                                                                                                                                   |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                           |
-| (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up) |
-| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`. `TRIODITIS_DEMO=1` alone turns invitations off                                                                                                   |
+| Convex env                             | Must be                                                                                                                                                                                                                            |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                                    |
+| (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up)          |
+| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `TRIODITIS_DEMO=1` and no `TRIODITIS_NETWORKS` on preview and nightly deployments, for `demo.seedForMe`. `TRIODITIS_DEMO=1` alone turns invitations off. `TRIODITIS_NETWORKS` lists the networks the server runs a bridge host for |
 
 ## Passwords
 
@@ -779,7 +779,8 @@ have at most 100 labels.` · `That label doesn’t exist.`
 
 ## Networks and connecting accounts
 
-`api.networks.list` returns the networks this server enables:
+`api.networks.list` returns the networks people can connect here: the ones an admin installed
+(Admin settings → Networks, below) that the server runs a bridge host for:
 
 ```ts
 { network, name, maturity: 'stable' | 'beta' | 'experimental',
@@ -836,7 +837,7 @@ and one queued before deadline jobs existed is settled either by the gateway's s
 gateway is running, or once the migrations run (`migrations:runAll`, which `pnpm dev` and
 the installer run after each deploy), whichever comes first.
 
-Errors: `That network isn’t enabled on this server.` · `Finish setting up your key, with
+Errors: `That network isn’t installed on this server.` · `Finish setting up your key, with
 its password and recovery key, before connecting a network.` · `That isn’t a login method
 this network offers.` · `That step of the login is over. Start again if it didn’t finish.` ·
 `That input isn’t sealed, or is too long.` · `That’s already been sent. Wait for the next
@@ -845,7 +846,7 @@ account doesn’t exist.`
 
 ### Health
 
-`api.networks.health` returns, for each enabled network,
+`api.networks.health` returns, for each network in `networks.list`,
 `{ network, bridgeOnline, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
 
 | `status`   | Means                                                                      |
@@ -858,15 +859,41 @@ account doesn’t exist.`
 `bridgeOnline` goes false two minutes after the bridge host's last heartbeat. Queries rerun
 when data changes, not when time passes, so recheck on focus.
 
+### Installing networks (admins)
+
+The server runs a bridge host for each network in `TRIODITIS_NETWORKS` (the installer runs
+one for every network unless the operator narrows it; docs/deploy.md). Admins choose which of
+those people can connect:
+
+- `api.networks.catalog` lists every network Trioditis knows, for the admin panel:
+  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, accounts }[]`.
+  `bridged` says the server runs its bridge host; one it doesn't can't be installed, and the
+  operator adds it with the installer (Telegram also needs its API ID and hash). `accounts`
+  counts the accounts connected to it, everyone's together; never whose.
+- `api.networks.install({ network, sessionId? })` installs one: it appears in
+  `networks.list` for everyone. Installing one already installed does nothing.
+- `api.networks.remove({ network, sessionId? })` removes one: nobody can start connecting it,
+  every account on it, anyone's, gets a logout as if its owner had disconnected it, and logins
+  still in progress on it are cancelled. It returns `{ disconnecting }`, how many logouts it
+  asked for. Chats stay; what the bridge host sends before a logout lands still arrives.
+
+All three are for admins only (`Only an admin can do that.`). Errors: `This server doesn’t run
+a bridge for <network>, so it can’t be installed here.`
+
+A server upgraded from before admins installed networks keeps the ones people had connected:
+the migrations install each network with an account that isn't logged out.
+
 ## Demo data
 
 For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
-signed-in person a connected fake-network account with six contacts and eight chats (two
+signed-in person a connected account on each of seven networks (WhatsApp, Signal, Google
+Messages, Telegram, Instagram, Slack and Messenger), with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
 public key, so they open like anything else. It needs `keys.setup` done first and works only
-where `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` (exactly when `server.info` says
-`demo: true`). The contacts, and each chat with its messages, are written whole, so a call
+where `TRIODITIS_DEMO=1` and no bridge host is configured (`TRIODITIS_NETWORKS` empty or
+unset; exactly when `server.info` says `demo: true`), so no real account can be there. The
+accounts look connected, but no bridge host runs them. The contacts, and each chat with its messages, are written whole, so a call
 that fails partway leaves no half-written chat, and calling again finishes the rest. Once
 everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
 available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
@@ -935,9 +962,9 @@ here.
 
 1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
    `{ demo, invitations, version }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
-   `TRIODITIS_NETWORKS=fake`, as `demo.seedForMe` needs), and `invitations` whether admins
+   no `TRIODITIS_NETWORKS`, as `demo.seedForMe` needs), and `invitations` whether admins
    can invite people here (false wherever `TRIODITIS_DEMO=1`). The client hides invite controls, and shows demo-only ones, from it instead
-   of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
+   of waiting for a mutation's error. The installed networks stay in `api.networks.list`.
    `version` is the commit the installer deployed (`TRIODITIS_VERSION`), or null where none
    was set (`pnpm dev`, previews); an open page compares it with its own build's to pick up
    an update (`docs/deploy.md`, Updating live).

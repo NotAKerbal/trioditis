@@ -5,7 +5,7 @@
 #   deploy/install/install.sh --port 9000 --host 192.168.1.20
 #   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
-#   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
+#   deploy/install/install.sh --networks whatsapp,signal  # only these bridge hosts, not all
 #   deploy/install/install.sh --updater                   # let admins update it from the app
 #
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
@@ -39,8 +39,12 @@ Options (each one is kept for later reruns):
                        port, such as Tailscale Serve: the https:// origin people open.
                        Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
-  --networks <list>    Comma-separated: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake
-                       (default whatsapp)
+  --networks <list|all>
+                       The networks this server runs a bridge host for, which admins can then
+                       install in the app (Admin settings, Networks). Comma-separated:
+                       whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack,
+                       groupme, linkedin, twitter, bluesky; or all (the default; Telegram
+                       only with its API ID and hash). Fewer suit a small machine
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
                        from, as Caddy ranges (default on a loopback bind: the loopback and
@@ -49,12 +53,10 @@ Options (each one is kept for later reruns):
   --new-server-keys    Only when the server's private keys are lost: make new key pairs.
                        Sends sealed to the old bridge key then fail, and agent access must
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
-  --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
-                       or stop exposing it (default off)
   --telegram-api-id <n>, --telegram-api-hash <hash>
                        The App api_id and api_hash from https://my.telegram.org/apps, which
                        Telegram needs from whoever runs the bridge (required with telegram
-                       in --networks)
+                       in --networks; without them, all leaves Telegram out)
   --updater, --no-updater
                        Run the updater, a systemd service that updates this install from
                        its git remote when admins ask in the app or on their schedule, or
@@ -65,7 +67,7 @@ EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url trusted domain networks e2e telegram_api_id telegram_api_hash updater
+unset -v mode port host bind proxy_url trusted domain networks telegram_api_id telegram_api_hash updater
 local_flag=0
 new_server_keys=0
 setup_link=1
@@ -87,8 +89,6 @@ while [ $# -gt 0 ]; do
     --telegram-api-id) telegram_api_id=$2; shift ;;
     --telegram-api-hash) telegram_api_hash=$2; shift ;;
     --new-server-keys) new_server_keys=1 ;;
-    --e2e) e2e=1 ;;
-    --no-e2e) e2e=0 ;;
     --updater) updater=1 ;;
     --no-updater) updater=0 ;;
     --no-setup-link) setup_link=0 ;;
@@ -169,7 +169,7 @@ check_option() {
 [ -z "${bind+set}" ] || check_option bind INSTALL_BIND "$bind"
 [ -z "${proxy_url+set}" ] || check_option public-url PROXY_URL "$proxy_url"
 [ -z "${domain+set}" ] || check_option domain INSTALL_DOMAIN "$domain"
-[ -z "${networks+set}" ] || check_option networks TRIODITIS_NETWORKS "$networks"
+[ -z "${networks+set}" ] || check_option networks INSTALL_NETWORKS "$networks"
 [ -z "${port+set}" ] || check_option port HTTP_PORT "$port"
 [ -z "${telegram_api_id+set}" ] || check_option telegram-api-id TELEGRAM_API_ID "$telegram_api_id"
 [ -z "${telegram_api_hash+set}" ] || check_option telegram-api-hash TELEGRAM_API_HASH "$telegram_api_hash"
@@ -230,6 +230,13 @@ set_var() {
   printf '%s\n' "$text" | env_write "$env_file" || die "Couldn't save the settings (above)."
   env_text=$text
 }
+# Removes NAME's setting, the same way.
+drop_var() {
+  local text
+  text=$(printf '%s\n' "$env_text" | grep -vE "^$1=" | sed '/^$/d' || true)
+  printf '%s\n' "$text" | env_write "$env_file" || die "Couldn't save the settings (above)."
+  env_text=$text
+}
 secret() { head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }
 hex_secret() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 keep_or() { local current; current=$(get "$1"); [ -n "$current" ] || set_var "$1" "$2"; }
@@ -267,9 +274,13 @@ if [ -z "${host+set}" ]; then
 fi
 trusted=${trusted-$(get INSTALL_TRUSTED_PROXIES)}
 trusted=${trusted//,/ }
-[ "${networks-x}" != '' ] || die "--networks needs at least one network."
-networks=${networks-$(get TRIODITIS_NETWORKS)}
-networks=${networks:-whatsapp}
+# The networks with a bridge host: all of them unless the operator limits them. Which of those
+# members are offered is for admins to choose in the app. TRIODITIS_NETWORKS isn't read: before
+# INSTALL_NETWORKS, it held the networks offered (a choice that's now the admins'), so an
+# install from then moves to every network.
+[ "${networks-x}" != '' ] || die "--networks needs at least one network, or all."
+networks=${networks-$(get INSTALL_NETWORKS)}
+networks=${networks:-all}
 # The Compose project names the install's volumes, so it never changes once there is one: a
 # saved name wins, and an install from before it was saved is the default, trioditis.
 # TRIODITIS_PROJECT only names a new install (no deploy/.env yet), and saying anything else
@@ -287,10 +298,6 @@ if [ -n "${TRIODITIS_PROJECT:-}" ] && [ "$TRIODITIS_PROJECT" != "$project" ]; th
 fi
 [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "TRIODITIS_PROJECT must be lowercase letters, digits, '-' and '_'."
 [[ "$trusted" =~ ^[A-Za-z0-9_.:/\ ]*$ ]] || die "--trusted-proxies takes IP ranges (CIDR) or private_ranges."
-if [ -z "${e2e+set}" ]; then
-  e2e=$(get INSTALL_E2E)
-  [ -n "$e2e" ] || case "$(get COMPOSE_FILE)" in *compose.e2e.yml*) e2e=1 ;; *) e2e=0 ;; esac
-fi
 
 # Checked as text first, so a huge number never reaches the shell's arithmetic.
 if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
@@ -298,16 +305,23 @@ if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$por
 fi
 port=$((10#$port))
 
-IFS=',' read -r -a network_list <<<"$networks"
-[ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
-for network in "${network_list[@]}"; do
-  case "$network" in
-    whatsapp | signal | gmessages | gvoice | telegram | meta | instagram | slack | groupme | linkedin | twitter | bluesky | fake) ;;
-    *) die "Unknown network '$network'. This version supports: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake." ;;
-  esac
-done
+supported_networks=(whatsapp signal gmessages gvoice telegram meta instagram slack groupme linkedin twitter bluesky)
+if [ "$networks" = all ]; then
+  network_list=("${supported_networks[@]}")
+else
+  IFS=',' read -r -a requested_networks <<<"$networks"
+  [ "${#requested_networks[@]}" -gt 0 ] || die "Pick at least one network, or all."
+  network_list=()
+  for network in "${requested_networks[@]}"; do
+    [[ " ${supported_networks[*]} " == *" $network "* ]] ||
+      die "Unknown network '$network'. This version supports: $(IFS=,; echo "${supported_networks[*]}" | sed 's/,/, /g'); or all."
+    # Once each, so a network named twice still gets one bridge host.
+    [[ " ${network_list[*]} " == *" $network "* ]] || network_list+=("$network")
+  done
+fi
 # Telegram lets a client in only with an app's credentials, issued to whoever runs it. The
-# bridge host checks them too, but an install that can't start Telegram stops here instead.
+# bridge host checks them too, but an install that can't start Telegram stops here instead,
+# when it was asked for by name; all just leaves it out until they're given.
 telegram_api_id=${telegram_api_id-$(get TELEGRAM_API_ID)}
 telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
 [ -z "$telegram_api_id" ] || [[ "$telegram_api_id" =~ ^[1-9][0-9]{0,9}$ ]] ||
@@ -315,8 +329,18 @@ telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
 [ -z "$telegram_api_hash" ] || [[ "$telegram_api_hash" =~ ^[0-9a-fA-F]{32}$ ]] ||
   die "--telegram-api-hash must be the 32 hex digits my.telegram.org shows as App api_hash."
 if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
-  die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+  if [ "$networks" = all ]; then
+    say "Leaving Telegram out: its bridge needs your own API ID and hash. To add it, create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash> (docs/networks/telegram.md)."
+    without_telegram=()
+    for network in "${network_list[@]}"; do [ "$network" = telegram ] || without_telegram+=("$network"); done
+    network_list=("${without_telegram[@]}")
+  else
+    die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+  fi
 fi
+# The bridged networks, comma-separated, as Compose (profiles) and the backend (what admins
+# may install) read them.
+bridged=$(IFS=,; echo "${network_list[*]}")
 updater=${updater-$(get INSTALL_UPDATER)}
 updater=${updater:-0}
 # The updater is a systemd service; refused here, before anything changes, where there's none.
@@ -327,10 +351,6 @@ fi
 # page compares the two to see the server was updated under it.
 version=$( (command -v git >/dev/null && git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}') || true)
 version=${version:-unknown}
-
-if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
-  warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
-fi
 
 # The sidecars' image, pinned as in the compose files.
 socat_image=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
@@ -440,7 +460,6 @@ else
   caddy_site=':80'
   caddy_global='auto_https off'
 fi
-[ "$e2e" = 1 ] && compose_files="$compose_files:compose.e2e.yml"
 
 bridge_hosts=()
 for network in "${network_list[@]}"; do bridge_hosts+=("$network-1=http://bridge-$network:8611"); done
@@ -451,7 +470,7 @@ set_var \
   PROXY_URL "${proxy_url%/}" \
   INSTALL_HOST "$host" \
   INSTALL_BIND "$bind" \
-  INSTALL_E2E "$e2e" \
+  INSTALL_NETWORKS "$networks" \
   INSTALL_UPDATER "$updater" \
   TRIODITIS_VERSION "$version" \
   HTTP_PORT "$port" \
@@ -465,11 +484,13 @@ set_var \
   LOOPBACK_PORT "$port" \
   COMPOSE_PROJECT_NAME "$project" \
   COMPOSE_FILE "$compose_files" \
-  COMPOSE_PROFILES "$networks" \
-  TRIODITIS_NETWORKS "$networks" \
+  COMPOSE_PROFILES "$bridged" \
+  TRIODITIS_NETWORKS "$bridged" \
   BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")" \
   TELEGRAM_API_ID "$telegram_api_id" \
   TELEGRAM_API_HASH "$telegram_api_hash"
+# The fake network's test endpoint's setting, from a version that had one.
+! has INSTALL_E2E || drop_var INSTALL_E2E
 
 # --- Secrets ------------------------------------------------------------------------------
 
@@ -559,7 +580,8 @@ write_file "$here/runtime/version" "$version" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
 # network's service at the same time, and the builds collide on the shared tag. Signal's
-# library (Rust) is only built when Signal is enabled: it adds a long first build.
+# library (Rust) is only built when Signal is bridged (as it is with all): it adds a long
+# first build.
 with_signal=0
 [[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
 docker build -q --build-arg "WITH_SIGNAL=$with_signal" -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
@@ -567,8 +589,7 @@ compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
 # else stay on the internal network, since the backend trusts the client address Caddy
-# gives it (X-Trioditis-Client-IP). The fake network's test endpoint (--e2e) is the one
-# exception, and only on this machine's loopback.
+# gives it (X-Trioditis-Client-IP).
 compose --profile '*' config | sh "$here/scripts/check-ports.sh" ||
   die "The compose files publish more than Caddy's port (above). This is a bug in the bundle."
 
@@ -628,6 +649,17 @@ wait_healthy postgres
 for database in convex_self_hosted $(printf 'bridge_%s ' "${network_list[@]}"); do
   ensure_database "$database"
 done
+# The fake network is gone from this version. Its bridge host went with the orphans just
+# above, and its database and volume, which only ever held made-up chats, go too.
+if [ "$(psql_admin -tAc "SELECT 1 FROM pg_database WHERE datname = 'bridge_fake'" 2>/dev/null)" = 1 ]; then
+  say "Removing the fake network's database"
+  psql_admin -qc "DROP DATABASE IF EXISTS bridge_fake" >/dev/null || warn "Couldn't remove the fake network's database, bridge_fake."
+fi
+fake_volume=$(docker volume ls -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.volume=bridge-fake")
+if [ -n "$fake_volume" ]; then
+  say "Removing the fake network's volume"
+  docker volume rm "$fake_volume" >/dev/null || warn "Couldn't remove the fake network's volume, $fake_volume."
+fi
 
 say "Starting the Convex backend"
 compose up -d --remove-orphans backend
@@ -747,6 +779,9 @@ EOF
   *) printf "Couldn't check whether the admin account exists. Until it does, the setup link is\n%s/setup#token=<TRIODITIS_SETUP_TOKEN from deploy/.env>.\n\n" "$public_url" ;;
 esac
 cat <<EOF
+Networks: admins install the ones people can connect in the app (Admin settings → Networks),
+from those this server bridges: ${bridged//,/, }.
+
 Manage it with deploy/trioditis (docker compose for this install), e.g.:
   deploy/trioditis ps
   deploy/trioditis logs -f gateway

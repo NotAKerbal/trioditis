@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
-import { SETUP_TOKEN, sealed, setup, signIn } from './setup'
+import { SETUP_TOKEN, sealed, setup, signIn, installNetworks } from './setup'
 
 describe('accounts', () => {
   const reserve = (t: ReturnType<typeof setup>, email: string, tokenHash?: string) =>
@@ -103,10 +103,11 @@ describe('accounts', () => {
 describe('logins', () => {
   it('needs an identity key and an enabled network', async () => {
     const t = setup()
+    await installNetworks(t)
     const noKey = await signIn(t, 'sam', 'member', false)
     await expect(noKey.mutation(api.logins.start, { network: 'whatsapp' })).rejects.toThrow(/setting up/)
     const isaac = await signIn(t, 'isaac')
-    await expect(isaac.mutation(api.logins.start, { network: 'discord' })).rejects.toThrow(/enabled/)
+    await expect(isaac.mutation(api.logins.start, { network: 'discord' })).rejects.toThrow(/installed/)
     const sessionId = await isaac.mutation(api.logins.start, { network: 'whatsapp' })
     expect(await isaac.query(api.logins.session, { loginSessionId: sessionId })).toMatchObject({ state: 'pending' })
     expect(await noKey.query(api.logins.session, { loginSessionId: sessionId })).toBeNull()
@@ -114,6 +115,7 @@ describe('logins', () => {
 
   it('accepts input only for the step being shown, sealed', async () => {
     const t = setup()
+    await installNetworks(t)
     const isaac = await signIn(t, 'isaac')
     const loginSessionId = await isaac.mutation(api.logins.start, { network: 'whatsapp' })
     await expect(isaac.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed() })).rejects.toThrow(
@@ -181,13 +183,13 @@ describe('server info', () => {
     expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true, version: null })
     process.env.TRIODITIS_DEMO = '1'
     try {
-      // Demo data needs the fake network alone too; without it, only invitations are off.
+      // Demo data needs a server with no bridge host too; with one, only invitations are off.
       expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false, version: null })
-      process.env.TRIODITIS_NETWORKS = 'fake'
+      delete process.env.TRIODITIS_NETWORKS
       expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false, version: null })
     } finally {
       delete process.env.TRIODITIS_DEMO
-      process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
+      process.env.TRIODITIS_NETWORKS = 'whatsapp,signal'
     }
   })
 })

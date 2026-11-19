@@ -142,8 +142,9 @@ services:
       timeout: 3s
       start_period: 10s
 
-  # One bridge host per network, each in a compose profile; install.sh enables the chosen
-  # ones (COMPOSE_PROFILES).
+  # One bridge host per network, each in a compose profile; install.sh enables every one, or
+  # those the operator limits it to (--networks), in COMPOSE_PROFILES. Admins then choose in
+  # the app which of them people can connect.
   bridge-whatsapp:
     <<: *bridge-host
     profiles: [whatsapp]
@@ -288,18 +289,6 @@ services:
     volumes:
       - bridge-bluesky:/data
 
-  # The fake network: logs in with any username, for trying the server without a real account.
-  bridge-fake:
-    <<: *bridge-host
-    profiles: [fake]
-    environment:
-      <<: *bridge-env
-      BRIDGE_NETWORK: fake
-      BRIDGE_HOST_ID: fake-1
-      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_fake?sslmode=disable
-    volumes:
-      - bridge-fake:/data
-
   caddy:
     <<: *service
     build:
@@ -343,6 +332,5 @@ volumes:
   bridge-linkedin:
   bridge-twitter:
   bridge-bluesky:
-  bridge-fake:
   caddy-data:
   caddy-config:

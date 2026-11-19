@@ -298,11 +298,11 @@ void test('a reset deletes nothing a link leads to outside the checkout', () => 
   assert.ok(existsSync(join(outside, 'local', 'keep')))
   // A link at the path itself is removed, not what it leads to.
   symlinkSync(join(outside, '.env.local'), join(top, 'packages/backend/.env.local'))
-  symlinkSync(join(outside, 'local'), join(top, '.data/bridge-fake'))
+  symlinkSync(join(outside, 'local'), join(top, '.data/bridge-whatsapp'))
   removeFromCheckout(join(top, 'packages/backend/.env.local'), top)
-  removeFromCheckout(join(top, '.data/bridge-fake'), top)
+  removeFromCheckout(join(top, '.data/bridge-whatsapp'), top)
   assert.equal(existsSync(join(top, 'packages/backend/.env.local')), false)
-  assert.equal(existsSync(join(top, '.data/bridge-fake')), false)
+  assert.equal(existsSync(join(top, '.data/bridge-whatsapp')), false)
   assert.ok(existsSync(join(outside, '.env.local')))
   assert.ok(existsSync(join(outside, 'local', 'keep')))
   // What really is inside is deleted, and what isn't there is fine.
@@ -471,7 +471,7 @@ void test('refuses a symlink anywhere among the files it or the Convex CLI write
   const outside = join(dir, 'outside')
   mkdirSync(outside)
   writeFileSync(join(outside, 'target'), 'keep')
-  const dirs = ['.data/bridge-fake', 'packages/backend/.convex/local/default/convex_local_storage/modules']
+  const dirs = ['.data/bridge-whatsapp', 'packages/backend/.convex/local/default/convex_local_storage/modules']
   for (const name of [...dirs, 'packages/backend/convex/_generated', 'packages/backend/convex/betterAuth/_generated']) {
     mkdirSync(join(top, name), { recursive: true })
   }
@@ -482,7 +482,7 @@ void test('refuses a symlink anywhere among the files it or the Convex CLI write
     '.data/dev.lock',
     '.data/secrets.json',
     '.data/releasing/dev.lock',
-    '.data/bridge-fake/bridge.db',
+    '.data/bridge-whatsapp/bridge.db',
     'packages/backend/.env.local',
     'packages/backend/.gitignore',
     'packages/backend/.convex/.gitignore',

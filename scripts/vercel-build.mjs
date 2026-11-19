@@ -16,7 +16,6 @@ import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
-  CLOUD_NETWORKS,
   DESKTOP_PACKAGE,
   backendDir,
   capture,
@@ -24,6 +23,7 @@ import {
   convexRef,
   desktopDir,
   environments,
+  removeConvexEnv,
   root,
   run,
   setConvexEnv,
@@ -121,16 +121,14 @@ if (names.includes('SITE_URL')) {
 } else {
   set('SITE_URL', target.siteUrl)
 }
-// Nightly is demo-only: it never offers a real network, so no real account or message can
-// reach it, and TRIODITIS_DEMO=1 stops invitations and gives whoever signs up demo data sealed
-// to their own key. No bridge host connects to it; the gateway secret and the bridge key exist
-// only because the backend expects them, and nothing outside it ever holds them.
+// Nightly is demo-only: it has no networks (no TRIODITIS_NETWORKS), so no real account or
+// message can reach it, and TRIODITIS_DEMO=1 stops invitations and gives whoever signs up demo
+// data sealed to their own key. No bridge host connects to it; the gateway secret and the
+// bridge key exist only because the backend expects them, and nothing outside it ever holds
+// them. Any networks it was given (the fake one, before networks were chosen in the app) go.
 if (names.includes('TRIODITIS_NETWORKS')) {
-  if (get('TRIODITIS_NETWORKS') !== CLOUD_NETWORKS) {
-    fail(`TRIODITIS_NETWORKS on ${name} must be "${CLOUD_NETWORKS}": a backend on Convex's cloud is demo-only.`)
-  }
-} else {
-  set('TRIODITIS_NETWORKS', CLOUD_NETWORKS)
+  removeConvexEnv(['TRIODITIS_NETWORKS'], { cwd: backendDir })
+  console.log("Removed TRIODITIS_NETWORKS: a backend on Convex's cloud has no networks.")
 }
 if (!names.includes('TRIODITIS_DEMO') || get('TRIODITIS_DEMO') !== '1') set('TRIODITIS_DEMO', '1')
 const secret = () => randomBytes(32).toString('base64url')
@@ -174,6 +172,11 @@ run(
   ],
   { cwd: backendDir, env: { VITE_CONVEX_SITE_URL: convexSiteUrl, VITE_TRIODITIS_ENVIRONMENT: name } },
 )
+// Nightly keeps its data between deploys, so its rows are caught up as a self-hosted server's
+// are (packages/backend/convex/migrations.ts): the demo chats from before the fake network
+// was removed are deleted this way.
+step(`Backend: migrations on ${name}`)
+run('pnpm', convex('run', 'migrations:runAll'), { cwd: backendDir })
 writeBuildOutput(convexSiteUrl)
 
 if (setupLink) {

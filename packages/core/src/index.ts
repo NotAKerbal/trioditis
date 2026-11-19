@@ -15,7 +15,6 @@ export const NETWORKS = [
   'linkedin',
   'twitter',
   'bluesky',
-  'fake',
 ] as const
 export type Network = (typeof NETWORKS)[number]
 

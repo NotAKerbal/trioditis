@@ -7,7 +7,7 @@ import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/com
 import { byteSize } from './lib/bounded'
 import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
-import { enabledNetworks } from './lib/networks'
+import { bridgedNetworks } from './lib/networks'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -101,9 +101,11 @@ export const ingest = mutation({
   handler: async (ctx, args) => {
     assertGateway(args.secret)
     if (args.events.length > MAX_BATCH) throw new ConvexError('Batch too large')
-    // Only networks this server offers. A demo deployment (fake only) so never stores events
-    // from a real network, whoever holds the gateway secret.
-    if (!enabledNetworks().has(args.network)) throw new ConvexError('Network not enabled')
+    // Only networks this server runs a bridge host for, installed by an admin or not: a
+    // network that was removed keeps its accounts until their logouts land, and what arrives
+    // for them meanwhile is theirs. A demo deployment runs none, so it never stores events
+    // from a network, whoever holds the gateway secret.
+    if (!bridgedNetworks().has(args.network)) throw new ConvexError('Network not enabled')
     const now = Date.now()
     const host = await registerHost(ctx, args.hostId, args.network, now)
 
