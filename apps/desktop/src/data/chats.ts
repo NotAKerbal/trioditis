@@ -30,7 +30,10 @@ export interface Chat {
   id: ChatId
   row: ChatRow
   network: Network
+  /** Its name, or what it is and where (`Chat on WhatsApp`) when that isn't known yet. */
   name: string
+  /** Whether `name` is the chat's own. */
+  named: boolean
   topic: string | undefined
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
@@ -54,13 +57,15 @@ function openMeta(row: ChatRow, session: Session): ChatPlaintext | null {
 
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
   const meta = openMeta(row, session)
+  const own = meta?.name?.trim()
   const where = networkName(row.network)
   const muted = (row.mutedUntil ?? 0) > now
   return {
     id: row._id as ChatId,
     row,
     network: row.network,
-    name: meta?.name?.trim() || (row.kind === 'dm' ? `Chat on ${where}` : `Group on ${where}`),
+    name: own || (row.kind === 'dm' ? `Chat on ${where}` : `Group on ${where}`),
+    named: !!own,
     topic: meta?.topic,
     described: !!meta,
     unread: row.unreadCount,

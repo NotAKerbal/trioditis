@@ -23,8 +23,10 @@ const KEY = 'trioditis.prefs'
 
 function load(): Prefs {
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Prefs>
-    return { ...DEFAULTS, ...saved }
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>
+    // Only today's preferences: one that's gone (notificationContent, say) isn't kept or saved.
+    const known = Object.fromEntries(Object.entries(saved).filter(([key]) => key in DEFAULTS))
+    return { ...DEFAULTS, ...known } as Prefs
   } catch {
     return DEFAULTS
   }

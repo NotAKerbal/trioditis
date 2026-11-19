@@ -255,7 +255,7 @@ function Notifications() {
         title="Desktop notifications"
         about={
           supported
-            ? 'Show who sent each new message and what they said, while Trioditis is open.'
+            ? 'Show each new message and who sent it (in a group, the group’s name), while Trioditis is open.'
             : 'This browser can’t show notifications.'
         }
       >

@@ -51,9 +51,10 @@ export function newArrivals(
 }
 
 /**
- * Who sent it and what they said. The chat's name is the sender in a one-to-one chat; a group
- * shows its own name, since the app doesn't know its members' names yet.
+ * Who sent it and what they said, never the network. The chat's name is the sender in a
+ * one-to-one chat; a group shows its own name, since the app doesn't know its members' names
+ * yet. A chat whose name isn't known yet would be named after its network, so it has none.
  */
 export function notificationText(chat: Chat, text: string | null): { title: string; body: string } {
-  return { title: chat.name, body: text ?? 'New message' }
+  return { title: chat.named ? chat.name : 'New message', body: text ?? 'New message' }
 }

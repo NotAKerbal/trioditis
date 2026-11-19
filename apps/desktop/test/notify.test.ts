@@ -82,9 +82,12 @@ describe('which arrivals notify', () => {
 })
 
 describe('what a notification says', () => {
-  const chat = { id: 'c1', name: 'Alice', network: 'whatsapp' } as Chat
+  const chat = { id: 'c1', name: 'Alice', named: true, network: 'whatsapp' } as Chat
   it('shows who sent it and what they said, never the network', () => {
     expect(notificationText(chat, 'See you at 7')).toEqual({ title: 'Alice', body: 'See you at 7' })
     expect(notificationText(chat, null)).toEqual({ title: 'Alice', body: 'New message' })
+    // Not described yet: the list calls it "Chat on WhatsApp", the notification doesn't.
+    const unnamed = { ...chat, name: 'Chat on WhatsApp', named: false }
+    expect(notificationText(unnamed, 'Hi')).toEqual({ title: 'New message', body: 'Hi' })
   })
 })
