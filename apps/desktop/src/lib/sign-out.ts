@@ -117,6 +117,16 @@ const underWay = new Set<Promise<unknown>>()
 let leaving = false
 /** The last session a sign-out here asked the server to end, and whether its key's removal was confirmed. */
 let asked: { sessionId: string; unconfirmed: boolean } | null = null
+/** The session this page opened with (members.me), once it's known. */
+let opened: string | null = null
+
+/** Notes the session this page opened with, for leaving when it ends (leaveForSignIn). */
+export function noteOpenedSession(sessionId: string) {
+  opened ??= sessionId
+}
+
+/** The session this page opened with, if it has opened one. */
+export const openedSession = () => opened
 
 /** Counts `work` as a sign-out under way on this page until it settles. */
 export function signingOut<T>(work: Promise<T>): Promise<T> {
@@ -127,12 +137,13 @@ export function signingOut<T>(work: Promise<T>): Promise<T> {
 
 /**
  * Goes to the sign-in page once any sign-out under way here is over, unless one has already
- * left for it: for a page that saw `sessionId`, the session it opened with, end (members.me).
+ * left for it: for a page that saw `sessionId`, the session it opened with, end (members.me, or
+ * Convex saying it's signed out).
  * If a sign-out here had asked to end it, and didn't hear back, this is that sign-out going
  * through after all: it leaves as that one would have, warning if the key's removal wasn't
  * confirmed, and telling the other tabs.
  */
-export async function leaveForSignIn(sessionId: string | null) {
+export async function leaveForSignIn(sessionId: string | null = opened) {
   while (underWay.size) await Promise.allSettled(underWay)
   if (leaving) return
   leaving = true

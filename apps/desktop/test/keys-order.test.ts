@@ -135,6 +135,11 @@ vi.resetModules()
 const otherTab = await import('../src/lib/keys.ts')
 
 const inSession = (id: string) => async () => id
+/** Makes the key stored for `userId` one kept before backups were recorded with it: unknown. */
+const keptBeforeBackupsWereNoted = (userId: string) => {
+  const { backedUp: _backedUp, ...rest } = db.rows.get(userId) as { backedUp?: true }
+  db.rows.set(userId, rest)
+}
 const refusal = (why: string) => expect.objectContaining({ why })
 const later = <T>() => {
   let settle!: (value: T) => void
@@ -187,6 +192,7 @@ describe('keeping and forgetting the key on this device', () => {
   it('stops saves under way without removing anything, for a sign-out unsure of the backups', async () => {
     const kept = generateKeyPair()
     await storeIdentity('u6', keyId(kept.publicKey), kept, await saveToken('u6'), inSession('S'))
+    keptBeforeBackupsWereNoted('u6')
     const token = await saveToken('u6')
     await forgetIdentity('u6', { onlyKid: null })
     // The key already here stays; a save from before the sign-out doesn't land.
@@ -488,6 +494,7 @@ describe('signing out, as the key on this device sees it', () => {
 
   it('keeps a key whose backups still don’t exist, and says so when that can’t be told', async () => {
     const first = await keptHere('v14')
+    keptBeforeBackupsWereNoted('v14')
     expect(await signOut('v14', first.session.id, { onlyKid: null, backedUpKid: async () => null })).toBeNull()
     expect((await loadIdentity('v14'))?.kid).toBe(first.kid)
     expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
@@ -525,6 +532,7 @@ describe('signing out, as the key on this device sees it', () => {
 
   it('keeps a key in the fence while its backups aren’t known to exist', async () => {
     const kept = await keptHere('v21')
+    keptBeforeBackupsWereNoted('v21')
     expect(await fenceSession('v21', kept.session.id)).toBe(true)
     expect((await loadIdentity('v21'))?.kid).toBe(kept.kid)
     await expect(saveIn(otherTab, 'v21', kept, kept.session.id)).rejects.toEqual(refusal('signingOut'))
@@ -566,6 +574,42 @@ describe('signing out, as the key on this device sees it', () => {
     await underWay
     await leaving
     expect(location.assign).toHaveBeenCalledWith('/sign-in')
+  })
+
+  it('removes a key saved just before the fence by its own record, though the screen didn’t know', async () => {
+    // The signing-out tab's live query still says no key is ready; another tab in the session has
+    // just unlocked one and kept it here. The fence names no key, and the record says enough.
+    const kept = await keptHere('v23')
+    expect(await fenceSession('v23', kept.session.id)).toBe(true)
+    expect(await loadIdentity('v23')).toBeNull()
+  })
+
+  it('names a key exactly: another kept here stays, backed up or not', async () => {
+    const kept = await keptHere('v24')
+    expect(await fenceSession('v24', kept.session.id, 'some-other-key')).toBe(true)
+    expect((await loadIdentity('v24'))?.kid).toBe(kept.kid)
+  })
+
+  it('leaves from wherever the page sees its session end, with the warning and the tab notice', async () => {
+    // Convex says signed out (an auth refresh saw the revocation) before members.me did.
+    vi.resetModules()
+    const page = await import('../src/lib/sign-out.ts')
+    const kept = await keptHere('v25')
+    page.noteOpenedSession(kept.session.id)
+    expect(await page.rememberSession(kept.session.id)).toBe('noted')
+    server.loseResponse = true
+    const failure = await page.signOut('v25', kept.session.id, {
+      onlyKid: null,
+      backedUpKid: () => Promise.reject(new Error('offline')),
+    })
+    expect(failure).toMatch(/didn’t go through/)
+    const tabs = new BroadcastChannel('trioditis-account')
+    const heard = new Promise((resolve) => tabs.addEventListener('message', resolve, { once: true }))
+    location.assign.mockClear()
+    await page.leaveForSignIn()
+    expect(location.assign).toHaveBeenCalledWith('/sign-in?key=unconfirmed')
+    await heard
+    tabs.close()
   })
 
   it('turns saves away with a reason that says what to do', () => {

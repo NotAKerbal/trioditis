@@ -30,6 +30,8 @@ import {
   currentSessionId,
   fenceSession,
   leaveForSignIn,
+  noteOpenedSession,
+  openedSession,
   rememberSession,
   SIGN_OUT_UNSTORED,
   signingOut,
@@ -49,6 +51,12 @@ export function AppGate({ children }: { children: ReactNode }) {
   const { isLoading, isAuthenticated } = useConvexAuth()
   const signedOut = useConfirmedSignedOut(!isLoading && !isAuthenticated)
   if (isAuthenticated) return <MemberGate>{children}</MemberGate>
+  // A page that was signed in leaves as its session's end says (a sign-out of its own may be
+  // finishing, or never heard back): see leaveForSignIn. One that never was just goes to sign in.
+  if (signedOut && openedSession()) {
+    void leaveForSignIn()
+    return <Splash />
+  }
   if (signedOut) return <Navigate to="/sign-in" />
   return <Splash />
 }
@@ -89,6 +97,7 @@ function MemberGate({ children }: { children: ReactNode }) {
     if (!sessionId) return
     if (opened.current && opened.current !== sessionId) return window.location.reload()
     opened.current = sessionId
+    noteOpenedSession(sessionId)
     let stop = false
     const note = (tries: number): unknown =>
       rememberSession(sessionId).then((noted) => {

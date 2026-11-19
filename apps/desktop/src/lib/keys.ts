@@ -17,6 +17,12 @@ interface StoredIdentity {
   iv: Uint8Array<ArrayBuffer>
   wrapped: ArrayBuffer
   deviceKey: CryptoKey
+  /**
+   * The key's backups were known to exist on the server when it was kept: every key kept now
+   * is (unlocking opens a backup; setup keeps the key once the server has both). Missing on a
+   * key kept before this was recorded, whose backups are then unknown here.
+   */
+  backedUp?: true
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -193,7 +199,17 @@ export async function storeIdentity(
   const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, new Uint8Array(keyPair.privateKey))
-  const record: StoredIdentity = { userId, kid, publicKey: toBase64Url(keyPair.publicKey), iv, wrapped, deviceKey }
+  // Kept only once its backups exist (see StoredIdentity.backedUp): so a sign-out can tell, in its
+  // own transaction, that this copy isn't the only one.
+  const record: StoredIdentity = {
+    userId,
+    kid,
+    publicKey: toBase64Url(keyPair.publicKey),
+    iv,
+    wrapped,
+    deviceKey,
+    backedUp: true,
+  }
   let session: string | null
   try {
     session = await currentSession()
@@ -214,7 +230,8 @@ export async function storeIdentity(
 /**
  * Forgets this device's key and fences saves begun before it. With `onlyKid`, it removes the
  * stored key only if it's that one: a different key here is someone else's evidence to keep.
- * With `onlyKid` null it removes nothing, and only fences: signing out while a key's backups
+ * With `onlyKid` null it removes the stored key only if that key's own record says its backups
+ * exist (StoredIdentity.backedUp), and otherwise only fences: signing out while a key's backups
  * aren't known to exist. With `endingSession`, saves for that session are refused from then on
  * (for signing out). Every tab hears of it once the forget has committed.
  */
@@ -228,11 +245,14 @@ export async function forgetIdentity(
         const ended = forgets.endedSessions.filter((id) => id !== endingSession)
         if (endingSession) ended.push(endingSession)
         writeForgets(store, userId, { count: forgets.count + 1, endedSessions: ended.slice(-NOTED_SESSIONS) })
-        if (onlyKid === null) return
         if (onlyKid === undefined) return void store.delete(userId)
+        // Read in this transaction, so it's whatever key is stored by now, a save that landed just
+        // before included. Named: that key only. Not named: the stored key if its own record says
+        // its backups exist; one whose backups aren't known stays.
         const stored = store.get(userId)
         stored.onsuccess = () => {
-          if ((stored.result as StoredIdentity | undefined)?.kid === onlyKid) store.delete(userId)
+          const key = stored.result as StoredIdentity | undefined
+          if (key && (onlyKid === null ? key.backedUp : key.kid === onlyKid)) store.delete(userId)
         }
       }),
     )
