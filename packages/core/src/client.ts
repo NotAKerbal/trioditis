@@ -87,9 +87,17 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'slack',
     name: 'Slack',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/slack.md.
-    flows: [],
-    termsRisk: false,
+    // The connector's IDs. The token flow comes first: it needs nothing the stepper can't
+    // show, where the email flow can stop at a CAPTCHA or a workspace list. See
+    // docs/networks/slack.md.
+    flows: [
+      { id: 'token', kind: 'cookies', name: 'Token and cookie' },
+      { id: 'email', kind: 'form', name: 'Email code' },
+      { id: 'app', kind: 'form', name: 'Slack app (bot)' },
+    ],
+    // A browser session's token used by an unofficial client, against Slack's acceptable
+    // use policy, and against many workspaces' own rules.
+    termsRisk: true,
   },
   groupme: {
     network: 'groupme',
