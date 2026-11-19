@@ -25,6 +25,10 @@ cat >"$work/source/deploy/install/install.sh" <<'EOF'
 #!/bin/sh
 root=$(cd "$(dirname "$0")/../.." && pwd)
 echo "installed $(git -C "$root" rev-parse HEAD)" >>"$UPDATER_TEST_LOG"
+# How it was run: its options, and whether it was handed the install's lock.
+lock=no
+if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
+echo "$* lock=$lock" >>"$UPDATER_TEST_LOG.how"
 if [ -e "$root/deploy/install/FAIL" ]; then printf '\033[31merror:\033[0m The build broke.\n' >&2; exit 1; fi
 EOF
 chmod +x "$work/source/deploy/install/install.sh"
@@ -46,7 +50,7 @@ cp "$repo/deploy/updater/updater.sh" "$work/checkout/deploy/updater/"
 cp "$repo/deploy/scripts/env.sh" "$work/checkout/deploy/scripts/"
 printf 'COMPOSE_PROJECT_NAME=trioditis-test\nUPDATER_SECRET=test-secret\n' >"$work/checkout/deploy/.env"
 # The installer's files that aren't in git stay out of it, as in a real install.
-printf 'deploy/.env\ndeploy/updater/\ndeploy/scripts/\ndeploy/.operation.lock\n' >>"$work/checkout/.git/info/exclude"
+printf 'deploy/.env\ndeploy/updater/\ndeploy/scripts/\ndeploy/.operation.lock\ndeploy/.updater-state\n' >>"$work/checkout/.git/info/exclude"
 
 mkdir -p "$work/bin"
 cat >"$work/bin/docker" <<'EOF'
@@ -54,7 +58,10 @@ cat >"$work/bin/docker" <<'EOF'
 # The updater's only docker calls are the agent's: record each report.
 case " $* " in
   *' -e UPDATER_SECRET '*' watch '*) echo "watch with ${UPDATER_SECRET:-no secret}" >>"$REPORT_LOG"; echo 'stable 0 - -' ;;
-  *' report '*) echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
+  *' report '*)
+    # A request an admin cancelled can't be claimed.
+    [ "${UPDATER_CLAIM:-}" != cancelled ] || exit 1
+    echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
 EOF
@@ -65,8 +72,9 @@ export PATH="$work/bin:$PATH" UPDATER_TEST_LOG="$work/installs" REPORT_LOG="$wor
 # the outcome it's left with. Exits like the step (an update that succeeds exits 0 itself).
 run() {
   : >"$work/installs"
+  : >"$work/installs.how"
   : >"$work/reports"
-  bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; done_id=req1; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
+  bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
 }
 head_is() { [ "$(git -C "$work/checkout" rev-parse HEAD)" = "$1" ]; }
@@ -81,6 +89,9 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
   grep -q "^idle|Updated to ${c2%"${c2#???????}"}.|req1|$c2|$c2|0|0|test-secret" "$work/reports" &&
   check ok "nightly moves it to dev's newest commit, installs it, and reports it done" ||
   check fail "nightly moves it to dev's newest commit, installs it, and reports it done ($(cat "$work/out" "$work/reports"))"
+[ "$(cat "$work/installs.how")" = "--no-setup-link lock=held" ] &&
+  check ok "the installer runs holding the updater's lock, and prints no setup link" ||
+  check fail "the installer runs holding the updater's lock, and prints no setup link ($(cat "$work/installs.how"))"
 
 # A commit whose installer fails.
 git_ -C "$work/source" checkout -q dev
@@ -94,6 +105,35 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "$(printf 'installed %s\ninstalle
   grep -q "^failed|The update to ${c3%"${c3#???????}"} failed: The build broke. The server is back on ${c2%"${c2#???????}"}." "$work/out" &&
   check ok "a failed install goes back to the commit it was on, installs that, and says why" ||
   check fail "a failed install goes back to the commit it was on, installs that, and says why ($(cat "$work/out" "$work/installs"))"
+state=$work/checkout/deploy/.updater-state
+grep -qx "failed_target=$c3" "$state" && grep -qx 'pending_target=' "$state" &&
+  check ok "the failed commit outlasts a restart, and nothing is left pending" ||
+  check fail "the failed commit outlasts a restart, and nothing is left pending ($(cat "$state"))"
+
+# From c1, with dev at c3: a request cancelled before the update claimed it, and a lock held
+# by someone else, both leave the checkout where it is.
+git_ -C "$work/checkout" checkout -q --detach "$c1"
+TEST_REQUEST=cancelled run update nightly
+head_is "$c1" && grep -q '^idle|The update was cancelled' "$work/out" && [ ! -s "$work/installs" ] &&
+  check ok "a request cancelled before it starts installs nothing" ||
+  check fail "a request cancelled before it starts installs nothing ($(cat "$work/out"))"
+flock "$work/checkout/deploy/.operation.lock" sleep 5 &
+holder=$!
+sleep 0.5
+run update nightly
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+head_is "$c1" && grep -q '^failed|A backup or an install is running' "$work/out" && [ ! -s "$work/installs" ] &&
+  check ok "a held lock stops it before the checkout moves" ||
+  check fail "a held lock stops it before the checkout moves ($(cat "$work/out"))"
+
+# An update cut off before it installed: the next start finishes it, and reports its request.
+printf 'pending_target=%s\npending_previous=%s\npending_request=req9\nauto_day=2026-01-01\nfailed_target=%s\n' "$c2" "$c1" "$c3" >"$state"
+run recover
+head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] && grep -q "^idle|Updated to ${c2%"${c2#???????}"}.|req9|" "$work/reports" &&
+  grep -qx 'pending_target=' "$state" && grep -qx 'auto_day=2026-01-01' "$state" &&
+  check ok "an update cut off is finished on the next start, and its request reported done" ||
+  check fail "an update cut off is finished on the next start, and its request reported done ($(cat "$work/out" "$work/reports" "$state"))"
 
 # Ahead of stable (main is at c1): nothing to install.
 run update stable

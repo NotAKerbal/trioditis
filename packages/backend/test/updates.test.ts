@@ -127,11 +127,22 @@ describe('updates', () => {
     ).rejects.toThrow(/commit/)
   })
 
-  it('takes back a request the updater hasn’t started', async () => {
+  it('takes back a request the updater hasn’t started, which it then can’t claim', async () => {
     const t = setup()
     const admin = await signIn(t, 'admin', 'admin')
     await admin.mutation(api.updates.request, { kind: 'update' })
+    const { request } = await t.query(api.updates.poll, { secret: UPDATER_SECRET })
     await admin.mutation(api.updates.cancelRequest, {})
     expect((await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request).toBeNull()
+    await expect(
+      t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'updating', claim: request!.id }),
+    ).rejects.toThrow(/cancelled/)
+    expect((await admin.query(api.updates.status, {})).updater).toBeNull()
+
+    // A request still waiting is claimed, and can't be cancelled after.
+    await admin.mutation(api.updates.request, { kind: 'update' })
+    const next = (await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request!
+    await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'updating', claim: next.id })
+    await expect(admin.mutation(api.updates.cancelRequest, {})).rejects.toThrow(/already started/)
   })
 })

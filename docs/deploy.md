@@ -310,11 +310,21 @@ What the updater does:
 It only ever moves forward: it installs a commit only when the checkout is behind the branch
 and has nothing the branch lacks, so switching from Nightly to an older Stable leaves the
 server where it is until Stable passes it, and a branch that was rewritten or diverged is
-never installed. It won't move a checkout with changes to tracked files, and it waits while a
-backup or an install holds the lock. If the installer fails, it checks out the commit it was
-on and runs the installer again, and reports both; a commit whose update failed isn't tried
-again automatically (Update now still tries it). An update is never interrupted: a request
-waits until it's done.
+never installed. It won't move a checkout with changes to tracked files. It takes the
+install's lock before it moves the checkout and holds it until the installer is done (the
+installer it runs uses that lock rather than taking its own), so a backup or an install the
+operator starts can't run in between; if one is already running, the update says so and
+doesn't start. If the installer fails, it checks out the commit it was on and runs the
+installer again, and reports both; a commit whose update failed isn't tried again
+automatically (Update now still tries it). The installer runs with `--no-setup-link`, since its
+output goes to the journal.
+
+A request can be cancelled until the updater claims it, just before it moves the checkout;
+after that the update runs to the end. What must outlast a restart is in
+`deploy/.updater-state`: the update in progress, the day of the last automatic update, and the
+commit whose update last failed. An update cut off midway (the machine or the service stopped)
+is finished when the updater next starts, before anything else, from the commits recorded
+there.
 
 The checkout belongs to the updater: leave it on the commit the updater put it on, and don't
 pull or edit it by hand. A private repository needs a `git fetch` that works without a

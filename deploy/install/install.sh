@@ -54,6 +54,8 @@ Options (each one is kept for later reruns):
                        Run the updater, a systemd service that updates this install from
                        its git remote when admins ask in the app or on their schedule, or
                        stop and remove it (default off; docs/deploy.md, Updates)
+  --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
+                       goes to a log). Not kept for reruns
 EOF
 }
 
@@ -61,6 +63,7 @@ EOF
 unset -v mode port host bind proxy_url trusted domain networks e2e updater
 local_flag=0
 new_server_keys=0
+setup_link=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
@@ -81,6 +84,7 @@ while [ $# -gt 0 ]; do
     --no-e2e) e2e=0 ;;
     --updater) updater=1 ;;
     --no-updater) updater=0 ;;
+    --no-setup-link) setup_link=0 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -128,7 +132,9 @@ fi
 # One install, backup or other write command for this install at a time (deploy/trioditis
 # takes the same lock): they stop and start the server under each other.
 if command -v flock >/dev/null; then
-  exec 9>"$here/.operation.lock"
+  # The updater runs this holding the lock on descriptor 9, which is then used as it is: a
+  # lock it holds is this run's, and one anyone else holds still stops it.
+  if ! { [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$here/.operation.lock" ]; }; then exec 9>"$here/.operation.lock"; fi
   flock -n 9 || die "Another backup, install or change to this install is running."
 else
   warn "flock (util-linux) isn't installed, so nothing stops a backup running during this install."
@@ -694,7 +700,9 @@ case "$(account_state)" in
   no)
     # The web app is built in only when the checkout has it (deploy/docker/web.Dockerfile);
     # until then nothing in the browser creates accounts.
-    if [ -f "$root/apps/desktop/package.json" ]; then
+    if [ "$setup_link" = 0 ]; then
+      printf 'The admin account doesn'"'"'t exist yet. Run deploy/install/install.sh for the setup link.\n\n'
+    elif [ -f "$root/apps/desktop/package.json" ]; then
       cat <<EOF
 Create the admin account with this link. It works once, until the first account exists:
 

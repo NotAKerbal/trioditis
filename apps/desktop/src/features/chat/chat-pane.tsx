@@ -36,7 +36,15 @@ import {
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
-import { appendToDraft, restoreDraft, setDraftReply, setDraftText, takeDraft, useDraft } from '~/data/drafts.ts'
+import {
+  appendToDraft,
+  restoreDraft,
+  setDraftReply,
+  setDraftText,
+  takeDraft,
+  useDraft,
+  whileSending,
+} from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
@@ -118,7 +126,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
     // Put the text and reply back if the send didn't reach the server, keeping anything newer.
-    await sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply))
+    await whileSending(() =>
+      sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply)),
+    )
   }
 
   async function onSchedule(sendAt: number) {
@@ -134,21 +144,23 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     // it comes back, ahead of anything typed since, only if it doesn't go.
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
-    try {
-      const clientMessageId = newClientId()
-      const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
-      await schedule({
-        chatId,
-        clientMessageId,
-        sendAt,
-        ...sealed,
-        ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
-      })
-      toast(`Scheduled for ${formatWhen(sendAt)}`)
-    } catch (e) {
-      restoreDraft(chatId, taken.text, taken.reply)
-      toast(errorMessage(e, 'That message couldn’t be scheduled.'))
-    }
+    await whileSending(async () => {
+      try {
+        const clientMessageId = newClientId()
+        const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
+        await schedule({
+          chatId,
+          clientMessageId,
+          sendAt,
+          ...sealed,
+          ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
+        })
+        toast(`Scheduled for ${formatWhen(sendAt)}`)
+      } catch (e) {
+        restoreDraft(chatId, taken.text, taken.reply)
+        toast(errorMessage(e, 'That message couldn’t be scheduled.'))
+      }
+    })
   }
 
   const name = chat.name

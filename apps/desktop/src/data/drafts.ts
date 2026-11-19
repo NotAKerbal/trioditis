@@ -20,8 +20,25 @@ const store = new Map<string, Draft<unknown>>()
 const listeners = new Set<() => void>()
 const EMPTY: Draft<never> = { text: '', reply: null, rev: 0 }
 
-/** Whether any chat has a draft or a reply in progress, which a reload would lose. */
+/** Sends and schedules under way, whose text is out of the draft until they settle. */
+let inFlight = 0
+
+/**
+ * Runs the send or schedule of a taken draft, putting it back included. Until it settles, the
+ * text is in neither the draft nor the server, so `hasDrafts` counts it.
+ */
+export async function whileSending<T>(work: () => Promise<T>): Promise<T> {
+  inFlight++
+  try {
+    return await work()
+  } finally {
+    inFlight--
+  }
+}
+
+/** Whether a reload would lose text: a draft, a reply in progress, or a send not yet settled. */
 export function hasDrafts() {
+  if (inFlight > 0) return true
   for (const draft of store.values()) if (draft.text.trim() || draft.reply) return true
   return false
 }

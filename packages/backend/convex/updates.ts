@@ -170,6 +170,8 @@ export const report = mutation({
     current: v.optional(commitInfo),
     latest: v.optional(updaterReport.fields.latest),
     done: v.optional(v.string()),
+    /** The request this report starts on: refused if it was cancelled meanwhile. */
+    claim: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -178,6 +180,7 @@ export const report = mutation({
       if (commit !== undefined && !COMMIT.test(commit)) throw new ConvexError('Not a commit ID')
     }
     const row = await ensureSettingsRow(ctx)
+    if (args.claim !== undefined && row.request?.id !== args.claim) throw new ConvexError('That request was cancelled.')
     const previous = row.updater
     const now = Date.now()
     // An update's start is when it was first reported; a failure keeps the start of the update

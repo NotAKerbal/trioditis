@@ -9,7 +9,11 @@
 # branch from this checkout's git remote, and to update, moves the checkout to that branch's
 # newest commit and runs the installer, which restarts only what changed. It only ever moves
 # forward: a commit the branch doesn't have, or local changes, and it stays where it is. If
-# the installer fails, it goes back to the commit it was on and runs the installer again.
+# the installer fails, it goes back to the commit it was on and runs the installer again. It
+# holds the install's lock from before it moves the checkout until the installer is done, and
+# keeps what must outlast a restart in deploy/.updater-state: an update in progress (finished
+# on the next start, if it was cut off), the day of the last automatic update, and the commit
+# whose update last failed.
 #
 # Everything is in functions and the last line calls main, so bash has read the whole file
 # before an update replaces it. After an update it exits, and systemd starts the new one.
@@ -45,7 +49,7 @@ load_settings() {
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
 # The secret and a report's values reach it as UPDATER_* variables, never as arguments (an
 # unset one isn't passed); --init so it stops on a signal.
-AGENT_VARIABLES='SECRET STATE MESSAGE DONE CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
+AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
   LATEST_SUBJECT BEHIND AHEAD CHECKED_AT'
 agent() {
   local passed=() name
@@ -55,15 +59,49 @@ agent() {
     --entrypoint node "$project/node:local" deploy/scripts/updater-agent.mjs "$@"
 }
 
-# report STATE [MESSAGE]: what the admins see. Marks $done_id finished, if set.
+# report STATE [MESSAGE]: what the admins see. Marks $done_id finished, if set; with
+# UPDATER_CLAIM set to a request's ID, fails unless that request is still waiting.
 report() {
   UPDATER_STATE=$1 UPDATER_MESSAGE=${2:-} UPDATER_DONE=$done_id \
     UPDATER_CURRENT=$current UPDATER_CURRENT_AT=$current_at \
     UPDATER_LATEST=$latest UPDATER_LATEST_CHANNEL=$latest_channel UPDATER_LATEST_AT=$latest_at \
     UPDATER_LATEST_SUBJECT=$latest_subject UPDATER_BEHIND=$behind UPDATER_AHEAD=$ahead \
     UPDATER_CHECKED_AT=$checked_at \
-    agent report || log "Couldn't report to the backend."
+    agent report || { log "Couldn't report to the backend."; return 1; }
 }
+
+# The state that outlasts a restart, in deploy/.updater-state: NAME=value lines, each checked
+# as it's read, so a damaged file reads as no state rather than as a command.
+STATE_NAMES='pending_target pending_previous pending_request auto_day failed_target'
+load_state() {
+  local name value
+  pending_target='' pending_previous='' pending_request='' auto_day='' failed_target=''
+  [ -f "$state_file" ] || return 0
+  while IFS='=' read -r name value; do
+    case "$name" in
+      pending_target | pending_previous | failed_target) [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
+      pending_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
+      auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
+      *) continue ;;
+    esac
+    printf -v "$name" '%s' "$value"
+  done <"$state_file"
+}
+save_state() {
+  local tmp name
+  tmp=$(mktemp "$state_file.XXXXXX") || { log "Couldn't save $state_file."; return 1; }
+  for name in $STATE_NAMES; do printf '%s=%s\n' "$name" "${!name}"; done >"$tmp" &&
+    mv -f "$tmp" "$state_file" || { rm -f "$tmp"; log "Couldn't save $state_file."; return 1; }
+}
+
+# The install's lock (deploy/.operation.lock), on descriptor 9, which the installer it runs
+# finds already held and uses as is. take_lock [SECONDS] waits that long for it (default: not
+# at all).
+take_lock() {
+  command -v flock >/dev/null || return 0
+  exec 9>"$here/.operation.lock" && flock -w "${1:-0}" 9
+}
+release_lock() { exec 9>&-; }
 
 # outcome STATE MESSAGE: what the reports say from now until the next check or update.
 outcome() {
@@ -108,7 +146,8 @@ run_install() {
     return 1
   fi
   output=$(mktemp)
-  "$root/deploy/install/install.sh" 2>&1 | tee "$output" >&2
+  # Its output goes to the journal, which is no place for the admin setup link.
+  "$root/deploy/install/install.sh" --no-setup-link 2>&1 | tee "$output" >&2
   status=${PIPESTATUS[0]}
   if [ "$status" != 0 ]; then
     install_error=$(sed 's/\x1b\[[0-9;]*m//g' "$output" | grep -a '^error: ' | tail -1 | cut -c8-308)
@@ -143,18 +182,35 @@ update() {
     outcome failed "The server's checkout has local changes, so the updater won't move it."
     return
   fi
-  # The installer takes this lock too; checked first so a backup or an install the operator
-  # is running isn't mistaken for a failed update.
-  if command -v flock >/dev/null && ! flock -n "$here/.operation.lock" true; then
+  # Held from here until the installer is done, so a backup or an install the operator starts
+  # can't run between moving the checkout and installing it, nor be mistaken for a failure.
+  if ! take_lock; then
+    release_lock
     outcome failed "A backup or an install is running on the server. Try again once it's done."
     return
   fi
   target=$latest
   previous=$current
+  # Claimed before anything moves: an admin who cancelled meanwhile gets their way. The
+  # request stays until the update is over, so it isn't marked done yet.
+  if ! UPDATER_CLAIM=$done_id done_id='' report updating "Installing ${target:0:7}." && [ -n "$done_id" ]; then
+    release_lock
+    outcome idle "The update was cancelled before it started."
+    return
+  fi
+  pending_target=$target pending_previous=$previous pending_request=$done_id
+  save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
   log "Updating from $previous to $target ($name)."
-  # The request stays until the update is over, so it isn't marked done yet.
-  done_id='' report updating "Installing ${target:0:7}."
+  finish_update
+}
+
+# finish_update: installs $pending_target, or goes back to $pending_previous if that fails,
+# holding the lock. Exits after a successful update.
+finish_update() {
+  local target=$pending_target previous=$pending_previous error
   if run_install "$target"; then
+    pending_target='' pending_previous='' pending_request=''
+    save_state
     describe_current
     behind=0 ahead=0
     outcome idle "Updated to ${target:0:7}."
@@ -162,16 +218,31 @@ update() {
     log "Updated to $target."
     exit 0
   fi
-  local error=$install_error
+  error=$install_error
   log "The update to $target failed: $error Going back to $previous."
-  failed_target=$target
   if run_install "$previous"; then
-    describe_current
     outcome failed "The update to ${target:0:7} failed: $error The server is back on ${previous:0:7}."
   else
-    describe_current
     outcome failed "The update to ${target:0:7} failed, and so did going back to ${previous:0:7}: $install_error The updater's log on the server has the details."
   fi
+  describe_current
+  failed_target=$target pending_target='' pending_previous='' pending_request=''
+  save_state
+  release_lock
+}
+
+# An update cut off by a restart (the machine, or the service, stopped mid-install) is
+# finished first: the checkout may be on either commit, and the server half updated.
+recover() {
+  [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
+  log "Finishing the update to $pending_target, which was cut off."
+  take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
+  done_id=$pending_request
+  done_id='' report updating "Finishing the update to ${pending_target:0:7}, which was cut off."
+  finish_update
+  # It failed and went back: its request is done, so it isn't tried again from the top.
+  report "$outcome_state" "$outcome_message"
+  done_id=''
 }
 
 # Whether an automatic update is due: the admins turned them on, it's the hour for them, and
@@ -188,6 +259,7 @@ init() {
   env_file="$here/.env"
   # shellcheck source=deploy/scripts/env.sh
   . "$here/scripts/env.sh"
+  state_file="$here/.updater-state"
   remote=origin
   # A fetch that needs credentials it doesn't have fails rather than waiting for a prompt.
   export GIT_TERMINAL_PROMPT=0
@@ -195,7 +267,8 @@ init() {
   load_settings || return 1
   describe_current || { log "$root isn't a git checkout."; return 1; }
   latest='' latest_channel='' latest_at='' latest_subject='' behind='' ahead='' checked_at=''
-  last_fetch=0 auto_day='' failed_target='' done_id=''
+  last_fetch=0 done_id=''
+  load_state
   outcome idle ''
 }
 
@@ -212,6 +285,7 @@ main() {
   for container in $(docker ps -aq --filter "label=trioditis.updater=$project"); do
     docker rm -f "$container" >/dev/null 2>&1 || true
   done
+  recover || exit 1
   log "Watching for updates to $root (project $project)."
 
   local wait=0 line channel auto request_id kind
@@ -243,6 +317,7 @@ main() {
     fi
     if [ "$kind" != update ] && auto_due; then
       auto_day=$(date +%F)
+      save_state
       if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
         update "$channel"
       fi
