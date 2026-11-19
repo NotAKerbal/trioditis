@@ -37,6 +37,18 @@ func init() {
 			sc := conn.(*signal.SignalConnector)
 			return signalsweep.Start(ctx, sc.Bridge.DB.Database, signalsweep.Interval, log.With().Str("component", "signal sweep").Logger())
 		},
+		// signalmeow submits a message again, unasked, after an ambiguous outcome: when the
+		// websocket drops with the send's response outstanding it resubmits the request
+		// (web.SignalWebsocket.sendRequestInternal, up to 3 times), and a 500 or 503 from
+		// Signal makes it send again, single- and multi-recipient (sendContent,
+		// sendToGroupWithSenderKey). Both happen inside its own websocket client, whose send
+		// channel and response channels nothing outside it can reach, before the host could
+		// report the send as unknown. Until mautrix-signal can be told not to, Signal is
+		// receive-only here. See docs/networks/signal.md, Sending.
+		ReceiveOnly: true,
+		// signalmeow logs the history transfer's backup key and a contact's name and number at
+		// info level; see signallog.go.
+		LogFilter: signalLogFilter,
 	})
 }
 

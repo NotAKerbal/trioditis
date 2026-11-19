@@ -55,6 +55,9 @@ type Config struct {
 	// AdjustBridgeConfig lets callers change bridgev2's settings, for tests.
 	AdjustBridgeConfig func(*bridgeconfig.BridgeConfig)
 	SendTimeout        time.Duration
+	// ReceiveOnly refuses commands that would put a message on the network
+	// (connector.Options.ReceiveOnly).
+	ReceiveOnly bool
 
 	Log zerolog.Logger
 }
@@ -166,7 +169,7 @@ func New(cfg Config) (*Host, error) {
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
 		BridgeKey: cfg.BridgeKey,
-		Notify:    notify, SendTimeout: cfg.SendTimeout,
+		Notify:    notify, SendTimeout: cfg.SendTimeout, ReceiveOnly: cfg.ReceiveOnly,
 	})
 	bridgeCfg := BridgeConfig()
 	if cfg.AdjustBridgeConfig != nil {

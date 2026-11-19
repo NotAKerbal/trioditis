@@ -192,6 +192,14 @@ func (c *Connector) HandleCommand(ctx context.Context, cmd *protocol.Command) er
 
 func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check bool) error {
 	switch cmd.Type {
+	case protocol.CommandSend, protocol.CommandEdit, protocol.CommandReact, protocol.CommandUnreact, protocol.CommandRedact:
+		// Refused before anything reaches bridgev2, so the outcome is certain: nothing went
+		// out. A stored one refused when it runs fails the same way.
+		if c.ReceiveOnly {
+			return conflict(protocol.ErrUnsupported, "%s is receive-only in this bridge host", c.Network)
+		}
+	}
+	switch cmd.Type {
 	case protocol.CommandSend, protocol.CommandEdit:
 		return c.handleSend(ctx, cmd, check)
 	case protocol.CommandReact:
