@@ -43,18 +43,21 @@ load_settings() {
 }
 
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
-# Values reach it as UPDATER_* variables, never as arguments; --init so it stops on a signal.
+# The secret and a report's values reach it as UPDATER_* variables, never as arguments (an
+# unset one isn't passed); --init so it stops on a signal.
+AGENT_VARIABLES='SECRET STATE MESSAGE DONE CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
+  LATEST_SUBJECT BEHIND AHEAD CHECKED_AT'
 agent() {
   local passed=() name
-  for name in $(compgen -e | grep '^UPDATER_'); do passed+=(-e "$name"); done
-  docker run --rm --init --log-driver none --label "trioditis.updater=$project" \
+  for name in $AGENT_VARIABLES; do passed+=(-e "UPDATER_$name"); done
+  UPDATER_SECRET=$secret docker run --rm --init --log-driver none --label "trioditis.updater=$project" \
     --network "${project}_default" "${passed[@]}" \
     --entrypoint node "$project/node:local" deploy/scripts/updater-agent.mjs "$@"
 }
 
 # report STATE [MESSAGE]: what the admins see. Marks $done_id finished, if set.
 report() {
-  UPDATER_SECRET=$secret UPDATER_STATE=$1 UPDATER_MESSAGE=${2:-} UPDATER_DONE=$done_id \
+  UPDATER_STATE=$1 UPDATER_MESSAGE=${2:-} UPDATER_DONE=$done_id \
     UPDATER_CURRENT=$current UPDATER_CURRENT_AT=$current_at \
     UPDATER_LATEST=$latest UPDATER_LATEST_CHANNEL=$latest_channel UPDATER_LATEST_AT=$latest_at \
     UPDATER_LATEST_SUBJECT=$latest_subject UPDATER_BEHIND=$behind UPDATER_AHEAD=$ahead \

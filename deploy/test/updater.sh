@@ -53,6 +53,7 @@ cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
 # The updater's only docker calls are the agent's: record each report.
 case " $* " in
+  *' -e UPDATER_SECRET '*' watch '*) echo "watch with ${UPDATER_SECRET:-no secret}" >>"$REPORT_LOG"; echo 'stable 0 - -' ;;
   *' report '*) echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
@@ -117,6 +118,13 @@ head_is "$c1" && grep -q "^failed|The server's checkout has local changes" "$wor
   [ "$(cat "$work/checkout/file")" = changed ] &&
   check ok "local changes: it stays, and they're kept" || check fail "local changes: it stays, and they're kept ($(cat "$work/out"))"
 git_ -C "$work/checkout" checkout -q -- file
+
+# The watch gets the secret too.
+: >"$work/reports"
+bash -c '. "$1/deploy/updater/updater.sh"; init; agent watch 0' updater "$work/checkout" >"$work/out" 2>&1 || true
+[ "$(cat "$work/out")" = "stable 0 - -" ] && [ "$(cat "$work/reports")" = "watch with test-secret" ] &&
+  check ok "the agent gets the updater's secret for a watch" ||
+  check fail "the agent gets the updater's secret for a watch ($(cat "$work/out" "$work/reports"))"
 
 # check_latest counts both ways.
 bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; echo "$latest $behind $ahead $latest_channel"' updater "$work/checkout" >"$work/out" 2>&1 || true
