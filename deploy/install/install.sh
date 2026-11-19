@@ -129,6 +129,9 @@ fi
 
 # --- Settings -----------------------------------------------------------------------------
 
+# The one parser for deploy/.env: env_check, env_value, env_names.
+# shellcheck source=deploy/scripts/env.sh
+. "$here/scripts/env.sh"
 # deploy/.env appears with the first setting saved, after the options are checked, so an
 # install exists exactly when it does. It's read once, here, and kept in memory: a read that
 # fails stops the install, rather than looking like missing settings and secrets.
@@ -138,24 +141,15 @@ if [ -e "$env_file" ] || [ -L "$env_file" ]; then
   existing_install=1
   if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then die "deploy/.env isn't a regular file. Put the install's .env back there."; fi
   env_text=$(cat "$env_file") || die "Couldn't read deploy/.env, which holds this install's settings and secrets."
-  # It's kept in the one form this writes (NAME=value, unquoted, each name once), which
-  # backup relies on to leave the private keys out; anything else is for the operator to fix.
-  if ! problems=$(printf '%s\n' "$env_text" | awk '
-    /^[[:space:]]*$/ || /^#/ { next }
-    !/^[A-Za-z_][A-Za-z0-9_]*=/ { print "line " NR " isn'"'"'t NAME=value"; bad = 1; next }
-    {
-      name = $0; sub(/=.*/, "", name)
-      value = $0; sub(/^[^=]*=/, "", value)
-      if (value ~ /^["\047`]/) { print "line " NR " (" name ") has a quoted value"; bad = 1 }
-      if (seen[name]++) { print "line " NR " sets " name " again"; bad = 1 }
-    }
-    END { exit bad }'); then
+  # It's kept in the one form this writes (deploy/scripts/env.sh), which backup relies on;
+  # anything else is for the operator to fix.
+  if ! problems=$(printf '%s\n' "$env_text" | env_check); then
     die "deploy/.env has lines not in the form this writes (NAME=value, unquoted, each name once): $(echo "$problems" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). Fix them and run this again."
   fi
 fi
 
-get() { printf '%s\n' "$env_text" | grep -E "^$1=" | tail -1 | cut -d= -f2- || true; }
-has() { printf '%s\n' "$env_text" | grep -qE "^$1="; }
+get() { printf '%s\n' "$env_text" | env_value "$1"; }
+has() { printf '%s\n' "$env_text" | env_names | grep -qx "$1"; }
 # Writes $2 (a file's whole contents) to path $1 through a private temp file beside it, then a
 # rename onto the exact name, so the file is never half written and a symlink at the name is
 # replaced, not followed. $3 is its mode.
@@ -168,7 +162,8 @@ write_file() {
   fi
 }
 # Sets NAME VALUE [NAME VALUE ...] in one atomic write, so a pair (such as a key pair) is
-# never saved half.
+# never saved half. Every name set is either listed in deploy/install/env-names (what a
+# backup keeps) or a private key (what it never does); deploy/test/install-settings.sh checks.
 set_var() {
   local names='' text
   for ((i = 1; i < $#; i += 2)); do names="$names|${!i}"; done

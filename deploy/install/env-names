@@ -1,0 +1,37 @@
+# The settings install.sh writes to deploy/.env, which `deploy/trioditis backup` copies into a
+# backup's secrets.env: only these, one per line. The other two names it writes,
+# BRIDGE_PRIVATE_KEY and AGENT_ACCESS_PRIVATE_KEY, never go into a backup (they're kept
+# apart with `deploy/trioditis keys export`). A name the installer starts writing must be
+# added here or to those two; deploy/test/install-settings.sh fails until it is.
+INSTALL_MODE
+INSTALL_DOMAIN
+PROXY_URL
+INSTALL_HOST
+INSTALL_BIND
+INSTALL_E2E
+INSTALL_TRUSTED_PROXIES
+HTTP_PORT
+HTTP_BIND
+PUBLIC_HOST
+PUBLIC_URL
+CADDY_SITE_ADDRESS
+CADDY_GLOBAL_OPTIONS
+CADDY_TRUSTED_PROXIES
+LOOPBACK_PORT
+HAIRPIN_BIND
+HAIRPIN_PORT
+HAIRPIN_TARGET
+COMPOSE_PROJECT_NAME
+COMPOSE_FILE
+COMPOSE_PROFILES
+TRIODITIS_NETWORKS
+BRIDGE_HOSTS
+POSTGRES_PASSWORD
+CONVEX_INSTANCE_SECRET
+BETTER_AUTH_SECRET
+GATEWAY_SECRET
+TRIODITIS_INTERNAL_TOKEN
+TRIODITIS_SETUP_TOKEN
+CONVEX_ADMIN_KEY
+BRIDGE_PUBLIC_KEY
+AGENT_ACCESS_PUBLIC_KEY

@@ -3,7 +3,9 @@
 # inside the checkout; `keys import` puts the private keys back into a deploy/.env that has
 # only the public ones (as a backup's secrets.env does), and refuses a pair that isn't this
 # server's: one whose public key differs, or whose private key isn't the private half of the
-# saved public key (mixed pairs). Neither prints a key. The keys are real X25519 pairs, made
+# saved public key (mixed pairs), and any private key not exactly 32 bytes of canonical
+# unpadded base64url (a trailing word or space, padding, 31 or 33 bytes, other characters).
+# Neither prints a key. The keys are real X25519 pairs, made
 # with the bundle's Node image, since import derives each public key to check it.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 # shellcheck source=deploy/test/lib.sh
@@ -57,6 +59,19 @@ for file in mixed swapped; do
   trioditis keys import "$backups/$file" >"$root/out" 2>&1 && status=0 || status=$?
   [ "$status" != 0 ] && grep -q "isn't the private half" "$root/out" && cmp -s "$env_file" "$root/secrets.env" && no_key_in "$root/out" &&
     check ok "import refuses a $file pair, printing no key" || { check fail "import refuses a $file pair, printing no key"; cat "$root/out" >&2; }
+done
+
+# A private key that isn't exactly a key: what's checked must be what's saved.
+bytes() { head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }
+k=$(key BRIDGE_PRIVATE_KEY)
+for bad in "$k typo" "$k " "$k=" "$(bytes 31)" "$(bytes 33)" "$(printf '%s' "$k" | cut -c1-42)+" "$(printf '%s' "$k" | cut -c1-42)B"; do
+  sed "s/^BRIDGE_PRIVATE_KEY=.*//" "$backups/keys" >"$backups/bad"
+  printf 'BRIDGE_PRIVATE_KEY=%s\n' "$bad" >>"$backups/bad"
+  trioditis keys import "$backups/bad" >"$root/out" 2>&1 && status=0 || status=$?
+  shape=$(printf '%s' "$bad" | sed 's/[A-Za-z0-9_-]\{6,\}/<key>/g')
+  [ "$status" != 0 ] && grep -q "isn't a key" "$root/out" && cmp -s "$env_file" "$root/secrets.env" && no_key_in "$root/out" &&
+    check ok "import refuses a private key like '$shape' ($(printf '%s' "$bad" | wc -c) chars)" ||
+    { check fail "import refuses a private key like '$shape'"; cat "$root/out" >&2; }
 done
 
 trioditis keys import "$backups/keys" >"$root/out" 2>&1 && status=0 || status=$?

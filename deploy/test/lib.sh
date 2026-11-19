@@ -31,6 +31,9 @@ make_install() {
   mkdir -p "$root/deploy"
   cp "$wrapper" "$root/deploy/trioditis"
   cp -r "$repo/deploy/compose" "$root/deploy/compose"
+  cp -r "$repo/deploy/scripts" "$root/deploy/scripts"
+  mkdir -p "$root/deploy/install"
+  cp "$repo/deploy/install/env-names" "$root/deploy/install/env-names"
   for name in POSTGRES_PASSWORD CONVEX_INSTANCE_SECRET BETTER_AUTH_SECRET GATEWAY_SECRET \
     TRIODITIS_INTERNAL_TOKEN BRIDGE_PUBLIC_KEY BRIDGE_PRIVATE_KEY AGENT_ACCESS_PUBLIC_KEY \
     AGENT_ACCESS_PRIVATE_KEY CONVEX_ADMIN_KEY; do

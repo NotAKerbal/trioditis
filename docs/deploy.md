@@ -298,8 +298,19 @@ it in one step, checks both files are there, and starts again what was running. 
 either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
 server is still stopping, leaves nothing behind, and if the server doesn't start again the
 backup counts as failed. The destination must be outside the checkout (symlinks resolved):
-image builds copy the checkout. It refuses a `deploy/.env` that isn't in the form the
-installer writes (`NAME=value` lines), since it can only leave the private keys out of that.
+image builds copy the checkout.
+
+`secrets.env` holds only the settings the installer writes, as `NAME=value` lines: the names
+listed in `deploy/install/env-names`, never the two private keys, and nothing else, not even
+a comment. Anything else in `deploy/.env` (a setting you added yourself) stays out of the
+backup, and the backup names it, without its value, so you can keep it yourself. As a last
+check, it won't publish a backup in which either private key's value appears anywhere.
+
+`deploy/.env` has one form, which the installer, backup and `keys` all read the same way
+(`deploy/scripts/env.sh`): `NAME=value` lines, the value unquoted, each name once, and no
+carriage returns; comments (`#`) and blank lines are allowed. Compose reads more
+(`export NAME=…`, spaces around `=`, quoted values), so anything else is refused, by the
+installer as by backup, which refuses before it makes anything.
 
 Keep backups encrypted: they contain the connector state above, and `secrets.env` holds every
 other secret the server has. Keep the private keys apart from them, with
@@ -318,7 +329,8 @@ will take, and they need that version:
 
 Backup, the installer, `create-admin`, `keys import`, and every `deploy/trioditis` Compose
 command that can start, stop or change services take a lock in `deploy/`, so only one of
-them runs at a time for an install. Only read-only commands (`ps`, `logs`, `config`, `top`,
+them runs at a time for an install. `deploy/trioditis` acts only on this install's Compose
+project, so it refuses `-p` and `--project-name`. Only read-only commands (`ps`, `logs`, `config`, `top`,
 `images`, `ls`, `port`, `version`, `events`) run beside them.
 
 ### The server's keys
@@ -339,7 +351,8 @@ It writes the two pairs to a new file, readable only by you, and never over an e
 or inside the checkout. Keep that file somewhere the backups aren't, such as a password
 manager or offline media, and delete the copy on the server. `keys import <file>` puts the
 private keys back into a `deploy/.env` that has only the public ones. It refuses a pair whose
-public key isn't the one there, and one whose private key isn't that public key's private
+public key isn't the one there, one whose private key isn't exactly a key (43 characters of
+unpadded base64url, nothing more), and one whose private key isn't that public key's private
 half (it derives each, in the bundle's Node image with no network). Neither command prints a
 key.
 

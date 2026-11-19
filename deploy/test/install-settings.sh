@@ -6,7 +6,11 @@
 # deploy/.env only, not from exported variables; and half a key pair (a public key without
 # its private one, as a backup's secrets.env leaves) stops the install, unless
 # --new-server-keys asks for a new pair; and --public-url with the port reachable from other
-# machines needs --trusted-proxies, since any of them could send its own X-Forwarded-For. TRIODITIS_INSTALLER=<path> tests another
+# machines needs --trusted-proxies, since any of them could send its own X-Forwarded-For; a
+# .env not in the one form (export, spaces around =, quotes, even after a space, a name
+# twice, a carriage return) stops it, unchanged; and every name it writes is classified,
+# either listed in deploy/install/env-names (what a backup keeps) or one of the two private
+# keys, so a new setting can't be added without deciding whether backups keep it. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 set -eu
@@ -28,6 +32,8 @@ checkout() {
   mkdir -p "$work/checkout/deploy/install"
   cp "$installer" "$work/checkout/deploy/install/install.sh"
   cp -r "$repo/deploy/compose" "$work/checkout/deploy/compose"
+  cp -r "$repo/deploy/scripts" "$work/checkout/deploy/scripts"
+  cp "$repo/deploy/install/env-names" "$work/checkout/deploy/install/env-names"
 }
 cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
@@ -48,7 +54,12 @@ case "$1" in
 esac
 EOF
 chmod +x "$work/bin/docker"
-install() { PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; }
+install() {
+  runs=$((${runs:-0} + 1))
+  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
+  cp "$work/checkout/deploy/.env" "$work/env.$runs" 2>/dev/null || true
+  return "$status"
+}
 value() { sed -n "s/^$1=//p" "$work/checkout/deploy/.env" | tail -1; }
 
 # An existing .env it can't read.
@@ -109,16 +120,37 @@ install --public-url https://proxy.invalid:8443 || true
   check fail "on the loopback, only the loopback is trusted until the network's gateway is known ($(value CADDY_TRUSTED_PROXIES))"
 
 # A .env not in the form the installer writes stops it, unchanged.
-for line in 'export POSTGRES_PASSWORD=keep-me' 'POSTGRES_PASSWORD = keep-me' 'POSTGRES_PASSWORD="keep-me"' 'POSTGRES_PASSWORD=keep-me
+for line in 'export POSTGRES_PASSWORD=keep-me' 'POSTGRES_PASSWORD = keep-me' 'POSTGRES_PASSWORD="keep-me"' \
+  'POSTGRES_PASSWORD= "keep-me"' "$(printf 'POSTGRES_PASSWORD=keep-me\r')" 'POSTGRES_PASSWORD=keep-me
 POSTGRES_PASSWORD=again'; do
   checkout
   printf '%s\nCOMPOSE_PROJECT_NAME=trioditis-test\n' "$line" >"$work/checkout/deploy/.env"
   before=$(cat "$work/checkout/deploy/.env")
   if install; then status=0; else status=$?; fi
   [ "$status" != 0 ] && grep -q "not in the form this writes" "$work/out" && [ "$(cat "$work/checkout/deploy/.env")" = "$before" ] &&
-    check ok "a .env with '$(echo "$line" | head -1)…' stops the install, unchanged" ||
-    check fail "a .env with '$(echo "$line" | head -1)…' stops the install, unchanged"
+    check ok "a .env with '$(echo "$line" | head -1 | tr '\r' '^')…' stops the install, unchanged" ||
+    check fail "a .env with '$(echo "$line" | head -1 | tr '\r' '^')…' stops the install, unchanged"
 done
+
+# Every name the installer writes: those its set_var and keep_or statements name (a
+# statement's continued lines joined; ${pair} is each key pair), and those a run wrote.
+classified() { grep -qxF "$1" "$repo/deploy/install/env-names" || [ "$1" = BRIDGE_PRIVATE_KEY ] || [ "$1" = AGENT_ACCESS_PRIVATE_KEY ]; }
+written=$( {
+  statements=$(awk '{ if (joined != "") joined = joined " " $0; else joined = $0 } !/\\$/ { print joined; joined = "" }' "$installer" |
+    grep -E '(^|[^A-Za-z_])(set_var|keep_or) ')
+  # Literal names: each followed by its value.
+  printf '%s\n' "$statements" | grep -oE '(^|[[:space:]])"?[A-Z][A-Z0-9_]+"? "' | grep -oE '[A-Z][A-Z0-9_]+' || true
+  # A name made from a key pair: one for each pair. (The ${pair} is literal text here.)
+  # shellcheck disable=SC2016
+  printf '%s\n' "$statements" | grep -oE '"\$\{pair\}_[A-Z_]+"' | tr -d '"' | sed 's/^\${pair}_//' |
+    while read -r rest; do echo "BRIDGE_$rest" && echo "AGENT_ACCESS_$rest"; done
+  for run in "$work"/env.*; do [ ! -f "$run" ] || sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$run"; done
+} | sort -u)
+unclassified=''
+for name in $written; do classified "$name" || unclassified="$unclassified $name"; done
+[ "$(echo "$written" | wc -w)" -ge 30 ] && [ -z "$unclassified" ] &&
+  check ok "every name the installer writes ($(echo "$written" | wc -w)) is classified" ||
+  check fail "every name the installer writes is classified (not:$unclassified; found $(echo "$written" | wc -w))"
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

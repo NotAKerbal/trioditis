@@ -13,6 +13,15 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 env_file="$here/.env"
+if [ "${1:-}" = restore ]; then
+  # Restore comes in a later version (deploy/restore). Refused before anything else, an
+  # install or not, so no restore can half happen.
+  echo "Restore isn't available in this version yet. Keep your backups: a later version restores them." >&2
+  exit 1
+fi
+# The one parser for deploy/.env and key files: env_check, env_value, env_names.
+# shellcheck source=deploy/scripts/env.sh
+. "$here/scripts/env.sh"
 if [ ! -f "$env_file" ]; then
   echo "No install here yet. Run deploy/install/install.sh first." >&2
   exit 1
@@ -62,23 +71,6 @@ take_lock() {
 
 random_hex() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# Prints, and fails on, each line of deploy/.env (on stdin) not in the form the installer
-# writes: NAME=value, the value unquoted, each name once (comments and blank lines aside).
-# Anything else Compose also reads (`export NAME=…`, spaces around `=`, a quoted value that
-# could run over lines), and backup could only leave the private keys out of NAME=value lines.
-env_noncanonical() {
-  awk '
-    /^[[:space:]]*$/ || /^#/ { next }
-    !/^[A-Za-z_][A-Za-z0-9_]*=/ { print "line " NR " isn'"'"'t NAME=value"; bad = 1; next }
-    {
-      name = $0; sub(/=.*/, "", name)
-      value = $0; sub(/^[^=]*=/, "", value)
-      if (value ~ /^["\047`]/) { print "line " NR " (" name ") has a quoted value"; bad = 1 }
-      if (seen[name]++) { print "line " NR " sets " name " again"; bad = 1 }
-    }
-    END { exit bad }'
-}
-
 # The bundle's Node image (as in deploy/docker/node.Dockerfile), for deriving public keys.
 node_image=node:24.21-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 # Reads "<name> <X25519 private key, base64url>" lines on stdin and prints "<name> <its public
@@ -106,12 +98,31 @@ derive_public_keys() {
 # input) and the agent-access key (granted chats). Backups leave them out; `keys` moves them.
 private_keys='BRIDGE_PRIVATE_KEY|AGENT_ACCESS_PRIVATE_KEY'
 key_names='BRIDGE_PUBLIC_KEY BRIDGE_PRIVATE_KEY AGENT_ACCESS_PUBLIC_KEY AGENT_ACCESS_PRIVATE_KEY'
-# The last value of $1 in text $2.
-value_in() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | tail -1; }
+# The value of $1 in checked text $2.
+value_in() { printf '%s\n' "$2" | env_value "$1"; }
+# Reads deploy/.env (a regular file, not a link) once, into $env_text, and checks its form;
+# refuses, naming the bad lines, if it isn't the one form.
+read_env() {
+  { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
+  env_text=$(cat "$env_file")
+  if ! problems=$(printf '%s\n' "$env_text" | env_check); then
+    echo "deploy/.env isn't all in the form the installer writes (NAME=value, unquoted, each name once):" >&2
+    echo "$problems" | sed 's/^/  /' >&2
+    echo "Fix those lines and run this again." >&2
+    exit 1
+  fi
+}
+# A private key as the installer writes one: canonical unpadded base64url of exactly 32
+# bytes, and nothing else (43 characters, the last carrying no stray bits).
+valid_key() {
+  printf '%s\n' "$1" | grep -qxE '[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]'
+}
 
 case "${1:-}" in
   backup)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
+    # deploy/.env, checked before anything is made.
+    read_env
     mkdir -p "$2"
     # Real paths, so a symlink can't lead the backup into the checkout.
     dir=$(cd "$2" && pwd -P)
@@ -119,12 +130,6 @@ case "${1:-}" in
       "$(cd "$here/.." && pwd -P)"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;;
     esac
     take_lock
-    if ! problems=$(env_noncanonical <"$env_file"); then
-      echo "deploy/.env isn't all in the form the installer writes (NAME=value), so the backup can't be sure it leaves the private keys out:" >&2
-      echo "$problems" | sed 's/^/  /' >&2
-      echo "Fix those lines (or run the installer, which keeps the file that way) and back up again." >&2
-      exit 1
-    fi
     # Everything the backup writes is the caller's alone.
     umask 077
     worker="$project-backup-$(random_hex)"
@@ -136,6 +141,7 @@ case "${1:-}" in
     published=''
     reserved=''
     running=''
+    left_out=''
     # However it ends, even interrupted while stopping: the archive container goes first, so
     # nothing still reads the volumes; the unpublished directory goes; and what was running
     # starts again once any stop still under way in Docker has finished. A second interrupt
@@ -146,8 +152,9 @@ case "${1:-}" in
       trap '' INT TERM HUP
       docker rm -f "$worker" >/dev/null 2>&1 || true
       [ -z "$work" ] || rm -rf "$work" || true
-      # A name reserved but never published: only the empty directory this backup made.
-      [ -z "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
+      # A name it was reserving but never published: removed only as an empty directory, which
+      # is all this backup ever makes there (rmdir refuses anything else).
+      [ -z "$reserved" ] || [ ! -d "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
       if [ -n "$running" ]; then
         compose stop >/dev/null 2>&1 || true
         # shellcheck disable=SC2086 # $running is a list of services
@@ -158,6 +165,7 @@ case "${1:-}" in
       fi
       if [ "$status" = 0 ]; then
         echo "Backed up project $project to $published (archive.tgz, and the secrets in secrets.env)."
+        [ -z "$left_out" ] || echo "Left out of secrets.env, as settings the installer doesn't write (keep them yourself if you need them):$left_out"
         echo "It holds private data: keep it encrypted."
         echo "The server's private keys aren't in it: with a backup they'd open what's sealed to the server."
         echo "Keep them apart from your backups (a password manager, or offline media): deploy/trioditis keys export <file>."
@@ -198,11 +206,28 @@ case "${1:-}" in
         } >"$MANIFEST"
         tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
         wait "$tar_pid"' >"$work/archive.tgz"
-    # deploy/.env without the private keys, read in one pass: a backup holds sealed content, and
-    # those keys open it (docs/architecture/sealing.md, Bridge key exposure).
-    read_status=0
-    grep -vE "^($private_keys)=" "$env_file" >"$work/secrets.env" || read_status=$?
-    [ "$read_status" -le 1 ] || { echo "Couldn't read deploy/.env." >&2; exit 1; }
+    # secrets.env holds only the settings listed in deploy/install/env-names, each as
+    # NAME=value from the checked .env: never the private keys (a backup holds sealed
+    # content, and they open it: docs/architecture/sealing.md, Bridge key exposure), and
+    # nothing else, not even a comment. A name deploy/.env has that isn't listed stays out, and
+    # is named below (its value isn't) for the operator to keep.
+    allowed=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)$/\1/p' "$here/install/env-names")
+    present=$(printf '%s\n' "$env_text" | env_names)
+    for name in $allowed; do
+      ! printf '%s\n' "$present" | grep -qx "$name" || printf '%s=%s\n' "$name" "$(value_in "$name" "$env_text")"
+    done >"$work/secrets.env"
+    left_out=''
+    for name in $present; do
+      case "$name" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY) continue ;; esac
+      printf '%s\n' "$allowed" | grep -qx "$name" || left_out="$left_out $name"
+    done
+    # And a last check that neither private key's value is anywhere in it, by any name. The
+    # values are patterns on stdin, never arguments.
+    if printf '%s\n' "$(value_in BRIDGE_PRIVATE_KEY "$env_text")" "$(value_in AGENT_ACCESS_PRIVATE_KEY "$env_text")" |
+      grep -vx '' | grep -qFf - "$work/secrets.env"; then
+      echo "A private key's value is in another setting, so it would be in the backup. Nothing was published." >&2
+      exit 1
+    fi
 
     # The name is reserved with mkdir, which fails if anything (a file, a directory, a link) is
     # there; then the private directory is renamed onto that empty one in one step, so the
@@ -211,7 +236,9 @@ case "${1:-}" in
     stamp="$dir/$project-$(date +%Y%m%d-%H%M%S)"
     n=1
     name=$stamp
-    until mkdir "$name" 2>/dev/null && reserved=$name; do
+    # The name is recorded before mkdir, so an interrupt at any point leaves cleanup knowing it.
+    until reserved=$name && mkdir "$name" 2>/dev/null; do
+      reserved=''
       [ -e "$name" ] || [ -L "$name" ] || { echo "Couldn't create the backup in $dir." >&2; exit 1; }
       n=$((n + 1))
       [ "$n" -le 100 ] || { echo "No free name for the backup in $dir." >&2; exit 1; }
@@ -225,20 +252,13 @@ case "${1:-}" in
     reserved=''
     published=$name
     ;;
-  restore)
-    # Restore comes in a later version (deploy/restore). Refused before the lock or anything
-    # else, so no restore can half happen.
-    echo "Restore isn't available in this version yet. Keep your backups: a later version restores them." >&2
-    exit 1
-    ;;
   keys)
     case "${2:-}" in export | import) ;; *) echo "Usage: deploy/trioditis keys export|import <file>" >&2; exit 2 ;; esac
     [ $# -eq 3 ] || { echo "Usage: deploy/trioditis keys $2 <file>" >&2; exit 2; }
     # deploy/.env, read once (after taking the lock, for an import, which writes it). No key is
     # ever printed.
     [ "$2" != import ] || take_lock
-    { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
-    env_text=$(cat "$env_file")
+    read_env
     if [ "$2" = export ]; then
       # A new file, readable only by you, published with a rename that fails if anything is
       # at the name, so nothing is ever overwritten; never inside the checkout.
@@ -271,6 +291,18 @@ $name=$value"
       # added through a temp file and a rename onto deploy/.env.
       { [ -r "$3" ] && [ ! -d "$3" ]; } || { echo "No key file at $3." >&2; exit 1; }
       file_text=$(cat "$3")
+      if ! problems=$(printf '%s\n' "$file_text" | env_check); then
+        echo "$3 isn't a key file in the form keys export writes:" >&2
+        echo "$problems" | sed 's/^/  /' >&2
+        echo "Nothing was changed." >&2
+        exit 1
+      fi
+      # Each private key exactly as it must be; the value checked is the value derived from
+      # and the value saved.
+      for pair in BRIDGE AGENT_ACCESS; do
+        valid_key "$(value_in "${pair}_PRIVATE_KEY" "$file_text")" ||
+          { echo "$3's ${pair}_PRIVATE_KEY isn't a key (43 characters of unpadded base64url, nothing else). Nothing was changed." >&2; exit 1; }
+      done
       new_text=$(printf '%s\n' "$env_text" | grep -vE "^($private_keys)=" || true)
       # Each private key's own public key, derived from it (no key is printed).
       derived=$(for pair in BRIDGE AGENT_ACCESS; do
@@ -328,8 +360,13 @@ ${pair}_PRIVATE_KEY=$private"
     for arg in "$@"; do
       if [ "$takes_value" = 1 ]; then takes_value=0 && continue; fi
       case "$arg" in
-        -f | --file | -p | --project-name | --profile | --project-directory | --env-file | --ansi | --progress | --parallel | --workdir) takes_value=1 ;;
-        --file=* | --project-name=* | --profile=* | --project-directory=* | --env-file=* | --ansi=* | --progress=* | --parallel=* | --workdir=* | -f?* | -p?*) ;;
+        # This install's project is set already; another would act on another install.
+        -p | -p?* | --project-name | --project-name=*)
+          echo "deploy/trioditis acts on this install's project ($project) only; drop $arg." >&2
+          exit 2
+          ;;
+        -f | --file | --profile | --project-directory | --env-file | --ansi | --progress | --parallel | --workdir) takes_value=1 ;;
+        --file=* | --profile=* | --project-directory=* | --env-file=* | --ansi=* | --progress=* | --parallel=* | --workdir=* | -f?*) ;;
         --compatibility | --dry-run | --all-resources | --verbose) ;;
         -*) break ;;
         *) command=$arg && break ;;
