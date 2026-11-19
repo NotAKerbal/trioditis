@@ -73,7 +73,7 @@ func TestLoginPromptExitsOnSignal(t *testing.T) {
 				<-exited
 			}()
 			deadline := time.Now().Add(20 * time.Second)
-			for !strings.Contains(outString(&out), "Username: ") {
+			for !strings.Contains(outString(&out), "Server: ") {
 				if time.Now().After(deadline) {
 					t.Fatalf("no prompt; output:\n%s", outString(&out))
 				}
@@ -105,7 +105,8 @@ func TestLoginPromptExitsOnSignal(t *testing.T) {
 func childEnv(t *testing.T) []string {
 	env := []string{
 		"TRIODITIS_TEST_RUN_MAIN=1",
-		"TRIODITIS_TEST_ARGS=--network fake --dev-keys --user isaac login",
+		// Bluesky's login asks for its server first, before it contacts anything.
+		"TRIODITIS_TEST_ARGS=--network bluesky --dev-keys --user isaac login",
 		// The database defaults to a file in here.
 		"BRIDGE_DATA_DIR=" + t.TempDir(),
 		// Nothing listens here: the child can't reach a real gateway.

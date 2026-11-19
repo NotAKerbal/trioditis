@@ -3,7 +3,8 @@ import type { MutationCtx } from '../_generated/server'
 import type { BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
-import { deletePayload } from './outbox'
+import { deletePayload, queueLogout } from './outbox'
+import { removedNetwork } from './networks'
 import { patchChat } from './chatView'
 import { onLoggedOut } from './commandOutcome'
 import { internal } from '../_generated/api'
@@ -488,10 +489,24 @@ async function applyLoginState(
     ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
   }
+  let accountId = existing?._id
   if (existing) {
     await ctx.db.patch(existing._id, fields)
     if (event.state === 'LOGGED_OUT') await onLoggedOut(ctx, existing)
-  } else await ctx.db.insert('networkAccounts', { userId: event.userId, network, loginId: event.loginId, ...fields })
+  } else {
+    accountId = await ctx.db.insert('networkAccounts', {
+      userId: event.userId,
+      network,
+      loginId: event.loginId,
+      ...fields,
+    })
+  }
+  // An account on a network an admin removed is logged out, whenever it reports in: one whose
+  // login finished as the network was removed, or whose logout didn't take. A network that was
+  // never decided on (an older server, before its migrations ran) is left alone.
+  if (event.state !== 'LOGGED_OUT' && (await removedNetwork(ctx, network))) {
+    await queueLogout(ctx, (await ctx.db.get(accountId!))!)
+  }
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {

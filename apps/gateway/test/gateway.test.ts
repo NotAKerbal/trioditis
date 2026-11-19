@@ -400,10 +400,10 @@ describe('dispatcher', () => {
 
 describe('config and logs', () => {
   it('reads bridge host addresses and refuses anything else', () => {
-    expect(parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611, fake-1=http://bridge:8612')).toEqual(
+    expect(parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611, signal-1=http://bridge:8612')).toEqual(
       new Map([
         ['whatsapp-1', 'http://127.0.0.1:8611'],
-        ['fake-1', 'http://bridge:8612'],
+        ['signal-1', 'http://bridge:8612'],
       ]),
     )
     expect(() => parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611/path')).toThrow()

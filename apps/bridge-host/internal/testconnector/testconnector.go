@@ -1,8 +1,9 @@
-// Package fakenet is a bridgev2 network connector for a network that doesn't exist. Tests
-// and the dev stack use it to drive the bridge host without a real account: it logs in with
-// any username, takes incoming messages from Go calls, records what it is asked to send,
-// and can be told to make sends fail or become ambiguous.
-package fakenet
+// Package testconnector is a bridgev2 network connector for the bridge host's own tests. It
+// is not a network: nothing registers it, and only tests import it, so it is never part of
+// the bridge-host binary. It logs in with any username, takes incoming messages from Go
+// calls, records what it is asked to send, and can be told to make sends fail or become
+// ambiguous.
+package testconnector
 
 import (
 	"context"
@@ -39,7 +40,7 @@ const (
 	SendRefused
 )
 
-// Sent is a message the fake network was asked to send.
+// Sent is a message the test connector was asked to send.
 type Sent struct {
 	LoginID networkid.UserLoginID
 	ChatID  networkid.PortalID
@@ -48,7 +49,7 @@ type Sent struct {
 	Edit    bool
 }
 
-// HistoryMessage is a message the fake network returns from backfill.
+// HistoryMessage is a message the test connector returns from backfill.
 type HistoryMessage struct {
 	ID       networkid.MessageID
 	SenderID networkid.UserID
@@ -56,7 +57,7 @@ type HistoryMessage struct {
 	TS       time.Time
 }
 
-// Network is the fake network connector.
+// Network is the test connector.
 type Network struct {
 	Bridge *bridgev2.Bridge
 
@@ -101,7 +102,7 @@ func (n *Network) GetBridgeInfoVersion() (int, int) { return 1, 1 }
 
 func (n *Network) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
-		DisplayName: "Fake network", NetworkURL: "https://example.invalid", NetworkID: "fake", BeeperBridgeType: "fake",
+		DisplayName: "Test network", NetworkURL: "https://example.invalid", NetworkID: "testnet", BeeperBridgeType: "testnet",
 	}
 }
 
@@ -133,7 +134,7 @@ type login struct {
 
 func (l *login) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	return &bridgev2.LoginStep{
-		Type: bridgev2.LoginStepTypeUserInput, StepID: "fake.username", Instructions: "Pick a username",
+		Type: bridgev2.LoginStepTypeUserInput, StepID: "testnet.username", Instructions: "Pick a username",
 		UserInputParams: &bridgev2.LoginUserInputParams{Fields: []bridgev2.LoginInputDataField{{
 			Type: bridgev2.LoginInputFieldTypeUsername, ID: "username", Name: "Username",
 		}}},
@@ -153,14 +154,14 @@ func (l *login) SubmitUserInput(ctx context.Context, input map[string]string) (*
 	}
 	go ul.Client.Connect(ul.Log.WithContext(context.Background()))
 	return &bridgev2.LoginStep{
-		Type: bridgev2.LoginStepTypeComplete, StepID: "fake.complete", Instructions: "Logged in",
+		Type: bridgev2.LoginStepTypeComplete, StepID: "testnet.complete", Instructions: "Logged in",
 		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: ul.ID, UserLogin: ul},
 	}, nil
 }
 
 func (l *login) Cancel() {}
 
-// Client is one login's connection to the fake network.
+// Client is one login's connection to the test connector.
 type Client struct {
 	n     *Network
 	login *bridgev2.UserLogin
@@ -189,8 +190,7 @@ func (c *Client) IsThisUser(_ context.Context, userID networkid.UserID) bool {
 }
 
 // GetChatInfo describes a chat from its ID. A chat whose ID is "dm-<user>" is a direct chat
-// with that user, named after them, as the dev stack's `pnpm fake` sends them; any other ID
-// is a group with one other member.
+// with that user, named after them; any other ID is a group with one other member.
 func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	other := networkid.UserID("peer-" + string(portal.ID))
 	name := "Chat " + string(portal.ID)
@@ -211,7 +211,7 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	}, nil
 }
 
-// DisplayName is the name the fake network gives a user: their ID with a capital letter, so
+// DisplayName is the name the test connector gives a user: their ID with a capital letter, so
 // "alice" is Alice.
 func DisplayName(userID networkid.UserID) string {
 	first, size := utf8.DecodeRuneInString(string(userID))
@@ -223,13 +223,13 @@ func DisplayName(userID networkid.UserID) string {
 
 func (c *Client) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	name := DisplayName(ghost.ID)
-	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"fake:" + string(ghost.ID)}}, nil
+	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"testnet:" + string(ghost.ID)}}, nil
 }
 
 func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
 	full := event.CapLevelFullySupported
 	return &event.RoomFeatures{
-		ID:                  "fake.v1",
+		ID:                  "testnet.v1",
 		Reply:               full,
 		Edit:                full,
 		Delete:              full,
@@ -272,9 +272,9 @@ func (c *Client) sendResult(ctx context.Context) error {
 	}
 	switch SendMode(c.n.mode.Load()) {
 	case SendAmbiguous:
-		return errors.New("fake network: connection dropped after the request went out")
+		return errors.New("test connector: connection dropped after the request went out")
 	case SendRefused:
-		ms := bridgev2.WrapErrorInStatus(errors.New("fake network: message refused")).WithIsCertain(true)
+		ms := bridgev2.WrapErrorInStatus(errors.New("test connector: message refused")).WithIsCertain(true)
 		ms.Status = event.MessageStatusFail
 		return ms
 	default:
@@ -290,7 +290,7 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		// Read the attachment through the Matrix connector, as a real network would to
 		// upload it.
 		if _, err := c.n.Bridge.Bot.DownloadMedia(ctx, msg.Content.URL, msg.Content.File); err != nil {
-			return nil, fmt.Errorf("fake network: can't read attachment: %w", err)
+			return nil, fmt.Errorf("test connector: can't read attachment: %w", err)
 		}
 	}
 	msgID := networkid.MessageID(fmt.Sprintf("sent-%d", c.n.counter.Add(1)))
@@ -323,7 +323,7 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	return &database.Reaction{}, nil
 }
 
-// Reactions is how many reactions the fake network has taken.
+// Reactions is how many reactions the test connector has taken.
 func (n *Network) Reactions() int64 { return n.reactions.Load() }
 
 func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
@@ -398,7 +398,7 @@ func textMessage(text string) *bridgev2.ConvertedMessage {
 func (n *Network) login(loginID networkid.UserLoginID) (*bridgev2.UserLogin, error) {
 	ul := n.Bridge.GetCachedUserLoginByID(loginID)
 	if ul == nil {
-		return nil, fmt.Errorf("fake network: no login %s", loginID)
+		return nil, fmt.Errorf("test connector: no login %s", loginID)
 	}
 	return ul, nil
 }
@@ -556,7 +556,7 @@ func resultError(res bridgev2.EventHandlingResult) error {
 		if res.Error != nil {
 			return res.Error
 		}
-		return errors.New("fake network: event wasn't handled")
+		return errors.New("test connector: event wasn't handled")
 	}
 	return nil
 }

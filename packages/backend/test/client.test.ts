@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, components } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { chatViewOf } from '../convex/lib/chatView'
-import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
+import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T, installNetworks } from './setup'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -91,8 +91,8 @@ describe('chat views', () => {
     const a = await signIn(t, 'user_a')
     for (let n = 0; n < 55; n++) await aChat(t, 'user_a', `pin${n}`, { lastMessageAt: n, pinned: true })
     await aChat(t, 'user_a', 'plain', { lastMessageAt: 100 })
-    await aChat(t, 'user_a', 'fake-pin', { lastMessageAt: 200, pinned: true, network: 'fake' })
-    await aChat(t, 'user_a', 'fake-plain', { lastMessageAt: 300, network: 'fake' })
+    await aChat(t, 'user_a', 'signal-pin', { lastMessageAt: 200, pinned: true, network: 'signal' })
+    await aChat(t, 'user_a', 'signal-plain', { lastMessageAt: 300, network: 'signal' })
     const seen: string[] = []
     let cursor: string | null = null
     for (;;) {
@@ -105,8 +105,8 @@ describe('chat views', () => {
       cursor = result.continueCursor
     }
     expect(seen).toEqual([...Array.from({ length: 55 }, (_, n) => `pin${54 - n}`), 'plain'])
-    const fake = await a.query(api.chats.list, { network: 'fake', paginationOpts: first })
-    expect(fake.page.map((row) => row.portalId)).toEqual(['fake-pin', 'fake-plain'])
+    const signal = await a.query(api.chats.list, { network: 'signal', paginationOpts: first })
+    expect(signal.page.map((row) => row.portalId)).toEqual(['signal-pin', 'signal-plain'])
   })
 
   it('moves a chat between views as its flags change, including combined ones', async () => {
@@ -558,20 +558,36 @@ describe('scheduled sends', () => {
 })
 
 describe('networks', () => {
-  it('lists the enabled networks with their login flows', async () => {
+  it('lists the installed networks with their login flows', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
+    expect(await a.query(api.networks.list, {})).toEqual([])
+    await installNetworks(t)
     const networks = await a.query(api.networks.list, {})
-    expect(networks.map((n) => n.network)).toEqual(['whatsapp', 'fake'])
+    expect(networks.map((n) => n.network)).toEqual(['whatsapp', 'signal'])
     expect(networks[0]!.flows.map((f) => f.id)).toEqual(['qr', 'phone'])
+  })
+
+  it('offers an installed network only while the server runs its bridge host', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await installNetworks(t)
+    process.env.TRIODITIS_NETWORKS = 'whatsapp'
+    try {
+      expect((await a.query(api.networks.list, {})).map((n) => n.network)).toEqual(['whatsapp'])
+      await expect(a.mutation(api.logins.start, { network: 'signal' })).rejects.toThrow(/installed/)
+    } finally {
+      process.env.TRIODITIS_NETWORKS = 'whatsapp,signal'
+    }
   })
 
   it('reports each network’s health for the person', async () => {
     const t = setup()
+    await installNetworks(t)
     const a = await signIn(t, 'user_a')
     expect(await a.query(api.networks.health, {})).toMatchObject([
       { network: 'whatsapp', status: 'none', bridgeOnline: false },
-      { network: 'fake', status: 'none' },
+      { network: 'signal', status: 'none' },
     ])
     await t.mutation(api.gateway.ingest, {
       secret: GATEWAY_SECRET,
@@ -603,6 +619,7 @@ describe('accounts, logins and logout', () => {
 
   it('needs both key backups before a network can be connected', async () => {
     const t = setup()
+    await installNetworks(t)
     const a = await signIn(t, 'user_a')
     await t.run(async (ctx) => {
       const recovery = (await ctx.db.query('keyBackups').collect()).find((row) => row.kind === 'recovery')!

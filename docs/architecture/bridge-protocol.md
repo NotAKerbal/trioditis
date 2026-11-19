@@ -22,7 +22,7 @@ and command payloads only go to configured addresses, and redirects are refused.
 
 | Name              | Meaning                                                                                             |
 | ----------------- | --------------------------------------------------------------------------------------------------- |
-| `network`         | Network slug: `whatsapp`, `signal`, `gmessages`, `telegram`, `meta`, `instagram`, `discord`, `fake` |
+| `network`         | Network slug: `whatsapp`, `signal`, `gmessages`, `telegram`, `meta`, `instagram`, `discord`         |
 | `userId`          | Trioditis user ID (the Convex `members` row's `userId`)                                             |
 | `loginId`         | Opaque ID (`l_…`) for a bridgev2 login, unique per network. `""` until a login completes            |
 | `portalId`        | Opaque ID (`p_…`) for a bridgev2 portal, unique per network. Network IDs (phone numbers) never leak |

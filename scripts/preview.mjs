@@ -6,15 +6,14 @@
 //   pnpm preview --fresh         throw the preview's data away and start empty
 //   pnpm preview --dry-run       check what's needed, print what it would do, and do nothing
 //
-// A preview is demo-only: it offers only the fake network (TRIODITIS_NETWORKS=fake), runs no
-// bridge host, and its backend makes demo data for whoever signs up (TRIODITIS_DEMO=1, which
-// also turns invitations off), so no real account or real message ever reaches Convex's cloud.
+// A preview is demo-only: it has no networks (no TRIODITIS_NETWORKS) and runs no bridge host,
+// and its backend makes demo data for whoever signs up (TRIODITIS_DEMO=1, which also turns
+// invitations off), so no real account or real message ever reaches Convex's cloud.
 // Running it again with the same name updates that preview and keeps its data and secrets.
 // Needs `npx convex login` and `npx vercel login` to have been done once on this machine.
 import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
-  CLOUD_NETWORKS,
   TESTER,
   accounts,
   backendDir,
@@ -23,6 +22,7 @@ import {
   convexRef,
   ensureTester,
   holdLock,
+  removeConvexEnv,
   root,
   run,
   setConvexEnv,
@@ -92,6 +92,16 @@ function setVariables(values) {
     return
   }
   setConvexEnv(values, { ...inBackend, deployment: ref })
+}
+
+/** Unsets variables, like `setVariables`; one that isn't set stays unset. */
+function removeVariables(variables) {
+  if (variables.length === 0) return
+  if (dryRun) {
+    console.log(`  would remove: ${variables.join(', ')} on ${ref}`)
+    return
+  }
+  removeConvexEnv(variables, { ...inBackend, deployment: ref })
 }
 
 function existingNames() {
@@ -175,11 +185,18 @@ try {
       .filter(([variable]) => !names.includes(variable))
       .map(([variable, make]) => [variable, make()]),
   )
-  // Always: a preview is demo-only, whatever it held before.
-  toSet.TRIODITIS_NETWORKS = CLOUD_NETWORKS
+  // Always: a preview is demo-only, whatever it held before. Demo data loads only on a backend
+  // with no networks, and a preview made before networks were chosen in the app has some.
   toSet.TRIODITIS_DEMO = '1'
   setVariables(toSet)
+  removeVariables(['TRIODITIS_NETWORKS'])
   act('run', 'pnpm', convex('deploy', '--yes'), { ...inBackend, env: { CONVEX_DEPLOY_KEY: deployKey ?? '' } })
+  // A preview kept from before keeps its data, so its rows are caught up as a self-hosted
+  // server's are (packages/backend/convex/migrations.ts).
+  act('run', 'pnpm', convex('run', 'migrations:runAll'), {
+    ...inBackend,
+    env: { CONVEX_DEPLOY_KEY: deployKey ?? '' },
+  })
 
   step('Web app: Vercel preview')
   const deployOutput = act(
@@ -252,5 +269,5 @@ console.log(`
   Password  ${TESTER.password}
   Backend   https://dashboard.convex.dev/d/${deploymentName}
 
-Demo data only: the fake network, no bridge host, and no invitations. Convex removes the backend
+Demo data only: no networks, no bridge host, and no invitations. Convex removes the backend
 after a few days.`)

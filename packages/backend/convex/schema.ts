@@ -2,7 +2,6 @@ import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 import {
   chatKind,
-  commandPayload,
   deliveryState,
   envelope,
   errorCode,
@@ -11,7 +10,9 @@ import {
   network,
   sender,
   storedChatView,
+  storedCommandPayload,
   storedLastMessage,
+  storedNetwork,
   updateChannel,
   updateRequest,
   updaterReport,
@@ -74,6 +75,19 @@ export default defineSchema({
   }).index('by_key', ['key']),
 
   /**
+   * The networks admins have installed, one row per network an admin (or the migration that
+   * kept what an older version offered) has decided on. A network with no row isn't installed;
+   * removing one keeps its row, with `installed: false`, so the decision stands.
+   */
+  serverNetworks: defineTable({
+    network,
+    installed: v.boolean(),
+    updatedAt: v.number(),
+    /** The admin who decided, or `migration`. */
+    updatedBy: v.string(),
+  }).index('by_network', ['network']),
+
+  /**
    * Better Auth's rate limits, one token bucket per key (see rateLimits.ts). `key` is a
    * SHA-256, never the client address or email it was made from. A row whose bucket has
    * refilled (`fullAt` passed) means the same as no row, and is pruned.
@@ -90,7 +104,7 @@ export default defineSchema({
   /** One connected account on one network, e.g. Isaac's WhatsApp. */
   networkAccounts: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.string(),
     /** The bridge host that runs this login; its commands go there. */
     hostId: v.optional(v.string()),
@@ -112,7 +126,7 @@ export default defineSchema({
 
   loginSessions: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     state: v.union(
       v.literal('pending'),
       v.literal('active'),
@@ -127,11 +141,13 @@ export default defineSchema({
     /** The step input was last sent for: each step takes one submission, as the bridge host does. */
     submittedStepId: v.optional(v.string()),
     updatedAt: v.number(),
-  }).index('by_user', ['userId']),
+  })
+    .index('by_user', ['userId'])
+    .index('by_network_state', ['network', 'state']),
 
   chats: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.string(),
     portalId: v.string(),
     kind: chatKind,
@@ -267,7 +283,7 @@ export default defineSchema({
 
   contacts: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
@@ -275,7 +291,7 @@ export default defineSchema({
   messages: defineTable({
     userId: v.string(),
     chatId: v.id('chats'),
-    network,
+    network: storedNetwork,
     /** The bridge host's deterministic event ID: the dedup key. `pending:<clientMessageId>` until a send is echoed. */
     eventId: v.string(),
     networkTs: v.number(),
@@ -341,7 +357,7 @@ export default defineSchema({
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     eventId: v.string(),
   }).index('by_event', ['userId', 'network', 'eventId']),
 
@@ -368,11 +384,11 @@ export default defineSchema({
    */
   outbox: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.optional(v.string()),
     /** Commands for one chat go out in order, one at a time. */
     chatId: v.optional(v.id('chats')),
-    payload: commandPayload,
+    payload: storedCommandPayload,
     /**
      * `queued` → `claimed` (leased to the gateway) → `dispatched` (the bridge host has it) or
      * `rejected` or `expired`.
@@ -436,7 +452,7 @@ export default defineSchema({
   /** Each bridge host's position in its event journal. */
   bridgeHosts: defineTable({
     hostId: v.string(),
-    network,
+    network: storedNetwork,
     lastSeq: v.number(),
     /** The last batch or heartbeat. Commands only go to hosts heard from recently. */
     lastSeenAt: v.number(),

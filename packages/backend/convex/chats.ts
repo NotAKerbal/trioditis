@@ -7,6 +7,7 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { ownChat, requireMember } from './lib/access'
 import { newestMessageWhere } from './lib/bounded'
 import { patchChat } from './lib/chatView'
+import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
 import { chatKind, chatView, envelope, network, storedLastMessage } from './validators'
 
@@ -170,7 +171,13 @@ export const list = query({
       const chats = []
       for (const row of result.page) {
         const chat = await ctx.db.get(row.chatId)
-        if (chat && chat.userId === userId && chat.view === view && (!args.network || chat.network === args.network)) {
+        if (
+          chat &&
+          chat.userId === userId &&
+          chat.view === view &&
+          (!args.network || chat.network === args.network) &&
+          !retired(chat)
+        ) {
           chats.push(await rowFor(ctx, chat, accounts))
         }
       }
@@ -194,7 +201,7 @@ export const list = query({
           .order('desc')
           .paginate(opts)
     const page = []
-    for (const chat of result.page) page.push(await rowFor(ctx, chat, accounts))
+    for (const chat of result.page) if (!retired(chat)) page.push(await rowFor(ctx, chat, accounts))
     return { ...result, page }
   },
 })
@@ -204,7 +211,9 @@ export const get = query({
   returns: chatRow,
   handler: async (ctx, { chatId }) => {
     const member = await requireMember(ctx)
-    return await rowFor(ctx, await ownChat(ctx, member.userId, chatId), new Map())
+    const chat = await ownChat(ctx, member.userId, chatId)
+    if (retired(chat)) throw new ConvexError('That chat doesn’t exist.')
+    return await rowFor(ctx, chat, new Map())
   },
 })
 

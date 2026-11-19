@@ -18,8 +18,8 @@ import (
 // opaque login and portal IDs.
 func setUpChat(t *testing.T, h *harness, chat networkid.PortalID, body string) (loginID, portalID string) {
 	t.Helper()
-	loginID = h.login("alice", "alice-fake")
-	if err := h.net.Incoming("alice-fake", chat, "peer", "first-"+networkid.MessageID(chat), body, time.Now()); err != nil {
+	loginID = h.login("alice", "alice-testnet")
+	if err := h.net.Incoming("alice-testnet", chat, "peer", "first-"+networkid.MessageID(chat), body, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return loginID, h.gw.waitFor(t, "first message", isMessage(body, h, "alice")).PortalID
@@ -101,7 +101,7 @@ func TestIDsSurviveANewBridgeKey(t *testing.T) {
 	}
 	h2 := startHost(t, dir, gw, withBridgeKey(newKey))
 	defer h2.host.Stop()
-	if err = h2.net.Incoming("alice-fake", "chat", "peer", "second", "after the new key", time.Now()); err != nil {
+	if err = h2.net.Incoming("alice-testnet", "chat", "peer", "second", "after the new key", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	evt := gw.waitFor(t, "message after the new key", isMessage("after the new key", h2, "alice"))
@@ -120,12 +120,12 @@ func TestPortalKeepsItsIDThroughAReID(t *testing.T) {
 	loginID, portalID := setUpChat(t, h, "phone-chat", "before the re-ID")
 	ctx := context.Background()
 	_, _, err := h.host.Bridge.ReIDPortal(ctx,
-		networkid.PortalKey{ID: "phone-chat", Receiver: "alice-fake"},
-		networkid.PortalKey{ID: "lid-chat", Receiver: "alice-fake"})
+		networkid.PortalKey{ID: "phone-chat", Receiver: "alice-testnet"},
+		networkid.PortalKey{ID: "lid-chat", Receiver: "alice-testnet"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = h.net.Incoming("alice-fake", "lid-chat", "peer", "after-reid", "after the re-ID", time.Now()); err != nil {
+	if err = h.net.Incoming("alice-testnet", "lid-chat", "peer", "after-reid", "after the re-ID", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if evt := gw.waitFor(t, "message after the re-ID", isMessage("after the re-ID", h, "alice")); evt.PortalID != portalID {
@@ -199,7 +199,7 @@ func TestLoginInProgressEndsAfterRestart(t *testing.T) {
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
 	session := "session-restart"
-	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "fake"})
+	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "testnet"})
 	gw.waitFor(t, "first login step", func(e *protocol.Event) bool {
 		return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
 	})
@@ -215,8 +215,8 @@ func TestLoginInProgressEndsAfterRestart(t *testing.T) {
 	}
 	// Input for the lost login ends it too, rather than being dropped.
 	status, _ := h2.command(protocol.Command{
-		CommandID: nextCommandID(), Type: protocol.CommandLoginSubmit, UserID: "alice", LoginSessionID: session, StepID: "fake.username",
-		Sealed: h2.sealForBridge("alice", session+"/fake.username", protocol.LoginSubmitPlaintext{Input: map[string]string{"username": "x"}}),
+		CommandID: nextCommandID(), Type: protocol.CommandLoginSubmit, UserID: "alice", LoginSessionID: session, StepID: "testnet.username",
+		Sealed: h2.sealForBridge("alice", session+"/testnet.username", protocol.LoginSubmitPlaintext{Input: map[string]string{"username": "x"}}),
 	})
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 for input to a lost login, got %d", status)

@@ -51,7 +51,10 @@
   --net-twitter: #3f4449;
   --net-bluesky: #1185fe;
   --net-agents: #0ea5e9;
-  --net-fake: #64748b;
+  --net-unknown: #64748b;
+  /* Instagram's and Messenger's marks sit on their gradients. */
+  --net-instagram-tile: linear-gradient(45deg, #fdb33a, #ee2a7b 50%, #6228d7);
+  --net-messenger-tile: linear-gradient(200deg, #ff6968, #a334fa 55%, #0695ff);
 
   /* Label colours. A label stores one of these names, never a colour value. */
   --label-pink: #db2777;
