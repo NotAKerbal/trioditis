@@ -29,6 +29,10 @@ var signalLogDropped = map[string]bool{
 	"item_data":             true,
 	"response_data":         true,
 	"invalid_response_data": true,
+	// Trace only too: the account's storage-service record, profile key included
+	// (storageservice.go), and contact discovery's credentials (contactdiscovery.go).
+	"account_record": true,
+	"creds":          true,
 }
 
 // signalLogFilter rewrites each zerolog line written to it without signalLogDropped, listing

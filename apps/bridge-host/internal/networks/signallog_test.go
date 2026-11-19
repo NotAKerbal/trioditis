@@ -76,3 +76,17 @@ func TestSignalLogFilterPassesOrdinaryLinesAndReplacesUnreadableOnes(t *testing.
 		t.Fatalf("an unreadable line wasn't replaced: %q", out.String())
 	}
 }
+
+// Trace-only fields with keys or credentials go too, should trace ever be turned on.
+func TestSignalLogFilterDropsTraceSecrets(t *testing.T) {
+	var out bytes.Buffer
+	log := zerolog.New(signalLogFilter(&out)).Level(zerolog.TraceLevel)
+	log.Trace().Any("account_record", map[string]string{"profileKey": "marker-profile-key"}).Msg("Found account record")
+	log.Trace().Any("creds", map[string]string{"password": "marker-password"}).Msg("Got contact discovery credentials")
+	if strings.Contains(out.String(), "marker-") {
+		t.Fatalf("a trace secret reached the log: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "Found account record") || !strings.Contains(out.String(), "Got contact discovery credentials") {
+		t.Fatalf("the lines themselves were lost: %q", out.String())
+	}
+}

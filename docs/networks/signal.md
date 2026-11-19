@@ -227,8 +227,10 @@ the account's `mediaRootBackupKey` (`backup.go`, "Received backup info"), and a 
 entry with no Signal ID, with the contact's name and phone number (`receiving.go`, "Signal
 Contact UUID is nil, skipping"). Signal's bridge host writes its whole log through a filter
 (`internal/networks/signallog.go`) that drops those fields (`backup_info`, `contact`) from
-every line, along with the trace-only fields that carry content or keys, and lists what it
-dropped in `dropped_fields`; the line itself stays. A line that isn't valid JSON is replaced.
+every line, along with the trace-only fields signalmeow 26.11 logs content, keys or
+credentials in (`raw_content`, `backup_frame`, `msg`, `contact_record`, `account_record`,
+`item_data`, `response_data`, `invalid_response_data`, `creds`; the bridge host never logs at
+trace, so these are a precaution), and lists what it dropped in `dropped_fields`; the line itself stays. A line that isn't valid JSON is replaced.
 `--verbose` adds error responses' bodies from Signal's servers, which hold no message
 content.
 
@@ -236,9 +238,9 @@ content.
 
 - **Receive-only** until mautrix-signal stops resubmitting after an ambiguous outcome; see
   Sending.
-- **Building takes Rust.** See Building with Signal. The image's Rust stage hasn't been
-  run yet (the agent that wrote it had no Docker access); the same libsignal tag was built
-  and linked natively on x86_64.
+- **Building takes Rust.** See Building with Signal. The image's Rust stage has been built
+  on x86_64 (about 5 minutes for libsignal on 24 cores; the image is about 50 MB bigger),
+  and the image reached Signal's QR step; arm64 hasn't been built yet.
 - **Linked-device limits.** Signal allows a few linked devices per account; the bridge is
   one. Signal unlinks a device that hasn't connected for 30 days; it then needs linking again.
 - **History** is what the phone transfers at linking, once; there is no later backfill
