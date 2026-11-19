@@ -11,6 +11,8 @@ import {
   generateRecoveryKey,
   keyId,
   newPasswordParams,
+  passkeyKey,
+  passkeyPrfSalt,
   passwordKey,
   ready,
   unwrapIdentityKey,
@@ -60,6 +62,37 @@ describe('identity key backups', () => {
 
   it('uses a fresh salt per password', () => {
     expect(newPasswordParams().salt).not.toEqual(newPasswordParams().salt)
+  })
+})
+
+describe('passkey backups', () => {
+  it('wrap with a key from the PRF output, which only that output opens', () => {
+    const identity = generateKeyPair()
+    const context: KeyBackupContext = { userId: 'user_1', kid: keyId(identity.publicKey), kind: 'passkey' }
+    const output = new Uint8Array(32).fill(7)
+    const wrapped = wrapIdentityKey(identity.privateKey, passkeyKey(output), context)
+    expect(unwrapIdentityKey(wrapped, passkeyKey(output), context, identity.publicKey).privateKey).toEqual(
+      identity.privateKey,
+    )
+    // Another passkey's output, or the raw output itself, doesn't open it.
+    expect(() =>
+      unwrapIdentityKey(wrapped, passkeyKey(new Uint8Array(32).fill(8)), context, identity.publicKey),
+    ).toThrow(SealError)
+    expect(() => unwrapIdentityKey(wrapped, output, context, identity.publicKey)).toThrow(SealError)
+    // Nor as another kind of backup.
+    expect(() =>
+      unwrapIdentityKey(wrapped, passkeyKey(output), { ...context, kind: 'recovery' }, identity.publicKey),
+    ).toThrow(SealError)
+  })
+
+  it('takes only a 32-byte PRF output', () => {
+    expect(() => passkeyKey(new Uint8Array(16))).toThrow(SealError)
+  })
+
+  it('evaluates the same fixed 32-byte input everywhere', () => {
+    // Stored with every passkey backup as `prfSalt`, which the server checks is 32 bytes.
+    expect(passkeyPrfSalt()).toHaveLength(32)
+    expect(toBase64Url(passkeyPrfSalt())).toBe(toBase64Url(passkeyPrfSalt()))
   })
 })
 

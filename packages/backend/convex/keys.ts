@@ -329,6 +329,11 @@ export const putBackup = mutation({
     ) {
       throw new ConvexError('A passkey backup needs its credential and a 32-byte PRF salt.')
     }
+    // Only for a passkey on this account, checked in this transaction: so a backup is never made
+    // for someone else's credential, nor lands after its passkey was removed.
+    if (args.kind === 'passkey' && !(await passkeyOf(ctx, member.userId, args.credentialId!))) {
+      throw new ConvexError('That passkey isn’t on your account any more. Add it again, then try again.')
+    }
     const replacing = await checkReplacement(ctx, member, args)
     await consumeKeyProof(ctx, member, args.proof)
     const revision = await replaceBackup(ctx, member, replacing, {
@@ -341,6 +346,28 @@ export const putBackup = mutation({
   },
 })
 
+/** The person's Better Auth passkey with `credentialId`, if they have it. */
+async function passkeyOf(ctx: QueryCtx, userId: string, credentialId: string) {
+  const row = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+    model: 'passkey',
+    where: [{ field: 'credentialID', value: credentialId }],
+  })) as { _id: string; userId: string } | null
+  return row?.userId === userId ? row : null
+}
+
+/** Removes the person's passkey backups for `credentialId`, keeping the revision counter up. */
+async function removeBackupsOf(ctx: MutationCtx, member: Doc<'members'>, credentialId: string) {
+  // Before a backup goes, the counter holds at least its revision, even for an account
+  // whose backups were written before the counter existed.
+  const seen = (await backupsOf(ctx, member.userId)).reduce((n, row) => Math.max(n, row.revision), 0)
+  if ((member.backupRevision ?? 0) < seen) await ctx.db.patch(member._id, { backupRevision: seen })
+  const rows = await ctx.db
+    .query('keyBackups')
+    .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('kind', 'passkey'))
+    .take(50)
+  for (const row of rows) if (row.credentialId === credentialId) await ctx.db.delete(row._id)
+}
+
 /**
  * Removes a passkey backup, with `proof`. Password and recovery backups are replaced, never
  * removed. A backup made again for the same credential gets a new revision, never its old one.
@@ -352,15 +379,63 @@ export const removePasskeyBackup = mutation({
     await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
     await consumeKeyProof(ctx, member, proof)
-    // Before a backup goes, the counter holds at least its revision, even for an account
-    // whose backups were written before the counter existed.
-    const seen = (await backupsOf(ctx, member.userId)).reduce((n, row) => Math.max(n, row.revision), 0)
-    if ((member.backupRevision ?? 0) < seen) await ctx.db.patch(member._id, { backupRevision: seen })
-    const rows = await ctx.db
-      .query('keyBackups')
-      .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('kind', 'passkey'))
-      .take(50)
-    for (const row of rows) if (row.credentialId === credentialId) await ctx.db.delete(row._id)
+    await removeBackupsOf(ctx, member, credentialId)
+    return null
+  },
+})
+
+/**
+ * The signed-in person's passkeys, as Better Auth has them, for listing in settings. Read here
+ * rather than from Better Auth's own route so it answers for the page's session (`sessionId`)
+ * and never for whoever another tab signed in as.
+ */
+export const passkeys = query({
+  args: { sessionId: v.optional(v.string()) },
+  returns: v.array(
+    v.object({
+      credentialId: v.string(),
+      name: v.union(v.null(), v.string()),
+      createdAt: v.union(v.null(), v.number()),
+      backedUp: v.boolean(),
+    }),
+  ),
+  handler: async (ctx, { sessionId }) => {
+    await requireSessionIfGiven(ctx, sessionId)
+    const member = await requireMember(ctx)
+    const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: 'passkey',
+      where: [{ field: 'userId', value: member.userId }],
+      paginationOpts: { cursor: null, numItems: 100 },
+    })) as { page: { credentialID: string; name?: string | null; createdAt?: number | null; backedUp: boolean }[] }
+    return page.map((row) => ({
+      credentialId: row.credentialID,
+      name: row.name ?? null,
+      createdAt: row.createdAt ?? null,
+      backedUp: row.backedUp,
+    }))
+  },
+})
+
+/**
+ * Removes a passkey: its backups and its sign-in credential, in this one transaction, so no
+ * half-removed passkey is left that the person thinks is gone but still opens their key. Needs
+ * `proof`, like any backup change. A credential that's no longer registered just loses its backups.
+ */
+export const removePasskey = mutation({
+  args: { credentialId: v.string(), proof: v.string(), sessionId: v.optional(v.string()) },
+  returns: v.null(),
+  handler: async (ctx, { credentialId, proof, sessionId }) => {
+    await requireSessionIfGiven(ctx, sessionId)
+    const member = await requireMember(ctx)
+    await consumeKeyProof(ctx, member, proof)
+    await removeBackupsOf(ctx, member, credentialId)
+    const passkey = await passkeyOf(ctx, member.userId, credentialId)
+    if (passkey) {
+      await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+        input: { model: 'passkey', where: [{ field: '_id', value: passkey._id }] },
+      })
+    }
+    await audit(ctx, { kind: 'user', id: member.userId }, 'passkey.remove', member.identityKid)
     return null
   },
 })

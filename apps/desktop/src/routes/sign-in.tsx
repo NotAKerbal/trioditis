@@ -12,6 +12,7 @@ import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
 import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
+import { holdPrf, signInWithPasskey } from '~/lib/passkeys.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
 
@@ -53,14 +54,17 @@ function SignIn() {
   async function withPasskey() {
     setBusy('passkey')
     setError(null)
-    const result = await authClient.signIn.passkey()
+    const result = await signInWithPasskey()
     setBusy(null)
-    if (result?.error)
+    if ('error' in result)
       return setError(
         tooManyAttempts(result.error, lastRetryAfter()) ??
           errorMessage(result.error, 'Signing in with a passkey didn’t work. Try your password.'),
       )
     announceAccountChange()
+    // The same touch gave the passkey's PRF output, if it has one: it unlocks the identity key
+    // on the next screen.
+    if (result.prf) holdPrf(result.prf, result.userId)
     await navigate({ to: '/' })
   }
 

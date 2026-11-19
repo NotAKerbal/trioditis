@@ -6,6 +6,7 @@ import {
   generateKeyPair,
   keyId,
   makeKeySetup,
+  passkeyPrfSalt,
   passwordKey,
   ready,
   SealError,
@@ -20,7 +21,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Navigate } from '@tanstack/react-router'
 import { ConvexHttpClient } from 'convex/browser'
 import { useConvexAuth, useMutation } from 'convex/react'
-import { Check, Copy, ShieldCheck } from 'lucide-react'
+import { Check, Copy, KeyRound, ShieldCheck } from 'lucide-react'
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient, convexTokenFor } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
@@ -38,6 +39,14 @@ import {
   signOut,
 } from '~/lib/sign-out.ts'
 import { takePassword } from '~/lib/pending-password.ts'
+import {
+  evaluatePasskeys,
+  NoPrf,
+  openPasskeyBackup,
+  PasskeyCancelled,
+  takePrf,
+  type PrfResult,
+} from '~/lib/passkeys.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -864,7 +873,16 @@ function KeySetup({
   )
 }
 
-type Backup = { kind: 'password' | 'recovery' | 'passkey'; nonce: string; ct: string; params?: PasswordParams }
+type Backup = {
+  kid: string
+  kind: 'password' | 'recovery' | 'passkey'
+  nonce: string
+  ct: string
+  params?: PasswordParams
+  credentialId?: string
+  prfSalt?: string
+  revision: number
+}
 
 function Unlock({
   userId,
@@ -892,8 +910,35 @@ function Unlock({
 }) {
   const [mode, setMode] = useState<'password' | 'recovery'>('password')
   const [secret, setSecret] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'secret' | 'passkey' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Passkey backups of this key: each opens with its passkey's PRF output (lib/passkeys.ts).
+  const passkeys = backups.filter(
+    (b): b is Backup & { credentialId: string; prfSalt: string } =>
+      b.kind === 'passkey' && b.kid === kid && !!b.credentialId && !!b.prfSalt,
+  )
+  const fail = (message: string) => {
+    setError(message)
+    setBusy(null)
+  }
+
+  /** Keeps the opened key on this device, then opens the app. */
+  async function keep(keyPair: KeyPair) {
+    if (isLeaving()) return
+    try {
+      if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
+      await storeIdentity(userId, kid, keyPair, token, () => sessionStill(userId, sessionId))
+    } catch (e) {
+      return fail(
+        e instanceof KeepRefused
+          ? `Your key opened, but it couldn’t be kept on this device: ${e.message}`
+          : `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
+      )
+    }
+    if (isLeaving()) return
+    onDone()
+  }
+
   async function unlock(value: string, how: 'password' | 'recovery') {
     const backup = backups.find((b) => b.kind === how)
     if (!backup)
@@ -902,13 +947,9 @@ function Unlock({
           ? 'There’s no password backup. Use your recovery key.'
           : 'There’s no recovery key backup. Use your password.',
       )
-    setBusy(true)
+    setBusy('secret')
     setError(null)
     await nextFrame()
-    const fail = (message: string) => {
-      setError(message)
-      setBusy(false)
-    }
     // Each step says what went wrong in it: only a key that doesn't open means a wrong password.
     let wrappingKey: Uint8Array
     try {
@@ -932,26 +973,52 @@ function Unlock({
           : 'That recovery key doesn’t match. Check it and try again.',
       )
     }
-    if (isLeaving()) return
-    try {
-      if (typeof token !== 'number') throw new Error('this device couldn’t get ready to keep a key')
-      await storeIdentity(userId, kid, keyPair, token, () => sessionStill(userId, sessionId))
-    } catch (e) {
-      return fail(
-        e instanceof KeepRefused
-          ? `Your key opened, but it couldn’t be kept on this device: ${e.message}`
-          : `Your key opened, but it couldn’t be kept on this device (${reason(e)}). Check that this site may store data, then try again.`,
-      )
-    }
-    if (isLeaving()) return
-    onDone()
+    await keep(keyPair)
   }
 
-  // Coming straight from sign-in, try the password that was just typed. It is taken once, so
-  // this does nothing on later renders.
+  /**
+   * Opens the key with a passkey backup: with the PRF output signing in just gave (`given`), or by
+   * asking one of this key's passkeys for it now.
+   */
+  async function unlockWithPasskey(given?: PrfResult) {
+    setBusy('passkey')
+    setError(null)
+    let prf: PrfResult
+    try {
+      prf = given ?? (await evaluatePasskeys(passkeys))
+    } catch (e) {
+      return fail(
+        e instanceof PasskeyCancelled
+          ? 'Unlocking with a passkey was cancelled. Try again, or use your password.'
+          : e instanceof NoPrf
+            ? `${e.message} Use your password instead.`
+            : `Your passkey couldn’t be used here (${reason(e)}). Use your password instead.`,
+      )
+    }
+    const backup = passkeys.find((b) => b.credentialId === prf.credentialId)
+    if (!backup) return fail('That passkey doesn’t unlock your key. Use another, or your password.')
+    let keyPair: KeyPair
+    try {
+      keyPair = await openPasskeyBackup(backup, prf, userId, fromBase64Url(publicKey))
+    } catch {
+      return fail('That passkey’s backup didn’t open your key. Use your password, then add the passkey again.')
+    }
+    await keep(keyPair)
+  }
+
+  // Coming straight from sign-in, use what was just given: a passkey's PRF output, if its backup
+  // was made with the same input sign-in asked for, or else the password that was just typed.
+  // Each is taken once, so this does nothing on later renders.
   useEffect(() => {
     const password = takePassword(userId)
-    if (password) void unlock(password, 'password')
+    const prf = takePrf(userId)
+    const match = prf && passkeys.find((b) => b.credentialId === prf.credentialId)
+    if (!password && !match) return
+    // Taken above, before anything waits, so they're never left for another screen.
+    void ready().then(() => {
+      if (prf && match && match.prfSalt === toBase64Url(passkeyPrfSalt())) void unlockWithPasskey(prf)
+      else if (password) void unlock(password, 'password')
+    })
   }, [])
 
   return (
@@ -994,9 +1061,22 @@ function Unlock({
             onChange={(e) => setSecret(e.target.value)}
           />
         </Field>
-        <Button type="submit" variant="primary" size="lg" block loading={busy}>
-          {busy ? 'Unlocking…' : 'Unlock'}
+        <Button type="submit" variant="primary" size="lg" block loading={busy === 'secret'} disabled={busy !== null}>
+          {busy === 'secret' ? 'Unlocking…' : 'Unlock'}
         </Button>
+        {passkeys.length > 0 ? (
+          <Button
+            type="button"
+            size="lg"
+            block
+            className="mt-2"
+            loading={busy === 'passkey'}
+            disabled={busy !== null}
+            onClick={() => void unlockWithPasskey()}
+          >
+            <KeyRound className="size-4" /> Unlock with a passkey
+          </Button>
+        ) : null}
         <Button type="button" block className="mt-2" onClick={onSignOut}>
           Sign out
         </Button>
