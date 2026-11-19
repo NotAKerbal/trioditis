@@ -63,14 +63,20 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'meta',
     name: 'Messenger',
     maturity: 'beta',
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // mautrix-meta's cookie flows. Its username-and-password flows aren't offered: they can
+    // need choices, images and in-browser checks the stepper can't show (docs/networks/meta.md).
+    flows: [
+      { id: 'facebook', kind: 'cookies', name: 'Cookies from facebook.com' },
+      { id: 'messenger', kind: 'cookies', name: 'Cookies from messenger.com' },
+    ],
     termsRisk: true,
   },
   instagram: {
     network: 'instagram',
     name: 'Instagram',
     maturity: 'beta',
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // Cookies only, as for Messenger (docs/networks/instagram.md).
+    flows: [{ id: 'instagram', kind: 'cookies', name: 'Cookies from instagram.com' }],
     termsRisk: true,
   },
   discord: {
