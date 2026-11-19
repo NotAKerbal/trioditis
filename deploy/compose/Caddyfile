@@ -1,0 +1,74 @@
+# The only service an install publishes. One origin serves the web app, Better Auth and the
+# MCP server (Convex's HTTP actions), and the Convex sync API, so auth cookies are
+# first-party. See docs/deploy.md, Routing.
+{
+	admin off
+	{$CADDY_GLOBAL_OPTIONS}
+	# Behind a proxy (install.sh --public-url), the scheme and client address come from its
+	# X-Forwarded-* headers; otherwise Caddy is the edge and trusts no one's. Strict: the
+	# client address is the rightmost one a trusted proxy didn't add, since the leftmost
+	# X-Forwarded-For entry is whatever the client sent.
+	servers {
+		trusted_proxies static {$CADDY_TRUSTED_PROXIES}
+		trusted_proxies_strict
+	}
+}
+
+# For the container's healthcheck only: plain HTTP on its loopback, the same in every mode,
+# since in domain mode the site only answers HTTPS for its name. It also checks that the
+# runtime config is mounted.
+http://127.0.0.1:8090 {
+	bind 127.0.0.1
+	handle /healthz {
+		root * /srv/runtime
+		rewrite * /config.json
+		file_server
+	}
+}
+
+{$TRIODITIS_SITE_ADDRESS::80} {
+	# The client's address, as Caddy determines it, for every request: the backend takes the
+	# client address from this header only (its auth rate limits), and Convex passes headers
+	# through as they arrive and adds none of its own. Set for the whole site, overwriting any
+	# value a client sent, since /convex/http/* reaches the same HTTP actions as /api/auth/*.
+	request_header X-Trioditis-Client-IP {client_ip}
+
+	encode zstd gzip
+
+	# The Convex client API and its websocket, under a prefix the client keeps
+	# (http://host/convex → ws://host/convex/api/<version>/sync).
+	handle_path /convex/* {
+		reverse_proxy backend:3210
+	}
+
+	# Convex HTTP actions: Better Auth, and the MCP server with its OAuth discovery.
+	@site path /api/auth/* /mcp /mcp/* /.well-known/oauth-*
+	handle @site {
+		reverse_proxy backend:3211
+	}
+
+	# Where the web app finds its backend, written by install.sh. Never cached, so a changed
+	# address takes effect on the next load.
+	handle /config.json {
+		header Cache-Control "no-store"
+		root * /srv/runtime
+		file_server
+	}
+
+	# The web app's build output. Names are content-hashed, so a file never changes and can be
+	# cached for good; a missing one is a real 404, not index.html, so a page still holding an
+	# old build's chunk names fails cleanly instead of loading HTML as JavaScript.
+	handle /assets/* {
+		root * /srv/web
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	handle {
+		root * /srv/web
+		@html path / /index.html
+		header @html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}

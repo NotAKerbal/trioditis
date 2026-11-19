@@ -1,0 +1,16 @@
+# For the end-to-end check only (docs/deploy.md, Verifying an install). The fake network's
+# control endpoint listens on the bridge host's loopback; a socat sidecar in the same network
+# namespace forwards it, and it's published on this machine's loopback only.
+services:
+  bridge-fake:
+    environment:
+      BRIDGE_FAKE_CONTROL_ADDR: 127.0.0.1:8621
+    ports:
+      - 127.0.0.1:${E2E_CONTROL_PORT:-18621}:8622
+  fake-control:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: [fake]
+    network_mode: service:bridge-fake
+    command: ['TCP-LISTEN:8622,fork,reuseaddr', 'TCP:127.0.0.1:8621']
+    depends_on:
+      bridge-fake: { condition: service_started }

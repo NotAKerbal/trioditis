@@ -1,0 +1,29 @@
+# Local mode on a loopback address (--host 127.0.0.1 or localhost). The backend checks
+# sign-ins against keys at the public address, and inside its container that address is the
+# container's own loopback, where nothing serves it. This sidecar shares the backend's network
+# namespace and serves the public port there by forwarding to Caddy, so the public address,
+# and the issuer in every sign-in token, stays the same.
+services:
+  loopback:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: { max-size: 10m, max-file: '3' }
+    network_mode: service:backend
+    depends_on:
+      caddy: { condition: service_healthy }
+    entrypoint: ['sh', '-c']
+    # A restarted backend gets a new network namespace and leaves this one behind in the old
+    # one, where Caddy can't be reached. Exiting then lets the restart policy start it again,
+    # in the backend's current namespace.
+    command:
+      - |
+        socat TCP-LISTEN:${LOOPBACK_PORT:?},bind=127.0.0.1,fork,reuseaddr TCP:caddy:80 &
+        while sleep 10; do
+          kill -0 $$! 2>/dev/null && nc -z -w 3 caddy 80 || exit 1
+        done
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:${LOOPBACK_PORT}/config.json']
+      interval: 10s
+      timeout: 5s

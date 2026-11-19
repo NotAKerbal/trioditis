@@ -1,0 +1,24 @@
+# Behind a proxy on this machine that listens only where people connect, such as Tailscale
+# Serve on the tailnet address, and not on Docker's host address where compose.hostmap.yml
+# sends the backend. This sidecar on the host network listens there and forwards to the proxy.
+# install.sh only adds it when the proxy can't already be reached that way.
+services:
+  hairpin:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: { max-size: 10m, max-file: '3' }
+    network_mode: host
+    command:
+      - TCP-LISTEN:${HAIRPIN_PORT:?},bind=${HAIRPIN_BIND:?},fork,reuseaddr
+      - TCP:${HAIRPIN_TARGET:?}:${HAIRPIN_PORT}
+    # Ready once it listens and the proxy behind it accepts connections.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          socat -u OPEN:/dev/null TCP:${HAIRPIN_BIND}:${HAIRPIN_PORT},connect-timeout=2
+          && socat -u OPEN:/dev/null TCP:${HAIRPIN_TARGET}:${HAIRPIN_PORT},connect-timeout=2
+      interval: 10s
+      timeout: 5s

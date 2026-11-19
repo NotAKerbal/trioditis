@@ -1,0 +1,5 @@
+# Domain mode on a machine with IPv6: the network carries IPv6 too, so Docker forwards IPv6
+# clients to Caddy with their own addresses rather than its proxy's (see install.sh).
+networks:
+  default:
+    enable_ipv6: true

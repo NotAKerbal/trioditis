@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trioditis</title>
+    <!--
+      Stand-in for the web app until apps/desktop's build lands in the bundle (see
+      deploy/docker/web.Dockerfile). It only says whether the server is up. It creates no
+      accounts: the app derives the password it sends from the one you type (authPassword in
+      packages/crypto), and an account made with the raw password couldn't sign in from the
+      app. Until the app is here, `deploy/trioditis create-admin` makes the admin account.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --text: #16181d;
+        --muted: #5c6370;
+        --border: #e3e6eb;
+        --bad: #c0362c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115;
+          --card: #171a21;
+          --text: #e8eaee;
+          --muted: #9aa1ad;
+          --border: #2a2f39;
+          --bad: #f07167;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          15px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+        padding: 16px;
+      }
+      main {
+        width: 100%;
+        max-width: 420px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 28px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      p {
+        margin: 16px 0 0;
+        color: var(--muted);
+      }
+      code {
+        font-size: 13px;
+      }
+      .status {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+      .dot.up {
+        background: #22a06b;
+      }
+      .dot.down {
+        background: var(--bad);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Trioditis</h1>
+      <div class="status"><span class="dot" id="dot"></span><span id="status">Checking the server…</span></div>
+      <p>
+        The server is installed, but the app isn't built into this install yet, so you can't sign up or sign in here.
+      </p>
+      <p>
+        On the server, <code>deploy/trioditis create-admin &lt;email&gt;</code> creates the admin account. See
+        <code>docs/deploy.md</code> in the server's checkout.
+      </p>
+    </main>
+
+    <script>
+      fetch('/convex/version')
+        .then((response) => {
+          document.getElementById('dot').className = response.ok ? 'dot up' : 'dot down'
+          document.getElementById('status').textContent = response.ok
+            ? 'Server is up'
+            : 'The backend isn’t answering yet'
+        })
+        .catch(() => {
+          document.getElementById('dot').className = 'dot down'
+          document.getElementById('status').textContent = 'The backend isn’t answering yet'
+        })
+    </script>
+  </body>
+</html>

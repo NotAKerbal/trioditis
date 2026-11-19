@@ -1,0 +1,6 @@
+# Written by install.sh: secrets, and the web app's runtime config; and deploy/trioditis's
+# backup and restore lock.
+.env*
+*.env
+runtime/
+.operation.lock

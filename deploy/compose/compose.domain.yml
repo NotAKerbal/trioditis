@@ -1,0 +1,7 @@
+# Domain mode: Caddy serves the domain on 80 and 443 and gets certificates with ACME.
+services:
+  caddy:
+    ports: !override
+      - 80:80
+      - 443:443
+      - 443:443/udp
