@@ -28,9 +28,33 @@ if [ ! -f "$env_file" ]; then
   echo "No install here yet. Run deploy/install/install.sh first." >&2
   exit 1
 fi
+# One backup, install or other write command for this install at a time: they stop and
+# start the server under each other. install.sh takes the same lock.
+take_lock() {
+  command -v flock >/dev/null || { echo "This command needs flock (util-linux)." >&2; exit 1; }
+  exec 9>"$here/.operation.lock"
+  flock -n 9 || { echo "Another backup, install or change to this install is running." >&2; exit 1; }
+}
+
+# deploy/.env is read once, here, for everything below. A backup reads it only under the
+# lock, from a private copy (the snapshot) that it then uses throughout; everything else
+# reads it in place. Its raw bytes are checked first: a NUL, which the shell would drop
+# without a word, or a carriage return, is refused before anything reads it.
+env_source=$env_file
+snapshot=''
+if [ "${1:-}" = backup ]; then
+  take_lock
+  { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
+  snapshot=$(umask 077 && mktemp "$env_file.backup-XXXXXX")
+  trap 'rm -f "$snapshot"' EXIT
+  cp "$env_file" "$snapshot"
+  env_source=$snapshot
+fi
+env_raw_clean "$env_source" || { echo "deploy/.env holds a NUL or a carriage return. Fix it and run this again." >&2; exit 1; }
+env_text=$(cat "$env_source")
 # The project is the one this install saved (installs from before it was saved use the
 # default), whatever COMPOSE_PROJECT_NAME says: it names the volumes that hold the data.
-project=$(grep -E '^COMPOSE_PROJECT_NAME=' "$env_file" | tail -1 | cut -d= -f2-)
+project=$(printf '%s\n' "$env_text" | env_value COMPOSE_PROJECT_NAME)
 project=${project:-trioditis}
 # deploy/.env is the only source of the install's settings and secrets, so every variable it
 # sets, every one the compose files read, and every COMPOSE_* one (Compose's own settings,
@@ -40,13 +64,13 @@ project=${project:-trioditis}
 # so it runs in the compose directory; this script stays where it was called, so paths given
 # to it mean what they say.
 for name in $( {
-  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file"
+  printf '%s\n' "$env_text" | env_names
   grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$here"/compose/*.yml | cut -c3-
   env | sed -n 's/^\(COMPOSE_[A-Za-z0-9_]*\)=.*/\1/p'
 } | sort -u); do
   unset "$name"
 done
-compose() { (cd "$here/compose" && docker compose --env-file "$env_file" -p "$project" "$@"); }
+compose() { (cd "$here/compose" && docker compose --env-file "$env_source" -p "$project" "$@"); }
 
 # The archive tool: the bundle's pinned Alpine-based image, which has tar and gzip.
 tool=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
@@ -61,14 +85,6 @@ trap 'exit 130' INT TERM HUP
 # volume is included and another install's never is.
 project_volumes() {
   docker volume ls -q --filter "label=com.docker.compose.project=$project" | sort
-}
-
-# One backup, install or other write command for this install at a time: they stop and
-# start the server under each other. install.sh takes the same lock.
-take_lock() {
-  command -v flock >/dev/null || { echo "This command needs flock (util-linux)." >&2; exit 1; }
-  exec 9>"$here/.operation.lock"
-  flock -n 9 || { echo "Another backup, install or change to this install is running." >&2; exit 1; }
 }
 
 random_hex() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
@@ -106,9 +122,14 @@ value_in() { printf '%s\n' "$2" | env_value "$1"; }
 # refuses, naming the bad lines, if it isn't the one form.
 read_env() {
   { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
+  env_raw_clean "$env_file" || { echo "deploy/.env holds a NUL or a carriage return. Fix it and run this again." >&2; exit 1; }
   env_text=$(cat "$env_file")
+  check_env_text
+}
+# Checks $env_text's form; refuses, naming the bad lines, if it isn't the one form.
+check_env_text() {
   if ! problems=$(printf '%s\n' "$env_text" | env_check); then
-    echo "deploy/.env isn't all in the form the installer writes (NAME=value, unquoted, each name once):" >&2
+    echo "deploy/.env isn't all in the form the installer writes (NAME=value with a literal value, each name once):" >&2
     echo "$problems" | sed 's/^/  /' >&2
     echo "Fix those lines and run this again." >&2
     exit 1
@@ -123,19 +144,13 @@ valid_key() {
 case "${1:-}" in
   backup)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
-    # The lock first, then deploy/.env, read once: that snapshot is the project, the settings
-    # Compose runs with, and secrets.env, for the whole backup. It's checked before anything
-    # is made.
-    take_lock
-    read_env
-    project=$(value_in COMPOSE_PROJECT_NAME "$env_text")
-    project=${project:-trioditis}
+    # The snapshot of deploy/.env, read once under the lock (above), is the project, the
+    # settings Compose runs with, and secrets.env, for the whole backup. It's checked before
+    # anything is made.
+    # The lock was taken and the snapshot read above, before anything else; it's checked now.
+    check_env_text
     # Everything the backup writes is the caller's alone.
     umask 077
-    snapshot=$(mktemp "$env_file.backup-XXXXXX")
-    printf '%s\n' "$env_text" >"$snapshot"
-    compose() { (cd "$here/compose" && docker compose --env-file "$snapshot" -p "$project" "$@"); }
-    trap 'rm -f "$snapshot"' EXIT
     mkdir -p "$2"
     # Real paths, so a symlink can't lead the backup into the checkout.
     dir=$(cd "$2" && pwd -P)
@@ -199,12 +214,19 @@ case "${1:-}" in
           started="$started $id"
           done_ids="$done_ids $id"
         done
+        # Each healthy (or running, without a healthcheck) within two minutes, or the next
+        # step doesn't start.
         for id in $started; do
+          ready=0
           for _ in $(seq 120); do
             state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo gone)
-            case "$state" in healthy | running) break ;; unhealthy | exited | dead | gone) return 1 ;; esac
+            case "$state" in healthy | running) ready=1 && break ;; unhealthy | exited | dead | gone) break ;; esac
             sleep 1
           done
+          if [ "$ready" = 0 ]; then
+            echo "$(printf '%s\n' "$running" | sed -n "s/^$id=//p") didn't become healthy ($state), so what depends on it wasn't started." >&2
+            return 1
+          fi
         done
       done
     }
@@ -258,10 +280,26 @@ case "${1:-}" in
       printf '%s\n' "$allowed" | grep -qx "$name" || left_out="$left_out $name"
     done
     # And a last check that neither private key's value is anywhere in it, by any name. The
-    # values are patterns on stdin, never arguments; a check that couldn't run fails too.
+    # values go in a private patterns file, never arguments. Each step is checked: secrets.env
+    # counts as clean only if grep found nothing (exit 1) with exactly as many patterns as
+    # there are private keys; anything else, a step that failed included, publishes nothing.
+    patterns="$work/.patterns"
+    expected=0
+    : >"$patterns"
+    for key_name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY; do
+      key_value=$(value_in "$key_name" "$env_text")
+      [ -n "$key_value" ] || continue
+      printf '%s\n' "$key_value" >>"$patterns"
+      expected=$((expected + 1))
+    done
     scan=0
-    printf '%s\n' "$(value_in BRIDGE_PRIVATE_KEY "$env_text")" "$(value_in AGENT_ACCESS_PRIVATE_KEY "$env_text")" |
-      grep -vx '' | grep -qFf - "$work/secrets.env" || scan=$?
+    if [ "$expected" -gt 0 ]; then
+      [ "$(wc -l <"$patterns" | tr -d ' ')" = "$expected" ] && [ "$(grep -c . "$patterns")" = "$expected" ] || scan=2
+      [ "$scan" != 0 ] || grep -qFf "$patterns" "$work/secrets.env" || scan=$?
+    else
+      scan=1
+    fi
+    rm -f "$patterns"
     case "$scan" in
       1) ;;
       0) echo "A private key's value is in another setting, so it would be in the backup. Nothing was published." >&2 && exit 1 ;;
@@ -406,7 +444,19 @@ ${pair}_PRIVATE_KEY=$private"
     case "${1:-}" in
       '') echo "Usage: deploy/trioditis <compose command> [options], e.g. ps, logs -f gateway, restart caddy" >&2 && exit 2 ;;
       -*) echo "deploy/trioditis takes no options before the command ($1): it sets the project, files and settings itself." >&2 && exit 2 ;;
-      ps | logs | config | top | images | ls | port | version | events) ;;
+      config)
+        # config shows the settings (secrets included) on the terminal; it never writes them
+        # to a file, where they'd land readable, and unlocked.
+        for arg in "$@"; do
+          case "$arg" in
+            -o* | --output | --output=* | -[!-]*o*)
+              echo "deploy/trioditis config doesn't write a file ($arg): the output holds the server's secrets." >&2
+              exit 2
+              ;;
+          esac
+        done
+        ;;
+      ps | logs | top | images | ls | port | version | events) ;;
       up | down | start | stop | restart | run | exec | rm | create | kill | pause | unpause | pull | build | cp | attach | wait | watch | scale | stats) take_lock ;;
       *) echo "deploy/trioditis doesn't know the command $1." >&2 && exit 2 ;;
     esac

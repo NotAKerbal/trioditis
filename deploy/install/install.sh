@@ -134,6 +134,26 @@ fi
 . "$here/scripts/env.sh"
 # shellcheck disable=SC2034 # read by env_write, in env.sh
 env_names_file="$here/install/env-names"
+# literal_setting NAME VALUE: whether VALUE, all of it, is a value NAME may hold: one line (no
+# newline or carriage return, which could slip a second setting in) in the literal form.
+literal_setting() {
+  case "$2" in *$'\n'* | *$'\r'*) return 1 ;; esac
+  printf '%s=%s\n' "$1" "$2" | env_check >/dev/null
+}
+# The options' values, checked before any is used or saved.
+check_option() {
+  literal_setting "$2" "$3" ||
+    die "--$1 must be one line of the characters A-Z a-z 0-9 . _ ~ : / @ + = , % - (no spaces, quotes or \$)."
+}
+[ -z "${host+set}" ] || check_option host INSTALL_HOST "$host"
+[ -z "${bind+set}" ] || check_option bind INSTALL_BIND "$bind"
+[ -z "${proxy_url+set}" ] || check_option public-url PROXY_URL "$proxy_url"
+[ -z "${domain+set}" ] || check_option domain INSTALL_DOMAIN "$domain"
+[ -z "${networks+set}" ] || check_option networks TRIODITIS_NETWORKS "$networks"
+[ -z "${port+set}" ] || check_option port HTTP_PORT "$port"
+# Several ranges, separated by commas or single spaces.
+[ -z "${trusted+set}" ] || literal_setting INSTALL_TRUSTED_PROXIES "${trusted//,/ }" ||
+  die "--trusted-proxies must be one line of ranges (A-Z a-z 0-9 . _ ~ : / @ + = % -), separated by commas or single spaces."
 # deploy/.env appears with the first setting saved, after the options are checked, so an
 # install exists exactly when it does. It's read once, here, and kept in memory: a read that
 # fails stops the install, rather than looking like missing settings and secrets.
@@ -142,6 +162,9 @@ env_text=''
 if [ -e "$env_file" ] || [ -L "$env_file" ]; then
   existing_install=1
   if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then die "deploy/.env isn't a regular file. Put the install's .env back there."; fi
+  # Its raw bytes first: the shell would drop a NUL from what it reads, with only a warning.
+  [ -r "$env_file" ] || die "Couldn't read deploy/.env, which holds this install's settings and secrets."
+  env_raw_clean "$env_file" || die "deploy/.env holds a NUL or a carriage return. Fix it and run this again."
   env_text=$(cat "$env_file") || die "Couldn't read deploy/.env, which holds this install's settings and secrets."
   # It's kept in the one form this writes (deploy/scripts/env.sh), which backup relies on;
   # anything else is for the operator to fix.
@@ -170,7 +193,11 @@ write_file() {
 set_var() {
   local names='' text
   for ((i = 1; i < $#; i += 2)); do
+    local value_index=$((i + 1))
     env_classified "${!i}" || die "Not saving ${!i}: it isn't a setting deploy/install/env-names lists, or a private key. (A bug in the installer: classify it there.)"
+    # Each value on its own, before the file is put together: one with a newline in it would
+    # otherwise read as two settings there.
+    literal_setting "${!i}" "${!value_index}" || die "Not saving ${!i}: its value isn't one line of literal characters."
     names="$names|${!i}"
   done
   text=$(printf '%s\n' "$env_text" | grep -vE "^(${names#|})=" | sed '/^$/d' || true)

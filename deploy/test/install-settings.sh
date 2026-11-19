@@ -11,7 +11,8 @@
 # twice, a carriage return) stops it, unchanged; set_var refuses a name that isn't
 # classified (listed in deploy/install/env-names, or a private key), so a new setting can't be
 # added without deciding whether backups keep it, and nothing else writes deploy/.env; and a
-# value that isn't literal (a space from --bind, say) stops it before it's saved. Every
+# value that isn't literal (a space from --bind, say), or an option's value spanning lines (a
+# second setting slipped in), or a NUL in deploy/.env, stops it before anything is saved. Every
 # value a fresh install writes or generates is literal, since the stub runs get through. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
@@ -129,7 +130,7 @@ POSTGRES_PASSWORD=again'; do
   printf '%s\nCOMPOSE_PROJECT_NAME=trioditis-test\n' "$line" >"$work/checkout/deploy/.env"
   before=$(cat "$work/checkout/deploy/.env")
   if install; then status=0; else status=$?; fi
-  [ "$status" != 0 ] && grep -q "not in the form this writes" "$work/out" && [ "$(cat "$work/checkout/deploy/.env")" = "$before" ] &&
+  [ "$status" != 0 ] && grep -qE "not in the form this writes|holds a NUL or a carriage return" "$work/out" && [ "$(cat "$work/checkout/deploy/.env")" = "$before" ] &&
     check ok "a .env with '$(echo "$line" | head -1 | tr '\r' '^')…' stops the install, unchanged" ||
     check fail "a .env with '$(echo "$line" | head -1 | tr '\r' '^')…' stops the install, unchanged"
 done
@@ -146,15 +147,41 @@ if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/depl
   check ok "set_var refuses a setting that isn't classified, saving nothing" ||
   { check fail "set_var refuses a setting that isn't classified, saving nothing"; tail -3 "$work/out" >&2; }
 # shellcheck disable=SC2016 # a grep pattern: the $ names are literal
-direct=$(grep -nE '>\s*"?\$(env_file|here/\.env)|(mv|cp|ln|tee)[^|;]*"\$env_file"' "$installer" "$repo/deploy/trioditis" || true)
+direct=$(grep -nE '>\s*"?\$(env_file|here/\.env)|(mv|cp|ln)[^|;]* "\$env_file"\s*$|tee [^|;]*"\$env_file"' "$installer" "$repo/deploy/trioditis" || true)
 [ -z "$direct" ] && check ok "nothing but env_write writes deploy/.env" || check fail "nothing but env_write writes deploy/.env ($direct)"
 
 # A value that isn't literal (a space, here, from --bind) stops the install before it saves it.
 checkout
 if install --public-url https://proxy.invalid:8443 --bind '127.0.0.1 x'; then status=0; else status=$?; fi
-[ "$status" != 0 ] && grep -q "isn't literal" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+[ "$status" != 0 ] && grep -qE "isn't literal|--bind must be one line" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
   check ok "a value that isn't literal stops the install before anything is saved" ||
   { check fail "a value that isn't literal stops the install before anything is saved"; tail -3 "$work/out" >&2; }
+
+# An option's value that spans lines, which would read as a second setting in deploy/.env.
+nl='
+'
+for option in --host --domain --public-url --trusted-proxies; do
+  checkout
+  case "$option" in
+    --public-url) value="https://box.example.com${nl}REVIEW_MARKER=literal" ;;
+    --trusted-proxies) value="192.168.0.10/32${nl}REVIEW_MARKER=literal" ;;
+    *) value="box.example.com${nl}REVIEW_MARKER=literal" ;;
+  esac
+  case "$option" in --trusted-proxies) extra="--public-url https://proxy.invalid:8443 --bind 192.168.0.96" ;; *) extra='' ;; esac
+  # shellcheck disable=SC2086 # $extra is options
+  if install $extra "$option" "$value"; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q -- "$option must be one line" "$work/out" && ! grep -qs REVIEW_MARKER "$work/checkout/deploy/.env" &&
+    check ok "a $option value spanning lines stops the install, saving nothing" ||
+    { check fail "a $option value spanning lines stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+done
+
+# A NUL in a value of deploy/.env (which the shell's read would drop, with a warning).
+checkout
+printf 'POSTGRES_PASSWORD=keep\000me\nCOMPOSE_PROJECT_NAME=trioditis-test\n' >"$work/checkout/deploy/.env"
+cp "$work/checkout/deploy/.env" "$work/env.nul"
+if install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "holds a NUL or a carriage return" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.nul" &&
+  check ok "a NUL in deploy/.env stops the install, unchanged" || { check fail "a NUL in deploy/.env stops the install, unchanged"; tail -2 "$work/out" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

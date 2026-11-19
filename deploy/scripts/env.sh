@@ -13,6 +13,12 @@
 # - BRIDGE_PRIVATE_KEY and AGENT_ACCESS_PRIVATE_KEY must each be exactly a key: canonical
 #   unpadded base64url of 32 bytes, 43 characters.
 
+# env_raw_clean FILE: whether FILE's raw bytes hold no NUL and no carriage return, checked
+# before the shell reads it (command substitution drops a NUL with at most a warning).
+env_raw_clean() {
+  [ "$(tr -d '\000\r' <"$1" | wc -c)" = "$(wc -c <"$1")" ]
+}
+
 # env_check: reads the text on stdin; prints each line not in that form (by line and name,
 # never a value), and fails if any is.
 env_check() {

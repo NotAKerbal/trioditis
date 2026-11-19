@@ -2,7 +2,8 @@
 # deploy/trioditis passes on only Compose's own commands, with nothing before the command:
 # any option there (a project, a compose file, an env file, a project directory, a dry run…)
 # is refused, lock or not, and so is a command it doesn't know; a command's own options
-# (logs -f) pass through. While a backup, install or other write command holds the lock, the
+# (logs -f) pass through, but config never writes its output (the secrets) to a file, in
+# any spelling of -o/--output. While a backup, install or other write command holds the lock, the
 # commands that change things (start, up, stop…), create-admin and backup are refused, and the
 # read-only ones (ps, config, logs) run. And restore, on a checkout with no install, still
 # says it isn't available yet.
@@ -34,6 +35,13 @@ for form in "--compatibility=false --project-name other config" "-f other.yml ps
   refused_by "$options" $form
 done
 refused_by "doesn't know the command" frobnicate
+cd "$root"
+for form in "config -o out.yml" "config -oout.yml" "config --output out.yml" "config --output=out.yml" "config -qo out.yml"; do
+  # shellcheck disable=SC2086 # $form is the arguments
+  refused_by "config doesn't write a file" $form
+  [ ! -e "$root/out.yml" ] && [ ! -e "$root/deploy/compose/out.yml" ] && check ok "'$form' wrote nothing" || check fail "'$form' wrote nothing"
+done
+cd - >/dev/null
 refused_by "Usage" ''
 allowed logs -f backend
 allowed ps --services

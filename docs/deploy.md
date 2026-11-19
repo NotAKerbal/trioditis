@@ -170,7 +170,8 @@ removes its bridge host; its volume and database stay, in case you add it back.
 `deploy/trioditis <command> [the command's own options]`. It sets the project, the compose
 files, the project directory and the env file itself, so it takes no Compose options before
 the command (`-p`, `-f`, `--env-file`, `--profile` and the rest are refused), and passes on
-only Compose's own commands:
+only Compose's own commands. `config` shows the settings, secrets included, on the terminal
+only: it refuses `-o`/`--output` in any spelling.
 
 ```sh
 deploy/trioditis ps
@@ -300,7 +301,9 @@ in a private directory beside the destination, reserves the name with `mkdir` (w
 if anything is there, so it moves on to the next suffix), renames the private directory onto
 it in one step, checks both files are there, and starts again the containers that were
 running (only those: not the finished functions job, nor a service you'd stopped), in the
-order their dependencies need. So there's
+order their dependencies need, each healthy within two minutes before the next starts; if
+one isn't, it stops there, names it, and the backup counts as failed
+(`deploy/trioditis up -d` starts the rest). So there's
 either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
 server is still stopping, leaves nothing behind, and if the server doesn't start again the
 backup counts as failed. The destination must be outside the checkout (symlinks resolved):
@@ -321,8 +324,10 @@ installer writes needs: `CONVEX_ADMIN_KEY` may hold `|`; `CADDY_GLOBAL_OPTIONS`,
 `CADDY_TRUSTED_PROXIES` and `INSTALL_TRUSTED_PROXIES` may be several words separated by
 single spaces; and the two private keys must each be exactly a key (43 characters of
 unpadded base64url). Comments (`#` lines) and blank lines are allowed. Anything else is
-refused: by the installer, which also refuses to save any value outside that form (an option
-like `--bind` with a space in it, say), and by backup, before it makes anything. Everything
+refused: by the installer, which also refuses any option's value outside that form (a space
+in `--bind`, or a value spanning lines, which would read as a second setting), and by
+backup, before it makes anything. A NUL or a carriage return anywhere in the file is refused
+before it's read at all. Everything
 the installer writes goes through one writer, which saves only names
 `deploy/install/env-names` lists or the two private keys.
 

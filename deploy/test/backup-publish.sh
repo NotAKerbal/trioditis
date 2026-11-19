@@ -7,8 +7,9 @@
 # its process group, as Ctrl-C sends) while the archive is streaming, or after it reserved
 # its name, publishes nothing and leaves nothing behind (an interrupt while it makes its
 # name's directory is held off, and one already there is never removed); one that can't run
-# its last check on the private keys, or finds the lock held (taken before .env is read),
-# publishes nothing; one with a deploy/.env not in the form the installer writes (export,
+# its last check on the private keys (grep failing, or the patterns not built), or finds
+# the lock held (taken before .env is even opened), publishes nothing; a NUL in deploy/.env
+# is refused before it's read; one with a deploy/.env not in the form the installer writes (export,
 # spaces around =, quoted values, a name twice, a carriage return) is refused before it
 # makes anything; and secrets.env holds only the settings listed in deploy/install/env-names:
 # no comment (even one quoting a private key), no unlisted setting (named, not shown), and,
@@ -162,6 +163,42 @@ cp "$root/env.before-lock" "$root/deploy/.env"
 [ "$status" != 0 ] && grep -q "Another backup, install or change" "$root/out" && ! grep -q "isn't all in the form" "$root/out" &&
   check ok "it takes the lock before it reads deploy/.env" || { check fail "it takes the lock before it reads deploy/.env"; cat "$root/out" >&2; }
 
+# Under the lock held elsewhere, the backup doesn't so much as open deploy/.env.
+if command -v strace >/dev/null; then
+  sh -c 'exec 9>"$1" && flock 9 && exec sleep 30' sh "$root/deploy/.operation.lock" &
+  holder=$!
+  sleep 1
+  strace -f -e trace=openat -o "$root/strace" "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  ! grep -q "\"$root/deploy/.env\"" "$root/strace" && grep -q "Another backup, install or change" "$root/out" &&
+    check ok "with the lock held elsewhere, it never opens deploy/.env" ||
+    check fail "with the lock held elsewhere, it never opens deploy/.env ($(grep -c "\"$root/deploy/.env\"" "$root/strace") opens)"
+else
+  echo "  skipped: strace isn't installed, so whether it opens deploy/.env under the lock isn't checked"
+fi
+
+# A NUL in a value of deploy/.env: refused (the shell would drop it from what it reads),
+# before anything is made.
+rm -rf "${backups:?}"
+cp "$root/deploy/.env" "$root/env.before-nul"
+printf 'INSTALL_DOMAIN=box\000example\n' >>"$root/deploy/.env"
+trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+cp "$root/env.before-nul" "$root/deploy/.env"
+[ "$status" != 0 ] && grep -q "holds a NUL or a carriage return" "$root/out" && [ ! -e "$backups" ] &&
+  check ok "a NUL in deploy/.env is refused before anything is made" || { check fail "a NUL in deploy/.env is refused before anything is made"; cat "$root/out" >&2; }
+mkdir -p "$backups"
+
+# The patterns for the last check not built (a shim that breaks the steps that build and
+# count them): nothing is published.
+real_grep=$(command -v grep)
+printf '#!/bin/sh\ncase "$*" in *-vx*|"-c . "*) exit 2 ;; esac\nexec %s "$@"\n' "$real_grep" >"$root/stub/grep"
+chmod +x "$root/stub/grep"
+PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+rm -f "$root/stub/grep"
+[ "$status" != 0 ] && grep -q "Couldn't check secrets.env for the private keys" "$root/out" && [ -z "$(entries)" ] &&
+  check ok "patterns that weren't built stop the backup" || { check fail "patterns that weren't built stop the backup"; cat "$root/out" >&2; }
+
 # The last check, on the private keys' values: if it can't run (grep fails, here a stub that
 # exits 2), nothing is published.
 rm -rf "${backups:?}"/*
@@ -189,7 +226,7 @@ for form in "export BRIDGE_PRIVATE_KEY=$bk" "BRIDGE_PRIVATE_KEY = $bk" "BRIDGE_P
   esac
   trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
   shown=$(printf '%s' "$form" | tr '\r' '^' | sed "s/$bk/<key>/")
-  [ "$status" != 0 ] && grep -q "isn't all in the form the installer writes" "$root/out" && [ ! -e "$backups" ] &&
+  [ "$status" != 0 ] && grep -qE "isn't all in the form the installer writes|holds a NUL or a carriage return" "$root/out" && [ ! -e "$backups" ] &&
     check ok "a .env with '$shown' is refused before anything is made" ||
     { check fail "a .env with '$shown' is refused before anything is made"; cat "$root/out" >&2; }
 done
