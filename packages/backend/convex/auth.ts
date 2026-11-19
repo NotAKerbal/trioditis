@@ -301,8 +301,12 @@ function tooManyRequests(retryAfter: number) {
   )
 }
 
-/** The cookies that carry a sign-in: Better Auth's session token and cache, and the Convex JWT. */
-const SESSION_COOKIE = /^(?:__Secure-)?[^=]*\.(?:session_token|session_data|convex_jwt)=/
+/**
+ * The cookies that carry a sign-in: Better Auth's session token, its cache, its "don't
+ * remember me" marker and account cookie (off here, but cleared with the rest), and the
+ * Convex JWT.
+ */
+const SESSION_COOKIE = /^(?:__Secure-)?[^=]*\.(?:session_token|session_data|dont_remember|account_data|convex_jwt)=/
 
 /**
  * A failed passkey registration from a page bound to its session (`passkeySessionBinding`)

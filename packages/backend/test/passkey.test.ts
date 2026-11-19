@@ -68,6 +68,7 @@ describe('adding a passkey', () => {
       headers.append('set-cookie', 'better-auth.session_token=; Max-Age=0; Path=/')
       headers.append('set-cookie', '__Secure-better-auth.session_data=; Max-Age=0; Path=/')
       headers.append('set-cookie', 'better-auth.convex_jwt=; Max-Age=0; Path=/')
+      headers.append('set-cookie', 'better-auth.dont_remember=; Max-Age=0; Path=/')
       headers.append('set-cookie', 'better-auth.passkey-challenge=abc; Path=/')
       return new Response('{}', { status: 401, headers })
     }
@@ -79,8 +80,8 @@ describe('adding a passkey', () => {
     // Unbound requests, other routes and successes are left as they are.
     expect(
       withoutSessionClears(request('/passkey/verify-registration', false), failed(), base).headers.getSetCookie(),
-    ).toHaveLength(4)
-    expect(withoutSessionClears(request('/sign-out'), failed(), base).headers.getSetCookie()).toHaveLength(4)
+    ).toHaveLength(5)
+    expect(withoutSessionClears(request('/sign-out'), failed(), base).headers.getSetCookie()).toHaveLength(5)
     const ok = new Response('{}', { status: 200, headers: { 'set-cookie': 'better-auth.session_token=x' } })
     expect(withoutSessionClears(request('/passkey/verify-registration'), ok, base)).toBe(ok)
   })
