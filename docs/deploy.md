@@ -328,12 +328,16 @@ An update doesn't sign anyone out or restart the whole server:
   the bundle changes them). New functions are deployed into the running backend, and open
   pages get their results straight away.
 - The installer rebuilds the images and Compose recreates only the containers whose image
-  changed. The gateway and the bridge hosts restart only when their code changed; a bridge
-  host reconnects to its network in seconds and catches up on what arrived meanwhile. Caddy
-  restarts when the web app changed, and pages reconnect to the backend by themselves.
+  or settings changed, and those that wait for them. Caddy restarts when the web app changed,
+  and pages reconnect to the backend by themselves. The gateway restarts when its code or the
+  backend's changed (they share the Node image), and the bridge hosts with it, since they
+  wait for it; otherwise they keep running. A bridge host reconnects to its network in
+  seconds and catches up on what arrived meanwhile.
 - Open pages move to the new web app on their own. The image is built with the commit it's
   from (`TRIODITIS_VERSION`, written to `deploy/.env` on every run), which the app has built
-  in, Caddy serves as `/version.json` and the functions return in `server.info`. When a page
+  in, Caddy serves as `/version.json` and the functions return in `server.info`. The
+  functions job reads it from `deploy/runtime/version`, not its environment, so a new commit
+  alone doesn't make Compose recreate the job and everything that waits for it. When a page
   sees the server's version change, it waits for `/version.json` to name a build other than
   its own, then reloads by itself if it's in the background with no draft or settings open,
   and otherwise offers a reload.

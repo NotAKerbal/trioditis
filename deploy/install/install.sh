@@ -522,6 +522,8 @@ mkdir -p "$here/runtime"
 [ ! -L "$here/runtime" ] || die "deploy/runtime is a symlink; it must be a directory of this checkout."
 write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
+# The commit the functions are deployed from (deploy-functions.sh reads it).
+write_file "$here/runtime/version" "$version" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
 # network's service at the same time, and the builds collide on the shared tag.

@@ -77,7 +77,7 @@ head_is "$c1" && grep -q '^idle|Already up to date' "$work/out" && [ ! -s "$work
 
 run update nightly
 head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
-  grep -q "^updating|Updating to ${c2%"${c2#???????}"}.||" "$work/reports" &&
+  grep -q "^updating|Installing ${c2%"${c2#???????}"}.||" "$work/reports" &&
   grep -q "^idle|Updated to ${c2%"${c2#???????}"}.|req1|$c2|$c2|0|0|test-secret" "$work/reports" &&
   check ok "nightly moves it to dev's newest commit, installs it, and reports it done" ||
   check fail "nightly moves it to dev's newest commit, installs it, and reports it done ($(cat "$work/out" "$work/reports"))"

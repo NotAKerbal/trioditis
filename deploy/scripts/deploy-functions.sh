@@ -29,6 +29,11 @@ for name in CONVEX_SELF_HOSTED_URL CONVEX_SELF_HOSTED_ADMIN_KEY; do
   fi
 done
 
+# The commit being deployed, which install.sh writes beside the web app's config.
+TRIODITIS_VERSION=$(cat /srv/runtime/version 2>/dev/null || true)
+printf '%s\n' "$TRIODITIS_VERSION" | grep -Eqx '[0-9a-f]{40}' || TRIODITIS_VERSION=unknown
+export TRIODITIS_VERSION
+
 # What the functions read. Private keys and the admin key stay out: no function needs them.
 names='SITE_URL BETTER_AUTH_SECRET GATEWAY_SECRET TRIODITIS_SETUP_TOKEN TRIODITIS_NETWORKS
   BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY TRIODITIS_VERSION'

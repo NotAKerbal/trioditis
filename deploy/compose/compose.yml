@@ -106,10 +106,14 @@ services:
       TRIODITIS_NETWORKS: ${TRIODITIS_NETWORKS:?}
       BRIDGE_PUBLIC_KEY: ${BRIDGE_PUBLIC_KEY:?}
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY:?}
-      TRIODITIS_VERSION: ${TRIODITIS_VERSION:-unknown}
       # The updater's secret reaches the backend only while the updater is on (--updater).
       TRIODITIS_UPDATER: ${INSTALL_UPDATER:-0}
       UPDATER_SECRET: ${UPDATER_SECRET:-}
+    # The commit being deployed, in runtime/version, not in the environment: a changed setting
+    # would make Compose recreate this job, and with it the gateway and the bridge hosts that
+    # wait for it, on every update.
+    volumes:
+      - ../runtime:/srv/runtime:ro
     depends_on:
       backend: { condition: service_healthy }
 

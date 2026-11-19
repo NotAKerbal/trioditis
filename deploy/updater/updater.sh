@@ -153,7 +153,7 @@ update() {
   previous=$current
   log "Updating from $previous to $target ($name)."
   # The request stays until the update is over, so it isn't marked done yet.
-  done_id='' report updating "Updating to ${target:0:7}."
+  done_id='' report updating "Installing ${target:0:7}."
   if run_install "$target"; then
     describe_current
     behind=0 ahead=0
