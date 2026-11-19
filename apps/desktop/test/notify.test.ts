@@ -13,10 +13,12 @@ const feed = (latest: number | null, ...arrivals: Arrival[]): ArrivalFeed => ({ 
 const ids = (arrivals: Arrival[]) => arrivals.map((a) => a.message.messageId)
 
 describe('which arrivals notify', () => {
-  const after = (cursor: Cursor | undefined, ...feeds: ArrivalFeed[]) => {
+  // Each answer is a feed, or a feed and when (this device's clock) it came; 0 by default.
+  const after = (cursor: Cursor | undefined, ...answers: (ArrivalFeed | [ArrivalFeed, number])[]) => {
     const fresh: string[][] = []
-    for (const f of feeds) {
-      const next = newArrivals(cursor, f)
+    for (const answer of answers) {
+      const [f, now] = Array.isArray(answer) ? answer : [answer, 0]
+      const next = newArrivals(cursor, f, now)
       cursor = next.cursor
       fresh.push(ids(next.fresh))
     }
@@ -25,11 +27,11 @@ describe('which arrivals notify', () => {
   const at = (since: number) => after(undefined, feed(since)).cursor
 
   it('only sets the cursor on the first answer', () => {
-    const first = newArrivals(undefined, feed(20, arrival('m2', 20), arrival('m1', 10)))
+    const first = newArrivals(undefined, feed(20, arrival('m2', 20), arrival('m1', 10)), 0)
     expect(first.fresh).toEqual([])
     expect(first.cursor.since).toBe(20)
     // Nothing has arrived yet: everything after counts.
-    expect(newArrivals(undefined, feed(null)).cursor.since).toBe(0)
+    expect(newArrivals(undefined, feed(null), 0).cursor.since).toBe(0)
   })
 
   it('notifies for what arrived after the cursor, once', () => {
@@ -60,6 +62,9 @@ describe('which arrivals notify', () => {
   it('stays quiet for an old message that comes into view later', () => {
     // Its chat brought back from the archive: it arrived long before the cursor.
     expect(after(at(LATE_MS * 3), feed(LATE_MS * 3, arrival('old', 5))).fresh).toEqual([[]])
+    // Or just before it, but the chat comes back long after the cursor last moved.
+    const days = 3 * 24 * 3600_000
+    expect(after(at(100_000), [feed(100_000, arrival('archived', 99_000)), days]).fresh).toEqual([[]])
   })
 
   it('moves the cursor past the person’s own sends, which aren’t listed', () => {

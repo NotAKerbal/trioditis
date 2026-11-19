@@ -200,8 +200,9 @@ pnpm --filter @trioditis/desktop app --server http://localhost:<port>    # this 
 ```
 
 The first run downloads Electron's binary (pnpm doesn't run its install script). The app asks
-for the address you open Trioditis at, checks that it is a Trioditis server (its
-`/config.json`, or the web app's `application-name` marker), and remembers it; **File → Change
+for the address you open Trioditis at, checks that it is a Trioditis server whose web app
+works in the desktop app (its `trioditis-desktop` marker; a server from before it is turned
+away as too old), and remembers it; **File → Change
 Server…** picks another. Plain `http://` is accepted only for this machine. Each server gets
 its own session, so nothing is shared between them.
 

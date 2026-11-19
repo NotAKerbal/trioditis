@@ -46,7 +46,7 @@ export function useMessageNotifications(selectedId: string | undefined, open: (c
 
   useEffect(() => {
     if (!feed) return
-    const { cursor: next, fresh } = newArrivals(cursor.current, feed)
+    const { cursor: next, fresh } = newArrivals(cursor.current, feed, Date.now())
     cursor.current = next
     const { selectedId, prefs } = latest.current
     if (!prefs.notifications || !canNotify()) return

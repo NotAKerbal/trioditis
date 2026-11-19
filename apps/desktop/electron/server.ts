@@ -49,16 +49,22 @@ export function sameOrigin(target: string, origin: string): boolean {
   }
 }
 
-/** The marker the web app's index.html carries, for a server that doesn't publish /config.json. */
-const MARKER = /<meta\s+name=["']application-name["']\s+content=["']Trioditis["']/i
+/**
+ * The marker the web app's index.html carries, with the version of what the desktop app needs
+ * from the page (src/lib/desktop.ts, and keeping unsent text when it unloads). Builds from
+ * before the desktop app have no marker.
+ */
+const MARKER = /<meta\s+name=["']trioditis-desktop["']\s+content=["'](\d+)["']/i
+export const DESKTOP_VERSION = 1
 
 /**
- * Whether what a server answered is Trioditis: its /config.json (the self-hosted bundle
- * publishes one) names a Convex deployment, or its page carries the app's marker (a dev server
- * or a Vercel preview, whose config is built in).
+ * What a server answered: `ready`, a Trioditis web app that works in the desktop app; `old`,
+ * Trioditis (its /config.json names a Convex deployment) from before it; `other`, anything else.
  */
-export function looksLikeTrioditis(answer: { config?: unknown; html?: string }): boolean {
+export function serverKind(answer: { config?: unknown; html?: string }): 'ready' | 'old' | 'other' {
+  const version = answer.html ? Number(MARKER.exec(answer.html)?.[1]) : NaN
+  if (version >= DESKTOP_VERSION) return 'ready'
   const config = answer.config as { convexUrl?: unknown } | null | undefined
-  if (config && typeof config === 'object' && typeof config.convexUrl === 'string' && config.convexUrl) return true
-  return !!answer.html && MARKER.test(answer.html)
+  if (config && typeof config === 'object' && typeof config.convexUrl === 'string' && config.convexUrl) return 'old'
+  return 'other'
 }

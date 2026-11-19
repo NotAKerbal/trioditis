@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isExternalAllowed, looksLikeTrioditis, normalizeServer, sameOrigin } from '../electron/server.ts'
+import { isExternalAllowed, normalizeServer, sameOrigin, serverKind } from '../electron/server.ts'
 
 describe('the desktop app’s server address', () => {
   it('takes a bare host as https, and keeps only the origin', () => {
@@ -22,12 +22,15 @@ describe('the desktop app’s server address', () => {
 })
 
 describe('telling a Trioditis server', () => {
-  it('by its config, or by the page’s marker', () => {
-    expect(looksLikeTrioditis({ config: { convexUrl: 'https://x.convex.cloud' } })).toBe(true)
-    expect(looksLikeTrioditis({ config: { convexUrl: '' } })).toBe(false)
-    expect(looksLikeTrioditis({ config: null })).toBe(false)
-    expect(looksLikeTrioditis({ html: '<meta name="application-name" content="Trioditis" />' })).toBe(true)
-    expect(looksLikeTrioditis({ html: '<title>Trioditis</title>' })).toBe(false)
+  it('by the page’s marker, or as too old by its config alone', () => {
+    const config = { convexUrl: 'https://x.convex.cloud' }
+    expect(serverKind({ html: '<meta name="trioditis-desktop" content="1" />' })).toBe('ready')
+    expect(serverKind({ html: '<meta name="trioditis-desktop" content="2" />', config })).toBe('ready')
+    expect(serverKind({ html: '<meta name="trioditis-desktop" content="0" />', config })).toBe('old')
+    expect(serverKind({ html: '<title>Trioditis</title>', config })).toBe('old')
+    expect(serverKind({ config: { convexUrl: '' } })).toBe('other')
+    expect(serverKind({ config: null })).toBe('other')
+    expect(serverKind({ html: '<title>Trioditis</title>' })).toBe('other')
   })
 })
 

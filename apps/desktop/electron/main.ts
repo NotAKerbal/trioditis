@@ -16,7 +16,7 @@ import {
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { isExternalAllowed, looksLikeTrioditis, normalizeServer, sameOrigin } from './server.ts'
+import { isExternalAllowed, normalizeServer, sameOrigin, serverKind } from './server.ts'
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
 // a dock badge and a menu. Nothing from the server runs with Node: its pages are sandboxed and
@@ -50,6 +50,8 @@ let committing = false
 let quitting = false
 /** Set while the app closes the server's window to change servers: told if the person stays. */
 let onStay: (() => void) | null = null
+/** That window, which a Mac must close rather than hide. */
+let leaving: BrowserWindow | null = null
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 
@@ -168,7 +170,7 @@ function openServer(origin: string) {
   })
   // On a Mac, closing the window keeps the app running for notifications, as Mac apps do.
   win.on('close', (event) => {
-    if (process.platform === 'darwin' && !quitting && serverWindow === win) {
+    if (process.platform === 'darwin' && !quitting && serverWindow === win && leaving !== win) {
       event.preventDefault()
       win.hide()
     }
@@ -186,14 +188,15 @@ function closeServer(win: BrowserWindow): Promise<boolean> {
   return new Promise((resolve) => {
     const finish = (left: boolean) => {
       onStay = null
+      leaving = null
       win.off('closed', closed)
-      if (!left) serverWindow = win
       resolve(left)
     }
     const closed = () => finish(true)
     onStay = () => finish(false)
-    // Not the server's window while it closes, so a Mac doesn't just hide it.
-    serverWindow = null
+    // Still the server's window until it's gone, so the Dock or a second launch shows it
+    // rather than opening another.
+    leaving = win
     win.once('closed', closed)
     win.close()
   })
@@ -239,13 +242,15 @@ async function probe(origin: string): Promise<string | null> {
   const get = (url: string) =>
     net.fetch(url, { cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
   try {
-    const config = await get(`${origin}/config.json`)
-    if (config.ok && config.headers.get('content-type')?.includes('json')) {
-      const json: unknown = await config.json().catch(() => null)
-      if (looksLikeTrioditis({ config: json })) return null
-    }
     const page = await get(`${origin}/`)
-    if (page.ok && looksLikeTrioditis({ html: await page.text() })) return null
+    const html = page.ok ? await page.text() : undefined
+    if (serverKind({ html }) === 'ready') return null
+    // The self-hosted bundle publishes /config.json, from before the desktop app too.
+    const config = await get(`${origin}/config.json`)
+    const json: unknown =
+      config.ok && config.headers.get('content-type')?.includes('json') ? await config.json().catch(() => null) : null
+    if (serverKind({ html, config: json }) === 'old')
+      return 'That Trioditis server is too old for the desktop app. Update it, then try again.'
     return 'That address answered, but it isn’t a Trioditis server.'
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
