@@ -500,6 +500,10 @@ compose() {
 # --- Images -------------------------------------------------------------------------------
 
 say "Building the images from this checkout (the first build takes a few minutes)"
+# Without the build attestations BuildKit adds by default (their timestamps give every build a
+# new image ID), an unchanged image keeps its ID, so Compose leaves its containers running
+# instead of recreating them, and everything that waits for them, on every run.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
 docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
 
