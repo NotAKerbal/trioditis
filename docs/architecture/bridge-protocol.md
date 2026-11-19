@@ -222,7 +222,7 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
   "type": "displayAndWait | userInput | cookies | complete | cancelled | error",
   "instructions": "…",
   "display": { "type": "qr | code | emoji | nothing", "data": "…" },
-  "fields": [{ "id": "phone", "type": "phoneNumber", "name": "Phone number" }],
+  "fields": [{ "id": "phone", "type": "phone_number", "name": "Phone number" }],
   "cookies": { "url": "…", "fields": [] },
   "loginId": "… (on complete)",
   "error": "… (on error)"

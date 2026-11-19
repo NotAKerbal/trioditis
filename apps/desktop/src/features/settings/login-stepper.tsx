@@ -34,8 +34,7 @@ const INPUT_TYPE: Record<string, string> = {
   password: 'password',
   token: 'password',
   email: 'email',
-  phoneNumber: 'tel',
-  // bridgev2's own name for a phone number field, which the bridge host passes on as is.
+  // bridgev2's field type names, which the bridge host passes on as they are.
   phone_number: 'tel',
   '2fa_code': 'text',
   url: 'url',
