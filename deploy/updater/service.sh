@@ -6,6 +6,7 @@
 # lingering on (loginctl enable-linger).
 #
 #   deploy/updater/service.sh check <project>      # exits 1, saying why, if it can't run here
+#   deploy/updater/service.sh installed <project>  # exits 0 if its unit is installed
 #   deploy/updater/service.sh install <project>
 #   deploy/updater/service.sh remove <project>
 #
@@ -17,7 +18,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 command=${1:-}
 project=${2:-}
 case "$project" in
-  '' | *[!a-z0-9_-]*) echo "usage: service.sh check|install|remove <project>" >&2; exit 2 ;;
+  '' | *[!a-z0-9_-]*) echo "usage: service.sh check|installed|install|remove <project>" >&2; exit 2 ;;
 esac
 unit="trioditis-updater-$project.service"
 root=$(cd "$here/.." && pwd)
@@ -57,7 +58,7 @@ blocker() {
     echo "it runs as a systemd service, and systemd isn't running here"
   elif [ "$(id -u)" != 0 ] && ! systemctl show-environment >/dev/null 2>&1; then
     echo "it runs as a user service, and this shell can't reach $(id -un)'s systemd user manager (log in as $(id -un) directly, not through sudo or su)"
-  elif [ ! -d "$probe" ] || [ ! -w "$probe" ]; then
+  elif [ ! -d "$probe" ] || [ ! -w "$probe" ] || [ ! -x "$probe" ]; then
     echo "it writes its unit into $dir, and $probe isn't a directory this user can write to"
   elif ! top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || [ ! "$top" -ef "$root" ] ||
     ! git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null 2>&1; then
@@ -108,5 +109,6 @@ EOF
     rm -f "$dir/$unit"
     systemctl daemon-reload
     ;;
-  *) echo "usage: service.sh check|install|remove <project>" >&2; exit 2 ;;
+  installed) [ -f "$dir/$unit" ] ;;
+  *) echo "usage: service.sh check|installed|install|remove <project>" >&2; exit 2 ;;
 esac

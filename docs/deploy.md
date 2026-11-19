@@ -290,7 +290,9 @@ install turns it off and says why, and `--updater` stops the install before it s
 or touches the server, until it can. If the service still can't be installed once the server is
 up, an install that has the updater on by default, not asked for, keeps the server running and
 turns the updater off, saying why. An install from before the updater gets it on at its next
-upgrade, as a new one would; one that turned it off keeps it off.
+upgrade, as a new one would; one that turned it off keeps it off. Until its service has been
+installed once, the updater is only on by default, so a first install that was cut off and is
+run again from a shell where it can't run goes on with it off rather than stopping.
 
 The updater is a systemd service on the host, `trioditis-updater-<project>`: a system service
 when the installer runs as root, and otherwise a user service of the operator, which keeps

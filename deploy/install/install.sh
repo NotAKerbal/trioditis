@@ -318,7 +318,13 @@ telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
 if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
   die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
 fi
+updater_asked=${updater+1}
 updater=${updater-$(get INSTALL_UPDATER)}
+# A saved 1 whose service was never installed, as after a first install cut off before then,
+# is still only the default, not the operator's choice.
+if [ -z "$updater_asked" ] && [ "$updater" = 1 ] && ! bash "$here/updater/service.sh" installed "$project" 2>/dev/null; then
+  updater=''
+fi
 # The updater is on unless the install turned it off. Where it can't run (no systemd, or not a
 # git checkout), a new install, or one from before the updater, gets it off and says why; one
 # that asks for it stops here, before any setting is saved or the server touched.
