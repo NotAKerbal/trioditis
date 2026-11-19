@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file:; style-src file:" />
+    <title>Connect to a server</title>
+    <link rel="stylesheet" href="connect.css" />
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">T</div>
+      <h1>Connect to your server</h1>
+      <p class="lead">Enter the address you open Trioditis at in a browser.</p>
+      <form id="form" novalidate>
+        <label for="address">Server address</label>
+        <input
+          id="address"
+          name="address"
+          type="text"
+          inputmode="url"
+          autocomplete="url"
+          spellcheck="false"
+          placeholder="https://trioditis.example.com"
+          required
+          autofocus
+        />
+        <p id="error" class="error" role="alert" hidden></p>
+        <div class="actions">
+          <button id="cancel" type="button" class="secondary" hidden>Cancel</button>
+          <button id="submit" type="submit">Connect</button>
+        </div>
+      </form>
+    </main>
+    <script src="connect.js"></script>
+  </body>
+</html>

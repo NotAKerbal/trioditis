@@ -7,6 +7,7 @@ import { ChatPane } from '~/features/chat/chat-pane.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { authClient } from '~/lib/auth-client.ts'
 import { BottomBar } from './bottom-bar.tsx'
+import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, type SidebarAction } from './sidebar.tsx'
 import { UpdateNotice } from './update-notice.tsx'
 
@@ -34,6 +35,8 @@ export function Shell() {
     select(chat.id)
     if (chat.hasUnread) void actions.markRead(chat.id)
   }
+
+  useMessageNotifications(selectedId, open)
 
   /**
    * Runs an action on a chat. If that chat was open and on screen, and the action takes it off

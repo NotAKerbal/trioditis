@@ -6,7 +6,7 @@
   "plugins": ["eslint", "typescript", "unicorn", "oxc"],
   "categories": { "correctness": "error" },
   "options": { "typeAware": true, "reportUnusedDisableDirectives": "error" },
-  "ignorePatterns": ["**/_generated/**", "**/betterAuth/generatedSchema.ts", "**/dist/**"],
+  "ignorePatterns": ["**/_generated/**", "**/betterAuth/generatedSchema.ts", "**/dist/**", "**/dist-electron/**"],
   "rules": {
     "eslint/no-unused-vars": [
       "error",

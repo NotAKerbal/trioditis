@@ -11,6 +11,7 @@ import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
 import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
 import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
+import { desktop } from '~/lib/desktop.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 import { holdPrf, signInWithPasskey } from '~/lib/passkeys.ts'
 
@@ -121,6 +122,14 @@ function SignIn() {
       <Button size="lg" block onClick={withPasskey} loading={busy === 'passkey'} disabled={busy !== null}>
         <KeyRound className="size-4" /> Sign in with a passkey
       </Button>
+      {desktop?.platform === 'darwin' ? (
+        // An unsigned Electron app can't reach the Mac's own passkeys (iCloud Keychain), and
+        // Electron can't ask a security key for its PIN, which sign-in requires.
+        <p className="mt-3 text-center text-sm text-muted-foreground">
+          Passkeys don’t work in the desktop app on a Mac yet. Sign in with your password here, or use your passkey in a
+          browser.
+        </p>
+      ) : null}
     </AuthCard>
   )
 }

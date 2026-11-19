@@ -748,3 +748,38 @@ describe('accounts, logins and logout', () => {
     })
   })
 })
+
+describe('arrivals, for notifications', () => {
+  it('lists messages from others by when they arrived, without history, own, deleted or other views', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const inbox = await aChat(t, 'user_a', 'inbox')
+    const archived = await aChat(t, 'user_a', 'archived', { archived: true })
+    await aMessage(t, inbox, 'e-first', 2_000)
+    await aMessage(t, inbox, 'e-history', 5_000, { historical: true })
+    await aMessage(t, inbox, 'e-mine', 5_000, { sender: { self: true } })
+    await aMessage(t, inbox, 'e-deleted', 5_000, { redactedAt: 6_000 })
+    await aMessage(t, archived, 'e-archived', 5_000)
+    // Arrives last with an older network time: still the newest arrival.
+    await aMessage(t, inbox, 'e-late', 1_000)
+    const { latest, arrivals } = await a.query(api.messages.arrivals, {})
+    expect(arrivals.map((x) => x.message.objectId)).toEqual(['e-late', 'e-first'])
+    expect(arrivals[0]).toMatchObject({ message: { self: false, redacted: false }, chat: { portalId: 'inbox' } })
+    expect(arrivals[0]!.message.sealed).not.toBeNull()
+    expect(latest).toBe(arrivals[0]!.arrivedAt)
+    // Someone else's messages are never theirs to see.
+    const b = await signIn(t, 'user_b')
+    expect(await b.query(api.messages.arrivals, {})).toEqual({ latest: null, arrivals: [] })
+  })
+
+  it('finds an arrival behind the person’s own sends, and moves the cursor past them', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const inbox = await aChat(t, 'user_a', 'inbox')
+    await aMessage(t, inbox, 'e-theirs', 1_000)
+    for (let n = 0; n < 12; n++) await aMessage(t, inbox, `e-mine-${n}`, 2_000 + n, { sender: { self: true } })
+    const { latest, arrivals } = await a.query(api.messages.arrivals, {})
+    expect(arrivals.map((x) => x.message.objectId)).toEqual(['e-theirs'])
+    expect(latest).toBeGreaterThan(arrivals[0]!.arrivedAt)
+  })
+})

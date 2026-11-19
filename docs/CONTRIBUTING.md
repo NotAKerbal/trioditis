@@ -187,6 +187,42 @@ everything.
 Previews get `preview`, nightly `nightly`, and the self-hosted bundle `selfhosted`. The web app
 builds to `apps/desktop/dist`, a static single-page app.
 
+### The desktop app
+
+The desktop app is an Electron window onto a server's own web app: the same pages a browser
+gets, with native notifications, a dock badge for unread chats and an app menu. It ships no
+copy of the web app, so it is always the version the server runs, and sign-in, cookies and
+passkeys stay first-party on the server's address. Its code is in `apps/desktop/electron`.
+
+```sh
+pnpm --filter @trioditis/desktop app                                     # asks for a server
+pnpm --filter @trioditis/desktop app --server http://localhost:<port>    # this checkout's, not saved
+```
+
+The first run downloads Electron's binary (pnpm doesn't run its install script). The app asks
+for the address you open Trioditis at, checks that it is a Trioditis server (its
+`/config.json`, or the web app's `application-name` marker), and remembers it; **File → Change
+Server…** picks another. Plain `http://` is accepted only for this machine. Each server gets
+its own session, so nothing is shared between them.
+
+What the server's page can do is limited: it runs sandboxed with no Node, stays on the
+server's address (other links open in your browser), may ask only for notifications, the
+clipboard and full screen, and reaches the app only to set the badge and bring the window
+forward, both checked in the main process.
+
+Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
+the desktop app; a browser asks first (Settings → Notifications). They show only the network
+unless you choose the chat name or the message, since the system can keep notifications in
+its history, outside the sealing. On Ubuntu,
+Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox` isn't owned
+by root there; for local testing pass `--no-sandbox` after `app`. Installers that set this up
+properly are not built yet.
+
+On a Mac, passkeys don't work in the desktop app: Electron reaches the Mac's own (iCloud
+Keychain) only from a signed app tied to the server's domain, which a self-hosted server can't
+be, and it can't ask a security key for the PIN sign-in requires. The sign-in page says so
+there; sign in with the password in the app, or use the passkey in a browser.
+
 ### Starting over
 
 To throw a checkout's data away, stop `pnpm dev` and run `pnpm dev --setup --reset`. It
@@ -471,7 +507,7 @@ pnpm install && pnpm dev --setup
 apps/
   bridge-host/    Go: bridgev2 network connectors behind Trioditis's own MatrixConnector
   gateway/        Node: bridge host ↔ Convex pipeline
-  desktop/        The desktop and web app (from the UI work)
+  desktop/        The web app, and the desktop app's Electron shell in electron/
 packages/
   backend/        Convex: schema, functions, auth, MCP server
   core/           Shared types and the bridge protocol's wire types

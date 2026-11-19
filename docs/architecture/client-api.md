@@ -652,6 +652,26 @@ Alongside the page:
   live when it ran. Hide a row once `expiresAt` passes: queries don't rerun just because
   time passes.
 
+### Arrivals
+
+`api.messages.arrivals({})` is what notifications watch. It returns an `ArrivalFeed` from
+`@trioditis/core`, `{ latest, arrivals }`:
+
+- `arrivals`: the newest messages from other people, by when the server stored them (not
+  network time), at most ten, each `{ arrivedAt, message, chat }`. `message` is a
+  `LastMessage`, opened the same way, with `sealed` null when it's too large to show;
+  `chat` is the chat's `ChatRow`. Imported history, the person's own messages, deleted ones
+  and chats outside the inbox are left out. It looks through at most 50 live messages and
+  8 MiB of them to find the ten. Muting is the client's to check (`mutedUntil`), since a
+  query doesn't rerun when a mute runs out.
+- `latest`: when the newest live message of any kind arrived, the person's own included, or
+  null if none has. It doesn't move when a chat changes view.
+
+Keep `latest` from the first answer as a cursor and notify only for arrivals after it,
+moving it on with each answer. So opening the app announces nothing, and an old message
+that comes into view later, its chat brought back from the archive, doesn't notify. More
+than ten arriving between two answers notify only for the newest ten.
+
 ### Sending
 
 ```ts
