@@ -11,6 +11,7 @@ import { createAuthClient } from 'better-auth/react'
 export const authClient = createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
+    onRequest: withPageSession,
     // An answer over a rate limit says how long to wait (Retry-After, in seconds): kept for the
     // screen that made the request to say so (tooManyAttempts in lib/errors.ts).
     onError: ({ response }) => {
@@ -29,6 +30,29 @@ export const authClient = createAuthClient({
 })
 
 let retryAfter: number | null = null
+let pageSession: string | null = null
+
+/** The two routes that add a passkey: the server checks them against the page's session. */
+const REGISTERING = ['/passkey/generate-register-options', '/passkey/verify-registration']
+
+/**
+ * Names the session the page opened with (members.me) on the requests that add a passkey, both
+ * of them (addPasskey passes its own options only to the second): the server refuses them, 409
+ * sessionChanged, if the browser has moved to another session since, and adds nothing.
+ * docs/architecture/client-api.md, Key writes are bound to the page's session.
+ */
+export function withPageSession<T extends { url: string | URL; headers: Headers }>(context: T): T {
+  const url = String(context.url)
+  if (pageSession && REGISTERING.some((path) => url.includes(path))) {
+    context.headers.set('x-trioditis-session-id', pageSession)
+  }
+  return context
+}
+
+/** Notes the session this page opened with, for withPageSession. */
+export function setPageSession(sessionId: string) {
+  pageSession ??= sessionId
+}
 const convexTokens = new Map<string, string>()
 
 /** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */

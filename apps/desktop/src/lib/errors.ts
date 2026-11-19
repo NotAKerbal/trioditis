@@ -45,3 +45,13 @@ export function errorCode(error: unknown): string | undefined {
  * start again, as whoever is signed in now, rather than offer to try again.
  */
 export const sessionChanged = (error: unknown) => errorCode(error) === 'sessionChanged'
+
+/**
+ * Whether an auth route (Better Auth's, like adding a passkey) refused because the page's session
+ * isn't the browser's any more: 409 with code sessionChanged. The page should start again.
+ */
+export function authSessionChanged(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const e = error as { status?: unknown; code?: unknown }
+  return e.status === 409 && e.code === 'sessionChanged'
+}

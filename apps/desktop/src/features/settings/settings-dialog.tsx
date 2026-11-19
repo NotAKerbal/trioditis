@@ -34,8 +34,8 @@ import {
   useServerInfo,
   useSidebarLayout,
 } from '~/data/chats.ts'
-import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
-import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
+import { authSessionChanged, errorMessage, sessionChanged, tooManyAttempts } from '~/lib/errors.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -581,6 +581,14 @@ function Members() {
   )
 }
 
+/**
+ * Whether "Add a passkey" is offered. Off until the server can finish a registration: Better Auth
+ * consumes the passkey challenge with a delete the Convex adapter refuses, so verification fails
+ * on the server today. Everything else it needs is here (the page's session on both requests,
+ * the reload on sessionChanged), so turning it on is this line.
+ */
+const ADDING_PASSKEYS = false
+
 function Keys() {
   const session = useSession()
   const { data: auth } = authClient.useSession()
@@ -592,6 +600,8 @@ function Keys() {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [busy, setBusy] = useState<'recovery' | 'password' | null>(null)
+  // Its own, so another action finishing doesn't clear it while a passkey is being added.
+  const [addingPasskey, setAddingPasskey] = useState(false)
   // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
   const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
@@ -749,11 +759,39 @@ function Keys() {
           </Button>
         </form>
       </Setting>
-      {/* Adding a passkey waits until the server can tie it to this page's session, as it does
-          key writes: until then a passkey could be added to whoever another tab signed in as.
-          Signing in with a passkey already added works as before. */}
-      <Setting title="Passkeys" about="Sign in without a password on this device. Adding a passkey is coming soon.">
-        <Button disabled>Coming soon</Button>
+      <Setting
+        title="Passkeys"
+        about={
+          ADDING_PASSKEYS
+            ? 'Sign in without a password on this device. Unlocking your key with a passkey comes later.'
+            : 'Sign in without a password on this device. Adding a passkey is coming soon.'
+        }
+      >
+        <Button
+          disabled={!ADDING_PASSKEYS}
+          loading={addingPasskey}
+          onClick={async () => {
+            setAddingPasskey(true)
+            try {
+              // Both requests name this page's session (withPageSession in lib/auth-client.ts).
+              const result = await authClient.passkey.addPasskey()
+              if (result?.error && authSessionChanged(result.error)) return window.location.reload()
+              if (result?.error) {
+                toast(
+                  tooManyAttempts(result.error, lastRetryAfter()) ??
+                    errorMessage(result.error, 'That passkey couldn’t be added.'),
+                )
+              } else toast('Passkey added.')
+            } catch {
+              // A request that never got an answer: nothing was added, and it can be tried again.
+              toast('The server couldn’t be reached, so no passkey was added. Try again.')
+            } finally {
+              setAddingPasskey(false)
+            }
+          }}
+        >
+          {ADDING_PASSKEYS ? 'Add a passkey' : 'Coming soon'}
+        </Button>
       </Setting>
       <p className="mt-2 text-sm text-subtle-foreground">
         Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
