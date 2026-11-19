@@ -320,8 +320,6 @@ go.mau.fi/mautrix-linkedin v0.2611.0 h1:tcP2c0/ZKrTa1S8CoC6oMlJExt6uBInFztjLUvUf
 go.mau.fi/mautrix-linkedin v0.2611.0/go.mod h1:umU3uQyrs2BN1EQ7gIujgPLOMFi9tTKN1ofMYRQSq1Q=
 go.mau.fi/mautrix-meta v0.2611.0 h1:QmPro7/L3okNOyM1rru7hYH94Cbqo2KcflUEGGS2P4I=
 go.mau.fi/mautrix-meta v0.2611.0/go.mod h1:0O4lY8DuYDoQgV6s+r9Pzwqo+ruG/OH7D19htj/E3/A=
-go.mau.fi/mautrix-signal v0.2611.0 h1:9Fo5CNyL7X5hZlnrscHpNglNg0wnjh/5JEs/KXuYL/E=
-go.mau.fi/mautrix-signal v0.2611.0/go.mod h1:QhRdzCuWNMyumN/c//s9N5YJloUQP+sQ8Jwi33QCUUg=
 go.mau.fi/mautrix-slack v0.2611.0 h1:5QUVIusMLxfIAhBhTQAocBFedIYoebv5M6Nny/1vwP0=
 go.mau.fi/mautrix-slack v0.2611.0/go.mod h1:3laV9hXcM9quLG/Gaha1ILPRmo3O5soErmZuGwrnt4w=
 go.mau.fi/mautrix-telegram v0.2611.0 h1:710YLU00J+CDqeCtaLLyfOgG+9TT+ibWm94CXeXLxzw=

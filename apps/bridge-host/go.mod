@@ -168,3 +168,7 @@ require (
 replace github.com/slack-go/slack => github.com/beeper/slackgo v0.0.0-20261109170826-c51406334f5e
 
 replace github.com/imroc/req/v3 => github.com/beeper/req/v3 v3.0.0-20260925135712-b49593750e56
+
+// mautrix-signal at the version required above, patched so a message send is never
+// resubmitted after an ambiguous outcome. See third_party/README.md.
+replace go.mau.fi/mautrix-signal => ./third_party/mautrix-signal

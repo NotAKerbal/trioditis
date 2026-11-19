@@ -44,6 +44,9 @@ FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e13857
 WORKDIR /src
 COPY go.work go.work.sum ./
 COPY apps/bridge-host/go.mod apps/bridge-host/go.sum apps/bridge-host/
+# The patched mautrix-signal the bridge host's go.mod replaces upstream with; resolving the
+# modules needs its go.mod.
+COPY apps/bridge-host/third_party/mautrix-signal/go.mod apps/bridge-host/third_party/mautrix-signal/
 RUN --mount=type=cache,target=/go/pkg/mod cd apps/bridge-host && go mod download
 COPY --from=libsignal /out/ /libsignal/
 # With libsignal, the Signal connector is built in (-tags libsignal) and the library linked
