@@ -6,8 +6,8 @@ import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
 import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
-import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
-import { enabledNetworks } from './lib/networks'
+import { LOGIN_COMMAND_TTL_MS, queueCommand, queueLoginCancel, queueLogout } from './lib/outbox'
+import { offeredNetworks, retired } from './lib/networks'
 import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
@@ -37,16 +37,18 @@ export const accounts = query({
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
       .take(100)
-    return rows.map((row) => ({
-      _id: row._id,
-      network: row.network,
-      state: row.state,
-      error: row.error ?? null,
-      lastHealthyAt: row.lastHealthyAt ?? null,
-      updatedAt: row.updatedAt,
-      logoutPending: row.logoutPending ?? false,
-      logoutError: row.logoutError ?? null,
-    }))
+    return rows
+      .filter((row) => !retired(row))
+      .map((row) => ({
+        _id: row._id,
+        network: row.network,
+        state: row.state,
+        error: row.error ?? null,
+        lastHealthyAt: row.lastHealthyAt ?? null,
+        updatedAt: row.updatedAt,
+        logoutPending: row.logoutPending ?? false,
+        logoutError: row.logoutError ?? null,
+      }))
   },
 })
 
@@ -75,7 +77,7 @@ export const session = query({
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
-    if (!session || session.userId !== member.userId) return null
+    if (!session || session.userId !== member.userId || retired(session)) return null
     return {
       _id: session._id,
       network: session.network,
@@ -94,7 +96,9 @@ export const start = mutation({
     // network to the other account, whose key then seals what it brings in.
     await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
-    if (!enabledNetworks().has(args.network)) throw new ConvexError('That network isn’t enabled on this server.')
+    if (!(await offeredNetworks(ctx)).has(args.network)) {
+      throw new ConvexError('That network isn’t installed on this server.')
+    }
     // Only the flows `networks.list` offers for this network. Without one, the bridge host
     // uses the network's first.
     if (args.flowId !== undefined && !NETWORK_INFO[args.network].flows.some((flow) => flow.id === args.flowId)) {
@@ -180,17 +184,7 @@ export const cancel = mutation({
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId) throw new ConvexError('That login doesn’t exist.')
     if (session.state === 'complete' || session.state === 'cancelled') return null
-    const now = Date.now()
-    await queueCommand(ctx, {
-      userId: member.userId,
-      network: session.network,
-      payload: { type: 'loginCancel', loginSessionId },
-      ...(session.hostId ? { hostId: session.hostId } : {}),
-      state: 'queued',
-      attempts: 0,
-      createdAt: now,
-      expiresAt: now + LOGIN_COMMAND_TTL_MS,
-    })
+    await queueLoginCancel(ctx, session)
     return null
   },
 })
@@ -206,19 +200,7 @@ export const logout = mutation({
     const member = await requireMember(ctx)
     const account = await ctx.db.get(networkAccountId)
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
-    if (account.state === 'LOGGED_OUT' || account.logoutPending) return null
-    const now = Date.now()
-    const logoutCommandId = await queueCommand(ctx, {
-      userId: member.userId,
-      network: account.network,
-      loginId: account.loginId,
-      payload: { type: 'logout' },
-      state: 'queued',
-      attempts: 0,
-      createdAt: now,
-      expiresAt: now + LOGIN_COMMAND_TTL_MS,
-    })
-    await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
+    if (!(await queueLogout(ctx, account))) return null
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return null
   },

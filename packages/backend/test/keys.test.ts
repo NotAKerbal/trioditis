@@ -17,7 +17,7 @@ import {
 import { hashPassword, verifyPassword } from 'better-auth/crypto'
 import { api, components, internal } from '../convex/_generated/api'
 import { MAX_PASSKEY_BACKUPS, MIN_MEMLIMIT, MIN_OPSLIMIT } from '../convex/keys'
-import { sealed, setup, signIn, type T } from './setup'
+import { sealed, setup, signIn, type T, installNetworks } from './setup'
 
 beforeAll(ready)
 
@@ -764,6 +764,7 @@ describe('key writes bound to a session', () => {
 
   it('refuses, writing nothing, when the shared client has switched to another account', async () => {
     const t = setup()
+    await installNetworks(t)
     const alice = await fresh(t, 'alice')
     const { sessionId: alicePage } = (await alice.query(api.members.me, {}))!
     // Bob signed in from another tab, so the page's calls now run as him.
@@ -857,6 +858,7 @@ describe('key writes bound to a session', () => {
 
   it('starts a network login with the page’s session named', async () => {
     const t = setup()
+    await installNetworks(t)
     const carol = await signIn(t, 'carol')
     const { sessionId } = (await carol.query(api.members.me, {}))!
     const loginSessionId = await carol.mutation(api.logins.start, { network: 'whatsapp', sessionId })

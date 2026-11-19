@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
-import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
+import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T, installNetworks } from './setup'
 
 const HOST = { hostId: 'whatsapp-1', network: 'whatsapp' as const }
 
@@ -119,6 +119,7 @@ async function loginOn(t: T, hostId: string) {
 async function ready() {
   seq = 0
   const t = setup()
+  await installNetworks(t)
   const as = await signIn(t, 'user_a')
   await loginOn(t, 'whatsapp-1')
   seq = 1
@@ -393,6 +394,7 @@ describe('sending', () => {
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
     await t.run(async (ctx) => {
@@ -587,6 +589,7 @@ describe('sending', () => {
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -803,6 +806,7 @@ describe('sending', () => {
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -842,6 +846,7 @@ describe('sending', () => {
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -1161,6 +1166,7 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
   it('takes one submission per login step, so a refused duplicate can’t end the login', async () => {
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -1201,6 +1207,7 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -1236,6 +1243,7 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })
@@ -1278,6 +1286,7 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     vi.useFakeTimers()
     seq = 0
     const t = setup()
+    await installNetworks(t)
     const as = await signIn(t, 'user_a')
     await heartbeat(t)
     const loginSessionId = await as.mutation(api.logins.start, { network: 'whatsapp' })

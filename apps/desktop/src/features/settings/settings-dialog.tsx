@@ -32,6 +32,7 @@ import {
   Copy,
   Eye,
   KeyRound,
+  Network as NetworkIcon,
   Plug,
   Plus,
   RefreshCw,
@@ -66,6 +67,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Heading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
+import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
 
 // Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
@@ -75,6 +77,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'notifications', name: 'Notifications', icon: <Bell /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
+  { id: 'networks', name: 'Networks', icon: <NetworkIcon />, admin: true },
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
 ] as const
@@ -141,6 +144,8 @@ export function SettingsDialog({
             <Notifications />
           ) : current.id === 'accounts' ? (
             <Accounts />
+          ) : current.id === 'networks' ? (
+            <Networks />
           ) : current.id === 'members' ? (
             <Members />
           ) : current.id === 'updates' ? (
@@ -336,6 +341,7 @@ const LOGOUT_ERROR: Record<string, string> = {
 }
 
 function Accounts() {
+  const session = useSession()
   const networks = useNetworks()
   const accounts = useAccounts()
   const health = useNetworkHealth()
@@ -468,7 +474,9 @@ function Accounts() {
       </div>
       {networks && networks.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          This server doesn’t enable any networks yet. Its admin chooses them.
+          {session.role === 'admin'
+            ? 'No networks are installed on this server yet. Install them in Admin settings → Networks.'
+            : 'No networks are installed on this server yet. Its admins install them.'}
         </p>
       ) : null}
     </>
@@ -476,8 +484,8 @@ function Accounts() {
 }
 
 /**
- * A demo server can fill an account with made-up chats on a fake network, to try the app without
- * connecting a real one. Shown only where server.info says it's a demo.
+ * A demo server can fill an account with made-up chats, on accounts no bridge runs, to try the
+ * app without connecting a real one. Shown only where server.info says it's a demo.
  */
 function DemoSeed() {
   const session = useSession()

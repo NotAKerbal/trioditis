@@ -1,7 +1,7 @@
 package host
 
-// The automated conformance suite: a real bridge host, running bridgev2 with the fake
-// network connector, against a fake gateway. See docs/PLAN.md, Connector platform.
+// The automated conformance suite: a real bridge host, running bridgev2 with the test
+// connector, against a fake gateway. See docs/PLAN.md, Connector platform.
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/testconnector"
 )
 
 const testToken = "test-internal-token"
@@ -230,7 +230,7 @@ type harness struct {
 	t         *testing.T
 	dir       string
 	gw        *fakeGateway
-	net       *fakenet.Network
+	net       *testconnector.Network
 	host      *Host
 	bridgeKey seal.KeyPair
 }
@@ -257,9 +257,9 @@ func startHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *h
 // buildHost makes a host without starting it, so a test can prepare its database first.
 func buildHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *harness {
 	t.Helper()
-	net := fakenet.New()
+	net := testconnector.New()
 	cfg := Config{
-		Network:          "fake",
+		Network:          "testnet",
 		DataDir:          dir,
 		ListenAddr:       "127.0.0.1:0",
 		CommandAddr:      "http://127.0.0.1:0",
@@ -320,11 +320,11 @@ func nextCommandID() string {
 	return fmt.Sprintf("cmd-%d-%d", time.Now().UnixNano(), commandCounter)
 }
 
-// login runs the fake network's login flow through commands and returns the opaque login ID.
+// login runs the test connector's login flow through commands and returns the opaque login ID.
 func (h *harness) login(userID, username string) string {
 	h.t.Helper()
 	session := "session-" + username
-	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: userID, LoginSessionID: session, Network: "fake"})
+	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: userID, LoginSessionID: session, Network: "testnet"})
 	step := h.gw.waitFor(h.t, "username step", func(e *protocol.Event) bool {
 		return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
 	}).Step
@@ -377,14 +377,14 @@ func TestConformance(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice", "bob")
 	h := startHost(t, dir, gw)
-	aliceLogin := h.login("alice", "alice-fake")
-	const aliceNet = networkid.UserLoginID("alice-fake")
+	aliceLogin := h.login("alice", "alice-testnet")
+	const aliceNet = networkid.UserLoginID("alice-testnet")
 
 	t.Run("registers with an empty batch on startup", func(t *testing.T) {
 		gw.lock.Lock()
 		defer gw.lock.Unlock()
-		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "fake-1" {
-			t.Fatalf("the first batch must be an empty heartbeat from fake-1, got %+v", gw.batches[0])
+		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "testnet-1" {
+			t.Fatalf("the first batch must be an empty heartbeat from testnet-1, got %+v", gw.batches[0])
 		}
 	})
 
@@ -398,7 +398,7 @@ func TestConformance(t *testing.T) {
 	// History the chat already has before Trioditis sees it. bridgev2 imports it through
 	// BatchSend when the chat's portal is created.
 	base := time.Now().Add(-time.Hour)
-	h.net.SetHistory("family", []fakenet.HistoryMessage{
+	h.net.SetHistory("family", []testconnector.HistoryMessage{
 		{ID: "h1", SenderID: "peer-family", Text: "history one", TS: base},
 		{ID: "h2", SenderID: networkid.UserID(aliceNet), Text: "history two", TS: base.Add(time.Minute)},
 	})
@@ -587,8 +587,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("an ambiguous send becomes unknown and isn't retried", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendAmbiguous)
-		defer h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendAmbiguous)
+		defer h.net.SetSendMode(testconnector.SendOK)
 		before := len(h.net.Sent())
 		send("cm-ambiguous", "maybe sent")
 		unknown := gw.waitFor(t, "unknown", statusOf("cm-ambiguous", protocol.StatusUnknown))
@@ -602,8 +602,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("a refused send fails", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendRefused)
-		defer h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendRefused)
+		defer h.net.SetSendMode(testconnector.SendOK)
 		send("cm-refused", "refused")
 		failed := gw.waitFor(t, "failed", statusOf("cm-refused", protocol.StatusFailed))
 		if failed.Error != protocol.ErrNetworkRejected {
@@ -740,7 +740,7 @@ func TestConformance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = os.WriteFile(filepath.Join(dir, "media", "fake", "latemedia1"), enc.Ciphertext, 0o600); err != nil {
+		if err = os.WriteFile(filepath.Join(dir, "media", "testnet", "latemedia1"), enc.Ciphertext, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		// In time at the hand-off; by the time the network reads the attachment, a second
@@ -765,7 +765,7 @@ func TestConformance(t *testing.T) {
 
 	t.Run("a login step takes one submit", func(t *testing.T) {
 		session := "session-twice"
-		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "fake"})
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "testnet"})
 		step := gw.waitFor(t, "username step", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
 		}).Step
@@ -850,8 +850,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("two people in the same chat each get their own copy", func(t *testing.T) {
-		bobLogin := h.login("bob", "bob-fake")
-		if err := h.net.Incoming("bob-fake", "family", "peer-family", "b1", "hello bob", time.Now()); err != nil {
+		bobLogin := h.login("bob", "bob-testnet")
+		if err := h.net.Incoming("bob-testnet", "family", "peer-family", "b1", "hello bob", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		evt := gw.waitFor(t, "bob's message", isMessage("hello bob", h, "bob"))
@@ -879,7 +879,7 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("expected one attachment, got %+v", plain.Attachments)
 		}
 		att := plain.Attachments[0]
-		ct, err := os.ReadFile(filepath.Join(dir, "media", "fake", att.MediaID))
+		ct, err := os.ReadFile(filepath.Join(dir, "media", "testnet", att.MediaID))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -895,7 +895,7 @@ func TestConformance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = os.WriteFile(filepath.Join(dir, "media", "fake", "outmedia1"), enc.Ciphertext, 0o600); err != nil {
+		if err = os.WriteFile(filepath.Join(dir, "media", "testnet", "outmedia1"), enc.Ciphertext, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		h.mustCommand(protocol.Command{
@@ -932,7 +932,7 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("exactly once across a restart", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendOK)
 		// A send whose outcome is never reported, then a restart: it must become unknown.
 		h.host.Connector.SendTimeout = time.Hour
 		gw.lock.Lock()

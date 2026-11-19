@@ -33,7 +33,7 @@ func testConnector(t *testing.T) *Connector {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	c := New(Options{Network: "fake", Store: st, SendTimeout: time.Hour})
+	c := New(Options{Network: "test", Store: st, SendTimeout: time.Hour})
 	c.Bridge, c.Log = &bridgev2.Bridge{BackgroundCtx: ctx}, zerolog.Nop()
 	return c
 }

@@ -316,7 +316,7 @@ network means delivering:
 
 ### Conformance suite
 
-- **Automated:** runs against a fake network connector in CI; covers the connector
+- **Automated:** runs against a test connector in CI; covers the connector
   contract, ordering, dedup, sealing, outbox states, restart recovery, and backfill.
 - **Live checklist:** scripted checks against real test accounts — login, send and
   receive both ways, a message sent from the phone, media, edits, deletes, reactions,
@@ -409,7 +409,7 @@ append-only audit log, viewable in Settings → Agents. Messages an agent sent a
 ## Self-hosting
 
 - **Unit of deployment:** a Docker Compose bundle: Caddy, Convex backend, Postgres,
-  gateway, bridge host (one container per enabled network), web app. Every image pinned
+  gateway, bridge host (one container per network the server runs), web app. Every image pinned
   by digest.
 - **One command:** `curl -fsSL https://<project>/install.sh | sh` installs Docker if
   needed, asks for a domain, generates secrets, starts the stack, and prints the admin
@@ -463,7 +463,7 @@ packages/
 deploy/
   compose/        Docker Compose bundle, pinned versions, config templates
   install/        One-command installer, Proxmox helper
-conformance/      Fake network connector, automated suite, live checklist, canary ledger
+conformance/      Test connector, automated suite, live checklist, canary ledger
 docs/
 ```
 
@@ -498,17 +498,17 @@ All rows are scoped to one person. Sealed fields are ciphertext envelopes.
 
 ## Quality and testing
 
-| Layer                                                                                  | Tooling                                                                              | Runs in CI                             |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------- |
-| Unit (core, crypto, message AST, cache)                                                | Vitest                                                                               | Yes                                    |
-| Convex functions and access checks                                                     | convex-test                                                                          | Yes                                    |
-| Bridge host and gateway pipeline                                                       | Go tests + Vitest against the fake network connector, Convex and Postgres in Compose | Yes                                    |
-| Agent security (negative tests: no grant, expired approval, revoked token, wrong user) | convex-test + MCP client                                                             | Yes, from the first MCP PR             |
-| Conformance live checklist                                                             | Scripted, real test accounts                                                         | Before each release and connector bump |
-| Canary ledger                                                                          | Continuous, two test accounts                                                        | Always on in the dev environment       |
-| Desktop end to end                                                                     | Playwright (Electron)                                                                | Yes                                    |
-| Mobile end to end                                                                      | Maestro                                                                              | Nightly / pre-release                  |
-| Install                                                                                | Fresh-VM install of the bundle                                                       | Pre-release                            |
+| Layer                                                                                  | Tooling                                                                    | Runs in CI                             |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
+| Unit (core, crypto, message AST, cache)                                                | Vitest                                                                     | Yes                                    |
+| Convex functions and access checks                                                     | convex-test                                                                | Yes                                    |
+| Bridge host and gateway pipeline                                                       | Go tests + Vitest against a test connector, Convex and Postgres in Compose | Yes                                    |
+| Agent security (negative tests: no grant, expired approval, revoked token, wrong user) | convex-test + MCP client                                                   | Yes, from the first MCP PR             |
+| Conformance live checklist                                                             | Scripted, real test accounts                                               | Before each release and connector bump |
+| Canary ledger                                                                          | Continuous, two test accounts                                              | Always on in the dev environment       |
+| Desktop end to end                                                                     | Playwright (Electron)                                                      | Yes                                    |
+| Mobile end to end                                                                      | Maestro                                                                    | Nightly / pre-release                  |
+| Install                                                                                | Fresh-VM install of the bundle                                             | Pre-release                            |
 
 CI (GitHub Actions): lint, typecheck, unit, Convex tests, pipeline integration and
 desktop end to end on every PR.
@@ -623,7 +623,7 @@ minutes.
 | 6   | TanStack desktop/web + Expo mobile, shared core; no react-native-web component sharing                                            | Decided                        |
 | 7   | Sealed storage by default for every account; per-object content keys sealed to each recipient; agents get access per granted chat | Decided                        |
 | 8   | Platform encryption ends at the bridge host; re-encrypted outbound by the connector                                               | Decided                        |
-| 9   | Separate accounts per person; admin panel; admin chooses enabled networks                                                         | Decided                        |
+| 9   | Separate accounts per person; admin panel; admins install networks in the app                                                     | Decided                        |
 | 10  | All six v1 networks ship with maturity labels; connector platform + conformance suite                                             | Decided                        |
 | 11  | No automatic resend after an ambiguous outcome; "delivery unknown" state                                                          | Decided                        |
 | 12  | Public domain default; Tailscale option; project-hosted push relay                                                                | Decided                        |

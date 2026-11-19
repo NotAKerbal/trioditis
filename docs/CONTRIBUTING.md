@@ -20,18 +20,18 @@ Always install from the root, and always with pnpm.
 
 Run these from the repository root.
 
-| Command                                | What it does                                                                              |
-| -------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `pnpm dev`                             | A working local instance of this checkout, with its own backend, gateway and fake network |
-| `pnpm dev --network whatsapp`          | The same with a real WhatsApp bridge host (`fake,whatsapp` for both)                      |
-| `pnpm dev --setup`                     | Sets that instance up and stops; run it for every new worktree                            |
-| `pnpm fake <username> <from> "<text>"` | Delivers a message on the fake network to the running instance                            |
-| `pnpm preview`                         | Deploys your working tree as a demo instance on a public URL, with its own backend        |
-| `pnpm check`                           | Runs exactly what CI runs: typecheck, lint, tests, and the bridge host's Go vet and tests |
-| `pnpm typecheck`                       | Type-checks every TypeScript package                                                      |
-| `pnpm test`                            | Runs the TypeScript tests; no services needed                                             |
-| `pnpm lint`                            | Lints the TypeScript and JavaScript with oxlint                                           |
-| `pnpm build`                           | Builds every package that has a build                                                     |
+| Command                     | What it does                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                  | A working local instance of this checkout, with its own backend, gateway and a WhatsApp bridge host |
+| `pnpm dev --network signal` | The same with another network's bridge host (`whatsapp,signal` for both)                            |
+| `pnpm dev --demo`           | The same with no network: demo chats only, like a preview                                           |
+| `pnpm dev --setup`          | Sets that instance up and stops; run it for every new worktree                                      |
+| `pnpm preview`              | Deploys your working tree as a demo instance on a public URL, with its own backend                  |
+| `pnpm check`                | Runs exactly what CI runs: typecheck, lint, tests, and the bridge host's Go vet and tests           |
+| `pnpm typecheck`            | Type-checks every TypeScript package                                                                |
+| `pnpm test`                 | Runs the TypeScript tests; no services needed                                                       |
+| `pnpm lint`                 | Lints the TypeScript and JavaScript with oxlint                                                     |
+| `pnpm build`                | Builds every package that has a build                                                               |
 
 ## Running locally
 
@@ -49,8 +49,8 @@ This one command:
    `AGENT_ACCESS_PUBLIC_KEY`.
 3. Builds the bridge host.
 4. Starts the backend in watch mode and creates the test account, as the server's admin.
-5. Starts the gateway, a bridge host for each network (the fake network unless you pass
-   `--network`), and the web app from `apps/desktop` once that exists.
+5. Starts the gateway, a bridge host for each network (WhatsApp unless you pass `--network`),
+   and the web app from `apps/desktop` once that exists.
 
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
@@ -64,19 +64,27 @@ in on the page's own address, as it does behind Caddy and on Vercel; `SITE_URL` 
 is that address. Without `apps/desktop`, `SITE_URL` is the backend's own HTTP address, which
 tools and scripts call directly.
 
-### The fake network
+### Networks
 
-The fake network is a network that doesn't exist: it logs in with any username and does what
-it's told. Connect it from the app (or the end-to-end script) with a username, then deliver
-messages to it:
+`TRIODITIS_NETWORKS` is the networks this instance runs a bridge host for: the ones an admin
+can install in the app (Admin settings → Networks). The test account is the admin, so install
+the network there, then connect your account to it. `pnpm dev` bridges WhatsApp, which links
+with your phone; `--network` picks others, comma-separated. A network's data stays on this
+machine, in this checkout's `.data/`. Signal's bridge host links libsignal, so the first run
+with Signal builds it (Rust, several minutes).
+
+### Demo data
 
 ```sh
-pnpm fake isaac alice "hello"                 # a direct message from alice
-pnpm fake isaac alice "hi all" --chat family  # into a group chat
+pnpm dev --demo
 ```
 
-Use `pnpm dev --network whatsapp` to bridge a real WhatsApp account instead. Its data stays on
-this machine, in this checkout's `.data/`.
+This runs no gateway and no bridge host, and sets `TRIODITIS_DEMO=1` on the backend with no
+`TRIODITIS_NETWORKS`, as a preview does. The backend then makes demo data for an account that
+asks for it (`demo.seedForMe`, from the app's settings), sealed to that account's own key, and
+turns invitations off. Demo chats show on real networks' badges, though nothing is bridged.
+The next `pnpm dev` without `--demo` removes `TRIODITIS_DEMO` again; the demo chats stay until
+you start over.
 
 ### One instance per branch
 
@@ -87,13 +95,12 @@ the machine shares, `~/.local/state/trioditis/slots/<n>.lock`, which names the c
 is created only if it doesn't exist, so two worktrees setting up at once never get the same
 slot.
 
-|                                    | Slot 0 (main checkout) | Slot n (a worktree)        |
-| ---------------------------------- | ---------------------- | -------------------------- |
-| Web app                            | `5180`                 | `5180 + n`                 |
-| Backend (Convex API, HTTP actions) | `4210`, `4211`         | `4210 + 2n`, `4211 + 2n`   |
-| Gateway                            | `8700`                 | `8700 + 10n`               |
-| Bridge hosts (fake, WhatsApp)      | `8701`, `8702`         | `8701 + 10n`, `8702 + 10n` |
-| Fake network control               | `8709`                 | `8709 + 10n`               |
+|                                    | Slot 0 (main checkout) | Slot n (a worktree)      |
+| ---------------------------------- | ---------------------- | ------------------------ |
+| Web app                            | `5180`                 | `5180 + n`               |
+| Backend (Convex API, HTTP actions) | `4210`, `4211`         | `4210 + 2n`, `4211 + 2n` |
+| Gateway                            | `8700`                 | `8700 + 10n`             |
+| Bridge host (WhatsApp)             | `8702`                 | `8702 + 10n`             |
 
 A worktree claims the first free slot the first time it is set up and keeps it while it
 exists, even when it isn't running. On every start the saved slot is checked against the
@@ -161,7 +168,7 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   a process list, and the settings already there are read without being printed.
   `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
 
-The gateway, the bridge hosts and the fake network's control port listen on `127.0.0.1` only,
+The gateway and the bridge hosts listen on `127.0.0.1` only,
 and the web app does unless you set `HOST`. The local backend listens on all of the machine's
 network interfaces: the Convex CLI has no option to bind it to `127.0.0.1`. Its admin API needs
 the admin key in `.convex`, but its HTTP actions (sign-in) can be reached from your network.
@@ -297,17 +304,6 @@ batch; a migration that goes on in further scheduled batches finishes in the bac
 a later batch's failure shows in the backend's logs rather than stopping setup. The self-hosted installer calls it after each of
 its deploys as well: see `docs/deploy.md`.
 
-### End-to-end check
-
-With `pnpm dev` running, the end-to-end script signs in as the test account, connects the fake
-network through a sealed login, receives and sends a message, and checks that nothing readable
-reached the backend:
-
-```sh
-cd apps/gateway
-node --env-file=../../.data/dev.env scripts/e2e-fake.ts tester@trioditis.test trioditis-dev-tester
-```
-
 ## Previews
 
 ```sh
@@ -318,12 +314,13 @@ This deploys the code in your working tree, committed or not, as a demo instance
 preview backend of its own and a Vercel preview of the web app. It prints the URL and the test
 account when it finishes. `pnpm preview --dry-run` prints every step and does nothing.
 
-**A preview is demo-only.** It sets `TRIODITIS_NETWORKS=fake` and `TRIODITIS_DEMO=1` on every
-run. The backend then refuses events for any other network and refuses invitations, so the
-test account can't invite anyone. It runs no gateway or bridge host,
-and its data is made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to
-the test account's own key exactly as real data would be. No real account or real message
-ever goes to Convex's cloud.
+**A preview is demo-only.** It has no networks: every run removes `TRIODITIS_NETWORKS` and sets
+`TRIODITIS_DEMO=1`. The backend then refuses every network's events and refuses invitations,
+so the test account can't invite anyone. It runs no gateway or bridge host, and its data is
+made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to the test
+account's own key exactly as real data would be. Its demo chats show on real networks'
+badges, though nothing is bridged. No real account or real message ever goes to Convex's
+cloud.
 
 Previews are short-lived and per branch, so each gets the known test account. It signs in with
 the password the app derives from `trioditis-dev-tester` (`authPassword` in packages/crypto),
@@ -358,8 +355,8 @@ How it works:
 2. Makes a temporary deploy key, and deletes it however the script ends.
 3. Sets the backend's variables that are missing: `BETTER_AUTH_SECRET`, `SITE_URL`, and a
    gateway secret, setup token and public keys that nothing outside the backend ever
-   holds, since no bridge host connects to a preview. `TRIODITIS_NETWORKS=fake` and
-   `TRIODITIS_DEMO=1` are set on every run, whatever the backend held before.
+   holds, since no bridge host connects to a preview. `TRIODITIS_DEMO=1` is set and
+   `TRIODITIS_NETWORKS` removed on every run, whatever the backend held before.
 4. Deploys the backend functions.
 5. Deploys the web app to a Vercel preview, with `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and
    `TRIODITIS_PREVIEW` as build variables, and without git details, so a preview made from
@@ -382,7 +379,7 @@ deploys it by hand.
 | -------- | ---------------------------------------------------------- |
 | Branch   | `dev`                                                      |
 | Backend  | The `nightly` deployment in the `trioditis` Convex project |
-| Networks | The fake network only; no bridge host                      |
+| Networks | None; no bridge host                                       |
 | Accounts | One: the first admin, who signs up with the setup link     |
 | Data     | Demo data for whoever signs up, sealed to their own key    |
 
@@ -395,9 +392,10 @@ prints the link in its Vercel build log, once; after that, get the token with:
 cd packages/backend && npx convex env get TRIODITIS_SETUP_TOKEN --deployment isaac-cochran:trioditis:nightly
 ```
 
-Nightly sets `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` on every deploy: the backend
-refuses events for any other network and refuses invitations, and the admin gets demo data
-from the backend (`demo.seedForMe`), sealed to their own key. No known password is involved.
+Nightly sets `TRIODITIS_DEMO=1` and has no `TRIODITIS_NETWORKS` on every deploy: the backend
+refuses every network's events and refuses invitations, and the admin gets demo data from the
+backend (`demo.seedForMe`), sealed to their own key, on real networks' badges. No known
+password is involved.
 
 There is no production site on Vercel. Trioditis's production is a server people run
 themselves (`deploy/`). Only `dev` deploys from Git; `vercel.json` turns `main` off, and
@@ -413,8 +411,8 @@ command with `scripts/vercel-build.mjs`. For a push to `dev`, that script:
    `CONVEX_DEPLOY_KEY`, which Vercel holds for the `dev` branch and must be a production key
    for nightly's deployment.
 2. Checks the backend's variables. It sets `SITE_URL` to nightly's address the first time and
-   stops the build if it holds a different one. It sets `TRIODITIS_NETWORKS=fake` the first
-   time and stops the build if it holds anything else. It sets `TRIODITIS_DEMO=1`. It creates
+   stops the build if it holds a different one. It removes `TRIODITIS_NETWORKS` if it's set (a
+   backend on Convex's cloud has no networks), and sets `TRIODITIS_DEMO=1`. It creates
    the secrets it needs if they're missing (through stdin, never in the build log), and creates
    `TRIODITIS_SETUP_TOKEN` once, printing the setup link on that run only.
 3. Runs `convex deploy`, which pushes the backend functions and builds the web app with
@@ -522,7 +520,7 @@ packages/
   core/           Shared types and the bridge protocol's wire types
   crypto/         Sealing (docs/architecture/sealing.md)
   config/         Shared TypeScript config
-scripts/          pnpm dev, preview, fake and check; the Vercel build and skip steps; the preview test account
+scripts/          pnpm dev, preview and check; the Vercel build and skip steps; the preview test account
 deploy/           The self-hosted bundle
 docs/
   PLAN.md         Product and implementation plan
@@ -577,5 +575,3 @@ with the shared test vectors or fixtures updated.
   `CONVEX_` variable in another dotenv file). Move those files aside, or start over.
 - **"Another run holds preview-<name>."** A `pnpm preview` with that name is still running.
 - **The bridge host won't build.** It needs Go 1.27 on `PATH` or in `~/.local/go`.
-- **The fake network refuses a message (409).** The username must be the one you connected
-  the fake network with.

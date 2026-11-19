@@ -22,9 +22,9 @@ make_install "backup publishes whole or not at all"
 bk=$(private_value BRIDGE_PRIVATE_KEY)
 ak=$(private_value AGENT_ACCESS_PRIVATE_KEY)
 
-make_volume bridge-fake
+make_volume bridge-whatsapp
 make_volume postgres
-fill bridge-fake 'echo one >/v/a'
+fill bridge-whatsapp 'echo one >/v/a'
 fill postgres 'echo 17 >/v/PG_VERSION'
 
 # Published entries in $backups, hidden ones (unpublished work) included.
@@ -287,7 +287,7 @@ cp "$root/env.good" "$root/deploy/.env"
 
 # Interrupted while streaming: a large, incompressible volume keeps tar busy.
 rm -rf "${backups:?}"/*
-fill bridge-fake 'head -c 600000000 /dev/urandom >/v/big'
+fill bridge-whatsapp 'head -c 600000000 /dev/urandom >/v/big'
 # A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: reset here.
 setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
 for _ in $(seq 600); do

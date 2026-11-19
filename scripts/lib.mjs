@@ -64,12 +64,6 @@ export const environments = {
   nightly: { siteUrl: null, deployment: null },
 }
 
-/**
- * The only networks a backend on Convex's cloud (a preview or nightly) may offer. Their data is
- * made up, so real accounts and real messages never reach the cloud.
- */
-export const CLOUD_NETWORKS = 'fake'
-
 // Every dev instance and preview gets this account, so there is something to sign in with
 // straight away. Those backends hold throwaway data only. Nightly never gets it.
 export const TESTER = { name: 'Dev Tester', email: 'tester@trioditis.test', password: 'trioditis-dev-tester' }
@@ -202,7 +196,6 @@ export const portsFor = (slot) => ({
   convexSite: 4211 + 2 * slot,
   gateway: 8700 + 10 * slot,
   bridge: {
-    fake: 8701 + 10 * slot,
     whatsapp: 8702 + 10 * slot,
     // The networks added later, above every slot's ports in the 8700s and 9000s (slots go
     // up to 99), so the ports above don't move.
@@ -218,7 +211,6 @@ export const portsFor = (slot) => ({
     twitter: 10110 + 20 * slot,
     bluesky: 10111 + 20 * slot,
   },
-  fakeControl: 8709 + 10 * slot,
 })
 
 const allPorts = (ports) => [
@@ -227,7 +219,6 @@ const allPorts = (ports) => [
   ports.convexSite,
   ports.gateway,
   ...Object.values(ports.bridge),
-  ports.fakeControl,
 ]
 
 const slotsDir = resolve(stateDir, 'slots')
@@ -939,6 +930,20 @@ export function setConvexEnv(values, options) {
       input: entries.map(([name, value]) => `${name}=${value}`).join('\n') + '\n',
     },
   )
+}
+
+/**
+ * Unsets variables on a backend; one that isn't set is left as it is. `options` says which
+ * backend, as for `setConvexEnv`.
+ */
+export function removeConvexEnv(names, options) {
+  for (const name of names) {
+    capture(
+      'pnpm',
+      convex('env', 'remove', name, ...(options.deployment ? ['--deployment', options.deployment] : [])),
+      { ...options, quiet: true },
+    )
+  }
 }
 
 /** The Go toolchain: on PATH, or where the dev VM keeps it. */

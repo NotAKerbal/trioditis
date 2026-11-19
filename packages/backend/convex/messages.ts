@@ -7,6 +7,7 @@ import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
 import { forgetMessage, lastOf } from './lib/lastMessage'
+import { retired } from './lib/networks'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -84,7 +85,7 @@ export const arrivals = query({
         bytes += byteSize(message)
         if ('self' in message.sender || message.redactedAt !== undefined) continue
         const chat = await ctx.db.get(message.chatId)
-        if (!chat || chat.userId !== member.userId || chat.view !== 'inbox') continue
+        if (!chat || chat.userId !== member.userId || chat.view !== 'inbox' || retired(chat)) continue
         out.push({
           arrivedAt: message._creationTime,
           message: clientLastMessage(lastOf(message)),

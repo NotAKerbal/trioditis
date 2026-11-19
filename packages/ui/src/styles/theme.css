@@ -58,7 +58,7 @@
   --color-net-twitter: var(--net-twitter);
   --color-net-bluesky: var(--net-bluesky);
   --color-net-agents: var(--net-agents);
-  --color-net-fake: var(--net-fake);
+  --color-net-unknown: var(--net-unknown);
 
   --color-label-pink: var(--label-pink);
   --color-label-blue: var(--label-blue);

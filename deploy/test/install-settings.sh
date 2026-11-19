@@ -13,7 +13,11 @@
 # added without deciding whether backups keep it, and nothing else writes deploy/.env; and a
 # value that isn't literal (a space from --bind, say), or an option's value spanning lines (a
 # second setting slipped in), or a NUL in deploy/.env, stops it before anything is saved. Every
-# value a fresh install writes or generates is literal, since the stub runs get through. TRIODITIS_INSTALLER=<path> tests another
+# value a fresh install writes or generates is literal, since the stub runs get through. And
+# the networks: every one gets a bridge host by default (Telegram only with its credentials),
+# --networks limits them and is kept (INSTALL_NETWORKS), an unknown one (fake) stops the
+# install, and an install from before (TRIODITIS_NETWORKS=whatsapp,fake, the fake network's
+# --e2e) moves to every network, without the fake one. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 set -eu
@@ -201,6 +205,60 @@ install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 012345
 install || true
 [ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
   [ "$(value TRIODITIS_NETWORKS)" = telegram ] && check ok "and a rerun keeps them" || check fail "and a rerun keeps them"
+
+# Every network gets a bridge host by default, but Telegram only with its credentials: all
+# leaves it out, with a note, rather than stopping. What's bridged is what the backend may
+# offer (TRIODITIS_NETWORKS) and the profiles Compose runs.
+all_but_telegram=whatsapp,signal,gmessages,gvoice,meta,instagram,slack,groupme,linkedin,twitter,bluesky
+checkout
+install || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  [ "$(value COMPOSE_PROFILES)" = "$all_but_telegram" ] && grep -q "Leaving Telegram out" "$work/out" &&
+  check ok "by default every network but Telegram (without its credentials) is bridged" ||
+  { check fail "by default every network but Telegram (without its credentials) is bridged"; grep -E '^(INSTALL_NETWORKS|TRIODITIS_NETWORKS)=' "$work/checkout/deploy/.env" >&2; }
+[ "$(value BRIDGE_HOSTS | tr ',' '\n' | wc -l)" = 11 ] && value BRIDGE_HOSTS | tr ',' '\n' | grep -qx 'bluesky-1=http://bridge-bluesky:8611' &&
+  check ok "each with its bridge host" || check fail "each with its bridge host ($(value BRIDGE_HOSTS))"
+install --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef0123456789abcdef || true
+[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal,gmessages,gvoice,telegram,meta,instagram,slack,groupme,linkedin,twitter,bluesky ] &&
+  ! grep -q "Leaving Telegram out" "$work/out" && check ok "and Telegram too once its credentials are given" ||
+  check fail "and Telegram too once its credentials are given ($(value TRIODITIS_NETWORKS))"
+
+# --networks limits them, and a rerun keeps the limit; all goes back to every one.
+checkout
+install --networks whatsapp,signal,whatsapp || true
+[ "$(value INSTALL_NETWORKS)" = whatsapp,signal,whatsapp ] && [ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal ] &&
+  [ "$(value COMPOSE_PROFILES)" = whatsapp,signal ] &&
+  [ "$(value BRIDGE_HOSTS)" = whatsapp-1=http://bridge-whatsapp:8611,signal-1=http://bridge-signal:8611 ] &&
+  check ok "--networks limits the bridge hosts, each once" || check fail "--networks limits the bridge hosts, each once ($(value TRIODITIS_NETWORKS))"
+install || true
+[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal ] && check ok "and a rerun keeps the limit" || check fail "and a rerun keeps the limit"
+install --networks all || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  check ok "--networks all goes back to every network" || check fail "--networks all goes back to every network"
+for networks in fake whatsapp,fake all,signal; do
+  checkout
+  if install --networks "$networks"; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "Unknown network" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+    check ok "--networks $networks stops the install, saving nothing" ||
+    { check fail "--networks $networks stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+done
+
+# An install from before INSTALL_NETWORKS: its TRIODITIS_NETWORKS was what it offered (now the
+# admins' choice), so it moves to every network; and the fake network's test endpoint (--e2e)
+# goes, with its setting and compose file.
+checkout
+printf '%s\n' POSTGRES_PASSWORD=keep-me COMPOSE_PROJECT_NAME=trioditis-test INSTALL_E2E=1 \
+  COMPOSE_FILE=compose.yml:compose.e2e.yml COMPOSE_PROFILES=whatsapp,fake TRIODITIS_NETWORKS=whatsapp,fake \
+  BRIDGE_HOSTS=whatsapp-1=http://bridge-whatsapp:8611,fake-1=http://bridge-fake:8611 >"$work/checkout/deploy/.env"
+chmod 600 "$work/checkout/deploy/.env"
+install || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  [ "$(value COMPOSE_PROFILES)" = "$all_but_telegram" ] && [ "$(value POSTGRES_PASSWORD)" = keep-me ] &&
+  check ok "an install from before moves to every network" || { check fail "an install from before moves to every network"; tail -3 "$work/out" >&2; }
+! grep -q fake "$work/checkout/deploy/.env" && ! grep -q '^INSTALL_E2E=' "$work/checkout/deploy/.env" &&
+  [ "$(value COMPOSE_FILE)" = compose.yml:compose.loopback.yml ] &&
+  check ok "without the fake network or its test endpoint" ||
+  { check fail "without the fake network or its test endpoint"; grep -E 'fake|E2E|COMPOSE_FILE' "$work/checkout/deploy/.env" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

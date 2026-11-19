@@ -159,13 +159,6 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'password', kind: 'form', name: 'App password' }],
     termsRisk: false,
   },
-  fake: {
-    network: 'fake',
-    name: 'Fake network',
-    maturity: 'experimental',
-    flows: [{ id: 'username', kind: 'form', name: 'Any username' }],
-    termsRisk: false,
-  },
 }
 
 /** Which inbox view a chat list shows. */
