@@ -196,6 +196,37 @@ carries on in the background, so whatsmeow clears the plaintext and acknowledges
 message; if the process stops before the sealed event is journaled, WhatsApp doesn't
 redeliver it. See the bridge host README, Plaintext at rest.
 
+### The other networks
+
+Each network's page in `docs/networks/` lists exactly what its connector keeps; in short:
+
+- **Every network** keeps the login's credentials in bridgev2's `user_login.metadata`:
+  session cookies (Google Messages, Google Voice, Messenger, Instagram, Slack, LinkedIn, X;
+  for the Google networks they are a whole Google account session), tokens (GroupMe,
+  Bluesky, Slack), Telegram's MTProto auth key, Signal's account keys, and X Chat's private
+  keys (with each conversation's keys in `portal.metadata`).
+- **Message content, bounded:** Messenger's encrypted chats run on whatsmeow, so the same
+  `whatsmeow_event_buffer` and sweep as WhatsApp apply. Signal's `signalmeow_event_buffer`
+  works the same way; the bridge host deletes rows past 35 days (Signal's server keeps
+  undelivered messages for 30), and deletes a history transfer's contacts once every chat
+  in it has been imported. GroupMe keeps each message's text in
+  its message metadata for edits; the bridge host clears it once GroupMe's edit window has
+  passed. Telegram's `telegram_file` cache holds no content but is kept shorter than an
+  upload lives, so a reused file is never lost.
+- **Message content, not bounded yet:** unsalted SHA-256 hashes of message text, used to
+  tell real edits from unchanged updates, so a short message can be confirmed by guessing:
+  Google Messages (`text_hash`), Telegram (`content_hash`, also logged at info when a send
+  succeeds) and LinkedIn (`edit_hash`, edited messages only). Messenger keeps poll questions
+  and options, and Instagram keeps shared posts' URLs from backfilled history.
+- **Names and numbers:** phone numbers and contact names in ghost, portal and connector
+  tables, and RCS read receipts naming who read a message (Google Messages).
+
+None of the connectors writes message content to its logs at info level, except Telegram's
+content hash; a few log raw network responses at warn or error. Signal's connector logs the
+history transfer's backup key and the name and number of a synced contact with no Signal ID,
+but its bridge host drops those fields from every line before they are written
+(docs/networks/signal.md, What's stored in plaintext).
+
 **Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
 encrypted backups**; the installer warns when its data directory isn't on an encrypted
 volume. **Phase 1:** those columns are sealed with a server-held key. See docs/PLAN.md, Open questions.

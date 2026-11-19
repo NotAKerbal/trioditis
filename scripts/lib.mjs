@@ -201,7 +201,23 @@ export const portsFor = (slot) => ({
   convexCloud: 4210 + 2 * slot,
   convexSite: 4211 + 2 * slot,
   gateway: 8700 + 10 * slot,
-  bridge: { fake: 8701 + 10 * slot, whatsapp: 8702 + 10 * slot },
+  bridge: {
+    fake: 8701 + 10 * slot,
+    whatsapp: 8702 + 10 * slot,
+    // The networks added later, above every slot's ports in the 8700s and 9000s (slots go
+    // up to 99), so the ports above don't move.
+    signal: 10101 + 20 * slot,
+    gmessages: 10102 + 20 * slot,
+    gvoice: 10103 + 20 * slot,
+    telegram: 10104 + 20 * slot,
+    meta: 10105 + 20 * slot,
+    instagram: 10106 + 20 * slot,
+    slack: 10107 + 20 * slot,
+    groupme: 10108 + 20 * slot,
+    linkedin: 10109 + 20 * slot,
+    twitter: 10110 + 20 * slot,
+    bluesky: 10111 + 20 * slot,
+  },
   fakeControl: 8709 + 10 * slot,
 })
 
@@ -934,10 +950,46 @@ export function goEnv() {
   throw new Error('Go 1.27 is needed for the bridge host: https://go.dev/dl/ (or put it in ~/.local/go)')
 }
 
-/** Builds the bridge host binary. Go's build cache makes this quick when nothing changed. */
-export function buildBridgeHost() {
-  run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnv() })
+/**
+ * Builds the bridge host binary. Go's build cache makes this quick when nothing changed.
+ * With `signal`, Signal's connector is built in, linking libsignal from `libsignalDir`.
+ */
+export function buildBridgeHost({ signal = false } = {}) {
+  const goEnvironment = goEnv()
+  if (!signal) {
+    run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnvironment })
+    return resolve(bridgeDir, 'bin/bridge-host')
+  }
+  const dir = libsignalDir()
+  const libraryPath = [dir, process.env.LIBRARY_PATH].filter(Boolean).join(delimiter)
+  run('go', ['build', '-tags', 'libsignal', '-o', 'bin/bridge-host', './cmd/bridge-host'], {
+    cwd: bridgeDir,
+    env: { ...goEnvironment, LIBRARY_PATH: libraryPath },
+  })
   return resolve(bridgeDir, 'bin/bridge-host')
+}
+
+/**
+ * The directory holding libsignal_ffi.a for a bridge host built with Signal: LIBSIGNAL_FFI_DIR,
+ * or .data/libsignal in this checkout. It must be the libsignal version mautrix-signal's
+ * bindings were generated against, which only the link would otherwise check; this says what
+ * is missing instead. Building it: docs/networks/signal.md. `module` is mautrix-signal's source:
+ * the bridge host builds against the patched copy in this checkout (third_party/README.md).
+ */
+export function libsignalDir(module = resolve(bridgeDir, 'third_party/mautrix-signal')) {
+  const dir = process.env.LIBSIGNAL_FFI_DIR ? resolve(process.env.LIBSIGNAL_FFI_DIR) : resolve(dataDir, 'libsignal')
+  const pinned = readFileSync(resolve(module, 'pkg/libsignalgo/signalversion/version.go'), 'utf8')
+  const version = /const Version = "v(\d+\.\d+\.\d+)"/.exec(pinned)?.[1]
+  if (!version) throw new Error(`Couldn't tell which libsignal version mautrix-signal needs (${module}).`)
+  const how = `Build libsignal v${version} (docs/networks/signal.md) and put its libsignal_ffi.a there, or set LIBSIGNAL_FFI_DIR to the directory that has it.`
+  const library = resolve(dir, 'libsignal_ffi.a')
+  if (!existsSync(library))
+    throw new Error(`Signal's bridge host links libsignal, and ${library} doesn't exist. ${how}`)
+  // libsignalgo calls signal_ffi_version_<version> to fail the link on any other version.
+  if (!readFileSync(library).includes(`signal_ffi_version_${version.replaceAll('.', '_')}`)) {
+    throw new Error(`${library} isn't libsignal v${version}, the version mautrix-signal needs. ${how}`)
+  }
+  return dir
 }
 
 /** The desktop and web app's package, if this checkout has it. */

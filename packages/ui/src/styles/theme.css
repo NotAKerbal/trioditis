@@ -51,6 +51,12 @@
   --color-net-messenger: var(--net-messenger);
   --color-net-instagram: var(--net-instagram);
   --color-net-discord: var(--net-discord);
+  --color-net-slack: var(--net-slack);
+  --color-net-groupme: var(--net-groupme);
+  --color-net-gvoice: var(--net-gvoice);
+  --color-net-linkedin: var(--net-linkedin);
+  --color-net-twitter: var(--net-twitter);
+  --color-net-bluesky: var(--net-bluesky);
   --color-net-agents: var(--net-agents);
   --color-net-fake: var(--net-fake);
 

@@ -38,14 +38,20 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   signal: {
     network: 'signal',
     name: 'Signal',
-    maturity: 'stable',
+    // Stable is the v1 target (docs/PLAN.md); experimental until it has been used with a real
+    // account, on the bridge host's patched mautrix-signal (docs/networks/signal.md, Sending).
+    maturity: 'experimental',
     flows: [{ id: 'qr', kind: 'qr', name: 'Link a device' }],
     termsRisk: false,
   },
   gmessages: {
     network: 'gmessages',
     name: 'Google Messages',
-    maturity: 'stable',
+    // Stable is the v1 target (docs/PLAN.md), reached after the conformance suite and a week on
+    // the canary ledger with a real account. See docs/networks/gmessages.md.
+    maturity: 'beta',
+    // The connector's only flow: Google account cookies, then an emoji tapped on the phone.
+    // Its QR flow is switched off upstream.
     flows: [{ id: 'google', kind: 'cookies', name: 'Sign in with Google' }],
     termsRisk: false,
   },
@@ -63,14 +69,20 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'meta',
     name: 'Messenger',
     maturity: 'beta',
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // mautrix-meta's cookie flows. Its username-and-password flows aren't offered: they can
+    // need choices, images and in-browser checks the stepper can't show (docs/networks/meta.md).
+    flows: [
+      { id: 'facebook', kind: 'cookies', name: 'Cookies from facebook.com' },
+      { id: 'messenger', kind: 'cookies', name: 'Cookies from messenger.com' },
+    ],
     termsRisk: true,
   },
   instagram: {
     network: 'instagram',
     name: 'Instagram',
     maturity: 'beta',
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // Cookies only, as for Messenger (docs/networks/instagram.md).
+    flows: [{ id: 'instagram', kind: 'cookies', name: 'Cookies from instagram.com' }],
     termsRisk: true,
   },
   discord: {
@@ -82,6 +94,70 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
       { id: 'token', kind: 'form', name: 'Token' },
     ],
     termsRisk: true,
+  },
+  slack: {
+    network: 'slack',
+    name: 'Slack',
+    maturity: 'experimental',
+    // The connector's IDs. The token flow comes first: it needs nothing the stepper can't
+    // show, where the email flow can stop at a CAPTCHA or a workspace list. See
+    // docs/networks/slack.md.
+    flows: [
+      { id: 'token', kind: 'cookies', name: 'Token and cookie' },
+      { id: 'email', kind: 'form', name: 'Email code' },
+      { id: 'app', kind: 'form', name: 'Slack app (bot)' },
+    ],
+    // A browser session's token used by an unofficial client, against Slack's acceptable
+    // use policy, and against many workspaces' own rules.
+    termsRisk: true,
+  },
+  groupme: {
+    network: 'groupme',
+    name: 'GroupMe',
+    maturity: 'experimental',
+    // The connector's third flow, `web`, reads the token from an embedded browser, which the
+    // stepper doesn't have; pasting the same token is `access-token`. See docs/networks/groupme.md.
+    flows: [
+      { id: 'access-token', kind: 'form', name: 'Access token' },
+      { id: 'password', kind: 'form', name: 'Email or phone and password' },
+    ],
+    // GroupMe has a public API for third-party apps using a person's own access token.
+    termsRisk: false,
+  },
+  gvoice: {
+    network: 'gvoice',
+    name: 'Google Voice',
+    maturity: 'experimental',
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    // Google account cookies driving voice.google.com's own API as an unofficial client, which
+    // Google checks for. See docs/networks/gvoice.md.
+    termsRisk: true,
+  },
+  linkedin: {
+    network: 'linkedin',
+    name: 'LinkedIn',
+    maturity: 'experimental',
+    // The connector's email-and-password flow isn't offered: its verification steps ask the
+    // person to pick from options, which the stepper can't show yet. See docs/networks/linkedin.md.
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    termsRisk: true,
+  },
+  twitter: {
+    network: 'twitter',
+    name: 'X',
+    maturity: 'experimental',
+    // The connector's password flow needs a browser token made by script in a web view, which
+    // the stepper can't run. See docs/networks/twitter.md.
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    termsRisk: true,
+  },
+  bluesky: {
+    network: 'bluesky',
+    name: 'Bluesky',
+    maturity: 'experimental',
+    // An app password with direct messages allowed; see docs/networks/bluesky.md.
+    flows: [{ id: 'password', kind: 'form', name: 'App password' }],
+    termsRisk: false,
   },
   fake: {
     network: 'fake',

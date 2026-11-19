@@ -21,16 +21,14 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	globallog "github.com/rs/zerolog/log"
 	"github.com/skip2/go-qrcode"
-	"go.mau.fi/mautrix-whatsapp/pkg/connector"
-	"gopkg.in/yaml.v3"
-	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/devkeys"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/host"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/networks"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/wabuffer"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
 )
 
@@ -49,10 +47,10 @@ func main() {
 			os.Exit(exitCode)
 		}
 	}()
-	network := flag.String("network", env("BRIDGE_NETWORK", "whatsapp"), "network to bridge: whatsapp or fake")
+	network := flag.String("network", env("BRIDGE_NETWORK", "whatsapp"), "network to bridge: "+strings.Join(networks.Names(), ", "))
 	dataDir := flag.String("data", env("BRIDGE_DATA_DIR", ".data/bridge-host"), "data directory")
 	user := flag.String("user", "", "login/inspect: the Trioditis user ID")
-	flow := flag.String("flow", "", "login: login flow ID (whatsapp: qr or phone)")
+	flow := flag.String("flow", "", "login: login flow ID (whatsapp: qr or phone; see docs/networks)")
 	devKeys := flag.Bool("dev-keys", false, "use dev identity keys from the data directory instead of the gateway's")
 	verbose := flag.Bool("verbose", false, "debug logging")
 	flag.Parse()
@@ -65,7 +63,12 @@ func main() {
 	if *verbose {
 		level = zerolog.DebugLevel
 	}
-	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}).Level(level).With().Timestamp().Logger()
+	console := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}
+	log := zerolog.New(logOutput(*network, console)).Level(level).With().Timestamp().Logger()
+	// mautrix-meta's protocol decoder logs through zerolog's global logger and attaches the
+	// raw protocol data, message text included, to its warnings. The global logger writes to
+	// the same output but keeps only the fields known to be safe, never below warn.
+	globallog.Logger = networks.GlobalLogger(console, level)
 	// Checked before anything starts, so a usage error never leaves a host running.
 	switch command {
 	case "run", "inspect":
@@ -91,9 +94,13 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to load the bridge key")
 	}
-	netConn, err := networkConnector(*network)
+	spec, ok := networks.Lookup(*network)
+	if !ok {
+		log.Fatal().Str("network", *network).Strs("networks", networks.Names()).Msg("Unknown network")
+	}
+	netConn, err := spec.New()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Unknown network")
+		log.Fatal().Err(err).Str("network", *network).Msg("Failed to set up the network")
 	}
 	cfg := host.Config{
 		Network:       *network,
@@ -133,19 +140,16 @@ func main() {
 	if err = h.Start(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start the bridge host")
 	}
-	// Shutdown, on every return from here: the sweeper is stopped (cancelled, then waited
-	// for) before the host and its database stop.
-	stopSweeping := func() {}
+	// Shutdown, on every return from here: the network's background work is stopped
+	// (cancelled, then waited for) before the host and its database stop.
+	stopBackground := func() {}
 	defer func() {
-		stopSweeping()
+		stopBackground()
 		h.Stop()
 		log.Info().Msg("Bridge host stopped")
 	}()
-	if wa, ok := netConn.(*connector.WhatsAppConnector); ok {
-		// Plaintext left in whatsmeow's decrypted-event buffer is deleted once it is past
-		// WhatsApp's redelivery window: now, and hourly, rather than only when a message
-		// arrives.
-		stopSweeping = wabuffer.Start(ctx, wa.DeviceStore, wabuffer.Interval, log.With().Str("component", "whatsapp buffer").Logger())
+	if spec.Background != nil {
+		stopBackground = spec.Background(ctx, netConn, log)
 	}
 	if fake, ok := netConn.(*fakenet.Network); ok && command == "run" && os.Getenv("BRIDGE_FAKE_CONTROL_ADDR") != "" && cfg.InternalToken != "" {
 		go serveFakeControl(ctx, os.Getenv("BRIDGE_FAKE_CONTROL_ADDR"), cfg.InternalToken, fake, log)
@@ -168,21 +172,14 @@ func main() {
 	<-ctx.Done()
 }
 
-func networkConnector(network string) (bridgev2.NetworkConnector, error) {
-	switch network {
-	case "whatsapp":
-		wa := &connector.WhatsAppConnector{}
-		// The connector's documented defaults, as its example config gives them.
-		example, data, _ := wa.GetConfig()
-		if err := yaml.Unmarshal([]byte(example), data); err != nil {
-			return nil, fmt.Errorf("failed to load WhatsApp defaults: %w", err)
-		}
-		return wa, nil
-	case "fake":
-		return fakenet.New(), nil
-	default:
-		return nil, fmt.Errorf("%q isn't a supported network", network)
+// logOutput is where the process logs: w, through the network's filter if it has one. A
+// network whose connector logs what must not be written out filters the host's log, which is
+// the one bridgev2 hands the connector.
+func logOutput(network string, w io.Writer) io.Writer {
+	if spec, ok := networks.Lookup(network); ok && spec.LogFilter != nil {
+		return spec.LogFilter(w)
 	}
+	return w
 }
 
 type keyFile struct {

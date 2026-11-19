@@ -222,7 +222,7 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
   "type": "displayAndWait | userInput | cookies | complete | cancelled | error",
   "instructions": "…",
   "display": { "type": "qr | code | emoji | nothing", "data": "…" },
-  "fields": [{ "id": "phone", "type": "phoneNumber", "name": "Phone number" }],
+  "fields": [{ "id": "phone", "type": "phone_number", "name": "Phone number" }],
   "cookies": { "url": "…", "fields": [] },
   "loginId": "… (on complete)",
   "error": "… (on error)"
@@ -238,7 +238,10 @@ empty `display.data`.
 
 What a person types or pastes into a login step (phone numbers, codes, cookies) is a
 credential. The client seals it to the bridge key, so the outbox never holds it in
-plaintext; the bridge host opens it, uses it and discards it.
+plaintext; the bridge host opens it, uses it and discards it. A `cookies` step's values
+can be sent as developer tools show them: the bridge host percent-decodes a field the
+network reads from a browser cookie, as bridgev2's own cookie login does. A `complete`
+step carries no `instructions`: a network's closing words name the account.
 
 ## Bridge key
 

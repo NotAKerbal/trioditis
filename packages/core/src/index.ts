@@ -1,7 +1,22 @@
 // Types shared by every Trioditis package: networks, delivery states and the sealed message
 // plaintext. The bridge host ↔ gateway wire types are in ./bridge-protocol.ts.
 
-export const NETWORKS = ['whatsapp', 'signal', 'gmessages', 'telegram', 'meta', 'instagram', 'discord', 'fake'] as const
+export const NETWORKS = [
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'telegram',
+  'meta',
+  'instagram',
+  'discord',
+  'slack',
+  'groupme',
+  'gvoice',
+  'linkedin',
+  'twitter',
+  'bluesky',
+  'fake',
+] as const
 export type Network = (typeof NETWORKS)[number]
 
 export type Maturity = 'stable' | 'beta' | 'experimental'

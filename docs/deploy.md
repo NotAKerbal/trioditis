@@ -153,6 +153,13 @@ talks to anything real: use it to try the server out. Signal and Google Messages
 list when the bridge host runs their connectors. Dropping a network from the list stops and
 removes its bridge host; its volume and database stay, in case you add it back.
 
+Telegram also needs your own app credentials from <https://my.telegram.org/apps>, which the
+installer keeps for later reruns (docs/networks/telegram.md):
+
+```sh
+deploy/install/install.sh --networks whatsapp,telegram --telegram-api-id <api_id> --telegram-api-hash <api_hash>
+```
+
 ## What's running
 
 | Service            | What it is                                                                         | Exposed                      |

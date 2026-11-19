@@ -39,7 +39,8 @@ Options (each one is kept for later reruns):
                        port, such as Tailscale Serve: the https:// origin people open.
                        Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
-  --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
+  --networks <list>    Comma-separated: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake
+                       (default whatsapp)
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
                        from, as Caddy ranges (default on a loopback bind: the loopback and
@@ -50,6 +51,10 @@ Options (each one is kept for later reruns):
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
   --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
                        or stop exposing it (default off)
+  --telegram-api-id <n>, --telegram-api-hash <hash>
+                       The App api_id and api_hash from https://my.telegram.org/apps, which
+                       Telegram needs from whoever runs the bridge (required with telegram
+                       in --networks)
   --updater, --no-updater
                        Run the updater, a systemd service that updates this install from
                        its git remote when admins ask in the app or on their schedule, or
@@ -60,13 +65,13 @@ EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url trusted domain networks e2e updater
+unset -v mode port host bind proxy_url trusted domain networks e2e telegram_api_id telegram_api_hash updater
 local_flag=0
 new_server_keys=0
 setup_link=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
+    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks | --telegram-api-id | --telegram-api-hash)
       [ $# -ge 2 ] || die "$1 needs a value."
       ;;
   esac
@@ -79,6 +84,8 @@ while [ $# -gt 0 ]; do
     --trusted-proxies) trusted=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
+    --telegram-api-id) telegram_api_id=$2; shift ;;
+    --telegram-api-hash) telegram_api_hash=$2; shift ;;
     --new-server-keys) new_server_keys=1 ;;
     --e2e) e2e=1 ;;
     --no-e2e) e2e=0 ;;
@@ -164,6 +171,8 @@ check_option() {
 [ -z "${domain+set}" ] || check_option domain INSTALL_DOMAIN "$domain"
 [ -z "${networks+set}" ] || check_option networks TRIODITIS_NETWORKS "$networks"
 [ -z "${port+set}" ] || check_option port HTTP_PORT "$port"
+[ -z "${telegram_api_id+set}" ] || check_option telegram-api-id TELEGRAM_API_ID "$telegram_api_id"
+[ -z "${telegram_api_hash+set}" ] || check_option telegram-api-hash TELEGRAM_API_HASH "$telegram_api_hash"
 # Several ranges, separated by commas or single spaces.
 [ -z "${trusted+set}" ] || literal_setting INSTALL_TRUSTED_PROXIES "${trusted//,/ }" ||
   die "--trusted-proxies must be one line of ranges (A-Z a-z 0-9 . _ ~ : / @ + = % -), separated by commas or single spaces."
@@ -293,10 +302,21 @@ IFS=',' read -r -a network_list <<<"$networks"
 [ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
 for network in "${network_list[@]}"; do
   case "$network" in
-    whatsapp | fake) ;;
-    *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
+    whatsapp | signal | gmessages | gvoice | telegram | meta | instagram | slack | groupme | linkedin | twitter | bluesky | fake) ;;
+    *) die "Unknown network '$network'. This version supports: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake." ;;
   esac
 done
+# Telegram lets a client in only with an app's credentials, issued to whoever runs it. The
+# bridge host checks them too, but an install that can't start Telegram stops here instead.
+telegram_api_id=${telegram_api_id-$(get TELEGRAM_API_ID)}
+telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
+[ -z "$telegram_api_id" ] || [[ "$telegram_api_id" =~ ^[1-9][0-9]{0,9}$ ]] ||
+  die "--telegram-api-id must be the number my.telegram.org shows as App api_id."
+[ -z "$telegram_api_hash" ] || [[ "$telegram_api_hash" =~ ^[0-9a-fA-F]{32}$ ]] ||
+  die "--telegram-api-hash must be the 32 hex digits my.telegram.org shows as App api_hash."
+if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
+  die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+fi
 updater=${updater-$(get INSTALL_UPDATER)}
 updater=${updater:-0}
 # The updater is a systemd service; refused here, before anything changes, where there's none.
@@ -447,7 +467,9 @@ set_var \
   COMPOSE_FILE "$compose_files" \
   COMPOSE_PROFILES "$networks" \
   TRIODITIS_NETWORKS "$networks" \
-  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
+  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")" \
+  TELEGRAM_API_ID "$telegram_api_id" \
+  TELEGRAM_API_HASH "$telegram_api_hash"
 
 # --- Secrets ------------------------------------------------------------------------------
 
@@ -536,8 +558,11 @@ write_file "$here/runtime/config.json" \
 write_file "$here/runtime/version" "$version" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
-# network's service at the same time, and the builds collide on the shared tag.
-docker build -q -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
+# network's service at the same time, and the builds collide on the shared tag. Signal's
+# library (Rust) is only built when Signal is enabled: it adds a long first build.
+with_signal=0
+[[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
+docker build -q --build-arg "WITH_SIGNAL=$with_signal" -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything

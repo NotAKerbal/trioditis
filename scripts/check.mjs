@@ -20,7 +20,22 @@ if (existsSync(resolve(bridgeDir, 'go.mod'))) {
     go = goEnv()
     checks.push(
       { name: 'go vet ./...', cmd: 'go', args: ['vet', './...'], cwd: bridgeDir, env: go },
+      // Signal's code is only compiled with this tag; vetting needs no libsignal to link.
+      {
+        name: 'go vet -tags libsignal ./...',
+        cmd: 'go',
+        args: ['vet', '-tags', 'libsignal', './...'],
+        cwd: bridgeDir,
+        env: go,
+      },
       { name: 'go test ./...', cmd: 'go', args: ['test', './...'], cwd: bridgeDir, env: go },
+      // The patched mautrix-signal copy is upstream plus its patch, nothing else.
+      {
+        name: 'mautrix-signal copy matches its patch',
+        cmd: 'node',
+        args: ['scripts/signal-fork.mjs', 'check'],
+        env: go,
+      },
     )
   } catch (error) {
     checks.push({ name: 'go vet, go test', blocked: error.message })

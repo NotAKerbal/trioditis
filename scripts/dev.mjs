@@ -56,7 +56,21 @@ import {
   writeDevEnv,
 } from './lib.mjs'
 
-const NETWORKS = ['fake', 'whatsapp']
+const NETWORKS = [
+  'fake',
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'gvoice',
+  'telegram',
+  'meta',
+  'instagram',
+  'slack',
+  'groupme',
+  'linkedin',
+  'twitter',
+  'bluesky',
+]
 
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')
@@ -212,7 +226,8 @@ try {
 
   if (hasBridgeHost) {
     step('Building the bridge host')
-    buildBridgeHost()
+    // Signal links libsignal (Rust), so it is only built in when it is asked for.
+    buildBridgeHost({ signal: networks.includes('signal') })
   }
 } catch (error) {
   fail(error.message)

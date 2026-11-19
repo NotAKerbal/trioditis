@@ -62,5 +62,22 @@ jobs:
           cache-dependency-path: apps/bridge-host/go.sum
       - if: steps.module.outputs.present == 'true'
         run: go vet ./...
+      # Signal's connector is only built with -tags libsignal and libsignal (Rust) to link,
+      # which is too slow to build on every run. Vetting needs no library, so this keeps the
+      # Signal code compiling; docs/networks/signal.md has the full build.
+      - if: steps.module.outputs.present == 'true'
+        name: go vet -tags libsignal ./...
+        run: go vet -tags libsignal ./...
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
+      # The bridge host builds against a patched copy of mautrix-signal
+      # (apps/bridge-host/third_party/README.md); this fails unless the copy is upstream at
+      # go.mod's version plus third_party/mautrix-signal.patch, so the patch is the whole change.
+      - if: steps.module.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - if: steps.module.outputs.present == 'true'
+        name: mautrix-signal copy matches its patch
+        working-directory: .
+        run: node scripts/signal-fork.mjs check
