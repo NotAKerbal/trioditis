@@ -4,9 +4,11 @@ go 1.27.4
 
 require (
 	github.com/beeper/groupme v0.0.0-20261118135138-42e6cd46dac3
+	github.com/beeper/groupme-lib v0.2.1-0.20261113165139-6773c3ac00ad
 	github.com/lib/pq v1.12.3
 	github.com/rs/zerolog v1.35.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	github.com/slack-go/slack v0.24.0
 	go.mau.fi/mautrix-bluesky v0.2510.0
 	go.mau.fi/mautrix-gmessages v0.2611.0
 	go.mau.fi/mautrix-gvoice v0.2611.0
@@ -21,6 +23,7 @@ require (
 	go.mau.fi/whatsmeow v0.0.0-20261116172437-19d61352436f
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sys v0.50.0
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	maunium.net/go/mautrix v0.33.0
 )
@@ -34,7 +37,6 @@ require (
 	github.com/armfazh/h2c-go-ref v0.0.0-20210215173008-07e12a6f8e0d // indirect
 	github.com/armfazh/tozan-ecc v0.1.3 // indirect
 	github.com/beeper/argo-go v1.1.2 // indirect
-	github.com/beeper/groupme-lib v0.2.1-0.20261113165139-6773c3ac00ad // indirect
 	github.com/beeper/poly1305 v0.0.0-20250815183548-d4eede7bbf3c // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bluesky-social/indigo v0.0.0-20251014222321-1e8718ae9f33 // indirect
@@ -119,7 +121,6 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/slack-go/slack v0.24.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/tidwall/gjson v1.20.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
@@ -156,7 +157,6 @@ require (
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 	google.golang.org/grpc v1.85.0 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	lukechampine.com/blake3 v1.2.1 // indirect
 	rsc.io/qr v0.2.0 // indirect
