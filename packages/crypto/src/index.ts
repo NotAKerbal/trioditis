@@ -234,7 +234,7 @@ export function decryptMedia(
 
 // Identity key backups: how a new device gets the person's identity private key. The key is
 // only ever stored wrapped, by a key derived from their password, by their recovery key, or
-// (later) by a passkey. See docs/architecture/client-api.md, Keys.
+// by a passkey (WebAuthn PRF). See docs/architecture/client-api.md, Keys.
 
 export type KeyBackupKind = 'password' | 'recovery' | 'passkey'
 
@@ -292,6 +292,30 @@ export function passwordKey(password: string, params: PasswordParams): Uint8Arra
     params.memlimit,
     sodium.crypto_pwhash_ALG_ARGON2ID13,
   )
+}
+
+/** What WebAuthn's PRF extension gives: an HMAC-SHA-256, so 32 bytes. */
+const PRF_OUTPUT_BYTES = 32
+
+/**
+ * The PRF input every passkey backup is made with, the same for everyone. Signing in with a
+ * passkey doesn't know whose it is until the server answers, so only an input fixed in advance
+ * can be evaluated in that same touch, and unlock the key straight after. It needn't be secret
+ * or unique: each credential's PRF is keyed by its own secret, so each passkey still gives its
+ * own wrapping key. The server keeps it with each backup (`prfSalt`), so a later input could
+ * differ per backup.
+ */
+export function passkeyPrfSalt(): Uint8Array {
+  return sodium.crypto_generichash(32, sodium.from_string('trioditis/v1/passkey-prf-salt'), null)
+}
+
+/**
+ * The wrapping key a passkey's PRF output gives: BLAKE2b keyed by the output, over a label for
+ * this one use, so the raw output never wraps anything itself.
+ */
+export function passkeyKey(prfOutput: Uint8Array): Uint8Array {
+  if (prfOutput.length !== PRF_OUTPUT_BYTES) throw new SealError('A passkey’s PRF output is 32 bytes')
+  return sodium.crypto_generichash(WRAPPING_KEY_BYTES, sodium.from_string('trioditis/v1/keybackup/passkey'), prfOutput)
 }
 
 export function wrapIdentityKey(

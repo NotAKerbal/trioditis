@@ -4,7 +4,9 @@ import {
   decodeRecoveryKey,
   generateRecoveryKey,
   newPasswordParams,
+  passkeyPrfSalt,
   passwordKey,
+  ready,
   SealError,
   toBase64Url,
   unwrapIdentityKey,
@@ -36,6 +38,17 @@ import {
 } from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import {
+  addPasskey,
+  deletePasskey,
+  evaluatePasskeys,
+  listPasskeys,
+  NoPrf,
+  PasskeyCancelled,
+  passkeyBackup,
+  type PasskeyBackup,
+  type PrfResult,
+} from '~/lib/passkeys.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -679,7 +692,7 @@ function Keys() {
     <>
       <Heading
         title="Keys and devices"
-        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password and your recovery key, and can’t open it."
+        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password, your recovery key and any passkey that unlocks it, and can’t open it."
       />
       <Setting title="Your key" about={`Key ID ${session.kid}. Unlocked on this device.`}>
         <span />
@@ -749,15 +762,198 @@ function Keys() {
           </Button>
         </form>
       </Setting>
-      {/* Adding a passkey waits until the server can tie it to this page's session, as it does
-          key writes: until then a passkey could be added to whoever another tab signed in as.
-          Signing in with a passkey already added works as before. */}
-      <Setting title="Passkeys" about="Sign in without a password on this device. Adding a passkey is coming soon.">
-        <Button disabled>Coming soon</Button>
-      </Setting>
+      <Passkeys backups={identity?.backups} />
       <p className="mt-2 text-sm text-subtle-foreground">
         Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
       </p>
     </>
+  )
+}
+
+/**
+ * The person's passkeys: each signs in, and one with a passkey backup also unlocks the key on a
+ * new device (lib/passkeys.ts). A backup is made from the passkey's PRF output, which the
+ * authenticator gives when the passkey is added, or else the next time it's used.
+ */
+function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
+  const session = useSession()
+  const putBackup = useMutation(api.keys.putBackup)
+  const removeBackup = useMutation(api.keys.removePasskeyBackup)
+  const passkeys = useQuery({ queryKey: ['passkeys', session.sessionId], queryFn: listPasskeys })
+  const [busy, setBusy] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+  // This key's passkey backups, by credential. One for an older key no longer opens anything.
+  const backupOf = new Map(
+    (backups ?? [])
+      .filter((b) => b.kind === 'passkey' && b.kid === session.kid && b.credentialId)
+      .map((b) => [b.credentialId!, b]),
+  )
+  const registered = new Set((passkeys.data ?? []).map((p) => p.credentialID))
+  // A backup whose passkey no longer signs in (removed elsewhere) still opens the key with it.
+  const unlockOnly = [...backupOf.keys()].filter((id) => passkeys.data && !registered.has(id))
+
+  /** Wraps the key with a passkey's PRF output and stores it as that passkey's backup. */
+  async function saveBackup(prf: PrfResult) {
+    const backup = await passkeyBackup(session.userId, session.kid, session.keyPair, prf)
+    await putBackup({
+      ...backup,
+      proof: await proveKey(session.keyPair, session.sessionId),
+      // Replacing names the revision it replaces, 0 for a new one (client-api.md, Keys).
+      expectedRevision: backupOf.get(prf.credentialId)?.revision ?? 0,
+      sessionId: session.sessionId,
+    })
+  }
+
+  /** What went wrong, in a toast; a page whose session changed starts again instead. */
+  function report(e: unknown, fallback: string) {
+    if (sessionChanged(e)) return window.location.reload()
+    if (e instanceof PasskeyCancelled) return toast('The passkey prompt was closed. Nothing changed.')
+    toast(
+      e instanceof NoPrf
+        ? `${e.message} It still signs you in.`
+        : e instanceof SealError
+          ? 'The passkey’s backup didn’t check out on this device, so it wasn’t saved. Try again.'
+          : errorMessage(e, fallback),
+    )
+  }
+
+  async function add() {
+    setBusy('add')
+    let added: Awaited<ReturnType<typeof addPasskey>>
+    try {
+      added = await addPasskey(session.sessionId)
+    } catch (e) {
+      report(e, 'The passkey couldn’t be added.')
+      return setBusy(null)
+    }
+    void passkeys.refetch()
+    if (!added.prf) {
+      toast('Passkey added. It signs you in. To let it unlock your key too, choose “Use to unlock”.')
+      return setBusy(null)
+    }
+    try {
+      await saveBackup({ credentialId: added.credentialId, output: added.prf })
+      toast('Passkey added. It signs you in and unlocks your key on a new device.')
+    } catch (e) {
+      report(
+        e,
+        'The passkey was added and signs you in, but it couldn’t be set to unlock your key. Try “Use to unlock”.',
+      )
+    }
+    setBusy(null)
+  }
+
+  /** Asks a passkey for its PRF output now, and makes its backup from it. */
+  async function useToUnlock(credentialId: string) {
+    setBusy(credentialId)
+    try {
+      await ready()
+      const prf = await evaluatePasskeys([{ credentialId, prfSalt: toBase64Url(passkeyPrfSalt()) }])
+      if (prf.credentialId !== credentialId) throw new Error('A different passkey answered. Try again.')
+      await saveBackup(prf)
+      toast('This passkey now unlocks your key on a new device.')
+    } catch (e) {
+      report(e, 'The passkey couldn’t be set to unlock your key.')
+    }
+    setBusy(null)
+  }
+
+  /**
+   * Removes the passkey's backup first, then the passkey itself: if only the first goes through,
+   * the passkey still signs in but no longer unlocks, never the other way round.
+   */
+  async function remove(credentialId: string, passkeyId: string | null) {
+    setConfirming(null)
+    setBusy(credentialId)
+    try {
+      if (backupOf.has(credentialId)) {
+        await removeBackup({
+          credentialId,
+          proof: await proveKey(session.keyPair, session.sessionId),
+          sessionId: session.sessionId,
+        })
+      }
+      if (passkeyId) await deletePasskey(passkeyId)
+      toast('Passkey removed.')
+    } catch (e) {
+      report(e, 'The passkey couldn’t be removed.')
+    }
+    void passkeys.refetch()
+    setBusy(null)
+  }
+
+  const row = (credentialId: string, title: string, detail: string, passkeyId: string | null) => {
+    const unlocks = backupOf.has(credentialId)
+    return (
+      <div key={credentialId} className="flex items-center gap-3 border-t border-border py-2.5">
+        <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 truncate font-semibold">
+            {title}
+            {unlocks ? <Badge variant="tag">Unlocks your key</Badge> : null}
+          </div>
+          <div className="text-sm text-muted-foreground">{detail}</div>
+        </div>
+        {confirming === credentialId ? (
+          <>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+              Keep
+            </Button>
+            <Button size="sm" onClick={() => void remove(credentialId, passkeyId)}>
+              Remove it
+            </Button>
+          </>
+        ) : (
+          <>
+            {!unlocks && passkeyId ? (
+              <Button
+                size="sm"
+                loading={busy === credentialId}
+                disabled={busy !== null}
+                onClick={() => void useToUnlock(credentialId)}
+              >
+                Use to unlock
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setConfirming(credentialId)}>
+              Remove
+            </Button>
+          </>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <Setting
+      title="Passkeys"
+      about="Sign in without a password. A passkey that unlocks your key also opens your messages on a new device."
+      column
+    >
+      <div className="mt-3">
+        {(passkeys.data ?? []).map((p) =>
+          row(
+            p.credentialID,
+            p.name || 'Passkey',
+            `Added ${new Date(p.createdAt).toLocaleDateString()}${p.backedUp ? ' · Synced' : ''}`,
+            p.id,
+          ),
+        )}
+        {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', null))}
+        {passkeys.isError ? (
+          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">
+            Your passkeys couldn’t be listed.{' '}
+            <Button variant="link" size="sm" onClick={() => void passkeys.refetch()}>
+              Try again
+            </Button>
+          </p>
+        ) : passkeys.data?.length === 0 && unlockOnly.length === 0 ? (
+          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">No passkeys yet.</p>
+        ) : null}
+        <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
+          Add a passkey
+        </Button>
+      </div>
+    </Setting>
   )
 }

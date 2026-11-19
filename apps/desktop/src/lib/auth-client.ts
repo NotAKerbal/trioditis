@@ -11,6 +11,13 @@ import { createAuthClient } from 'better-auth/react'
 export const authClient = createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
+    // Adding a passkey is bound to the page's session, as key writes are (client-api.md, Key writes
+    // are bound to the page's session). addPasskey passes its own fetch options only to its second
+    // step, so the header goes on both here.
+    onRequest: (context) => {
+      if (registeringAs && REGISTRATION_PATHS.some((path) => String(context.url).includes(path)))
+        context.headers.set(SESSION_HEADER, registeringAs)
+    },
     // An answer over a rate limit says how long to wait (Retry-After, in seconds): kept for the
     // screen that made the request to say so (tooManyAttempts in lib/errors.ts).
     onError: ({ response }) => {
@@ -29,6 +36,25 @@ export const authClient = createAuthClient({
 })
 
 let retryAfter: number | null = null
+let registeringAs: string | null = null
+
+/** The header that names the page's session to Better Auth's passkey registration. Matches the backend. */
+const SESSION_HEADER = 'x-trioditis-session-id'
+const REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
+
+/**
+ * Runs `register` (which adds a passkey) as `sessionId`, the session the page opened with: if
+ * the browser is in another by now, the server refuses both steps (409, sessionChanged) and
+ * changes nothing.
+ */
+export async function asSession<T>(sessionId: string, register: () => Promise<T>): Promise<T> {
+  registeringAs = sessionId
+  try {
+    return await register()
+  } finally {
+    registeringAs = null
+  }
+}
 const convexTokens = new Map<string, string>()
 
 /** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */

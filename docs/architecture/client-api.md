@@ -199,8 +199,8 @@ again in a few minutes.`
 
 The person's **identity key pair** is what everything is sealed to. The private key exists
 only on their devices. So a new device can get it, the server keeps it **wrapped**: by the
-password, by the **recovery key**, and later by a passkey. The server can't unwrap any of
-them.
+password, by the **recovery key**, and by any passkey that offers WebAuthn's PRF extension.
+The server can't unwrap any of them.
 
 `api.keys.identity` returns `{ state, publicKey, kid, backups }`. What to do for each
 `state`:
@@ -209,7 +209,7 @@ them.
 | ------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `none`        | No identity key yet                                  | First-device setup, below                                                                                                                                                                                               |
 | `needsBackup` | A key, but not both a password and a recovery backup | On a device that has the key: make the missing backups and call `keys.setup` with a proof. On a device that doesn't: say "finish setup on the device you first used". Connecting networks is blocked until this is done |
-| `ready`       | Key and both backups                                 | On a new device, unlock with the password or the recovery key                                                                                                                                                           |
+| `ready`       | Key and both backups                                 | On a new device, unlock with the password, the recovery key or a passkey backup                                                                                                                                         |
 
 ### First device
 
@@ -277,7 +277,8 @@ const pair = unwrapIdentityKey(
 
 A wrong password throws `SealError`. "Use your recovery key instead" does the same with the
 `recovery` backup and `decodeRecoveryKey(text)` as the wrapping key; `decodeRecoveryKey`
-forgives case, spaces, dashes and look-alike letters, and its checksum catches typos.
+forgives case, spaces, dashes and look-alike letters, and its checksum catches typos. A
+passkey backup opens with `passkeyKey(prfOutput)` as the wrapping key (Passkeys, below).
 
 ### A new recovery key, or a passkey
 
@@ -294,6 +295,60 @@ replaced backup takes the next one, which needn't be the old revision plus one, 
 passkey backup removed and made again gets a new one, so a device still holding the old
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
+
+### Passkeys
+
+A passkey signs in (`authClient.signIn.passkey()`), and one whose authenticator offers
+WebAuthn's **PRF** extension can also unlock the identity key, so a new device needs no
+password. The PRF output for an input is a secret only that passkey can produce; it never
+leaves the device. `passkeyKey(output)` (packages/crypto) turns it into a wrapping key, and the
+key is wrapped with it as a `passkey` backup for that credential:
+
+```ts
+await ready()
+const first = passkeyPrfSalt() // the PRF input; the same everywhere (below)
+const { data, webauthn } = await authClient.passkey.addPasskey({
+  extensions: { prf: { eval: { first } } },
+  returnWebAuthnResponse: true,
+}) // with the page's session in x-trioditis-session-id (Key writes are bound to the page's session)
+const output = webauthn.clientExtensionResults.prf?.results?.first // may be missing, see below
+const context = { userId, kid, kind: 'passkey' } as const
+const wrap = wrapIdentityKey(identity.privateKey, passkeyKey(new Uint8Array(output)), context)
+// Open it again before sending, as for every backup: the server can't check a wrap.
+await convex.mutation(api.keys.putBackup, {
+  kind: 'passkey',
+  ...wrap,
+  credentialId: webauthn.response.id,
+  prfSalt: toBase64Url(first),
+  proof,
+  expectedRevision: 0,
+  sessionId,
+})
+```
+
+- **The PRF input is fixed**: `passkeyPrfSalt()`, a constant 32 bytes, for every person and
+  passkey. Signing in doesn't know whose passkey it is until the server answers, so only an
+  input known in advance can be evaluated in the sign-in touch itself. Pass it to
+  `signIn.passkey({ extensions: { prf: { eval: { first } } }, returnWebAuthnResponse: true })`,
+  and the same touch that signs in gives the output that opens the key. The input needn't be
+  secret or unique: each credential's PRF is keyed by its own secret, so each passkey still
+  gives its own wrapping key. Each backup keeps the input it was made with (`prfSalt`); a
+  backup with another input is opened by asking its passkey again, with `evalByCredential`.
+- **Not every authenticator gives the output when the passkey is made.** Some give it only
+  when the passkey is next used, and some (or the browser) not at all. Without it, the passkey
+  still signs in; offer to make its backup later with a `navigator.credentials.get()` naming
+  that credential (`allowCredentials`) and the input (`prf.evalByCredential`). That ceremony
+  goes nowhere near the server: only the output matters, and only the device uses it.
+- **Unlocking with a passkey** on a new device: from the sign-in touch's output if it came with
+  one and the backup for that credential used the same input, or else with a
+  `navigator.credentials.get()` naming this key's passkey backups and their inputs. The
+  credential that answered picks the backup. A passkey backup opens without its passkey being
+  registered for sign-in: it's the output that opens it.
+- **Removing a passkey** removes its backup first (`keys.removePasskeyBackup`), then the
+  passkey (`POST /passkey/delete-passkey { id }`), so a half-done removal leaves a passkey that
+  signs in but no longer unlocks, not one that unlocks but the person thinks is gone.
+  `GET /passkey/list-user-passkeys` lists them; each has its `credentialID`, which a backup's
+  `credentialId` matches.
 
 ### Key writes are bound to the page's session
 
@@ -338,12 +393,15 @@ createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
     onRequest: (context) => {
-      if (context.url.toString().includes('/passkey/') && pageSessionId)
-        context.headers.set('x-trioditis-session-id', pageSessionId)
+      if (REGISTRATION_PATHS.some((path) => String(context.url).includes(path)) && registeringAs)
+        context.headers.set('x-trioditis-session-id', registeringAs)
     },
   },
 })
 ```
+
+The desktop app sets `registeringAs` only while it adds a passkey (`asSession` in
+apps/desktop/src/lib/auth-client.ts).
 
 Without the header nothing is checked, as before.
 
@@ -791,8 +849,8 @@ Contact profiles (name, handle, avatar) are sealed with kind `contact`, object I
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
 5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
-7. **Passkey PRF unlock**: the backup storage exists (`putBackup` with `kind: 'passkey'`),
-   but the PRF flow in the UI doesn't yet.
+7. **Done:** passkey PRF unlock. Adding a passkey makes its backup when the authenticator
+   gives a PRF output, and signing in with one unlocks the key in the same touch (Passkeys).
 8. **Label filter order**: a label view is in labelling order, not recency. Sorting it by
    recency needs a per-label recency index.
 
