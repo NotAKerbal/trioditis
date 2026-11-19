@@ -72,15 +72,24 @@ report() {
 
 # The state that outlasts a restart, in deploy/.updater-state: NAME=value lines, each checked
 # as it's read, so a damaged file reads as no state rather than as a command.
-STATE_NAMES='pending_target pending_previous pending_request auto_day failed_target'
+#
+# pending_*: the update in progress, from before the checkout moves until it's over, with its
+# phase: `install` (the target) or `rollback` (back to the previous commit, the target having
+# failed). done_*: how the last update ended, until the backend has the report, so a report
+# that didn't get through is sent again rather than the request run again.
+STATE_NAMES='pending_target pending_previous pending_request pending_phase
+  done_request done_result done_target done_previous auto_day failed_target'
 load_state() {
   local name value
-  pending_target='' pending_previous='' pending_request='' auto_day='' failed_target=''
+  for name in $STATE_NAMES; do printf -v "$name" '%s' ''; done
   [ -f "$state_file" ] || return 0
   while IFS='=' read -r name value; do
     case "$name" in
-      pending_target | pending_previous | failed_target) [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
-      pending_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
+      pending_target | pending_previous | done_target | done_previous | failed_target)
+        [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
+      pending_request | done_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
+      pending_phase) [[ "$value" =~ ^(install|rollback)$ ]] || continue ;;
+      done_result) [[ "$value" =~ ^(updated|back|stuck)$ ]] || continue ;;
       auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
       *) continue ;;
     esac
@@ -198,51 +207,75 @@ update() {
     outcome idle "The update was cancelled before it started."
     return
   fi
-  pending_target=$target pending_previous=$previous pending_request=$done_id
+  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install
   save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
   log "Updating from $previous to $target ($name)."
   finish_update
 }
 
-# finish_update: installs $pending_target, or goes back to $pending_previous if that fails,
-# holding the lock. Exits after a successful update.
+# finish_update: installs $pending_target, or, in the rollback phase or once that fails, goes
+# back to $pending_previous, holding the lock. Exits after a successful update.
 finish_update() {
-  local target=$pending_target previous=$pending_previous error
-  if run_install "$target"; then
-    pending_target='' pending_previous='' pending_request=''
+  local target=$pending_target previous=$pending_previous
+  failure_detail=''
+  if [ "$pending_phase" != rollback ]; then
+    if run_install "$target"; then
+      conclude updated
+      describe_current
+      behind=0 ahead=0
+      report_done
+      log "Updated to $target."
+      exit 0
+    fi
+    failure_detail=$install_error
+    log "The update to $target failed: $failure_detail Going back to $previous."
+    # Saved before going back, so a restart from here goes on going back, and never tries the
+    # failed commit again.
+    failed_target=$target pending_phase=rollback
     save_state
-    describe_current
-    behind=0 ahead=0
-    outcome idle "Updated to ${target:0:7}."
-    report idle "$outcome_message"
-    log "Updated to $target."
-    exit 0
   fi
-  error=$install_error
-  log "The update to $target failed: $error Going back to $previous."
-  if run_install "$previous"; then
-    outcome failed "The update to ${target:0:7} failed: $error The server is back on ${previous:0:7}."
-  else
-    outcome failed "The update to ${target:0:7} failed, and so did going back to ${previous:0:7}: $install_error The updater's log on the server has the details."
+  if run_install "$previous"; then conclude back; else
+    [ -n "$failure_detail" ] || failure_detail=$install_error
+    conclude stuck
   fi
   describe_current
-  failed_target=$target pending_target='' pending_previous='' pending_request=''
-  save_state
+  report_done
   release_lock
 }
 
-# An update cut off by a restart (the machine, or the service, stopped mid-install) is
-# finished first: the checkout may be on either commit, and the server half updated.
+# conclude RESULT: the update in progress is over (updated, back on the previous commit, or
+# stuck: going back failed too); kept as done_* until the backend has the report.
+conclude() {
+  done_request=$pending_request done_result=$1 done_target=$pending_target done_previous=$pending_previous
+  pending_target='' pending_previous='' pending_request='' pending_phase=''
+  save_state
+}
+
+# report_done: reports how the last update ended, marking its request done, and forgets it
+# once the backend has it. Its outcome stays in the reports until the next check or update.
+report_done() {
+  [ -n "$done_result" ] || return 0
+  local target=${done_target:0:7} previous=${done_previous:0:7} detail=${failure_detail:+: $failure_detail}
+  case "$done_result" in
+    updated) outcome idle "Updated to $target." ;;
+    back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
+    stuck) outcome failed "The update to $target failed, and so did going back to $previous${detail:-.} The updater's log on the server has the details." ;;
+  esac
+  if done_id=$done_request report "$outcome_state" "$outcome_message"; then
+    done_request='' done_result='' done_target='' done_previous=''
+    save_state
+  fi
+}
+
+# An update cut off by a restart (the machine, or the service, stopped mid-install or
+# mid-rollback) is finished first: the checkout may be on either commit, and the server half
+# updated.
 recover() {
   [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
-  log "Finishing the update to $pending_target, which was cut off."
+  log "Finishing the update to $pending_target ($pending_phase), which was cut off."
   take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
-  done_id=$pending_request
   done_id='' report updating "Finishing the update to ${pending_target:0:7}, which was cut off."
   finish_update
-  # It failed and went back: its request is done, so it isn't tried again from the top.
-  report "$outcome_state" "$outcome_message"
-  done_id=''
 }
 
 # Whether an automatic update is due: the admins turned them on, it's the hour for them, and
@@ -267,7 +300,7 @@ init() {
   load_settings || return 1
   describe_current || { log "$root isn't a git checkout."; return 1; }
   latest='' latest_channel='' latest_at='' latest_subject='' behind='' ahead='' checked_at=''
-  last_fetch=0 done_id=''
+  last_fetch=0 done_id='' failure_detail=''
   load_state
   outcome idle ''
 }
@@ -304,6 +337,10 @@ main() {
       sleep 60
       continue
     fi
+    # A request whose update is over but whose report didn't get through is reported, not
+    # run again.
+    if [ -n "$done_request" ] && [ "$request_id" = "$done_request" ]; then request_id=- kind=-; fi
+    report_done
     done_id=''
     [ "$request_id" = - ] || done_id=$request_id
 

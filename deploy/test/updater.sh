@@ -61,6 +61,8 @@ case " $* " in
   *' report '*)
     # A request an admin cancelled can't be claimed.
     [ "${UPDATER_CLAIM:-}" != cancelled ] || exit 1
+    # The backend out of reach, for one test.
+    [ ! -e "$REPORT_LOG.down" ] || exit 1
     echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
@@ -134,6 +136,29 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] && grep -q "^id
   grep -qx 'pending_target=' "$state" && grep -qx 'auto_day=2026-01-01' "$state" &&
   check ok "an update cut off is finished on the next start, and its request reported done" ||
   check fail "an update cut off is finished on the next start, and its request reported done ($(cat "$work/out" "$work/reports" "$state"))"
+
+# Cut off while going back: the next start goes on going back, and never tries c3 again.
+git_ -C "$work/checkout" checkout -q --detach "$c3"
+printf 'pending_target=%s\npending_previous=%s\npending_request=req7\npending_phase=rollback\nfailed_target=%s\n' "$c3" "$c2" "$c3" >"$state"
+run recover
+head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
+  grep -q "^failed|The update to ${c3%"${c3#???????}"} failed. The server is back on ${c2%"${c2#???????}"}.|req7|" "$work/reports" &&
+  grep -qx 'pending_target=' "$state" && grep -qx 'done_request=' "$state" &&
+  check ok "cut off while going back, it goes on going back, and reports the request done" ||
+  check fail "cut off while going back, it goes on going back, and reports the request done ($(cat "$work/out" "$work/installs" "$work/reports" "$state"))"
+
+# The report that ends an update doesn't get through: it's kept, and sent once it can be.
+printf 'done_request=req8\ndone_result=back\ndone_target=%s\ndone_previous=%s\nfailed_target=%s\n' "$c3" "$c2" "$c3" >"$state"
+touch "$work/reports.down"
+run report_done
+rm -f "$work/reports.down"
+grep -qx 'done_request=req8' "$state" && [ ! -s "$work/installs" ] &&
+  check ok "an update's last report that didn't get through is kept" ||
+  check fail "an update's last report that didn't get through is kept ($(cat "$state"))"
+run report_done
+grep -q '^failed|The update to .* failed. The server is back on .*|req8|' "$work/reports" && grep -qx 'done_request=' "$state" &&
+  [ ! -s "$work/installs" ] && check ok "and is sent once it can be, installing nothing" ||
+  check fail "and is sent once it can be, installing nothing ($(cat "$work/reports" "$state"))"
 
 # Ahead of stable (main is at c1): nothing to install.
 run update stable
