@@ -4,8 +4,9 @@ import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMutation } from 'convex/react'
-// The cached hook keeps a chat's subscription open for a while after its pane closes (main.tsx),
-// so going back to a chat shows its messages at once, already up to date, instead of loading.
+// The cached hook keeps a chat's pages subscribed for a while after its pane closes (main.tsx),
+// so going back to a chat shows its latest messages at once, already up to date, instead of
+// loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
 import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'

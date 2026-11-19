@@ -25,10 +25,14 @@ applyTheme()
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ConvexBetterAuthProvider client={convex} authClient={authClient}>
-      {/* Recently left chats stay subscribed, so reopening one is instant (data/messages.ts).
-          Bounded, since each idle one is still a live query on the server; signing out loads
-          a new page, so none outlives the account. */}
-      <ConvexQueryCacheProvider expiration={5 * 60_000} maxIdleEntries={20}>
+      {/* A query nothing shows any more, such as a left chat's pages of messages
+          (data/messages.ts), stays subscribed for 5 minutes, so reopening the chat is instant.
+          Each idle one is still a live query on the server, so their number is capped too. The
+          cap counts queries, so each loaded page counts, not chats. Once it's reached, the
+          library drops the query that has just gone idle, not the oldest, so it's set well
+          above a working session's worth: the 5 minutes are what bound it in practice. Signing
+          out loads a new page, so none outlives the account. */}
+      <ConvexQueryCacheProvider expiration={5 * 60_000} maxIdleEntries={100}>
         <QueryClientProvider client={queryClient}>
           <RouterProvider router={router} />
         </QueryClientProvider>

@@ -127,7 +127,7 @@ export function MessageList(props: MessageListProps) {
       className={cn(
         'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-2',
         // Messages that had to be fetched ease in; a chat shown from the cache is just there.
-        openedLoading && !props.loading && 'animate-fade-in',
+        openedLoading && !props.loading && 'animate-fade-in motion-reduce:animate-none',
       )}
       aria-live="polite"
     >
