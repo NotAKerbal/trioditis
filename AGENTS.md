@@ -7,7 +7,8 @@ worktrees and checks, and `docs/architecture/` for the contracts between compone
   `main` or `dev` directly.
 - Stored message content is always sealed (`docs/architecture/sealing.md`). Never write
   plaintext message content, chat names or contact names to Convex, a database, a log
-  or disk.
+  or disk. The one exception, by the owner's choice: notifications show the sender and the
+  message, and the system may keep them in its notification history.
 - Sends are never retried automatically after an ambiguous outcome. Use the `unknown`
   delivery state.
 - Keep the TypeScript and Go sides of a contract in step, in the same pull request.

@@ -212,10 +212,12 @@ clipboard and full screen, and reaches the app only to set the badge and bring t
 forward, both checked in the main process.
 
 Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
-the desktop app; a browser asks first (Settings → Notifications). They show only the network
-unless you choose the chat name or the message, since the system can keep notifications in
-its history, outside the sealing. On Ubuntu,
-Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox` isn't owned
+the desktop app; a browser asks first (Settings → Notifications). They show who sent the
+message (the chat's name; a group's own name, until member names exist) and what it says,
+never the network. The system can keep them in its notification history, outside the
+sealing: a deliberate exception (AGENTS.md).
+
+On Ubuntu, Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox` isn't owned
 by root there; for local testing pass `--no-sandbox` after `app`. Installers that set this up
 properly are not built yet.
 

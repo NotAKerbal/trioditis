@@ -48,7 +48,6 @@ import {
   useServerInfo,
   useSidebarLayout,
 } from '~/data/chats.ts'
-import type { NotificationContent } from '~/data/notify.ts'
 import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { passkeysUnavailable } from '~/lib/desktop.ts'
@@ -254,7 +253,11 @@ function Notifications() {
       />
       <Setting
         title="Desktop notifications"
-        about={supported ? 'Show new messages while Trioditis is open.' : 'This browser can’t show notifications.'}
+        about={
+          supported
+            ? 'Show who sent each new message and what they said, while Trioditis is open.'
+            : 'This browser can’t show notifications.'
+        }
       >
         <Switch
           checked={prefs.notifications && allowed}
@@ -262,22 +265,6 @@ function Notifications() {
           onCheckedChange={(v) => void turn(v)}
           aria-label="Desktop notifications"
         />
-      </Setting>
-      <Setting
-        title="What they show"
-        about="Your system can keep notifications in its history, outside Trioditis’s encryption. The network alone gives nothing away."
-        column
-      >
-        <Segmented
-          value={prefs.notificationContent}
-          onValueChange={(v) => setPref('notificationContent', v as NotificationContent)}
-          className="mt-3 w-[340px]"
-          aria-label="What notifications show"
-        >
-          <SegmentedItem value="network">Network only</SegmentedItem>
-          <SegmentedItem value="name">Chat name</SegmentedItem>
-          <SegmentedItem value="message">Message</SegmentedItem>
-        </Segmented>
       </Setting>
     </>
   )

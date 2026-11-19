@@ -59,7 +59,7 @@ export function useMessageNotifications(selectedId: string | undefined, open: (c
       // The chat the person is reading needs no notification.
       if (chat.id === selectedId && document.visibilityState === 'visible' && document.hasFocus()) continue
       const text = openLastMessage(arrival.message, session)?.text ?? null
-      const { title, body } = notificationText(chat, text, prefs.notificationContent)
+      const { title, body } = notificationText(chat, text)
       // Tagged by chat: a newer message replaces the last one's notification, and another tab's.
       const notification = show(title, { body, tag: chat.id, icon: '/icon.svg' })
       if (!notification) return

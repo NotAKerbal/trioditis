@@ -1,11 +1,8 @@
-import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
+import type { Arrival, ArrivalFeed } from '@trioditis/core'
 import type { Chat } from '~/data/chats.ts'
 
 // Which arrivals get a notification, and what it says, with no browser in them so they can be
 // tested. The hook that shows them is features/shell/notifications.ts.
-
-/** What a notification shows. The system can keep notifications in its history, on disk. */
-export type NotificationContent = 'network' | 'name' | 'message'
 
 /**
  * How far behind the cursor an arrival still counts, for as long after the cursor moved. A
@@ -53,12 +50,10 @@ export function newArrivals(
   return { cursor: { since, movedAt, seen }, fresh }
 }
 
-export function notificationText(
-  chat: Chat,
-  text: string | null,
-  content: NotificationContent,
-): { title: string; body: string } {
-  if (content === 'message') return { title: chat.name, body: text ?? 'New message' }
-  if (content === 'name') return { title: chat.name, body: 'New message' }
-  return { title: 'New message', body: `On ${NETWORK_INFO[chat.network]?.name ?? chat.network}` }
+/**
+ * Who sent it and what they said. The chat's name is the sender in a one-to-one chat; a group
+ * shows its own name, since the app doesn't know its members' names yet.
+ */
+export function notificationText(chat: Chat, text: string | null): { title: string; body: string } {
+  return { title: chat.name, body: text ?? 'New message' }
 }

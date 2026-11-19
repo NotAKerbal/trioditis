@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from 'react'
-import type { NotificationContent } from '~/data/notify.ts'
 
 // This device's display preferences: they live in this browser only. The sidebar layout follows
 // the person across devices, so it is stored on the server instead (data/preferences.ts).
@@ -12,8 +11,6 @@ export interface Prefs {
   networkBadges: boolean
   /** Notify for new messages, once the browser allows it. */
   notifications: boolean
-  /** Only the network unless the person chooses more: the system can keep what it shows. */
-  notificationContent: NotificationContent
 }
 
 const DEFAULTS: Prefs = {
@@ -21,7 +18,6 @@ const DEFAULTS: Prefs = {
   previews: true,
   networkBadges: true,
   notifications: true,
-  notificationContent: 'network',
 }
 const KEY = 'trioditis.prefs'
 

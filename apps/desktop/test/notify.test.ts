@@ -83,10 +83,8 @@ describe('which arrivals notify', () => {
 
 describe('what a notification says', () => {
   const chat = { id: 'c1', name: 'Alice', network: 'whatsapp' } as Chat
-  it('shows only the network unless the person chooses more', () => {
-    expect(notificationText(chat, 'See you at 7', 'network')).toEqual({ title: 'New message', body: 'On WhatsApp' })
-    expect(notificationText(chat, 'See you at 7', 'name')).toEqual({ title: 'Alice', body: 'New message' })
-    expect(notificationText(chat, 'See you at 7', 'message')).toEqual({ title: 'Alice', body: 'See you at 7' })
-    expect(notificationText(chat, null, 'message').body).toBe('New message')
+  it('shows who sent it and what they said, never the network', () => {
+    expect(notificationText(chat, 'See you at 7')).toEqual({ title: 'Alice', body: 'See you at 7' })
+    expect(notificationText(chat, null)).toEqual({ title: 'Alice', body: 'New message' })
   })
 })
