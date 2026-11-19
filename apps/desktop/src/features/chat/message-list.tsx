@@ -2,7 +2,7 @@ import type { Id } from '@trioditis/backend/dataModel'
 import { Button } from '@trioditis/ui/button'
 import { cn } from '@trioditis/ui/lib/utils'
 import { AlertCircle, Check, CheckCheck, Clock, Reply } from 'lucide-react'
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { formatWhen } from '~/data/snooze.ts'
@@ -47,6 +47,8 @@ export function MessageList(props: MessageListProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
+  // Whether this chat opened with nothing to show yet. The list is remade for each chat.
+  const [openedLoading] = useState(props.loading)
   // Set while earlier messages load: the top-most message in view and how far down it sat, to
   // put it back there. Anchoring on a message, not the list's height, keeps it still even if a
   // new message arrives at the bottom meanwhile.
@@ -120,7 +122,15 @@ export function MessageList(props: MessageListProps) {
   let lastDay = ''
 
   return (
-    <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-2" aria-live="polite">
+    <div
+      ref={scroller}
+      className={cn(
+        'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-2',
+        // Messages that had to be fetched ease in; a chat shown from the cache is just there.
+        openedLoading && !props.loading && 'animate-fade-in',
+      )}
+      aria-live="polite"
+    >
       {props.canLoadMore ? (
         <div ref={top} className="mb-3 flex justify-center">
           <Button size="sm" onClick={loadEarlier}>
@@ -129,7 +139,7 @@ export function MessageList(props: MessageListProps) {
         </div>
       ) : null}
       {props.loading ? (
-        <p className="py-16 text-center text-sm text-subtle-foreground" aria-busy="true">
+        <p className="animate-fade-in-late py-16 text-center text-sm text-subtle-foreground" aria-busy="true">
           Opening messages…
         </p>
       ) : messages.length === 0 && scheduled.length === 0 ? (
