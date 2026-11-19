@@ -599,7 +599,9 @@ function Keys() {
   const [saved, setSaved] = useState(false)
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
-  const [busy, setBusy] = useState<'recovery' | 'password' | 'passkey' | null>(null)
+  const [busy, setBusy] = useState<'recovery' | 'password' | null>(null)
+  // Its own, so another action finishing doesn't clear it while a passkey is being added.
+  const [addingPasskey, setAddingPasskey] = useState(false)
   // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
   const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
@@ -767,19 +769,25 @@ function Keys() {
       >
         <Button
           disabled={!ADDING_PASSKEYS}
-          loading={busy === 'passkey'}
+          loading={addingPasskey}
           onClick={async () => {
-            setBusy('passkey')
-            // Both requests name this page's session (withPageSession in lib/auth-client.ts).
-            const result = await authClient.passkey.addPasskey()
-            if (result?.error && authSessionChanged(result.error)) return window.location.reload()
-            setBusy(null)
-            if (result?.error) {
-              toast(
-                tooManyAttempts(result.error, lastRetryAfter()) ??
-                  errorMessage(result.error, 'That passkey couldn’t be added.'),
-              )
-            } else toast('Passkey added.')
+            setAddingPasskey(true)
+            try {
+              // Both requests name this page's session (withPageSession in lib/auth-client.ts).
+              const result = await authClient.passkey.addPasskey()
+              if (result?.error && authSessionChanged(result.error)) return window.location.reload()
+              if (result?.error) {
+                toast(
+                  tooManyAttempts(result.error, lastRetryAfter()) ??
+                    errorMessage(result.error, 'That passkey couldn’t be added.'),
+                )
+              } else toast('Passkey added.')
+            } catch {
+              // A request that never got an answer: nothing was added, and it can be tried again.
+              toast('The server couldn’t be reached, so no passkey was added. Try again.')
+            } finally {
+              setAddingPasskey(false)
+            }
           }}
         >
           {ADDING_PASSKEYS ? 'Add a passkey' : 'Coming soon'}
