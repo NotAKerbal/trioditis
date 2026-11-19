@@ -324,10 +324,11 @@ after that the update runs to the end. What must outlast a restart is in
 `deploy/.updater-state`: the update in progress and whether it was installing or going back,
 how the last one ended until the backend has that report, the day of the last automatic
 update, and the commit whose update last failed. An update cut off midway (the machine or the
-service stopped) is finished when the updater next starts, before anything else: one cut off
-while going back goes on going back, and never tries the failed commit again. A request whose
-update is over is reported done, and never run a second time, even if that report has to wait
-for the backend.
+service stopped, or its state couldn't be saved) goes back to the commit it was on when the
+updater next starts, before anything else, since how it would have ended isn't known; it counts
+as failed, so it isn't tried again on its own. A request whose update is over is reported done,
+and never run a second time: until the backend has that report, the updater sends it again and
+starts no other update.
 
 The checkout belongs to the updater: leave it on the commit the updater put it on, and don't
 pull or edit it by hand. A private repository needs a `git fetch` that works without a

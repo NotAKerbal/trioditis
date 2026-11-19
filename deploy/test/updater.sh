@@ -76,7 +76,7 @@ run() {
   : >"$work/installs"
   : >"$work/installs.how"
   : >"$work/reports"
-  bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
+  bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
 }
 head_is() { [ "$(git -C "$work/checkout" rev-parse HEAD)" = "$1" ]; }
@@ -129,20 +129,23 @@ head_is "$c1" && grep -q '^failed|A backup or an install is running' "$work/out"
   check ok "a held lock stops it before the checkout moves" ||
   check fail "a held lock stops it before the checkout moves ($(cat "$work/out"))"
 
-# An update cut off before it installed: the next start finishes it, and reports its request.
-printf 'pending_target=%s\npending_previous=%s\npending_request=req9\nauto_day=2026-01-01\nfailed_target=%s\n' "$c2" "$c1" "$c3" >"$state"
+# An update cut off mid-install (here, as the checkout moved): its outcome isn't known, so the
+# next start goes back to the commit it was on, counts the target failed, and reports it.
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+printf 'pending_target=%s\npending_previous=%s\npending_request=req9\npending_phase=install\nauto_day=2026-01-01\n' "$c2" "$c1" >"$state"
 run recover
-head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] && grep -q "^idle|Updated to ${c2%"${c2#???????}"}.|req9|" "$work/reports" &&
-  grep -qx 'pending_target=' "$state" && grep -qx 'auto_day=2026-01-01' "$state" &&
-  check ok "an update cut off is finished on the next start, and its request reported done" ||
-  check fail "an update cut off is finished on the next start, and its request reported done ($(cat "$work/out" "$work/reports" "$state"))"
+head_is "$c1" && [ "$(cat "$work/installs")" = "installed $c1" ] &&
+  grep -q "^failed|The update to ${c2%"${c2#???????}"} failed: It was cut off before it finished. The server is back on ${c1%"${c1#???????}"}.|req9|" "$work/reports" &&
+  grep -qx 'pending_target=' "$state" && grep -qx "failed_target=$c2" "$state" && grep -qx 'auto_day=2026-01-01' "$state" &&
+  check ok "an update cut off mid-install goes back on the next start, and its request is reported done" ||
+  check fail "an update cut off mid-install goes back on the next start, and its request is reported done ($(cat "$work/out" "$work/reports" "$state"))"
 
 # Cut off while going back: the next start goes on going back, and never tries c3 again.
 git_ -C "$work/checkout" checkout -q --detach "$c3"
 printf 'pending_target=%s\npending_previous=%s\npending_request=req7\npending_phase=rollback\nfailed_target=%s\n' "$c3" "$c2" "$c3" >"$state"
 run recover
 head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
-  grep -q "^failed|The update to ${c3%"${c3#???????}"} failed. The server is back on ${c2%"${c2#???????}"}.|req7|" "$work/reports" &&
+  grep -q "^failed|The update to ${c3%"${c3#???????}"} failed: It was cut off before it finished. The server is back on ${c2%"${c2#???????}"}.|req7|" "$work/reports" &&
   grep -qx 'pending_target=' "$state" && grep -qx 'done_request=' "$state" &&
   check ok "cut off while going back, it goes on going back, and reports the request done" ||
   check fail "cut off while going back, it goes on going back, and reports the request done ($(cat "$work/out" "$work/installs" "$work/reports" "$state"))"
@@ -159,6 +162,18 @@ run report_done
 grep -q '^failed|The update to .* failed. The server is back on .*|req8|' "$work/reports" && grep -qx 'done_request=' "$state" &&
   [ ! -s "$work/installs" ] && check ok "and is sent once it can be, installing nothing" ||
   check fail "and is sent once it can be, installing nothing ($(cat "$work/reports" "$state"))"
+
+# While that report is waiting, a turn of the loop installs nothing, even for a new request.
+git_ -C "$work/checkout" checkout -q --detach "$c1"
+printf 'done_request=req8\ndone_result=back\ndone_target=%s\ndone_previous=%s\n' "$c3" "$c1" >"$state"
+touch "$work/reports.down"
+run handle 'nightly 1 req10 update'
+rm -f "$work/reports.down"
+head_is "$c1" && [ ! -s "$work/installs" ] && grep -qx 'done_request=req8' "$state" &&
+  check ok "no update starts while the last one's report is waiting" ||
+  check fail "no update starts while the last one's report is waiting ($(cat "$work/out" "$state"))"
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+rm -f "$state"
 
 # Ahead of stable (main is at c1): nothing to install.
 run update stable

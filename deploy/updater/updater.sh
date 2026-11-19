@@ -12,8 +12,9 @@
 # the installer fails, it goes back to the commit it was on and runs the installer again. It
 # holds the install's lock from before it moves the checkout until the installer is done, and
 # keeps what must outlast a restart in deploy/.updater-state: an update in progress (finished
-# on the next start, if it was cut off), the day of the last automatic update, and the commit
-# whose update last failed.
+# on the next start, if it was cut off, by going back), how the last one ended until the
+# backend has the report, the day of the last automatic update, and the commit whose update
+# last failed.
 #
 # Everything is in functions and the last line calls main, so bash has read the whole file
 # before an update replaces it. After an update it exits, and systemd starts the new one.
@@ -32,6 +33,8 @@ AUTO_HOUR=04
 WATCH_SECONDS=600
 # How often it looks for a new version without being asked.
 FETCH_SECONDS=3600
+# How long it waits after the backend didn't answer, or didn't take a report.
+BACKOFF_SECONDS=60
 
 log() { printf 'updater: %s\n' "$*" >&2; }
 
@@ -217,8 +220,8 @@ update() {
 # back to $pending_previous, holding the lock. Exits after a successful update.
 finish_update() {
   local target=$pending_target previous=$pending_previous
-  failure_detail=''
   if [ "$pending_phase" != rollback ]; then
+    failure_detail='' rollback_detail=''
     if run_install "$target"; then
       conclude updated
       describe_current
@@ -229,13 +232,11 @@ finish_update() {
     fi
     failure_detail=$install_error
     log "The update to $target failed: $failure_detail Going back to $previous."
-    # Saved before going back, so a restart from here goes on going back, and never tries the
-    # failed commit again.
     failed_target=$target pending_phase=rollback
     save_state
   fi
   if run_install "$previous"; then conclude back; else
-    [ -n "$failure_detail" ] || failure_detail=$install_error
+    rollback_detail=$install_error
     conclude stuck
   fi
   describe_current
@@ -255,11 +256,12 @@ conclude() {
 # once the backend has it. Its outcome stays in the reports until the next check or update.
 report_done() {
   [ -n "$done_result" ] || return 0
-  local target=${done_target:0:7} previous=${done_previous:0:7} detail=${failure_detail:+: $failure_detail}
+  local target=${done_target:0:7} previous=${done_previous:0:7}
+  local detail=${failure_detail:+: $failure_detail} back=${rollback_detail:+: $rollback_detail}
   case "$done_result" in
     updated) outcome idle "Updated to $target." ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
-    stuck) outcome failed "The update to $target failed, and so did going back to $previous${detail:-.} The updater's log on the server has the details." ;;
+    stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
   if done_id=$done_request report "$outcome_state" "$outcome_message"; then
     done_request='' done_result='' done_target='' done_previous=''
@@ -268,13 +270,18 @@ report_done() {
 }
 
 # An update cut off by a restart (the machine, or the service, stopped mid-install or
-# mid-rollback) is finished first: the checkout may be on either commit, and the server half
-# updated.
+# mid-rollback, or its state couldn't be saved) goes back first: the checkout may be on either
+# commit and the server half updated, and how the install would have ended isn't known, so the
+# commit it was on is the one to be on. The target counts as failed, so nothing tries it again
+# on its own.
 recover() {
   [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
-  log "Finishing the update to $pending_target ($pending_phase), which was cut off."
+  log "The update to $pending_target was cut off; going back to $pending_previous."
   take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
-  done_id='' report updating "Finishing the update to ${pending_target:0:7}, which was cut off."
+  done_id='' report updating "Going back to ${pending_previous:0:7}: the update to ${pending_target:0:7} was cut off."
+  failed_target=$pending_target pending_phase=rollback
+  failure_detail="It was cut off before it finished." rollback_detail=''
+  save_state
   finish_update
 }
 
@@ -300,7 +307,7 @@ init() {
   load_settings || return 1
   describe_current || { log "$root isn't a git checkout."; return 1; }
   latest='' latest_channel='' latest_at='' latest_subject='' behind='' ahead='' checked_at=''
-  last_fetch=0 done_id='' failure_detail=''
+  last_fetch=0 done_id='' failure_detail='' rollback_detail=''
   load_state
   outcome idle ''
 }
@@ -321,47 +328,60 @@ main() {
   recover || exit 1
   log "Watching for updates to $root (project $project)."
 
-  local wait=0 line channel auto request_id kind
+  local wait=0 line
   while :; do
     # Its last line: the client library may print notes of its own before it.
     if ! line=$(agent watch "$wait" | tail -1); then
       log "Couldn't reach the backend; trying again in a minute."
-      sleep 60
+      sleep "$BACKOFF_SECONDS"
       wait=0
       continue
     fi
-    read -r channel auto request_id kind <<<"$line"
-    if ! { [[ "$channel" =~ ^(stable|nightly)$ ]] && [[ "$auto" =~ ^[01]$ ]] &&
-      [[ "$request_id" =~ ^([A-Za-z0-9_-]{1,64}|-)$ ]] && [[ "$kind" =~ ^(check|update|-)$ ]]; }; then
-      log "Unexpected answer from the backend: $line"
-      sleep 60
-      continue
-    fi
-    # A request whose update is over but whose report didn't get through is reported, not
-    # run again.
-    if [ -n "$done_request" ] && [ "$request_id" = "$done_request" ]; then request_id=- kind=-; fi
-    report_done
-    done_id=''
-    [ "$request_id" = - ] || done_id=$request_id
-
-    if [ "$kind" = update ]; then
-      update "$channel"
-    elif [ "$kind" = check ]; then
-      report checking
-      if check_latest "$channel"; then outcome idle ''; else outcome failed "Couldn't reach the repository to look for updates."; fi
-    elif [ "$channel" != "$latest_channel" ] || [ $(($(date +%s) - last_fetch)) -ge "$FETCH_SECONDS" ]; then
-      check_latest "$channel" || true
-    fi
-    if [ "$kind" != update ] && auto_due; then
-      auto_day=$(date +%F)
-      save_state
-      if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
-        update "$channel"
-      fi
-    fi
-    report "$outcome_state" "$outcome_message"
+    handle "$line"
     wait=$WATCH_SECONDS
   done
+}
+
+# handle LINE: one turn of the loop, for what a watch printed: `<channel> <auto> <request id or
+# -> <request kind or ->`.
+handle() {
+  local channel auto request_id kind
+  read -r channel auto request_id kind <<<"$1"
+  if ! { [[ "$channel" =~ ^(stable|nightly)$ ]] && [[ "$auto" =~ ^[01]$ ]] &&
+    [[ "$request_id" =~ ^([A-Za-z0-9_-]{1,64}|-)$ ]] && [[ "$kind" =~ ^(check|update|-)$ ]]; }; then
+    log "Unexpected answer from the backend: $1"
+    sleep "$BACKOFF_SECONDS"
+    return
+  fi
+  # How the last update ended goes first. Until the backend has it, nothing new installs: the
+  # report is what tells the backend that update's request is done, and a newer update would
+  # take its place. The request it's for is reported, never run again.
+  if [ -n "$done_request" ] && [ "$request_id" = "$done_request" ]; then request_id=- kind=-; fi
+  report_done
+  if [ -n "$done_result" ]; then
+    log "The backend hasn't taken the last update's report; trying again shortly."
+    sleep "$BACKOFF_SECONDS"
+    return
+  fi
+  done_id=''
+  [ "$request_id" = - ] || done_id=$request_id
+
+  if [ "$kind" = update ]; then
+    update "$channel"
+  elif [ "$kind" = check ]; then
+    report checking
+    if check_latest "$channel"; then outcome idle ''; else outcome failed "Couldn't reach the repository to look for updates."; fi
+  elif [ "$channel" != "$latest_channel" ] || [ $(($(date +%s) - last_fetch)) -ge "$FETCH_SECONDS" ]; then
+    check_latest "$channel" || true
+  fi
+  if [ "$kind" != update ] && auto_due; then
+    auto_day=$(date +%F)
+    save_state
+    if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
+      update "$channel"
+    fi
+  fi
+  report "$outcome_state" "$outcome_message"
 }
 
 # Sourced by deploy/test/updater.sh for its functions; run, it's the service.
