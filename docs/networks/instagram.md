@@ -104,9 +104,12 @@ plaintext), in the `bridge_instagram` database:
 
 Logs: the bridge host logs at info, where mautrix-meta logs IDs, not content. Its warnings
 about frames it doesn't expect (`dgw` socket) and refused uploads can include raw
-responses. The protocol decoder's global-logger warnings only add raw data at trace, and
-the bridge host sets that logger to its own at start, so they are left out. Compose keeps
-at most 3 × 10 MB of logs per service.
+responses. The protocol decoder, shared with Messenger, logs through zerolog's global logger
+and attaches raw data, message text included, to its warnings about opcodes and fields it
+doesn't know. The bridge host's global logger keeps only those warnings' text and safe
+fields (type and field names, indexes, IDs), drops the rest and never logs below warn; see
+docs/networks/meta.md (What it keeps in plaintext) for the details. Compose keeps at most 3 × 10 MB of logs per
+service.
 
 ## Known limits
 

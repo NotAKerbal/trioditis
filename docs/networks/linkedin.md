@@ -7,7 +7,8 @@ browser session's cookies, which LinkedIn's terms don't allow (see Terms risk).
 
 The bridge host's setup is `apps/bridge-host/internal/networks/linkedin.go`: the connector's
 example config, with contact names written without the " (LinkedIn)" suffix (the app shows
-the network's badge) and redacted login responses never logged. There are no operator
+the network's badge), redacted login responses never logged, and messages never sent twice
+(see Sends and retries). There are no operator
 settings: nothing to put in `.env`, and the compose service (`bridge-linkedin`, profile
 `linkedin`, database `bridge_linkedin`) needs nothing beyond the shared bridge settings.
 
@@ -72,15 +73,24 @@ nothing logs LinkedIn's raw response; never run it with `--verbose` in productio
 
 ## Sends and retries
 
-mautrix-linkedin's HTTP layer (`linkedingo`, `DoRaw`) retries **every** request, sends
-included, up to five times after a connection error or a 502/503/504, resending the body. A
-message whose answer was lost can therefore be sent again by the connector itself, which is
-what AGENTS.md rules out for Trioditis. Each send carries an `originToken` (bridgev2's
-transaction ID), the same on every retry, which LinkedIn's own web client uses to recognise
-its messages; whether LinkedIn's server also deduplicates on it is **not verified**. The
-client's `http.Client` is private to `linkedingo`, so this can't be changed from the bridge
-host without patching the connector. Until it is, treat a duplicate after a flaky connection
-as a known limitation (and report it if seen).
+mautrix-linkedin's HTTP layer (`linkedingo`, `DoRaw`) retries every request up to five
+times after a connection error or a 502/503/504, resending the body. For a message that
+would mean sending it again after its answer was lost, so the bridge host changes it for
+message creation (`POST .../voyagerMessagingDashMessengerMessages?action=createMessage`,
+used by sends and by a new group's first message): each one goes to LinkedIn **once**.
+
+The bridge host wraps the connector (`linkedinConnector`) and gives each login's HTTP client
+a transport (`linkedinSendOnce`) that turns a connection error, any 5xx and a redirect on
+that request into a 500 Internal Server Error, which `DoRaw` doesn't retry. The connector
+reports a 5xx as a server error it isn't sure of, so the send is recorded as `unknown` and
+the person decides whether to send it again. A 4xx is LinkedIn's own refusal and stays a
+failure. Every other request (edits, reactions, sync, media) keeps the connector's retries,
+which can't send a message twice. The client's `http.Client` is private to `linkedingo`, so
+the bridge host reaches it by reflection in one place (`linkedinHTTPClient`); if an upgrade
+moves or retypes the field, logins fail to load rather than send without the transport, and
+`TestLinkedInSendOnceReachesTheClient` fails. `TestLinkedInSendIsNotRepeated` sends through
+the connector against each ambiguous answer and checks that it reaches LinkedIn once and is
+reported as uncertain.
 
 ## Known limits
 

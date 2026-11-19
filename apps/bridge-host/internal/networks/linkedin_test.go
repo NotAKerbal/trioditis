@@ -2,7 +2,10 @@ package networks
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -10,7 +13,11 @@ import (
 
 	"github.com/rs/zerolog"
 	linkedin "go.mau.fi/mautrix-linkedin/pkg/connector"
+	"go.mau.fi/mautrix-linkedin/pkg/linkedingo"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/devkeys"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/host"
@@ -94,7 +101,11 @@ func TestLinkedInConnector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	li := conn.(*linkedin.LinkedInConnector)
+	wrapped, ok := conn.(*linkedinConnector)
+	if !ok {
+		t.Fatalf("connector: got %T", conn)
+	}
+	li := wrapped.LinkedInConnector
 	if li.Config.LogRedactedLoginResponses {
 		t.Error("login responses would be logged")
 	}
@@ -134,5 +145,183 @@ func TestLinkedInConnector(t *testing.T) {
 		if got, ok := required[id]; !ok || got != want {
 			t.Errorf("cookie field %s: present %v, required %v, want required %v", id, ok, got, want)
 		}
+	}
+}
+
+// Wrapping the connector mustn't hide what bridgev2 looks for on it: each optional interface
+// mautrix-linkedin's connector implements, the wrapper implements too.
+func TestLinkedInWrapperKeepsInterfaces(t *testing.T) {
+	conn, err := registry["linkedin"].New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := conn.(*linkedinConnector).LinkedInConnector
+	for _, iface := range []reflect.Type{
+		reflect.TypeFor[bridgev2.StoppableNetwork](),
+		reflect.TypeFor[bridgev2.DirectMediableNetwork](),
+		reflect.TypeFor[bridgev2.IdentifierValidatingNetwork](),
+		reflect.TypeFor[bridgev2.TransactionIDGeneratingNetwork](),
+		reflect.TypeFor[bridgev2.PortalBridgeInfoFillingNetwork](),
+		reflect.TypeFor[bridgev2.ConfigValidatingNetwork](),
+		reflect.TypeFor[bridgev2.MaxFileSizeingNetwork](),
+		reflect.TypeFor[bridgev2.NetworkResettingNetwork](),
+		reflect.TypeFor[bridgev2.SplitPortalMigratingNetwork](),
+		reflect.TypeFor[bridgev2.PushParsingNetwork](),
+	} {
+		if reflect.TypeOf(inner).Implements(iface) && !reflect.TypeOf(conn).Implements(iface) {
+			t.Errorf("the wrapper hides %s", iface)
+		}
+	}
+	// The connector asserts these three itself.
+	if _, ok := conn.(bridgev2.DirectMediableNetwork); !ok {
+		t.Error("the wrapper hides DirectMediableNetwork")
+	}
+	if _, ok := conn.(bridgev2.IdentifierValidatingNetwork); !ok {
+		t.Error("the wrapper hides IdentifierValidatingNetwork")
+	}
+	if _, ok := conn.(bridgev2.TransactionIDGeneratingNetwork); !ok {
+		t.Error("the wrapper hides TransactionIDGeneratingNetwork")
+	}
+}
+
+// loadLinkedInLogin loads a login the way bridgev2 does, through the wrapper, and points the
+// send-once transport at linkedIn instead of the network.
+func loadLinkedInLogin(t *testing.T, linkedIn http.RoundTripper) *linkedin.LinkedInClient {
+	t.Helper()
+	conn, err := registry["linkedin"].New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar, err := linkedingo.NewJarFromCookieHeader("JSESSIONID=ajax:1; li_at=x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "me", Metadata: &linkedin.UserLoginMetadata{Cookies: jar}}}
+	if err = conn.LoadUserLogin(context.Background(), login); err != nil {
+		t.Fatal(err)
+	}
+	client := login.Client.(*linkedin.LinkedInClient)
+	httpClient, err := linkedinHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendOnce, ok := httpClient.Transport.(*linkedinSendOnce)
+	if !ok {
+		t.Fatalf("login transport: got %T", httpClient.Transport)
+	}
+	sendOnce.next = linkedIn
+	return client
+}
+
+// The reflection that installs the transport fails loudly, not silently, if an upgrade
+// moves or retypes the fields it reads: loading a login then fails, and so does this test.
+func TestLinkedInSendOnceReachesTheClient(t *testing.T) {
+	loadLinkedInLogin(t, &countingTransport{fail: status(http.StatusOK)})
+	if _, err := privateField[*http.Client](&linkedingo.Client{}, "jar"); err == nil {
+		t.Error("a field of another type was read")
+	}
+	if _, err := privateField[*http.Client](&linkedingo.Client{}, "missing"); err == nil {
+		t.Error("a missing field was read")
+	}
+}
+
+// linkedinSend sends a text through the connector. The timeout is shorter than DoRaw's
+// retries take (2s, 4s, 8s...), so a send that is repeated fails the test quickly.
+func linkedinSend(client *linkedin.LinkedInClient) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.HandleMatrixMessage(ctx, &bridgev2.MatrixMessage{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{
+			Event:              &event.Event{ID: "$send", RoomID: "!chat"},
+			Content:            &event.MessageEventContent{MsgType: event.MsgText, Body: "hello"},
+			Portal:             &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "2-abc", Receiver: "me"}}},
+			InputTransactionID: "txn-1",
+		},
+	})
+	return err
+}
+
+// DoRaw repeats a request after a transport error or a 502/503/504, and doesn't follow a
+// redirect. A message must go out once and, when its outcome is ambiguous, be reported as
+// uncertain, which the bridge host records as unknown.
+func TestLinkedInSendIsNotRepeated(t *testing.T) {
+	for name, fail := range map[string]func(*http.Request) (*http.Response, error){
+		"transport error":     func(*http.Request) (*http.Response, error) { return nil, errors.New("connection reset") },
+		"bad gateway":         status(http.StatusBadGateway),
+		"service unavailable": status(http.StatusServiceUnavailable),
+		"gateway timeout":     status(http.StatusGatewayTimeout),
+		"redirect":            status(http.StatusSeeOther),
+	} {
+		t.Run(name, func(t *testing.T) {
+			linkedIn := &countingTransport{fail: fail}
+			err := linkedinSend(loadLinkedInLogin(t, linkedIn))
+			var ms bridgev2.MessageStatus
+			if !errors.As(err, &ms) {
+				t.Fatalf("got %v, want a message status", err)
+			}
+			if ms.IsCertain || ms.Status == event.MessageStatusFail {
+				t.Errorf("status %+v: reported as certain", ms)
+			}
+			if n := linkedIn.calls.Load(); n != 1 {
+				t.Fatalf("the message reached LinkedIn %d times, want once", n)
+			}
+		})
+	}
+	t.Run("refusal stays certain", func(t *testing.T) {
+		linkedIn := &countingTransport{fail: status(http.StatusBadRequest)}
+		err := linkedinSend(loadLinkedInLogin(t, linkedIn))
+		var ms bridgev2.MessageStatus
+		if !errors.As(err, &ms) || !ms.IsCertain {
+			t.Fatalf("got %v, want a certain failure", err)
+		}
+		if n := linkedIn.calls.Load(); n != 1 {
+			t.Fatalf("the message reached LinkedIn %d times, want once", n)
+		}
+	})
+}
+
+// Only message creation is changed: an edit, at the same endpoint with the message's URN,
+// gets LinkedIn's own answer, and other actions keep DoRaw's retries.
+func TestLinkedInOtherRequestsPassThrough(t *testing.T) {
+	linkedIn := &countingTransport{fail: status(http.StatusTeapot)}
+	cli := linkedingo.NewClient(context.Background(), linkedingo.NewURN("me"), linkedingo.NewEmptyStringCookieJar(), "", "", "", linkedingo.Handlers{})
+	httpClient, err := linkedingoHTTPClient(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient.Transport = &linkedinSendOnce{next: linkedIn}
+	err = cli.EditMessage(context.Background(), linkedingo.NewURN("urn:li:msg_message:1"), linkedingo.SendMessageBody{Text: "edited"})
+	var respErr *linkedingo.ResponseError
+	if !errors.As(err, &respErr) || respErr.StatusCode != http.StatusTeapot {
+		t.Fatalf("got %v, want LinkedIn's own 418", err)
+	}
+
+	sendOnce := &linkedinSendOnce{next: &countingTransport{fail: status(http.StatusBadGateway)}}
+	for _, target := range []string{
+		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages/urn%3Ali%3Amsg_message%3A1",
+		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages?action=reactWithEmoji",
+	} {
+		req, _ := http.NewRequest(http.MethodPost, target, nil)
+		resp, err := sendOnce.RoundTrip(req)
+		if err != nil || resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s: got %v %v, want the 502 untouched", target, resp, err)
+		}
+	}
+}
+
+// A signed-out session's cookies reach the jar even when the answer to a send is replaced.
+func TestLinkedInSendOnceKeepsCookies(t *testing.T) {
+	sendOnce := &linkedinSendOnce{next: &countingTransport{fail: func(req *http.Request) (*http.Response, error) {
+		resp, _ := status(http.StatusFound)(req)
+		resp.Header.Add("Set-Cookie", "li_at=delete me; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+		return resp, nil
+	}}}
+	req, _ := http.NewRequest(http.MethodPost, "https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage", nil)
+	resp, err := sendOnce.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("got %v %v, want a 500", resp, err)
+	}
+	if got := resp.Header.Values("Set-Cookie"); len(got) != 1 || !strings.HasPrefix(got[0], "li_at=delete me") {
+		t.Errorf("cookies: got %q", got)
 	}
 }

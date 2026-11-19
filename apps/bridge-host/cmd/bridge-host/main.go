@@ -63,11 +63,12 @@ func main() {
 	if *verbose {
 		level = zerolog.DebugLevel
 	}
-	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}).Level(level).With().Timestamp().Logger()
-	// Some connectors (mautrix-meta's protocol decoder) log through zerolog's global logger,
-	// and add the raw protocol data, message text included, when its level is trace, which
-	// it is until set. It is the host's logger instead, as in the mautrix bridges.
-	globallog.Logger = log.With().Bool("global_log", true).Logger()
+	console := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}
+	log := zerolog.New(console).Level(level).With().Timestamp().Logger()
+	// mautrix-meta's protocol decoder logs through zerolog's global logger and attaches the
+	// raw protocol data, message text included, to its warnings. The global logger writes to
+	// the same output but keeps only the fields known to be safe, never below warn.
+	globallog.Logger = networks.GlobalLogger(console, level)
 	// Checked before anything starts, so a usage error never leaves a host running.
 	switch command {
 	case "run", "inspect":

@@ -111,13 +111,22 @@ edit keeps its media (`mediaeditcache.go`). An edit to an older one, or after a 
 can't look the media up (the bridge host's `GetEvent` refuses, as it keeps no content) and
 is bridged as text.
 
-Logs: the bridge host logs at info, where mautrix-meta logs IDs, not content. A few
+Logs: the bridge host logs at info, where mautrix-meta logs IDs, not content. Two
 warnings include raw Meta responses that can hold message text: a send whose response has
-no message ID, a refused group creation, and the protocol decoder's warnings about fields
-or steps it doesn't know. The decoder logs through zerolog's global logger, and adds the raw
-arguments only when that logger is at trace, which it is until something sets it; the
-bridge host sets it to its own logger at start, so they are left out. Compose keeps at most
-3 × 10 MB of logs per service.
+no message ID, and a refused group creation.
+
+The protocol decoder (`messagix/lightspeed`) and its table code log through zerolog's global
+logger instead, and attach the raw data to their warnings about opcodes, fields and stored
+procedures they don't know (`step_data`, `item`, `input_data`, `blob_base64` and more;
+everything at trace). The bridge host's global logger (`GlobalLogger`,
+`apps/bridge-host/internal/networks/globallog.go`) keeps only the fields known to be safe:
+the warning's text, the opcode, Go type, field and stored-procedure names, indexes, and
+Meta's thread, message and attachment IDs. It drops every other field, a new one included,
+and names what it dropped (`dropped_fields`). It never logs below warn, even with
+`--verbose`, since the decoder's debug line puts Meta's server log in the message itself.
+`TestGlobalLoggerDropsDecoderData` feeds the pinned decoder payloads carrying a marker (an
+unknown opcode, an unknown field, malformed data) and checks that the marker never reaches
+the output. Compose keeps at most 3 × 10 MB of logs per service.
 
 ## Known limits
 
