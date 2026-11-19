@@ -16,7 +16,7 @@ import {
 import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { Checkbox } from '@trioditis/ui/checkbox'
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@trioditis/ui/dialog'
+import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { Input } from '@trioditis/ui/input'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
@@ -26,8 +26,19 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
-import { Check, Copy, Eye, KeyRound, Plug, Plus, Users } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import {
+  Check,
+  Copy,
+  Eye,
+  KeyRound,
+  Plug,
+  Plus,
+  RefreshCw,
+  Settings as SettingsIcon,
+  ShieldCheck,
+  Users,
+} from 'lucide-react'
+import { useState } from 'react'
 import {
   networkName,
   useAccounts,
@@ -50,15 +61,21 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
+import { Heading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
+import { Updates } from './updates.tsx'
 
+// Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
+// admins only (Admin settings).
 export const SETTINGS_SECTIONS = [
   { id: 'appearance', name: 'Appearance', icon: <Eye /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
-  { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
+  { id: 'members', name: 'Members', icon: <Users />, admin: true },
+  { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
 ] as const
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]['id']
+const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
 
 /** The settings panel. The gear and the account menu open it; its section is in the URL. */
 export function SettingsDialog({
@@ -69,8 +86,13 @@ export function SettingsDialog({
   onSectionChange: (s: SettingsSection | undefined) => void
 }) {
   const session = useSession()
-  const sections = SETTINGS_SECTIONS.filter((s) => !('admin' in s) || session.role === 'admin')
+  const isAdmin = session.role === 'admin'
+  const asked = SETTINGS_SECTIONS.find((s) => s.id === section)
+  // A member who opens an admin section (an old link, say) gets their own settings instead.
+  const admin = isAdmin && !!asked && isAdminSection(asked)
+  const sections = SETTINGS_SECTIONS.filter((s) => isAdminSection(s) === admin)
   const current = sections.find((s) => s.id === section) ?? sections[0]!
+  const other = SETTINGS_SECTIONS.find((s) => isAdminSection(s) !== admin)!
   return (
     <Dialog open={!!section} onOpenChange={(open) => !open && onSectionChange(undefined)}>
       <DialogContent className="flex h-[620px] w-[min(900px,calc(100vw-32px))]" aria-describedby={undefined}>
@@ -78,7 +100,7 @@ export function SettingsDialog({
           className="flex w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px]"
           aria-label="Settings sections"
         >
-          <DialogTitle className="mx-2 mb-3.5 text-md">Settings</DialogTitle>
+          <DialogTitle className="mx-2 mb-3.5 text-md">{admin ? 'Admin settings' : 'Settings'}</DialogTitle>
           {sections.map((s) => (
             <Button
               variant="bare"
@@ -96,6 +118,17 @@ export function SettingsDialog({
               {s.name}
             </Button>
           ))}
+          {isAdmin ? (
+            <Button
+              variant="bare"
+              type="button"
+              onClick={() => onSectionChange(other.id)}
+              className="mt-auto flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4"
+            >
+              {admin ? <SettingsIcon /> : <ShieldCheck />}
+              {admin ? 'Your settings' : 'Admin settings'}
+            </Button>
+          ) : null}
         </nav>
         <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
           {current.id === 'appearance' ? (
@@ -104,43 +137,14 @@ export function SettingsDialog({
             <Accounts />
           ) : current.id === 'members' ? (
             <Members />
+          ) : current.id === 'updates' ? (
+            <Updates />
           ) : (
             <Keys />
           )}
         </div>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function Heading({ title, lead }: { title: string; lead: string }) {
-  return (
-    <>
-      <h2 className="pr-10 text-lg font-bold tracking-[-0.015em]">{title}</h2>
-      <DialogDescription className="mt-1 mb-3.5">{lead}</DialogDescription>
-    </>
-  )
-}
-
-function Setting({
-  title,
-  about,
-  children,
-  column,
-}: {
-  title: string
-  about: string
-  children: ReactNode
-  column?: boolean
-}) {
-  return (
-    <div className={cn('border-t border-border py-[15px]', column ? 'block' : 'flex items-center gap-[18px]')}>
-      <div className="min-w-0 flex-1">
-        <b className="block font-semibold">{title}</b>
-        <span className="mt-0.5 block text-sm text-muted-foreground">{about}</span>
-      </div>
-      {children}
-    </div>
   )
 }
 

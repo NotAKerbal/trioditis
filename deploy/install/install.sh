@@ -6,6 +6,7 @@
 #   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
 #   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
+#   deploy/install/install.sh --updater                   # let admins update it from the app
 #
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
 # options keeps the install as it is, and an option changes only its own setting. A rerun
@@ -24,7 +25,7 @@ warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 Options (each one is kept for later reruns):
   --local              Serve plain HTTP on a port, with no domain (the default)
@@ -49,13 +50,20 @@ Options (each one is kept for later reruns):
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
   --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
                        or stop exposing it (default off)
+  --updater, --no-updater
+                       Run the updater, a systemd service that updates this install from
+                       its git remote when admins ask in the app or on their schedule, or
+                       stop and remove it (default off; docs/deploy.md, Updates)
+  --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
+                       goes to a log). Not kept for reruns
 EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url trusted domain networks e2e
+unset -v mode port host bind proxy_url trusted domain networks e2e updater
 local_flag=0
 new_server_keys=0
+setup_link=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
@@ -74,6 +82,9 @@ while [ $# -gt 0 ]; do
     --new-server-keys) new_server_keys=1 ;;
     --e2e) e2e=1 ;;
     --no-e2e) e2e=0 ;;
+    --updater) updater=1 ;;
+    --no-updater) updater=0 ;;
+    --no-setup-link) setup_link=0 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -121,7 +132,9 @@ fi
 # One install, backup or other write command for this install at a time (deploy/trioditis
 # takes the same lock): they stop and start the server under each other.
 if command -v flock >/dev/null; then
-  exec 9>"$here/.operation.lock"
+  # The updater runs this holding the lock on descriptor 9, which is then used as it is: a
+  # lock it holds is this run's, and one anyone else holds still stops it.
+  if ! { [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$here/.operation.lock" ]; }; then exec 9>"$here/.operation.lock"; fi
   flock -n 9 || die "Another backup, install or change to this install is running."
 else
   warn "flock (util-linux) isn't installed, so nothing stops a backup running during this install."
@@ -284,6 +297,17 @@ for network in "${network_list[@]}"; do
     *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
   esac
 done
+updater=${updater-$(get INSTALL_UPDATER)}
+updater=${updater:-0}
+# The updater is a systemd service; refused here, before anything changes, where there's none.
+if [ "$updater" = 1 ] && ! command -v systemctl >/dev/null; then
+  die "--updater runs a systemd service, and this machine has no systemctl."
+fi
+# The commit this checkout is at: the web app and the functions are built from it, and an open
+# page compares the two to see the server was updated under it.
+version=$( (command -v git >/dev/null && git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}') || true)
+version=${version:-unknown}
+
 if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
   warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
 fi
@@ -408,6 +432,8 @@ set_var \
   INSTALL_HOST "$host" \
   INSTALL_BIND "$bind" \
   INSTALL_E2E "$e2e" \
+  INSTALL_UPDATER "$updater" \
+  TRIODITIS_VERSION "$version" \
   HTTP_PORT "$port" \
   HTTP_BIND "$http_bind" \
   PUBLIC_HOST "$public_host" \
@@ -454,6 +480,7 @@ keep_or BETTER_AUTH_SECRET "$(secret 32)"
 keep_or GATEWAY_SECRET "$(secret 32)"
 keep_or TRIODITIS_INTERNAL_TOKEN "$(secret 32)"
 keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
+keep_or UPDATER_SECRET "$(secret 32)"
 
 # Compose reads COMPOSE_FILE and COMPOSE_PROFILES from deploy/.env, relative to the compose
 # directory, so it runs from there.
@@ -479,6 +506,10 @@ compose() {
 # --- Images -------------------------------------------------------------------------------
 
 say "Building the images from this checkout (the first build takes a few minutes)"
+# Without the build attestations BuildKit adds by default (their timestamps give every build a
+# new image ID), an unchanged image keeps its ID, so Compose leaves its containers running
+# instead of recreating them, and everything that waits for them, on every run.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
 docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
 
@@ -501,6 +532,8 @@ mkdir -p "$here/runtime"
 [ ! -L "$here/runtime" ] || die "deploy/runtime is a symlink; it must be a directory of this checkout."
 write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
+# The commit the functions are deployed from (deploy-functions.sh reads it).
+write_file "$here/runtime/version" "$version" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
 # network's service at the same time, and the builds collide on the shared tag.
@@ -637,6 +670,17 @@ if [ "$reachable" = 0 ]; then
   warn "The backend can't fetch sign-in keys from $public_url, so sign-in won't work yet: $hint. Then run this again."
 fi
 
+# --- The updater --------------------------------------------------------------------------
+
+# Installed (or kept) once the server is up, since it talks to it; never restarted here, as it
+# may be the updater that's running this install. See deploy/updater/service.sh.
+if [ "$updater" = 1 ]; then
+  say "Starting the updater (trioditis-updater-$project)"
+  bash "$here/updater/service.sh" install "$project" || die "Couldn't install the updater's service (above)."
+else
+  bash "$here/updater/service.sh" remove "$project" || warn "Couldn't remove the updater's service (above)."
+fi
+
 # --- Done ---------------------------------------------------------------------------------
 
 # Whether the admin account exists, asked through the backend with the admin key (which
@@ -656,7 +700,9 @@ case "$(account_state)" in
   no)
     # The web app is built in only when the checkout has it (deploy/docker/web.Dockerfile);
     # until then nothing in the browser creates accounts.
-    if [ -f "$root/apps/desktop/package.json" ]; then
+    if [ "$setup_link" = 0 ]; then
+      printf 'The admin account doesn'"'"'t exist yet. Run deploy/install/install.sh for the setup link.\n\n'
+    elif [ -f "$root/apps/desktop/package.json" ]; then
       cat <<EOF
 Create the admin account with this link. It works once, until the first account exists:
 
@@ -681,6 +727,16 @@ Manage it with deploy/trioditis (docker compose for this install), e.g.:
   deploy/trioditis logs -f gateway
   deploy/trioditis down        # stop; data stays in Docker volumes
 
-Upgrade: update this checkout (git pull), then run deploy/install/install.sh again. It keeps
-these settings; pass an option only to change one.
 EOF
+if [ "$updater" = 1 ]; then
+  cat <<EOF
+Updates: admins choose the channel and update from the app (Admin settings → Updates). The
+updater's log: journalctl $([ "$(id -u)" = 0 ] || echo '--user ')-u trioditis-updater-$project
+EOF
+else
+  cat <<EOF
+Upgrade: update this checkout (git pull), then run deploy/install/install.sh again. It keeps
+these settings; pass an option only to change one. Or let admins update from the app: run
+this again with --updater.
+EOF
+fi

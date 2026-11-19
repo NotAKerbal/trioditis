@@ -36,7 +36,15 @@ import {
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
-import { appendToDraft, restoreDraft, setDraftReply, setDraftText, takeDraft, useDraft } from '~/data/drafts.ts'
+import {
+  appendToDraft,
+  restoreDraft,
+  setDraftReply,
+  setDraftText,
+  takeDraft,
+  useDraft,
+  whileSending,
+} from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
@@ -118,7 +126,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
     // Put the text and reply back if the send didn't reach the server, keeping anything newer.
-    await sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply))
+    await whileSending(() =>
+      sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply)),
+    )
   }
 
   async function onSchedule(sendAt: number) {
@@ -134,21 +144,23 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     // it comes back, ahead of anything typed since, only if it doesn't go.
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
-    try {
-      const clientMessageId = newClientId()
-      const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
-      await schedule({
-        chatId,
-        clientMessageId,
-        sendAt,
-        ...sealed,
-        ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
-      })
-      toast(`Scheduled for ${formatWhen(sendAt)}`)
-    } catch (e) {
-      restoreDraft(chatId, taken.text, taken.reply)
-      toast(errorMessage(e, 'That message couldn’t be scheduled.'))
-    }
+    await whileSending(async () => {
+      try {
+        const clientMessageId = newClientId()
+        const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
+        await schedule({
+          chatId,
+          clientMessageId,
+          sendAt,
+          ...sealed,
+          ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
+        })
+        toast(`Scheduled for ${formatWhen(sendAt)}`)
+      } catch (e) {
+        restoreDraft(chatId, taken.text, taken.reply)
+        toast(errorMessage(e, 'That message couldn’t be scheduled.'))
+      }
+    })
   }
 
   const name = chat.name
@@ -316,19 +328,24 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
             )
           }
           onCancelScheduled={(id, body) =>
-            void cancelScheduled({ scheduledId: id }).then(
-              () => {
-                // Keep anything in the composer by now; add the cancelled text below it. A copy
-                // this device couldn't open, or that hadn't come yet, has nothing to put back.
-                if (body === null) return toast('Cancelled. It won’t be sent.')
-                if (body === undefined) return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
-                toast(
-                  appendToDraft(chat.id, body)
-                    ? 'Cancelled. The message was added below your draft.'
-                    : 'Cancelled. The message is back in the composer.',
-                )
-              },
-              (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
+            // Counted like a send until its text is back in the composer: the server's copy is
+            // gone once the cancel goes through, so a reload in between would lose it.
+            void whileSending(() =>
+              cancelScheduled({ scheduledId: id }).then(
+                () => {
+                  // Keep anything in the composer by now; add the cancelled text below it. A copy
+                  // this device couldn't open, or that hadn't come yet, has nothing to put back.
+                  if (body === null) return toast('Cancelled. It won’t be sent.')
+                  if (body === undefined)
+                    return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
+                  toast(
+                    appendToDraft(chat.id, body)
+                      ? 'Cancelled. The message was added below your draft.'
+                      : 'Cancelled. The message is back in the composer.',
+                  )
+                },
+                (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
+              ),
             )
           }
         />

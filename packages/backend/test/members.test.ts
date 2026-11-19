@@ -178,13 +178,13 @@ describe('privacy between people', () => {
 describe('server info', () => {
   it('says whether this is a demo server, signed in or not', async () => {
     const t = setup()
-    expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true })
+    expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true, version: null })
     process.env.TRIODITIS_DEMO = '1'
     try {
       // Demo data needs the fake network alone too; without it, only invitations are off.
-      expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false })
+      expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false, version: null })
       process.env.TRIODITIS_NETWORKS = 'fake'
-      expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false })
+      expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false, version: null })
     } finally {
       delete process.env.TRIODITIS_DEMO
       process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'

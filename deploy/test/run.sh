@@ -3,7 +3,7 @@
 # Each makes and removes its own throwaway project; none touches an install.
 cd "$(dirname "$0")" || exit 1
 failed=''
-for test in backup-publish.sh backup-restart.sh keys.sh lock.sh env-source.sh caddy-headers.sh ports.sh install-settings.sh; do
+for test in backup-publish.sh backup-restart.sh keys.sh lock.sh env-source.sh caddy-headers.sh ports.sh install-settings.sh updater.sh; do
   sh "./$test" || failed="$failed $test"
 done
 if [ -n "$failed" ]; then

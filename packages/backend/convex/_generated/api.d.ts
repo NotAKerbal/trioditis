@@ -41,6 +41,7 @@ import type * as preferences from '../preferences.js'
 import type * as rateLimits from '../rateLimits.js'
 import type * as scheduled from '../scheduled.js'
 import type * as server from '../server.js'
+import type * as updates from '../updates.js'
 import type * as validators from '../validators.js'
 
 import type { ApiFromModules, FilterApi, FunctionReference } from 'convex/server'
@@ -79,6 +80,7 @@ declare const fullApi: ApiFromModules<{
   rateLimits: typeof rateLimits
   scheduled: typeof scheduled
   server: typeof server
+  updates: typeof updates
   validators: typeof validators
 }>
 
