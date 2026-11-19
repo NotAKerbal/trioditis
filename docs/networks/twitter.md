@@ -82,11 +82,13 @@ and at trace level raw incoming events. Never run X with `--verbose` in producti
 ## Sends and retries
 
 twittermeow (`MakeRequestFull`) retries requests up to five times after a connection error or
-a 5xx. For a send it can't send the message twice: the body is a reader that the first
-attempt consumed, so a retry after the request went out carries an empty or partial body,
-which X rejects, and the send fails rather than repeating. (A retry after a connection that
-never opened resends the whole body, but then nothing reached X.) The cost is that a send X
-received but answered with a 5xx is reported failed, though it was delivered.
+a 5xx. As twittermeow is written at this version, a send can't go out twice that way: the
+body is a reader that the first attempt consumed, so a retry after the request went out
+carries an empty or partial body, which X rejects. (A retry after a connection that never
+opened resends the whole body, but then nothing reached X.) The connector doesn't mark that
+error certain, so the send is recorded as **delivery unknown**, not failed: a send X
+received but answered with a 5xx may have been delivered, and you choose whether to send it
+again.
 
 Replies are sent with their target's IDs only, without X's quoted preview: the connector
 fetches the replied-to message's text from Matrix, which the bridge host can't provide (it
