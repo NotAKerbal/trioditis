@@ -126,6 +126,19 @@ type gmessagesSendOnce struct {
 	next http.RoundTripper
 }
 
+// CloseIdleConnections passes libgm's clean-up on disconnect (http.Client's
+// CloseIdleConnections, which only reaches a transport that has the method) to the transport
+// underneath.
+func (t *gmessagesSendOnce) CloseIdleConnections() {
+	next := t.next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	if closer, ok := next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func (t *gmessagesSendOnce) RoundTrip(req *http.Request) (*http.Response, error) {
 	next := t.next
 	if next == nil {

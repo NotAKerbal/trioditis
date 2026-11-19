@@ -295,3 +295,20 @@ func TestGMessagesLoginStartsWithCookies(t *testing.T) {
 		}
 	}
 }
+
+type idleClosingTransport struct {
+	http.RoundTripper
+	closed bool
+}
+
+func (t *idleClosingTransport) CloseIdleConnections() { t.closed = true }
+
+// libgm drops idle connections on disconnect through http.Client.CloseIdleConnections, which
+// only reaches the transport underneath if the send-once wrapper passes it on.
+func TestGMessagesSendOnceClosesIdleConnections(t *testing.T) {
+	inner := &idleClosingTransport{RoundTripper: http.DefaultTransport}
+	(&http.Client{Transport: &gmessagesSendOnce{next: inner}}).CloseIdleConnections()
+	if !inner.closed {
+		t.Fatal("CloseIdleConnections didn't reach the wrapped transport")
+	}
+}
