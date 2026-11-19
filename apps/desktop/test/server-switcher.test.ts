@@ -10,9 +10,12 @@ describe('the sign-in page’s server switcher', () => {
   it('names the server and opens the desktop app’s picker', () => {
     const changeServer = vi.fn()
     const server = serverSwitcher({ setBadge() {}, focus() {}, platform: 'darwin', changeServer }, location)
-    expect(server?.host).toBe('home.tailnet.ts.net')
-    server?.change()
+    if (!server) throw new Error('no switcher')
+    expect(server.host).toBe('home.tailnet.ts.net')
+    // As the link's onClick, which passes the click event: the app must get none of it.
+    ;(server.change as (event: unknown) => void)({ type: 'click' })
     expect(changeServer).toHaveBeenCalledOnce()
+    expect(changeServer).toHaveBeenCalledWith()
   })
 
   it('isn’t offered in a browser', () => {

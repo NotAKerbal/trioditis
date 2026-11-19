@@ -87,6 +87,7 @@ function SignIn() {
             <Button
               variant="link"
               className="h-auto px-0 align-baseline text-base"
+              aria-label="Change server"
               onClick={server.change}
               disabled={busy !== null}
             >

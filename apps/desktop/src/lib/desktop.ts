@@ -27,6 +27,7 @@ export function serverSwitcher(
 ): { host: string; change: () => void } | null {
   const changeServer = bridge?.changeServer
   if (typeof changeServer !== 'function') return null
+  // Called with nothing, never handed the click: an event can't cross into the app's preload.
   return { host: location.host, change: () => changeServer() }
 }
 
