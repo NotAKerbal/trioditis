@@ -34,8 +34,8 @@ release build, cargo's caches kept between builds), and nobody else should pay f
 Without it the image builds as before. It builds for the machine it runs on, amd64 or
 arm64.
 
-The library is linked statically; the binary then needs `libstdc++6` and `zlib1g` at run
-time, which the runtime image has.
+The library is linked statically; the binary then loads the C++ runtime (`libstdc++6`,
+`libgcc-s1`) at run time, which the runtime image has.
 
 ### Dev
 
@@ -62,7 +62,7 @@ mkdir -p ~/.local/lib/libsignal && cp target/release/libsignal_ffi.a ~/.local/li
 export LIBSIGNAL_FFI_DIR=~/.local/lib/libsignal   # or copy it into .data/libsignal
 ```
 
-rustup fetches the toolchain the checkout names. The library is about 50 MB-plus and
+rustup fetches the toolchain the checkout names. The library is about 220 MB (x86_64) and
 takes several minutes on a fast machine. Linking also needs `libz.so` and the C++ runtime
 (`zlib1g-dev`, `g++`). Without `zlib1g-dev`, a `libz.so` symlink to the system's
 `libz.so.1` in the same directory as `libsignal_ffi.a` does the same.
@@ -187,8 +187,9 @@ Signal's servers, which hold no message content.
 
 ## Known limits
 
-- **Building takes Rust.** See Building with Signal. The image's Rust build has not run in
-  this repository's CI.
+- **Building takes Rust.** See Building with Signal. The image's Rust stage hasn't been
+  run yet (the agent that wrote it had no Docker access); the same libsignal tag was built
+  and linked natively on x86_64.
 - **Linked-device limits.** Signal allows a few linked devices per account; the bridge is
   one. Signal unlinks a device that hasn't connected for 30 days; it then needs linking again.
 - **History** is what the phone transfers at linking, once; there is no later backfill

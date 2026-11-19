@@ -59,10 +59,10 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
-# libstdc++6 and zlib1g are what a build with Signal links dynamically; both are already in
-# the base image, and named so that stays true.
+# A build with Signal loads the C++ runtime (libstdc++6, with libgcc-s1); the base image has
+# both, and libstdc++6 is named so that stays true.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 zlib1g \
+  && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --system --uid 10001 --create-home bridge \
   && mkdir -p /data && chown bridge:bridge /data
