@@ -6,7 +6,7 @@
 #   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
 #   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
-#   deploy/install/install.sh --updater                   # let admins update it from the app
+#   deploy/install/install.sh --no-updater                # update it by hand, not from the app
 #
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
 # options keeps the install as it is, and an option changes only its own setting. A rerun
@@ -58,7 +58,8 @@ Options (each one is kept for later reruns):
   --updater, --no-updater
                        Run the updater, a systemd service that updates this install from
                        its git remote when admins ask in the app or on their schedule, or
-                       stop and remove it (default off; docs/deploy.md, Updates)
+                       stop and remove it (default on, where systemd can run it;
+                       docs/deploy.md, Updates)
   --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
                        goes to a log). Not kept for reruns
 EOF
@@ -318,10 +319,19 @@ if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ]
   die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
 fi
 updater=${updater-$(get INSTALL_UPDATER)}
-updater=${updater:-0}
-# The updater is a systemd service; refused here, before anything changes, where there's none.
-if [ "$updater" = 1 ] && ! command -v systemctl >/dev/null; then
-  die "--updater runs a systemd service, and this machine has no systemctl."
+# The updater is on unless the install turned it off. Where it can't run (no systemd, or not a
+# git checkout), a new install, or one from before the updater, gets it off and says why; one
+# that asks for it stops here, before anything changes.
+if [ -z "$updater" ]; then
+  if reason=$(bash "$here/updater/service.sh" check "$project" 2>&1); then
+    updater=1
+  else
+    updater=0
+    warn "The updater is off, so admins can't update the server from the app: ${reason:-its check failed}. Once it can run, run this again with --updater."
+  fi
+elif [ "$updater" = 1 ]; then
+  reason=$(bash "$here/updater/service.sh" check "$project" 2>&1) ||
+    die "The updater can't run here: ${reason:-its check failed}. Fix that, or run this with --no-updater to update by hand."
 fi
 # The commit this checkout is at: the web app and the functions are built from it, and an open
 # page compares the two to see the server was updated under it.

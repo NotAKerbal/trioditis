@@ -274,12 +274,20 @@ Back up before upgrading (below).
 
 ## Updates
 
-With the updater on, admins update the server from the app instead: **Admin settings →
-Updates**. Turn it on with the installer (the setting is kept, like the others):
+Admins update the server from the app: **Admin settings → Updates**. The updater that does it
+is on by default, and the installer turns it off or back on (the setting is kept, like the
+others):
 
 ```sh
-deploy/install/install.sh --updater       # --no-updater stops and removes it
+deploy/install/install.sh --no-updater    # stops and removes it, to update by hand (Upgrade)
+deploy/install/install.sh --updater       # turns it on again
 ```
+
+It needs systemd and a git checkout with an `origin` remote to fetch from. Where it can't run
+(no systemd, a shell that can't reach the operator's systemd user manager, as from `sudo` or
+`su`, or a checkout that isn't a git clone), a new install turns it off and says why, and
+`--updater` stops the install, changing nothing, until it can. An install from before the
+updater gets it on at its next upgrade, as a new one would; one that turned it off keeps it off.
 
 The updater is a systemd service on the host, `trioditis-updater-<project>`: a system service
 when the installer runs as root, and otherwise a user service of the operator, which keeps
@@ -531,7 +539,7 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 | `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                |
 | `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                   |
 | `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                   |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                                                                                                                                                                |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one; the updater is on by default in a git checkout with an `origin` remote, off (saying why) outside one, kept off once turned off, and `--updater` where it can't run stops the installer unchanged              |
 | `updater.sh`          | Against a throwaway git remote and a stub installer: the updater moves the checkout to the channel's newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, installs that, and reports the installer's error; it leaves a checkout that's up to date, ahead of the channel, diverged from it, or has local changes where it is                                                                     |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs

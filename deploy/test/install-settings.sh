@@ -36,8 +36,15 @@ checkout() {
   cp "$installer" "$work/checkout/deploy/install/install.sh"
   cp -r "$repo/deploy/compose" "$work/checkout/deploy/compose"
   cp -r "$repo/deploy/scripts" "$work/checkout/deploy/scripts"
+  cp -r "$repo/deploy/updater" "$work/checkout/deploy/updater"
   cp "$repo/deploy/install/env-names" "$work/checkout/deploy/install/env-names"
 }
+# A systemd whose user manager answers, or doesn't with STUB_SYSTEMCTL=fail.
+cat >"$work/bin/systemctl" <<'EOF'
+#!/bin/sh
+[ "${STUB_SYSTEMCTL:-ok}" = ok ]
+EOF
+chmod +x "$work/bin/systemctl"
 cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -201,6 +208,32 @@ install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 012345
 install || true
 [ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
   [ "$(value TRIODITIS_NETWORKS)" = telegram ] && check ok "and a rerun keeps them" || check fail "and a rerun keeps them"
+
+# The updater is on by default where it can run: a new install in a git checkout with an origin
+# remote turns it on, and one in a directory that isn't a git checkout gets it off and says why.
+# A saved choice stays, and --updater where it can't run stops the install, changing nothing.
+checkout
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one" "$work/out" &&
+  check ok "outside a git checkout, the updater is off, saying why" ||
+  { check fail "outside a git checkout, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work/checkout" init -q
+git -C "$work/checkout" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m test
+git -C "$work/checkout" remote add origin https://example.invalid/trioditis.git
+install || true
+[ "$(value INSTALL_UPDATER)" = 1 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "in a git checkout with an origin remote, the updater is on" ||
+  { check fail "in a git checkout with an origin remote, the updater is on"; tail -2 "$work/out" >&2; }
+sed -i 's/^INSTALL_UPDATER=.*/INSTALL_UPDATER=0/' "$work/checkout/deploy/.env"
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "an install that turned it off keeps it off" || check fail "an install that turned it off keeps it off"
+cp "$work/checkout/deploy/.env" "$work/env.updater"
+if STUB_SYSTEMCTL=fail install --updater; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "The updater can't run here: .*user manager" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
+  check ok "--updater where it can't run stops the install, unchanged" ||
+  { check fail "--updater where it can't run stops the install, unchanged"; tail -2 "$work/out" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]
