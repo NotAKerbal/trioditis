@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exsync"
 
 	"maunium.net/go/mautrix"
@@ -67,8 +69,32 @@ type Connector struct {
 }
 
 var (
-	_ bridgev2.MatrixConnector = (*Connector)(nil)
+	_ bridgev2.MatrixConnector                 = (*Connector)(nil)
+	_ bridgev2.MatrixConnectorWithHTTPSettings = (*Connector)(nil)
 )
+
+// HTTPTransportWrapper is implemented by a network connector that needs to see the requests
+// of the HTTP clients its library builds from the bridge's settings, which it can't reach
+// otherwise (mautrix-gmessages' libgm keeps its clients private).
+type HTTPTransportWrapper interface {
+	WrapHTTPTransport(http.RoundTripper) http.RoundTripper
+}
+
+// GetHTTPClientSettings is what bridgev2 gives connectors to build HTTP clients from: its own
+// default, with the network's transport wrapper (HTTPTransportWrapper) around the transport
+// if it has one.
+func (c *Connector) GetHTTPClientSettings() exhttp.ClientSettings {
+	settings := exhttp.SensibleClientSettings
+	if c.Bridge == nil {
+		return settings
+	}
+	if wrapper, ok := c.Bridge.Network.(HTTPTransportWrapper); ok {
+		settings.TransportOverride = func(cs exhttp.ClientSettings) http.RoundTripper {
+			return wrapper.WrapHTTPTransport(cs.Configure(&http.Transport{}))
+		}
+	}
+	return settings
+}
 
 // New makes a connector. Pass it to bridgev2.NewBridge, which calls Init.
 func New(opts Options) *Connector {

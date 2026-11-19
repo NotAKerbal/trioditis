@@ -63,8 +63,11 @@ text included. A send whose connection dropped after Google got it, or that hit 
 client's 2-minute timeout, would go out again. The bridge host wraps each login's HTTP
 transport (`gvoiceSendOnce`): a send that fails in transport or with a 5xx comes back to the
 connector as a 408, which it reports as an uncertain timeout, so the send is `unknown` and
-the person decides whether to send again. Other requests (sync, contacts, read markers) keep
-libgv's retries. The connector is wrapped (`gvoiceConnector`) only to install that transport
+the person decides whether to send again. A send answered with a redirect comes back as a
+408 too: Go's HTTP client would follow a 307 or 308 by posting the text again, and libgv
+would retry a 5xx from the redirected address. (Refusing the redirect in the client instead
+would fail the request with a network error, which libgv retries.) Other requests (sync,
+contacts, read markers) keep libgv's retries. The connector is wrapped (`gvoiceConnector`) only to install that transport
 in `LoadUserLogin`; every interface it implements is kept.
 
 ## Sending without the signature helper

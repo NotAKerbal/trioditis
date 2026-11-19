@@ -49,8 +49,12 @@ var gvoiceSendSMS, _ = url.Parse(libgv.EndpointSendSMS)
 // gvoiceSendOnce makes an ambiguous failure of a send final. libgv only gives up on a
 // request without retrying when it gets a response under 500, and the HTTP client wraps
 // every transport error as a net.Error, which libgv retries; so a send that failed in
-// transport or with a 5xx comes back as 408 Request Timeout. The connector reports that as
-// a timeout it isn't certain about, which the bridge host records as unknown.
+// transport or with a 5xx comes back as 408 Request Timeout. So does a send answered with a
+// redirect: the HTTP client would follow a 307 or 308 by posting the text again, and the
+// redirected request no longer matches the send endpoint, so a 5xx there would be retried.
+// (Refusing the redirect in the client's CheckRedirect instead fails the request with a
+// net.Error, which libgv retries.) The connector reports a 408 as a timeout it isn't certain
+// about, which the bridge host records as unknown.
 type gvoiceSendOnce struct {
 	next http.RoundTripper
 }
@@ -64,7 +68,7 @@ func (t *gvoiceSendOnce) RoundTrip(req *http.Request) (*http.Response, error) {
 		return next.RoundTrip(req)
 	}
 	resp, err := next.RoundTrip(req)
-	if err == nil && resp.StatusCode < 500 {
+	if err == nil && resp.StatusCode < 500 && (resp.StatusCode < 300 || resp.StatusCode >= 400) {
 		return resp, nil
 	}
 	// A transport error includes the HTTP client's own 2-minute timeout, which libgv would

@@ -21,7 +21,9 @@ connector with three changes:
   `TestBlueskySendsAreNotRetried` checks both ways). The bridge host's wrapper keeps those
   retries for reads (GET, HEAD) and sends everything else (messages, read markers, session
   refreshes) once; an ambiguous send is then recorded `unknown` by the bridge host, as for
-  every network.
+  every network. Redirects are followed for reads only: Go's HTTP client follows a 307 or
+  308 by posting the body again, so a send answered with a redirect fails instead, as
+  uncertain, and is recorded `unknown` (`TestBlueskySendsAreNotRedirected`).
 - **The login form is tidied**: the server field is used as a host name, so `https://` and a
   trailing `/` are removed and a blank server means `bsky.social`; a leading `@` is removed
   from the handle.

@@ -2,15 +2,19 @@ package networks
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	bluesky "go.mau.fi/mautrix-bluesky/pkg/connector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 )
@@ -111,5 +115,68 @@ func TestBlueskySendsAreNotRetried(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || gets.Load() != 2 {
 		t.Errorf("a read answered with 503 then 200: status %d after %d requests, want 200 after 2", resp.StatusCode, gets.Load())
+	}
+}
+
+// The HTTP client follows a 307 or 308 by posting the body again. A send answered with a
+// redirect is posted once and fails as uncertain; a read still follows its redirect.
+func TestBlueskySendsAreNotRedirected(t *testing.T) {
+	var mu sync.Mutex
+	posts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			mu.Lock()
+			posts[r.URL.Path]++
+			mu.Unlock()
+			if r.URL.Path == "/xrpc/chat.bsky.convo.sendMessage" {
+				http.Redirect(w, r, "/xrpc/elsewhere", http.StatusTemporaryRedirect)
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"m","rev":"r","sentAt":"2026-01-01T00:00:00Z","sender":{"did":"did:plc:x"},"text":"hi"}`))
+		case r.URL.Path == "/xrpc/old.read":
+			http.Redirect(w, r, "/xrpc/new.read", http.StatusTemporaryRedirect)
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	conn, err := registry["bluesky"].New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := &bridgev2.UserLogin{UserLogin: &database.UserLogin{Metadata: &bluesky.UserLoginMetadata{Host: srv.URL}}}
+	if err = conn.LoadUserLogin(context.Background(), login); err != nil {
+		t.Fatal(err)
+	}
+	client := login.Client.(*bluesky.BlueskyClient)
+
+	_, err = client.HandleMatrixMessage(context.Background(), &bridgev2.MatrixMessage{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{
+			Content: &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"},
+			Portal:  &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "c"}}},
+		},
+	})
+	if !errors.Is(err, errSendRedirected) {
+		t.Fatalf("got %v, want the redirect refused", err)
+	}
+	// bridgev2 turns the connector's error into the send's status this way.
+	if status := bridgev2.WrapErrorInStatus(err); status.IsCertain {
+		t.Error("a redirected send was reported as certainly not sent")
+	}
+	mu.Lock()
+	if len(posts) != 1 || posts["/xrpc/chat.bsky.convo.sendMessage"] != 1 {
+		t.Errorf("posts by path: %v, want one to the send endpoint", posts)
+	}
+	mu.Unlock()
+
+	resp, err := client.XRPC.Client.Get(srv.URL + "/xrpc/old.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Request.URL.Path != "/xrpc/new.read" {
+		t.Errorf("a redirected read: status %d at %s, want 200 at /xrpc/new.read", resp.StatusCode, resp.Request.URL.Path)
 	}
 }

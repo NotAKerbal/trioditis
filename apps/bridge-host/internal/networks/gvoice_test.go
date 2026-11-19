@@ -112,6 +112,27 @@ func TestGVoiceSendIsNotRepeated(t *testing.T) {
 			}
 		})
 	}
+	// The HTTP client would follow a 307 by posting the text again, to a path the send
+	// endpoint match no longer covers; a 5xx there would then be retried by libgv.
+	t.Run("redirect", func(t *testing.T) {
+		google := newGoogleServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == gvoiceSendSMS.Path {
+				http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+				return
+			}
+			w.WriteHeader(http.StatusBadGateway)
+		})
+		cli := libgv.NewClient(map[string]string{"SAPISID": "x"})
+		cli.HTTP.Transport = &gvoiceSendOnce{next: google}
+		_, err := cli.SendMessage(context.Background(), &gvproto.ReqSendSMS{ThreadID: "t.+15550100", Text: "hello"})
+		var respErr *libgv.ResponseError
+		if !errors.As(err, &respErr) || respErr.Resp.StatusCode != http.StatusRequestTimeout {
+			t.Fatalf("got %v, want a 408 response error", err)
+		}
+		if n := google.total(); n != 1 {
+			t.Fatalf("the send reached Google %d times (%v), want once", n, google.requests)
+		}
+	})
 	t.Run("other requests pass through", func(t *testing.T) {
 		google := &countingTransport{fail: status(http.StatusTeapot)}
 		cli := libgv.NewClient(map[string]string{"SAPISID": "x"})
