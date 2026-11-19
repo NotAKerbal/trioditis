@@ -56,7 +56,21 @@ import {
   writeDevEnv,
 } from './lib.mjs'
 
-const NETWORKS = ['fake', 'whatsapp']
+const NETWORKS = [
+  'fake',
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'gvoice',
+  'telegram',
+  'meta',
+  'instagram',
+  'slack',
+  'groupme',
+  'linkedin',
+  'twitter',
+  'bluesky',
+]
 
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')

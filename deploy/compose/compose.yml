@@ -135,8 +135,7 @@ services:
       start_period: 10s
 
   # One bridge host per network, each in a compose profile; install.sh enables the chosen
-  # ones (COMPOSE_PROFILES). Signal and Google Messages get services here once the bridge
-  # host runs their connectors.
+  # ones (COMPOSE_PROFILES).
   bridge-whatsapp:
     <<: *bridge-host
     profiles: [whatsapp]
@@ -147,6 +146,127 @@ services:
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_whatsapp?sslmode=disable
     volumes:
       - bridge-whatsapp:/data
+
+  bridge-signal:
+    <<: *bridge-host
+    profiles: [signal]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: signal
+      BRIDGE_HOST_ID: signal-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_signal?sslmode=disable
+    volumes:
+      - bridge-signal:/data
+
+  bridge-gmessages:
+    <<: *bridge-host
+    profiles: [gmessages]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: gmessages
+      BRIDGE_HOST_ID: gmessages-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gmessages?sslmode=disable
+    volumes:
+      - bridge-gmessages:/data
+
+  bridge-gvoice:
+    <<: *bridge-host
+    profiles: [gvoice]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: gvoice
+      BRIDGE_HOST_ID: gvoice-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gvoice?sslmode=disable
+    volumes:
+      - bridge-gvoice:/data
+
+  bridge-telegram:
+    <<: *bridge-host
+    profiles: [telegram]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: telegram
+      BRIDGE_HOST_ID: telegram-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_telegram?sslmode=disable
+    volumes:
+      - bridge-telegram:/data
+
+  bridge-meta:
+    <<: *bridge-host
+    profiles: [meta]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: meta
+      BRIDGE_HOST_ID: meta-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_meta?sslmode=disable
+    volumes:
+      - bridge-meta:/data
+
+  bridge-instagram:
+    <<: *bridge-host
+    profiles: [instagram]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: instagram
+      BRIDGE_HOST_ID: instagram-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_instagram?sslmode=disable
+    volumes:
+      - bridge-instagram:/data
+
+  bridge-slack:
+    <<: *bridge-host
+    profiles: [slack]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: slack
+      BRIDGE_HOST_ID: slack-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_slack?sslmode=disable
+    volumes:
+      - bridge-slack:/data
+
+  bridge-groupme:
+    <<: *bridge-host
+    profiles: [groupme]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: groupme
+      BRIDGE_HOST_ID: groupme-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_groupme?sslmode=disable
+    volumes:
+      - bridge-groupme:/data
+
+  bridge-linkedin:
+    <<: *bridge-host
+    profiles: [linkedin]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: linkedin
+      BRIDGE_HOST_ID: linkedin-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_linkedin?sslmode=disable
+    volumes:
+      - bridge-linkedin:/data
+
+  bridge-twitter:
+    <<: *bridge-host
+    profiles: [twitter]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: twitter
+      BRIDGE_HOST_ID: twitter-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_twitter?sslmode=disable
+    volumes:
+      - bridge-twitter:/data
+
+  bridge-bluesky:
+    <<: *bridge-host
+    profiles: [bluesky]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: bluesky
+      BRIDGE_HOST_ID: bluesky-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_bluesky?sslmode=disable
+    volumes:
+      - bridge-bluesky:/data
 
   # The fake network: logs in with any username, for trying the server without a real account.
   bridge-fake:
@@ -189,6 +309,17 @@ volumes:
   postgres:
   convex:
   bridge-whatsapp:
+  bridge-signal:
+  bridge-gmessages:
+  bridge-gvoice:
+  bridge-telegram:
+  bridge-meta:
+  bridge-instagram:
+  bridge-slack:
+  bridge-groupme:
+  bridge-linkedin:
+  bridge-twitter:
+  bridge-bluesky:
   bridge-fake:
   caddy-data:
   caddy-config:

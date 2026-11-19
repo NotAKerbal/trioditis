@@ -9,6 +9,12 @@ const NETWORK_STYLE: Record<string, { className: string; letter: string }> = {
   meta: { className: 'bg-net-messenger', letter: 'M' },
   instagram: { className: 'bg-net-instagram', letter: 'I' },
   discord: { className: 'bg-net-discord', letter: 'D' },
+  slack: { className: 'bg-net-slack', letter: '#' },
+  groupme: { className: 'bg-net-groupme', letter: 'G' },
+  gvoice: { className: 'bg-net-gvoice', letter: 'V' },
+  linkedin: { className: 'bg-net-linkedin', letter: 'in' },
+  twitter: { className: 'bg-net-twitter', letter: 'X' },
+  bluesky: { className: 'bg-net-bluesky', letter: 'B' },
   agents: { className: 'bg-net-agents', letter: '✦' },
 }
 

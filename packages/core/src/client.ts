@@ -83,6 +83,54 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
   },
+  slack: {
+    network: 'slack',
+    name: 'Slack',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/slack.md.
+    flows: [],
+    termsRisk: false,
+  },
+  groupme: {
+    network: 'groupme',
+    name: 'GroupMe',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/groupme.md.
+    flows: [],
+    termsRisk: false,
+  },
+  gvoice: {
+    network: 'gvoice',
+    name: 'Google Voice',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/gvoice.md.
+    flows: [],
+    termsRisk: false,
+  },
+  linkedin: {
+    network: 'linkedin',
+    name: 'LinkedIn',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/linkedin.md.
+    flows: [],
+    termsRisk: false,
+  },
+  twitter: {
+    network: 'twitter',
+    name: 'X',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/twitter.md.
+    flows: [],
+    termsRisk: false,
+  },
+  bluesky: {
+    network: 'bluesky',
+    name: 'Bluesky',
+    maturity: 'experimental',
+    // Filled in from the connector's login flows; see docs/networks/bluesky.md.
+    flows: [],
+    termsRisk: false,
+  },
   fake: {
     network: 'fake',
     name: 'Fake network',

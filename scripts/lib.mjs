@@ -201,7 +201,23 @@ export const portsFor = (slot) => ({
   convexCloud: 4210 + 2 * slot,
   convexSite: 4211 + 2 * slot,
   gateway: 8700 + 10 * slot,
-  bridge: { fake: 8701 + 10 * slot, whatsapp: 8702 + 10 * slot },
+  bridge: {
+    fake: 8701 + 10 * slot,
+    whatsapp: 8702 + 10 * slot,
+    // The networks added later, above every slot's ports in the 8700s and 9000s (slots go
+    // up to 99), so the ports above don't move.
+    signal: 10101 + 20 * slot,
+    gmessages: 10102 + 20 * slot,
+    gvoice: 10103 + 20 * slot,
+    telegram: 10104 + 20 * slot,
+    meta: 10105 + 20 * slot,
+    instagram: 10106 + 20 * slot,
+    slack: 10107 + 20 * slot,
+    groupme: 10108 + 20 * slot,
+    linkedin: 10109 + 20 * slot,
+    twitter: 10110 + 20 * slot,
+    bluesky: 10111 + 20 * slot,
+  },
   fakeControl: 8709 + 10 * slot,
 })
 

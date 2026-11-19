@@ -38,7 +38,8 @@ Options (each one is kept for later reruns):
                        port, such as Tailscale Serve: the https:// origin people open.
                        Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
-  --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
+  --networks <list>    Comma-separated: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake
+                       (default whatsapp)
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
                        from, as Caddy ranges (default on a loopback bind: the loopback and
@@ -280,8 +281,8 @@ IFS=',' read -r -a network_list <<<"$networks"
 [ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
 for network in "${network_list[@]}"; do
   case "$network" in
-    whatsapp | fake) ;;
-    *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
+    whatsapp | signal | gmessages | gvoice | telegram | meta | instagram | slack | groupme | linkedin | twitter | bluesky | fake) ;;
+    *) die "Unknown network '$network'. This version supports: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake." ;;
   esac
 done
 if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
