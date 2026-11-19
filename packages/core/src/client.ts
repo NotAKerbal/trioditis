@@ -135,24 +135,26 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'linkedin',
     name: 'LinkedIn',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/linkedin.md.
-    flows: [],
-    termsRisk: false,
+    // The connector's email-and-password flow isn't offered: its verification steps ask the
+    // person to pick from options, which the stepper can't show yet. See docs/networks/linkedin.md.
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    termsRisk: true,
   },
   twitter: {
     network: 'twitter',
     name: 'X',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/twitter.md.
-    flows: [],
-    termsRisk: false,
+    // The connector's password flow needs a browser token made by script in a web view, which
+    // the stepper can't run. See docs/networks/twitter.md.
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    termsRisk: true,
   },
   bluesky: {
     network: 'bluesky',
     name: 'Bluesky',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/bluesky.md.
-    flows: [],
+    // An app password with direct messages allowed; see docs/networks/bluesky.md.
+    flows: [{ id: 'password', kind: 'form', name: 'App password' }],
     termsRisk: false,
   },
   fake: {
