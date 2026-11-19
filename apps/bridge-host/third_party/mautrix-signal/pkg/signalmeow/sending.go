@@ -303,6 +303,13 @@ func (r *GroupMessageSendResult) FailureError() error {
 	if len(r.FailedToSendTo) == 0 {
 		return nil
 	}
+	// Trioditis: if Signal may have delivered to anyone, say so, rather than reporting
+	// another member's certain refusal: the send as a whole isn't certain to have failed.
+	for _, failure := range r.FailedToSendTo {
+		if errors.Is(failure.Error, ErrSendUncertain) {
+			return failure.Error
+		}
+	}
 	for _, failure := range r.FailedToSendTo {
 		if !errors.Is(failure.Error, ErrUnregisteredUser) {
 			return failure.Error
@@ -1000,7 +1007,10 @@ func (cli *Client) sendContent(
 	}
 	log.Trace().Msg("Received a response to a message send")
 
-	retryableStatuses := []uint32{409, 410, 428, 500, 503}
+	// Trioditis: 500 and 503 aren't retried (they are reported below). Signal may have
+	// queued the message before failing, so sending again could deliver it twice. 409 and 410
+	// are refusals (the device list changed), so sending again is right.
+	retryableStatuses := []uint32{409, 410, 428}
 
 	// Check to see if our status is retryable
 	needToRetry := false
@@ -1052,6 +1062,8 @@ func (cli *Client) sendContent(
 		return sentUnidentified, fmt.Errorf("%w (send returned 404)", ErrUnregisteredUser)
 	} else if *response.Status == 413 || *response.Status == 429 {
 		return sentUnidentified, fmt.Errorf("%w (send returned %d)", ErrRateLimited, *response.Status)
+	} else if *response.Status >= 500 {
+		return sentUnidentified, fmt.Errorf("%w (send returned %d)", ErrSendUncertain, *response.Status)
 	} else if *response.Status != 200 {
 		return sentUnidentified, fmt.Errorf("unexpected status code while sending: %d", *response.Status)
 	}

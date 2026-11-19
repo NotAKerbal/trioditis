@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/beeper/groupme v0.0.0-20261118135138-42e6cd46dac3
 	github.com/beeper/groupme-lib v0.2.1-0.20261113165139-6773c3ac00ad
+	github.com/coder/websocket v1.8.15
 	github.com/lib/pq v1.12.3
 	github.com/rs/zerolog v1.35.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -46,7 +47,6 @@ require (
 	github.com/bytemare/voprf v0.0.0-20210221170502-f0af88d24d16 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/earthboundkid/versioninfo/v2 v2.24.1 // indirect

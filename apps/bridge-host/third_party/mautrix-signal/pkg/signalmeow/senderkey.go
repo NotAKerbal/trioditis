@@ -229,6 +229,11 @@ func (cli *Client) sendToGroupWithSenderKey(
 		Any("fallback_recipients", fallbackRecipients).
 		Msg("Sending multi-recipient message with sender key")
 	resp, err := cli.UnauthedWS.SendRequest(ctx, http.MethodPut, path, ssCiphertext, header)
+	if err != nil {
+		// Trioditis: upstream carries on with a nil response, which ends up as "unexpected
+		// status code 0" and loses whether Signal may have received it.
+		return nil, fmt.Errorf("multi-recipient send failed: %w", err)
+	}
 	switch resp.GetStatus() {
 	case 200:
 		var respData MultiRecipient200Response
@@ -279,11 +284,13 @@ func (cli *Client) sendToGroupWithSenderKey(
 		return cli.sendToGroupWithSenderKey(ctx, groupID, allRecipients, sec, content, messageTimestamp, retries+1)
 	case 413, 428, 429:
 		return nil, fmt.Errorf("%w (multi-recipient send returned %d)", ErrRateLimited, resp.GetStatus())
-	case 500, 503:
+	case 500, 502, 503, 504:
+		// Trioditis: reported, not retried. Signal may have queued the message for some or all
+		// members before failing, and a retry (or, after three, the one-by-one fallback) could
+		// deliver it to them twice.
 		log.Warn().Uint32("status_code", resp.GetStatus()).
-			Msg("Multi-recipient send failed with server error, retrying")
-		doUnlock()
-		return cli.sendToGroupWithSenderKey(ctx, groupID, allRecipients, sec, content, messageTimestamp, retries+1)
+			Msg("Multi-recipient send failed with server error, not retrying")
+		return nil, fmt.Errorf("%w (multi-recipient send returned %d)", ErrSendUncertain, resp.GetStatus())
 	default:
 		return nil, fmt.Errorf("unexpected status code %d in multi-recipient send", resp.GetStatus())
 	}

@@ -44,10 +44,6 @@ type Options struct {
 	Notify func()
 	// SendTimeout is how long a send may wait for an outcome before it is marked unknown.
 	SendTimeout time.Duration
-	// ReceiveOnly refuses every command that would put a message on the network (send,
-	// edit, react, unreact, redact), for a connector that may resubmit one after an
-	// ambiguous outcome. Read markers and typing still go out. See networks.Network.
-	ReceiveOnly bool
 }
 
 // Connector implements bridgev2.MatrixConnector.

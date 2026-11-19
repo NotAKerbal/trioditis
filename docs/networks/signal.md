@@ -1,15 +1,11 @@
 # Signal
 
 Signal, through `go.mau.fi/mautrix-signal` **v0.2611.0** (`pkg/connector`,
-`SignalConnector`), which links Signal's own Rust library, **libsignal v0.106.1**
+`SignalConnector`), patched so a message is never sent twice (see Sending), which links Signal's own Rust library, **libsignal v0.106.1**
 (`github.com/signalapp/libsignal`, tag `v0.106.1`, commit
 `904c8dc8216073b078a5f2f5090e3da8382e6a92`), through cgo. Network ID `signal`, maturity
 **experimental** (stable is its v1 target in docs/PLAN.md), `termsRisk: false`: the bridge
 is a linked device, like Signal Desktop, made with Signal's own linking flow.
-
-**Receive-only for now** (`receiveOnly: true` in `NETWORK_INFO`): messages, history and
-read state come in, but the bridge host refuses sends, edits, reactions and deletions. See
-Sending.
 
 One login is one Signal account, linked as a secondary device of the phone. The phone
 stays the primary device: it must stay registered, and Signal unlinks a device that hasn't
@@ -102,8 +98,8 @@ the connector reports them as unsupported; received voice notes come through unc
 ## Sending
 
 AGENTS.md: a send is never retried after an ambiguous outcome; it is reported `unknown`
-and the person decides. mautrix-signal v0.2611.0 retries on its own in two places, both
-before the connector returns, so the host never gets to say `unknown`:
+and the person decides. Upstream mautrix-signal v0.2611.0 retries on its own in two places,
+both before the connector returns, so the host would never get to say `unknown`:
 
 - **A dropped websocket.** When the connection closes with a request's response still
   outstanding, signalmeow closes that request's response channel, and
@@ -112,31 +108,53 @@ before the connector returns, so the host never gets to say `unknown`:
   accepted the first one, it gets it twice.
 - **A 500 or 503 from Signal.** `sendContent` (one recipient, `pkg/signalmeow/sending.go`)
   and `sendToGroupWithSenderKey` (a group, `pkg/signalmeow/senderkey.go`) send again with
-  the same timestamp. 409 and 410 (the recipient's device list changed: Signal refused the
-  message, so sending again is right) and 428 are retried the same way.
+  the same timestamp; a group send that fails three times is then sent again to each member
+  one by one.
 
-There is no seam the bridge host can use. Every request goes through signalmeow's own
-websocket client (`AuthedWS`, `UnauthedWS`). Its outgoing queue is one unexported channel
-that senders write to and each new connection's write loop reads, both through the same
-field, so it can't be wrapped without racing a reconnect; the response channels live in a
-local map; and the client and its websockets are made and connected in one call. A hook below that
-would mean reading and rewriting Signal's websocket frames under TLS. The connector's
-client type (`*SignalClient`) is asserted in several places, so it can't be wrapped either.
+Both are inside signalmeow's own websocket client, with no seam the bridge host could use
+from outside, so the bridge host builds against a **patched copy** of mautrix-signal:
+`apps/bridge-host/third_party/mautrix-signal`, which `apps/bridge-host/go.mod` swaps in for
+the required version with a `replace`. The copy is upstream v0.2611.0 plus
+`third_party/mautrix-signal.patch`, and `node scripts/signal-fork.mjs check` (in `pnpm check`
+and CI) fails if it is anything else. The patch (every change is marked `Trioditis:`):
 
-So until mautrix-signal can be told not to resubmit (a patch upstream, or a fork), the
-bridge host runs Signal **receive-only** (`networks.Network.ReceiveOnly`): it refuses
-`send`, `edit`, `react`, `unreact` and `redact` with 409 `unsupported` before anything
-reaches bridgev2, so nothing is submitted and the refusal is certain (a stored one is
-refused when it runs and fails). `markRead` and `typing` still go out: a repeated read
-receipt or typing notice changes nothing. Turning sends back on is `ReceiveOnly: false` in
-`internal/networks/signal.go` and dropping `receiveOnly` from `NETWORK_INFO`, once a patched
-connector is in.
+| Where                                               | Upstream                                                        | Patched                                                                                            |
+| --------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `web/signalwebsocket.go`, `sendRequestInternal`     | a request whose connection closed unanswered is submitted again | a message send (`PUT /v1/messages/…`) that was written is reported with `web.ErrRequestUncertain`  |
+| `sending.go`, `sendContent`                         | 500 and 503 are sent again                                      | any 5xx is reported with `signalmeow.ErrSendUncertain`                                             |
+| `senderkey.go`, `sendToGroupWithSenderKey`          | 500 and 503 are sent again; the websocket's error is ignored    | 500, 502, 503 and 504 are reported with `ErrSendUncertain`; the websocket's error is returned      |
+| `sending.go`, `GroupMessageSendResult.FailureError` | the first failure that isn't an unregistered member             | an uncertain failure first, so one member's certain refusal doesn't make the whole send certain    |
+| `connector/errors.go`, `wrapSendError`              | (no such error)                                                 | `ErrSendUncertain` becomes an uncertain `MessageStatus`, checked before the cases that are certain |
 
-For whoever decides that: a resubmission isn't shown twice by Signal's apps. The
-websocket case resends the same ciphertext, which libsignal refuses to decrypt a second
-time, and the 500/503 case reuses the message's timestamp, which Signal's apps use to drop
-duplicates. That's Signal's behaviour, not something the bridge host can check, so it isn't
-relied on here.
+`ErrSendUncertain` is `web.ErrRequestUncertain`, so `errors.Is` finds either. An uncertain
+`MessageStatus` is recorded `unknown`, as for every network (`connector.handleOutcome`).
+Upstream's other retries stay, as they follow a request that never went out or that Signal
+refused: a request lost before it was written is submitted on the next connection; 409 and
+410 (the recipient's device list changed) and a 401 on sealed sender (sent again without it)
+are sent again. A 413, 428 or 429 is a certain failure (rate limited). Read receipts, typing
+and the sync copy to your own devices go through the same requests, so a dropped connection
+loses one of those instead of sending it twice: a lost read receipt or typing notice changes
+nothing, and a lost sync copy means your phone doesn't show that one message.
+
+`internal/networks/signalsend_libsignal_test.go` drives the patched websocket against a fake
+Signal that answers one send and drops the connection on the next: the second is reported
+uncertain at once, and the fake receives it once. Against upstream the same test waits for
+the next connection and sends it again.
+
+What stays as upstream has it:
+
+- **A group send that reached some members** is reported sent; signalmeow logs each member
+  it failed for. Nothing is sent again.
+- **Signal's own retry receipts.** A recipient whose device couldn't decrypt a message asks
+  for it again (a `DecryptionErrorMessage`), and signalmeow resends it to that device from
+  its send cache (`retry.go`). That is Signal's protocol: the device never got it.
+
+**Updating mautrix-signal:** change the version in `apps/bridge-host/go.mod`, run
+`node scripts/signal-fork.mjs update` (it copies the new upstream and applies the patch, and
+stops if a hunk no longer applies), check every `Trioditis:` change still covers each
+resubmission upstream has (search the diff for new `retry` and `sendRequestInternal`
+callers), then `go mod tidy` and `node scripts/signal-fork.mjs diff`. See
+`apps/bridge-host/third_party/README.md`.
 
 ## Logging in
 
@@ -236,8 +254,8 @@ content.
 
 ## Known limits
 
-- **Receive-only** until mautrix-signal stops resubmitting after an ambiguous outcome; see
-  Sending.
+- **A patched connector.** mautrix-signal is the bridge host's patched copy; updating it
+  means carrying the patch forward (Sending).
 - **Building takes Rust.** See Building with Signal. The image's Rust stage has been built
   on x86_64 (about 5 minutes for libsignal on 24 cores; the image is about 50 MB bigger),
   and the image reached Signal's QR step; arm64 hasn't been built yet.
@@ -259,10 +277,14 @@ With Isaac's account, on a host built with Signal (`pnpm dev --network signal` o
 - [ ] **Backfill:** recent chats appear with their history, DMs and groups, with names and
       avatars; Note to Self is there with no avatar.
 - [ ] **Receive:** a message from another phone arrives in a DM and in a group.
-- [ ] **Sending is refused:** a send, edit, reaction or delete fails at once with
-      `unsupported`, and nothing appears on the phone.
-- [ ] **Their edits, reactions and deletes** arrive.
-- [ ] **Media:** an image, a video, a file and a voice note arrive.
+- [ ] **Send:** text to a DM and a group; it shows on the phone (as sent from this device)
+      and on the recipient's, and its status reaches `sent`.
+- [ ] **Reply, edit, react, delete:** each, both directions. Edit and delete within 24
+      hours.
+- [ ] **Media:** an image, a video, a file and a voice note arrive; sending an image.
+- [ ] **A send with the connection down:** turn the network off (or stop Signal's traffic)
+      just as you send. The send ends `unknown` or `failed`, never sent twice: the recipient
+      has it at most once.
 - [ ] **Read state:** reading a chat in Trioditis marks it read on the phone.
 - [ ] **Own messages:** one sent from the phone appears as yours.
 - [ ] **Reconnect after restart:** stop the bridge host, send it a message meanwhile, start

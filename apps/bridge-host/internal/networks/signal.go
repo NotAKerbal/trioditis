@@ -2,6 +2,10 @@
 
 // Signal links libsignal (Rust, through cgo), so it is only in a build made with
 // `-tags libsignal` and libsignal_ffi on the linker path; see docs/networks/signal.md.
+//
+// mautrix-signal is the patched copy in third_party/mautrix-signal (go.mod's replace):
+// upstream submits a message again after an ambiguous outcome, which sends must never be
+// (AGENTS.md). See docs/networks/signal.md, Sending.
 
 package networks
 
@@ -37,15 +41,6 @@ func init() {
 			sc := conn.(*signal.SignalConnector)
 			return signalsweep.Start(ctx, sc.Bridge.DB.Database, signalsweep.Interval, log.With().Str("component", "signal sweep").Logger())
 		},
-		// signalmeow submits a message again, unasked, after an ambiguous outcome: when the
-		// websocket drops with the send's response outstanding it resubmits the request
-		// (web.SignalWebsocket.sendRequestInternal, up to 3 times), and a 500 or 503 from
-		// Signal makes it send again, single- and multi-recipient (sendContent,
-		// sendToGroupWithSenderKey). Both happen inside its own websocket client, whose send
-		// channel and response channels nothing outside it can reach, before the host could
-		// report the send as unknown. Until mautrix-signal can be told not to, Signal is
-		// receive-only here. See docs/networks/signal.md, Sending.
-		ReceiveOnly: true,
 		// signalmeow logs the history transfer's backup key and a contact's name and number at
 		// info level; see signallog.go.
 		LogFilter: signalLogFilter,

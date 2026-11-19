@@ -29,6 +29,13 @@ if (existsSync(resolve(bridgeDir, 'go.mod'))) {
         env: go,
       },
       { name: 'go test ./...', cmd: 'go', args: ['test', './...'], cwd: bridgeDir, env: go },
+      // The patched mautrix-signal copy is upstream plus its patch, nothing else.
+      {
+        name: 'mautrix-signal copy matches its patch',
+        cmd: 'node',
+        args: ['scripts/signal-fork.mjs', 'check'],
+        env: go,
+      },
     )
   } catch (error) {
     checks.push({ name: 'go vet, go test', blocked: error.message })

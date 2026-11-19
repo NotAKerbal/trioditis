@@ -106,6 +106,13 @@ func wrapSendError(err error) error {
 		return err
 	}
 	switch {
+	case errors.Is(err, signalmeow.ErrSendUncertain):
+		// Trioditis: first, so an error that also wraps a certain one (a group send) is still
+		// reported as possibly delivered, never as certainly failed.
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("Signal may or may not have received this").
+			WithErrorReason(event.MessageStatusNetworkError).
+			WithSendNotice(true)
 	case errors.Is(err, signalmeow.ErrUnregisteredUser):
 		return bridgev2.WrapErrorInStatus(err).
 			WithMessage("recipient isn't registered on Signal").

@@ -416,6 +416,10 @@ var (
 	ErrUnregisteredUser = errors.New("user is unregistered")
 	ErrDevicesChanged   = errors.New("device list changed while sending skdm")
 	ErrRateLimited      = errors.New("rate limited by server")
+	// ErrSendUncertain says Signal may or may not have delivered a message. Trioditis: such
+	// a send is reported to the caller and never submitted again, which could deliver it
+	// twice. It is the websocket's own error, so either is found by errors.Is.
+	ErrSendUncertain = web.ErrRequestUncertain
 )
 
 func (cli *Client) FetchAndProcessPreKey(ctx context.Context, theirServiceID libsignalgo.ServiceID, specificDeviceID int) error {

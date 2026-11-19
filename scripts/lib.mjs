@@ -960,7 +960,7 @@ export function buildBridgeHost({ signal = false } = {}) {
     run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnvironment })
     return resolve(bridgeDir, 'bin/bridge-host')
   }
-  const dir = libsignalDir(goEnvironment)
+  const dir = libsignalDir()
   const libraryPath = [dir, process.env.LIBRARY_PATH].filter(Boolean).join(delimiter)
   run('go', ['build', '-tags', 'libsignal', '-o', 'bin/bridge-host', './cmd/bridge-host'], {
     cwd: bridgeDir,
@@ -973,24 +973,11 @@ export function buildBridgeHost({ signal = false } = {}) {
  * The directory holding libsignal_ffi.a for a bridge host built with Signal: LIBSIGNAL_FFI_DIR,
  * or .data/libsignal in this checkout. It must be the libsignal version mautrix-signal's
  * bindings were generated against, which only the link would otherwise check; this says what
- * is missing instead. Building it: docs/networks/signal.md.
+ * is missing instead. Building it: docs/networks/signal.md. `module` is mautrix-signal's source:
+ * the bridge host builds against the patched copy in this checkout (third_party/README.md).
  */
-export function libsignalDir(goEnvironment = goEnv()) {
+export function libsignalDir(module = resolve(bridgeDir, 'third_party/mautrix-signal')) {
   const dir = process.env.LIBSIGNAL_FFI_DIR ? resolve(process.env.LIBSIGNAL_FFI_DIR) : resolve(dataDir, 'libsignal')
-  // `go mod download` fetches the module first if the cache doesn't have it yet, and says
-  // where it is extracted; `go list -m` gives an empty directory in that case.
-  const downloaded = capture('go', ['mod', 'download', '-json', 'go.mau.fi/mautrix-signal'], {
-    cwd: bridgeDir,
-    env: goEnvironment,
-    quiet: true,
-  })
-  let module
-  try {
-    module = JSON.parse(downloaded).Dir
-  } catch {
-    module = undefined
-  }
-  if (!module) throw new Error(`Couldn't find mautrix-signal's source: go mod download gave no directory.`)
   const pinned = readFileSync(resolve(module, 'pkg/libsignalgo/signalversion/version.go'), 'utf8')
   const version = /const Version = "v(\d+\.\d+\.\d+)"/.exec(pinned)?.[1]
   if (!version) throw new Error(`Couldn't tell which libsignal version mautrix-signal needs (${module}).`)

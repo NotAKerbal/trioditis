@@ -51,10 +51,6 @@ func TestSignalConnectorConfig(t *testing.T) {
 	if network.Background == nil {
 		t.Error("Signal has no background sweep")
 	}
-	// signalmeow resubmits a send after an ambiguous outcome, so the host must refuse sends.
-	if !network.ReceiveOnly {
-		t.Error("Signal isn't receive-only")
-	}
 	if network.LogFilter == nil {
 		t.Error("Signal's log isn't filtered")
 	}

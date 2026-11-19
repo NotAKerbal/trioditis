@@ -1,0 +1,183 @@
+diff --git a/pkg/connector/errors.go b/pkg/connector/errors.go
+index e723f44..4136f4b 100644
+--- a/pkg/connector/errors.go
++++ b/pkg/connector/errors.go
+@@ -106,6 +106,13 @@ func wrapSendError(err error) error {
+ 		return err
+ 	}
+ 	switch {
++	case errors.Is(err, signalmeow.ErrSendUncertain):
++		// Trioditis: first, so an error that also wraps a certain one (a group send) is still
++		// reported as possibly delivered, never as certainly failed.
++		return bridgev2.WrapErrorInStatus(err).
++			WithMessage("Signal may or may not have received this").
++			WithErrorReason(event.MessageStatusNetworkError).
++			WithSendNotice(true)
+ 	case errors.Is(err, signalmeow.ErrUnregisteredUser):
+ 		return bridgev2.WrapErrorInStatus(err).
+ 			WithMessage("recipient isn't registered on Signal").
+diff --git a/pkg/signalmeow/keys.go b/pkg/signalmeow/keys.go
+index 1b2370a..8841bf7 100644
+--- a/pkg/signalmeow/keys.go
++++ b/pkg/signalmeow/keys.go
+@@ -416,6 +416,10 @@ var (
+ 	ErrUnregisteredUser = errors.New("user is unregistered")
+ 	ErrDevicesChanged   = errors.New("device list changed while sending skdm")
+ 	ErrRateLimited      = errors.New("rate limited by server")
++	// ErrSendUncertain says Signal may or may not have delivered a message. Trioditis: such
++	// a send is reported to the caller and never submitted again, which could deliver it
++	// twice. It is the websocket's own error, so either is found by errors.Is.
++	ErrSendUncertain = web.ErrRequestUncertain
+ )
+ 
+ func (cli *Client) FetchAndProcessPreKey(ctx context.Context, theirServiceID libsignalgo.ServiceID, specificDeviceID int) error {
+diff --git a/pkg/signalmeow/senderkey.go b/pkg/signalmeow/senderkey.go
+index 322fcc8..bda887a 100644
+--- a/pkg/signalmeow/senderkey.go
++++ b/pkg/signalmeow/senderkey.go
+@@ -229,6 +229,11 @@ func (cli *Client) sendToGroupWithSenderKey(
+ 		Any("fallback_recipients", fallbackRecipients).
+ 		Msg("Sending multi-recipient message with sender key")
+ 	resp, err := cli.UnauthedWS.SendRequest(ctx, http.MethodPut, path, ssCiphertext, header)
++	if err != nil {
++		// Trioditis: upstream carries on with a nil response, which ends up as "unexpected
++		// status code 0" and loses whether Signal may have received it.
++		return nil, fmt.Errorf("multi-recipient send failed: %w", err)
++	}
+ 	switch resp.GetStatus() {
+ 	case 200:
+ 		var respData MultiRecipient200Response
+@@ -279,11 +284,13 @@ func (cli *Client) sendToGroupWithSenderKey(
+ 		return cli.sendToGroupWithSenderKey(ctx, groupID, allRecipients, sec, content, messageTimestamp, retries+1)
+ 	case 413, 428, 429:
+ 		return nil, fmt.Errorf("%w (multi-recipient send returned %d)", ErrRateLimited, resp.GetStatus())
+-	case 500, 503:
++	case 500, 502, 503, 504:
++		// Trioditis: reported, not retried. Signal may have queued the message for some or all
++		// members before failing, and a retry (or, after three, the one-by-one fallback) could
++		// deliver it to them twice.
+ 		log.Warn().Uint32("status_code", resp.GetStatus()).
+-			Msg("Multi-recipient send failed with server error, retrying")
+-		doUnlock()
+-		return cli.sendToGroupWithSenderKey(ctx, groupID, allRecipients, sec, content, messageTimestamp, retries+1)
++			Msg("Multi-recipient send failed with server error, not retrying")
++		return nil, fmt.Errorf("%w (multi-recipient send returned %d)", ErrSendUncertain, resp.GetStatus())
+ 	default:
+ 		return nil, fmt.Errorf("unexpected status code %d in multi-recipient send", resp.GetStatus())
+ 	}
+diff --git a/pkg/signalmeow/sending.go b/pkg/signalmeow/sending.go
+index dce4eea..e00f320 100644
+--- a/pkg/signalmeow/sending.go
++++ b/pkg/signalmeow/sending.go
+@@ -303,6 +303,13 @@ func (r *GroupMessageSendResult) FailureError() error {
+ 	if len(r.FailedToSendTo) == 0 {
+ 		return nil
+ 	}
++	// Trioditis: if Signal may have delivered to anyone, say so, rather than reporting
++	// another member's certain refusal: the send as a whole isn't certain to have failed.
++	for _, failure := range r.FailedToSendTo {
++		if errors.Is(failure.Error, ErrSendUncertain) {
++			return failure.Error
++		}
++	}
+ 	for _, failure := range r.FailedToSendTo {
+ 		if !errors.Is(failure.Error, ErrUnregisteredUser) {
+ 			return failure.Error
+@@ -1000,7 +1007,10 @@ func (cli *Client) sendContent(
+ 	}
+ 	log.Trace().Msg("Received a response to a message send")
+ 
+-	retryableStatuses := []uint32{409, 410, 428, 500, 503}
++	// Trioditis: 500 and 503 aren't retried (they are reported below). Signal may have
++	// queued the message before failing, so sending again could deliver it twice. 409 and 410
++	// are refusals (the device list changed), so sending again is right.
++	retryableStatuses := []uint32{409, 410, 428}
+ 
+ 	// Check to see if our status is retryable
+ 	needToRetry := false
+@@ -1052,6 +1062,8 @@ func (cli *Client) sendContent(
+ 		return sentUnidentified, fmt.Errorf("%w (send returned 404)", ErrUnregisteredUser)
+ 	} else if *response.Status == 413 || *response.Status == 429 {
+ 		return sentUnidentified, fmt.Errorf("%w (send returned %d)", ErrRateLimited, *response.Status)
++	} else if *response.Status >= 500 {
++		return sentUnidentified, fmt.Errorf("%w (send returned %d)", ErrSendUncertain, *response.Status)
+ 	} else if *response.Status != 200 {
+ 		return sentUnidentified, fmt.Errorf("unexpected status code while sending: %d", *response.Status)
+ 	}
+diff --git a/pkg/signalmeow/web/signalwebsocket.go b/pkg/signalmeow/web/signalwebsocket.go
+index a575ab0..14225a6 100644
+--- a/pkg/signalmeow/web/signalwebsocket.go
++++ b/pkg/signalmeow/web/signalwebsocket.go
+@@ -178,6 +178,11 @@ func (s *SignalWebsocket) pushOutgoing(ctx context.Context, send SignalWebsocket
+ 
+ var ErrForcedReconnect = errors.New("forced reconnect")
+ 
++// ErrRequestUncertain says a request went out but no answer came back, so Signal may or may
++// not have acted on it. Trioditis: a message send that ends this way is reported, never
++// submitted again (see sendRequestInternal).
++var ErrRequestUncertain = errors.New("signal may or may not have received the request")
++
+ func (s *SignalWebsocket) ForceReconnect() {
+ 	if s == nil {
+ 		return
+@@ -547,6 +552,9 @@ type SignalWebsocketSendMessage struct {
+ 	ResponseMessage *SimpleResponse
+ 	// Populate this for request AND response
+ 	RequestMessage *signalpb.WebSocketRequestMessage
++	// Trioditis: set by the write loop just before it writes the request, so a request that
++	// was lost before it could go out can be told apart from one that went unanswered.
++	written *atomic.Bool
+ }
+ 
+ func writeLoop(
+@@ -597,6 +605,10 @@ func writeLoop(
+ 							Msg("Sending WS request")
+ 					}
+ 				}
++				// Set before writing: a write that fails partway may still have reached Signal.
++				if request.written != nil {
++					request.written.Store(true)
++				}
+ 				err := wspb.Write(ctx, ws, message)
+ 				if err != nil {
+ 					if ctx.Err() != nil && ctx.Err() != context.Canceled {
+@@ -665,10 +677,12 @@ func (s *SignalWebsocket) sendRequestInternal(
+ 		request.Headers = append(request.Headers, "authorization:Basic "+s.basicAuth.String())
+ 	}
+ 	responseChannel := make(chan *signalpb.WebSocketResponseMessage, 1)
++	written := &atomic.Bool{}
+ 	err := s.pushOutgoing(ctx, SignalWebsocketSendMessage{
+ 		RequestMessage:  request,
+ 		ResponseChannel: responseChannel,
+ 		RequestTime:     time.Now(),
++		written:         written,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+@@ -676,6 +690,13 @@ func (s *SignalWebsocket) sendRequestInternal(
+ 	response := <-responseChannel
+ 
+ 	isSelfDelete := request.GetVerb() == http.MethodDelete && strings.HasPrefix(request.GetPath(), "/v1/devices/")
++	if response == nil && written.Load() && isMessageSend(request) {
++		// Trioditis: the connection closed after a message went out and before Signal
++		// answered. Signal may already have delivered it, so submitting it again could deliver
++		// it twice; the caller is told instead. A message lost before it was written is still
++		// submitted again below: it never reached Signal.
++		return nil, fmt.Errorf("%w: the connection closed before Signal answered", ErrRequestUncertain)
++	}
+ 	if response == nil && !isSelfDelete {
+ 		// If out of retries, return error no matter what
+ 		if retryCount >= 3 {
+@@ -698,6 +719,12 @@ func (s *SignalWebsocket) sendRequestInternal(
+ 	return response, nil
+ }
+ 
++// isMessageSend reports whether a request delivers a message: to one recipient
++// (/v1/messages/<service ID>) or to several with a sender key (/v1/messages/multi_recipient).
++func isMessageSend(request *signalpb.WebSocketRequestMessage) bool {
++	return request.GetVerb() == http.MethodPut && strings.HasPrefix(request.GetPath(), "/v1/messages/")
++}
++
+ func OpenWebsocket(ctx context.Context, url string) (*websocket.Conn, *http.Response, error) {
+ 	opt := &websocket.DialOptions{
+ 		HTTPClient: SignalHTTPClient,

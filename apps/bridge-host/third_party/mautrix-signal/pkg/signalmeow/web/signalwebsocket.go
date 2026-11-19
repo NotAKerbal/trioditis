@@ -178,6 +178,11 @@ func (s *SignalWebsocket) pushOutgoing(ctx context.Context, send SignalWebsocket
 
 var ErrForcedReconnect = errors.New("forced reconnect")
 
+// ErrRequestUncertain says a request went out but no answer came back, so Signal may or may
+// not have acted on it. Trioditis: a message send that ends this way is reported, never
+// submitted again (see sendRequestInternal).
+var ErrRequestUncertain = errors.New("signal may or may not have received the request")
+
 func (s *SignalWebsocket) ForceReconnect() {
 	if s == nil {
 		return
@@ -547,6 +552,9 @@ type SignalWebsocketSendMessage struct {
 	ResponseMessage *SimpleResponse
 	// Populate this for request AND response
 	RequestMessage *signalpb.WebSocketRequestMessage
+	// Trioditis: set by the write loop just before it writes the request, so a request that
+	// was lost before it could go out can be told apart from one that went unanswered.
+	written *atomic.Bool
 }
 
 func writeLoop(
@@ -596,6 +604,10 @@ func writeLoop(
 							Dur("elapsed", elapsed).
 							Msg("Sending WS request")
 					}
+				}
+				// Set before writing: a write that fails partway may still have reached Signal.
+				if request.written != nil {
+					request.written.Store(true)
 				}
 				err := wspb.Write(ctx, ws, message)
 				if err != nil {
@@ -665,10 +677,12 @@ func (s *SignalWebsocket) sendRequestInternal(
 		request.Headers = append(request.Headers, "authorization:Basic "+s.basicAuth.String())
 	}
 	responseChannel := make(chan *signalpb.WebSocketResponseMessage, 1)
+	written := &atomic.Bool{}
 	err := s.pushOutgoing(ctx, SignalWebsocketSendMessage{
 		RequestMessage:  request,
 		ResponseChannel: responseChannel,
 		RequestTime:     time.Now(),
+		written:         written,
 	})
 	if err != nil {
 		return nil, err
@@ -676,6 +690,13 @@ func (s *SignalWebsocket) sendRequestInternal(
 	response := <-responseChannel
 
 	isSelfDelete := request.GetVerb() == http.MethodDelete && strings.HasPrefix(request.GetPath(), "/v1/devices/")
+	if response == nil && written.Load() && isMessageSend(request) {
+		// Trioditis: the connection closed after a message went out and before Signal
+		// answered. Signal may already have delivered it, so submitting it again could deliver
+		// it twice; the caller is told instead. A message lost before it was written is still
+		// submitted again below: it never reached Signal.
+		return nil, fmt.Errorf("%w: the connection closed before Signal answered", ErrRequestUncertain)
+	}
 	if response == nil && !isSelfDelete {
 		// If out of retries, return error no matter what
 		if retryCount >= 3 {
@@ -696,6 +717,12 @@ func (s *SignalWebsocket) sendRequestInternal(
 		return s.sendRequestInternal(ctx, request, retryCount+1)
 	}
 	return response, nil
+}
+
+// isMessageSend reports whether a request delivers a message: to one recipient
+// (/v1/messages/<service ID>) or to several with a sender key (/v1/messages/multi_recipient).
+func isMessageSend(request *signalpb.WebSocketRequestMessage) bool {
+	return request.GetVerb() == http.MethodPut && strings.HasPrefix(request.GetPath(), "/v1/messages/")
 }
 
 func OpenWebsocket(ctx context.Context, url string) (*websocket.Conn, *http.Response, error) {

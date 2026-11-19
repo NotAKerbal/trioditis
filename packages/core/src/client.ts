@@ -21,11 +21,6 @@ export interface NetworkInfo {
   flows: LoginFlow[]
   /** Connecting it can get the account banned under the network's terms (cookie or token logins). */
   termsRisk: boolean
-  /**
-   * Messages arrive, but the bridge host refuses sends, edits, reactions and deletions (read
-   * markers still go out): its connector can resubmit a message after an ambiguous outcome.
-   */
-  receiveOnly?: boolean
 }
 
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
@@ -43,12 +38,11 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   signal: {
     network: 'signal',
     name: 'Signal',
-    // Stable is the v1 target (docs/PLAN.md). Receive-only until mautrix-signal stops resending
-    // a message after an ambiguous outcome; see docs/networks/signal.md, Sending.
+    // Stable is the v1 target (docs/PLAN.md); experimental until it has been used with a real
+    // account, on the bridge host's patched mautrix-signal (docs/networks/signal.md, Sending).
     maturity: 'experimental',
     flows: [{ id: 'qr', kind: 'qr', name: 'Link a device' }],
     termsRisk: false,
-    receiveOnly: true,
   },
   gmessages: {
     network: 'gmessages',

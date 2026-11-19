@@ -114,7 +114,6 @@ func main() {
 		BridgeKey:     bridgeKey,
 
 		NetworkConnector: netConn,
-		ReceiveOnly:      spec.ReceiveOnly,
 		Log:              log,
 	}
 	cfg.CommandAddr = "http://" + cfg.ListenAddr

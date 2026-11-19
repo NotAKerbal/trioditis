@@ -70,3 +70,10 @@ jobs:
         run: go vet -tags libsignal ./...
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
+      # The bridge host builds against a patched copy of mautrix-signal
+      # (apps/bridge-host/third_party/README.md); this fails unless the copy is upstream at
+      # go.mod's version plus third_party/mautrix-signal.patch, so the patch is the whole change.
+      - if: steps.module.outputs.present == 'true'
+        name: mautrix-signal copy matches its patch
+        working-directory: .
+        run: node scripts/signal-fork.mjs check

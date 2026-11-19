@@ -1,40 +1,24 @@
 // How `pnpm dev --network signal` finds libsignal: the version comes from mautrix-signal's
-// source, which a fresh machine has to download first, and the library must be that version.
-// A stub `go` stands in for the toolchain, answering as it does on a cold module cache.
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+// source (the bridge host's patched copy), and the library must be that version.
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { libsignalDir } from '../lib.mjs'
 
-/** A stub go and a module directory it reports, holding libsignalgo's version file. */
-function coldCache() {
+/** A mautrix-signal source tree holding libsignalgo's version file, and a library directory. */
+function sources() {
   const top = mkdtempSync(join(tmpdir(), 'trioditis-libsignal-'))
-  const module = join(top, 'mod', 'go.mau.fi', 'mautrix-signal@v0.2611.0')
+  const module = join(top, 'mautrix-signal')
   mkdirSync(join(module, 'pkg/libsignalgo/signalversion'), { recursive: true })
   writeFileSync(
     join(module, 'pkg/libsignalgo/signalversion/version.go'),
     'package signalversion\n\nconst Version = "v0.106.1"\n',
   )
-  const bin = join(top, 'bin')
-  mkdirSync(bin)
-  // `go list -m` on a cold cache succeeds with an empty directory; `go mod download -json`
-  // fetches the module and reports where it is.
-  writeFileSync(
-    join(bin, 'go'),
-    `#!/bin/sh
-case "$1 $2" in
-  "list -m") echo "" ;;
-  "mod download") printf '{"Path":"go.mau.fi/mautrix-signal","Version":"v0.2611.0","Dir":"%s"}\\n' '${module}' ;;
-  *) echo "unexpected go $*" >&2; exit 1 ;;
-esac
-`,
-  )
-  chmodSync(join(bin, 'go'), 0o755)
   const lib = join(top, 'lib')
   mkdirSync(lib)
-  return { goEnvironment: { PATH: `${bin}${delimiter}${process.env.PATH}` }, lib }
+  return { module, lib }
 }
 
 function withLibraryDir(dir, fn) {
@@ -48,25 +32,28 @@ function withLibraryDir(dir, fn) {
   }
 }
 
-void test('reads the libsignal version from the module go downloads, on a cold module cache', () => {
-  const { goEnvironment, lib } = coldCache()
+void test("reads the libsignal version from mautrix-signal's source", () => {
+  const { module, lib } = sources()
   writeFileSync(join(lib, 'libsignal_ffi.a'), 'archive with signal_ffi_version_0_106_1 inside')
   assert.equal(
-    withLibraryDir(lib, () => libsignalDir(goEnvironment)),
+    withLibraryDir(lib, () => libsignalDir(module)),
     lib,
   )
 })
 
 void test('names the missing library and the version it needs', () => {
-  const { goEnvironment, lib } = coldCache()
-  assert.throws(
-    () => withLibraryDir(lib, () => libsignalDir(goEnvironment)),
-    /doesn't exist\. Build libsignal v0\.106\.1/,
-  )
+  const { module, lib } = sources()
+  assert.throws(() => withLibraryDir(lib, () => libsignalDir(module)), /doesn't exist\. Build libsignal v0\.106\.1/)
 })
 
 void test('refuses a library of another version', () => {
-  const { goEnvironment, lib } = coldCache()
+  const { module, lib } = sources()
   writeFileSync(join(lib, 'libsignal_ffi.a'), 'archive with signal_ffi_version_0_105_0 inside')
-  assert.throws(() => withLibraryDir(lib, () => libsignalDir(goEnvironment)), /isn't libsignal v0\.106\.1/)
+  assert.throws(() => withLibraryDir(lib, () => libsignalDir(module)), /isn't libsignal v0\.106\.1/)
+})
+
+void test("the default source is the bridge host's copy of mautrix-signal", () => {
+  const { lib } = sources()
+  // Whatever version the copy pins, it is read, and the missing library is named.
+  assert.throws(() => withLibraryDir(lib, () => libsignalDir()), /doesn't exist\. Build libsignal v\d+\.\d+\.\d+ /)
 })

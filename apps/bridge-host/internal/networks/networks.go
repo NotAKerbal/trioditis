@@ -24,10 +24,6 @@ type Network struct {
 	// started) and returns a function that stops that work and waits for it. It is called
 	// before the host and its database stop.
 	Background func(ctx context.Context, conn bridgev2.NetworkConnector, log zerolog.Logger) (stop func())
-	// ReceiveOnly makes the host refuse sends, edits, reactions and deletions, for a
-	// connector that can resubmit a message after an ambiguous outcome, which the host
-	// can't prevent: sends must never be retried then (AGENTS.md).
-	ReceiveOnly bool
 	// LogFilter, if set, wraps the process's log output, to drop what the connector logs
 	// that must not be written out.
 	LogFilter func(io.Writer) io.Writer

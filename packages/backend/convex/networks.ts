@@ -26,7 +26,6 @@ export const list = query({
       maturity: v.union(v.literal('stable'), v.literal('beta'), v.literal('experimental')),
       flows: v.array(flow),
       termsRisk: v.boolean(),
-      receiveOnly: v.optional(v.boolean()),
     }),
   ),
   handler: async (ctx) => {
