@@ -8,9 +8,27 @@ export interface DesktopBridge {
   focus(): void
   /** Node's name for the system: `darwin`, `win32`, `linux`. */
   platform: string
+  /**
+   * Open the app's server picker, as File → Change Server… does. Optional: the server's web
+   * app can be newer than the installed desktop app, which may not have it.
+   */
+  changeServer?: () => void
 }
 
 export const desktop = (window as { trioditisDesktop?: DesktopBridge }).trioditisDesktop
+
+/**
+ * Which server a signed-out screen is on, and how to pick another: only in a desktop app that
+ * can open its picker. A browser changes servers by going to another address, so it gets null.
+ */
+export function serverSwitcher(
+  bridge: DesktopBridge | undefined,
+  location: { host: string },
+): { host: string; change: () => void } | null {
+  const changeServer = bridge?.changeServer
+  if (typeof changeServer !== 'function') return null
+  return { host: location.host, change: () => changeServer() }
+}
 
 /**
  * Said wherever a passkey is used, in the desktop app on a Mac or Linux, where passkeys don't

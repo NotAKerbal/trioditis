@@ -20,7 +20,7 @@ import { isExternalAllowed, normalizeServer, pageIsReady, sameOrigin, serverKind
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
 // a dock badge and a menu. Nothing from the server runs with Node: its pages are sandboxed and
-// reach the app only through the preload's three calls, each checked here.
+// reach the app only through the preload's four calls, each checked here.
 
 app.setName('Trioditis')
 app.setPath('userData', path.join(app.getPath('appData'), 'Trioditis'))
@@ -353,6 +353,12 @@ ipcMain.on('desktop:badge', (event, count: unknown) => {
 
 ipcMain.on('desktop:focus', (event) => {
   if (fromServerPage(event)) reveal(serverWindow)
+})
+
+// The sign-in page's Change link. It only opens the picker, as the File menu does: the person
+// still types the address and the picker checks it, so a page can't move the app anywhere.
+ipcMain.on('desktop:change-server', (event) => {
+  if (fromServerPage(event)) showConnect()
 })
 
 function reveal(win: BrowserWindow | null) {
