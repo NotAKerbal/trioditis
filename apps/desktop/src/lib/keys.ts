@@ -238,13 +238,15 @@ export async function storeIdentity(
 export async function forgetIdentity(
   userId: string,
   { onlyKid, endingSession }: { onlyKid?: string | null; endingSession?: string } = {},
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await inTransaction<void>('readwrite', (store) =>
+    // Answers whether a key is still stored here afterwards.
+    return await inTransaction<boolean>('readwrite', (store, answer) =>
       readForgets(store, userId, (forgets) => {
         const ended = forgets.endedSessions.filter((id) => id !== endingSession)
         if (endingSession) ended.push(endingSession)
         writeForgets(store, userId, { count: forgets.count + 1, endedSessions: ended.slice(-NOTED_SESSIONS) })
+        answer(false)
         if (onlyKid === undefined) return void store.delete(userId)
         // Read in this transaction, so it's whatever key is stored by now, a save that landed just
         // before included. Named: that key only. Not named: the stored key if its own record says
@@ -253,6 +255,7 @@ export async function forgetIdentity(
         stored.onsuccess = () => {
           const key = stored.result as StoredIdentity | undefined
           if (key && (onlyKid === null ? key.backedUp : key.kid === onlyKid)) store.delete(userId)
+          else answer(!!key)
         }
       }),
     )

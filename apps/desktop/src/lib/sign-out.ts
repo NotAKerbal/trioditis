@@ -196,8 +196,9 @@ async function endThisSession(
   { onlyKid, backedUpKid }: SignOutOptions = {},
 ): Promise<string | null> {
   let unconfirmed = false
+  let stillHere: boolean
   try {
-    await forgetFirmly(userId, { onlyKid, endingSession: sessionId })
+    stillHere = await forgetFirmly(userId, { onlyKid, endingSession: sessionId })
   } catch {
     // A save under way could still land after the session ends, so it isn't ended.
     return SIGN_OUT_UNSTORED
@@ -210,7 +211,8 @@ async function endThisSession(
   if (!token) return SIGN_OUT_SWITCHED
   // Fenced now, so the key here is the last one that will be: forget it too if its backups have
   // turned out to exist meanwhile (another tab may have finished them, then unlocked).
-  if (onlyKid === null && backedUpKid) {
+  // Only for a key still here whose backups its own record couldn't vouch for.
+  if (onlyKid === null && backedUpKid && stillHere) {
     try {
       const kid = await backedUpKid()
       if (kid) await forgetFirmly(userId, { onlyKid: kid, endingSession: sessionId })

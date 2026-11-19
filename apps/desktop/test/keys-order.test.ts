@@ -477,6 +477,7 @@ describe('signing out, as the key on this device sees it', () => {
   it('forgets a key kept for want of backups, if they turned up and it was saved before the fence', async () => {
     // Signing out from "finish setting up": no key here as it starts, so it keeps whatever is.
     const kept = await keptHere('v13')
+    keptBeforeBackupsWereNoted('v13')
     const asked: string[] = []
     const failure = await signOut('v13', kept.session.id, {
       onlyKid: null,
@@ -543,6 +544,7 @@ describe('signing out, as the key on this device sees it', () => {
     vi.resetModules()
     const page = await import('../src/lib/sign-out.ts')
     const kept = await keptHere('v22')
+    keptBeforeBackupsWereNoted('v22')
     expect(await page.rememberSession(kept.session.id)).toBe('noted')
     server.loseResponse = true
     // The key's removal can't be confirmed, and the server's answer never arrives.
@@ -595,6 +597,7 @@ describe('signing out, as the key on this device sees it', () => {
     vi.resetModules()
     const page = await import('../src/lib/sign-out.ts')
     const kept = await keptHere('v25')
+    keptBeforeBackupsWereNoted('v25')
     page.noteOpenedSession(kept.session.id)
     expect(await page.rememberSession(kept.session.id)).toBe('noted')
     server.loseResponse = true
@@ -610,6 +613,23 @@ describe('signing out, as the key on this device sees it', () => {
     expect(location.assign).toHaveBeenCalledWith('/sign-in?key=unconfirmed')
     await heard
     tabs.close()
+  })
+
+  it('asks nothing about backups when the fence already took a key that vouched for them', async () => {
+    const kept = await keptHere('v26')
+    let asked = 0
+    const failure = await signOut('v26', kept.session.id, {
+      onlyKid: null,
+      backedUpKid: async () => {
+        asked++
+        throw new Error('timed out')
+      },
+    })
+    expect(failure).toBeNull()
+    expect(asked).toBe(0)
+    expect(await loadIdentity('v26')).toBeNull()
+    // Removed, and known to be: no warning.
+    expect(location.assign).toHaveBeenLastCalledWith('/sign-in')
   })
 
   it('turns saves away with a reason that says what to do', () => {
