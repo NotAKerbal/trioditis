@@ -321,10 +321,12 @@ fi
 updater=${updater-$(get INSTALL_UPDATER)}
 # The updater is on unless the install turned it off. Where it can't run (no systemd, or not a
 # git checkout), a new install, or one from before the updater, gets it off and says why; one
-# that asks for it stops here, before anything changes.
+# that asks for it stops here, before any setting is saved or the server touched.
+updater_default=0
 if [ -z "$updater" ]; then
   if reason=$(bash "$here/updater/service.sh" check "$project" 2>&1); then
     updater=1
+    updater_default=1
   else
     updater=0
     warn "The updater is off, so admins can't update the server from the app: ${reason:-its check failed}. Once it can run, run this again with --updater."
@@ -711,7 +713,18 @@ fi
 # may be the updater that's running this install. See deploy/updater/service.sh.
 if [ "$updater" = 1 ]; then
   say "Starting the updater (trioditis-updater-$project)"
-  bash "$here/updater/service.sh" install "$project" || die "Couldn't install the updater's service (above)."
+  if ! bash "$here/updater/service.sh" install "$project"; then
+    [ "$updater_default" = 1 ] || die "Couldn't install the updater's service (above)."
+    # On by default, not asked for: the server is up, so it stays up, and the updater goes off
+    # instead. Its secret is taken back from the backend (deploy-functions.sh removes it with
+    # the updater off), so the app doesn't offer updates that nothing would run.
+    bash "$here/updater/service.sh" remove "$project" >/dev/null 2>&1 || true
+    updater=0
+    set_var INSTALL_UPDATER 0
+    compose run --rm --no-deps -T functions >/dev/null 2>&1 ||
+      warn "Couldn't take the updater's secret back from the backend: run this again."
+    warn "The updater is off, so admins can't update the server from the app: its service couldn't be installed (above). Once it can, run this again with --updater."
+  fi
 else
   bash "$here/updater/service.sh" remove "$project" || warn "Couldn't remove the updater's service (above)."
 fi

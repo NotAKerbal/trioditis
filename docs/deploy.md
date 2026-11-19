@@ -285,9 +285,12 @@ deploy/install/install.sh --updater       # turns it on again
 
 It needs systemd and a git checkout with an `origin` remote to fetch from. Where it can't run
 (no systemd, a shell that can't reach the operator's systemd user manager, as from `sudo` or
-`su`, or a checkout that isn't a git clone), a new install turns it off and says why, and
-`--updater` stops the install, changing nothing, until it can. An install from before the
-updater gets it on at its next upgrade, as a new one would; one that turned it off keeps it off.
+`su`, a unit directory it can't write, or a checkout that isn't a git clone of its own), a new
+install turns it off and says why, and `--updater` stops the install before it saves a setting
+or touches the server, until it can. If the service still can't be installed once the server is
+up, an install that has the updater on by default, not asked for, keeps the server running and
+turns the updater off, saying why. An install from before the updater gets it on at its next
+upgrade, as a new one would; one that turned it off keeps it off.
 
 The updater is a systemd service on the host, `trioditis-updater-<project>`: a system service
 when the installer runs as root, and otherwise a user service of the operator, which keeps

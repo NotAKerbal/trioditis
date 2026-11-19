@@ -235,5 +235,24 @@ if STUB_SYSTEMCTL=fail install --updater; then status=0; else status=$?; fi
   check ok "--updater where it can't run stops the install, unchanged" ||
   { check fail "--updater where it can't run stops the install, unchanged"; tail -2 "$work/out" >&2; }
 
+# A unit directory it can't write, and a copy unpacked inside another repository (git would
+# find that one, and the updater would update it), get the updater off by default too.
+mkdir -p "$work/xdg/systemd"
+: >"$work/xdg/systemd/user"
+rm -f "$work/checkout/deploy/.env"
+XDG_CONFIG_HOME="$work/xdg" install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
+  check ok "with a unit directory it can't write, the updater is off, saying why" ||
+  { check fail "with a unit directory it can't write, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work" init -q
+git -C "$work" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m parent
+git -C "$work" remote add origin https://example.invalid/other.git
+install || true
+rm -rf "$work/.git"
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one of its own" "$work/out" &&
+  check ok "inside another repository, the updater is off, saying why" ||
+  { check fail "inside another repository, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

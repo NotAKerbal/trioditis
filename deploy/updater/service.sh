@@ -39,22 +39,29 @@ else
 fi
 
 # Why the updater can't run here, or nothing when it can: it needs systemd running (for a
-# user service, the operator's own manager, which a shell from sudo or su often can't reach),
-# and a git checkout with an origin remote to fetch updates from. The checkout's path goes into
-# the unit as is, where systemd would read quotes, spaces, \ or % (its specifiers) as more than
-# characters.
+# user service, the operator's own manager, which a shell from sudo or su often can't reach), a
+# unit directory it can write, and a git checkout with an origin remote to fetch updates from.
+# The checkout's path goes into the unit as is, where systemd would read quotes, spaces, \ or %
+# (its specifiers) as more than characters. The checkout must be the top of its own repository:
+# git looks upwards, so a copy unpacked inside another repository would otherwise update that one.
 blocker() {
   case "$root" in
     *[!A-Za-z0-9._/-]*) echo "it needs the checkout at a path of only A-Z a-z 0-9 . _ / -, not $root"; return ;;
   esac
+  # The unit's directory, or the nearest one above it that exists, which mkdir -p starts from.
+  probe=$dir
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do probe=$(dirname "$probe"); done
   if [ "$has_systemctl" = 0 ]; then
     echo "it runs as a systemd service, and this machine has no systemctl"
   elif [ "$(id -u)" = 0 ] && [ ! -d /run/systemd/system ]; then
     echo "it runs as a systemd service, and systemd isn't running here"
   elif [ "$(id -u)" != 0 ] && ! systemctl show-environment >/dev/null 2>&1; then
     echo "it runs as a user service, and this shell can't reach $(id -un)'s systemd user manager (log in as $(id -un) directly, not through sudo or su)"
-  elif ! git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null 2>&1; then
-    echo "it updates a git checkout, and $root isn't one"
+  elif [ ! -d "$probe" ] || [ ! -w "$probe" ]; then
+    echo "it writes its unit into $dir, and $probe isn't a directory this user can write to"
+  elif ! top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || [ ! "$top" -ef "$root" ] ||
+    ! git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null 2>&1; then
+    echo "it updates a git checkout, and $root isn't one of its own"
   elif ! git -C "$root" remote get-url origin >/dev/null 2>&1; then
     echo "it fetches updates from the checkout's origin remote, and $root has none"
   fi

@@ -309,7 +309,9 @@ init() {
   export GIT_TERMINAL_PROMPT=0
 
   load_settings || return 1
-  describe_current || { log "$root isn't a git checkout."; return 1; }
+  # The checkout's own repository, not one it was unpacked inside (git looks upwards).
+  { top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) && [ "$top" -ef "$root" ] && describe_current; } ||
+    { log "$root isn't a git checkout of its own."; return 1; }
   latest='' latest_channel='' latest_at='' latest_subject='' behind='' ahead='' checked_at=''
   last_fetch=0 done_id='' failure_detail='' rollback_detail=''
   load_state
