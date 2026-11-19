@@ -129,9 +129,11 @@ fi
 
 # --- Settings -----------------------------------------------------------------------------
 
-# The one parser for deploy/.env: env_check, env_value, env_names.
+# The one parser and writer for deploy/.env: env_check, env_value, env_names, env_write.
 # shellcheck source=deploy/scripts/env.sh
 . "$here/scripts/env.sh"
+# shellcheck disable=SC2034 # read by env_write, in env.sh
+env_names_file="$here/install/env-names"
 # deploy/.env appears with the first setting saved, after the options are checked, so an
 # install exists exactly when it does. It's read once, here, and kept in memory: a read that
 # fails stops the install, rather than looking like missing settings and secrets.
@@ -144,15 +146,15 @@ if [ -e "$env_file" ] || [ -L "$env_file" ]; then
   # It's kept in the one form this writes (deploy/scripts/env.sh), which backup relies on;
   # anything else is for the operator to fix.
   if ! problems=$(printf '%s\n' "$env_text" | env_check); then
-    die "deploy/.env has lines not in the form this writes (NAME=value, unquoted, each name once): $(echo "$problems" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). Fix them and run this again."
+    die "deploy/.env has lines not in the form this writes (NAME=value with a literal value, each name once): $(echo "$problems" | tr '\n' ';' | sed 's/;$//; s/;/; /g'). Fix them and run this again."
   fi
 fi
 
 get() { printf '%s\n' "$env_text" | env_value "$1"; }
 has() { printf '%s\n' "$env_text" | env_names | grep -qx "$1"; }
-# Writes $2 (a file's whole contents) to path $1 through a private temp file beside it, then a
-# rename onto the exact name, so the file is never half written and a symlink at the name is
-# replaced, not followed. $3 is its mode.
+# Writes the runtime config, $2, to path $1 through a private temp file beside it, then a
+# rename onto the exact name, so it's never half written and a symlink at the name is
+# replaced, not followed. $3 is its mode. (deploy/.env is written only by env_write.)
 write_file() {
   local tmp
   tmp=$(mktemp "$1.XXXXXX")
@@ -162,17 +164,21 @@ write_file() {
   fi
 }
 # Sets NAME VALUE [NAME VALUE ...] in one atomic write, so a pair (such as a key pair) is
-# never saved half. Every name set is either listed in deploy/install/env-names (what a
-# backup keeps) or a private key (what it never does); deploy/test/install-settings.sh checks.
+# never saved half. env_write refuses, and the install stops, if a value isn't literal or a
+# name isn't classified: listed in deploy/install/env-names (what a backup keeps) or a
+# private key (what it never does).
 set_var() {
   local names='' text
-  for ((i = 1; i < $#; i += 2)); do names="$names|${!i}"; done
+  for ((i = 1; i < $#; i += 2)); do
+    env_classified "${!i}" || die "Not saving ${!i}: it isn't a setting deploy/install/env-names lists, or a private key. (A bug in the installer: classify it there.)"
+    names="$names|${!i}"
+  done
   text=$(printf '%s\n' "$env_text" | grep -vE "^(${names#|})=" | sed '/^$/d' || true)
   while [ $# -ge 2 ]; do
     text="$text${text:+$'\n'}$1=$2"
     shift 2
   done
-  write_file "$env_file" "$text" 600
+  printf '%s\n' "$text" | env_write "$env_file" || die "Couldn't save the settings (above)."
   env_text=$text
 }
 secret() { head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }

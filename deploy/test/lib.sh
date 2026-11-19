@@ -3,12 +3,15 @@
 # bundle's compose files, deploy/trioditis, and a .env of dummy values. Its volumes are made
 # directly, labelled as Compose labels its own, so nothing is built or started. Everything a
 # test makes is named after its project and removed when it ends, so it never touches another
-# install. TRIODITIS_WRAPPER=<path> tests another deploy/trioditis, such as an older one.
+# install. TRIODITIS_WRAPPER=<path> tests another deploy/trioditis, such as an older one, and
+# TRIODITIS_SCRIPTS=<dir> the deploy/scripts it goes with.
 # shellcheck shell=sh
 
 set -eu
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 wrapper=${TRIODITIS_WRAPPER:-$repo/deploy/trioditis}
+# The deploy/scripts that wrapper uses (an older wrapper with its own).
+scripts=${TRIODITIS_SCRIPTS:-$repo/deploy/scripts}
 tool=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
 failures=0
 
@@ -31,14 +34,17 @@ make_install() {
   mkdir -p "$root/deploy"
   cp "$wrapper" "$root/deploy/trioditis"
   cp -r "$repo/deploy/compose" "$root/deploy/compose"
-  cp -r "$repo/deploy/scripts" "$root/deploy/scripts"
+  cp -r "$scripts" "$root/deploy/scripts"
   mkdir -p "$root/deploy/install"
   cp "$repo/deploy/install/env-names" "$root/deploy/install/env-names"
   for name in POSTGRES_PASSWORD CONVEX_INSTANCE_SECRET BETTER_AUTH_SECRET GATEWAY_SECRET \
-    TRIODITIS_INTERNAL_TOKEN BRIDGE_PUBLIC_KEY BRIDGE_PRIVATE_KEY AGENT_ACCESS_PUBLIC_KEY \
-    AGENT_ACCESS_PRIVATE_KEY CONVEX_ADMIN_KEY; do
+    TRIODITIS_INTERNAL_TOKEN BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY CONVEX_ADMIN_KEY; do
     echo "$name=test-$name"
   done >"$root/deploy/.env"
+  # The private keys in the form deploy/.env requires (32 random bytes, base64url).
+  for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY; do
+    echo "$name=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
+  done >>"$root/deploy/.env"
   cat >>"$root/deploy/.env" <<EOF
 TRIODITIS_SETUP_TOKEN=test-setup-token
 COMPOSE_PROJECT_NAME=$project
@@ -63,6 +69,9 @@ cleanup() {
 }
 
 trioditis() { "$root/deploy/trioditis" "$@"; }
+
+# The value of a private key in this install's deploy/.env.
+private_value() { sed -n "s/^$1=//p" "$root/deploy/.env"; }
 
 # make_volume <key> [docker volume create options]: this project's volume for <key>.
 make_volume() {

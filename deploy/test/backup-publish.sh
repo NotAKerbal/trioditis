@@ -5,8 +5,10 @@
 # the next free name and leaves what was there alone; one whose rename silently does nothing
 # (a stub mv that exits 0) fails instead of reporting success; one interrupted (SIGINT to
 # its process group, as Ctrl-C sends) while the archive is streaming, or after it reserved
-# its name (even in the instant between choosing it and making it), publishes nothing and
-# leaves nothing behind; one with a deploy/.env not in the form the installer writes (export,
+# its name, publishes nothing and leaves nothing behind (an interrupt while it makes its
+# name's directory is held off, and one already there is never removed); one that can't run
+# its last check on the private keys, or finds the lock held (taken before .env is read),
+# publishes nothing; one with a deploy/.env not in the form the installer writes (export,
 # spaces around =, quoted values, a name twice, a carriage return) is refused before it
 # makes anything; and secrets.env holds only the settings listed in deploy/install/env-names:
 # no comment (even one quoting a private key), no unlisted setting (named, not shown), and,
@@ -15,6 +17,8 @@
 # shellcheck source=deploy/test/lib.sh
 . "$(dirname "$0")/lib.sh"
 make_install "backup publishes whole or not at all"
+bk=$(private_value BRIDGE_PRIVATE_KEY)
+ak=$(private_value AGENT_ACCESS_PRIVATE_KEY)
 
 make_volume bridge-fake
 make_volume postgres
@@ -41,7 +45,7 @@ done <"$root/deploy/.env" | sort)
   grep -q '^BRIDGE_PUBLIC_KEY=test-BRIDGE_PUBLIC_KEY$' "$backup/secrets.env" &&
   check ok "secrets.env is deploy/.env without the private keys" || check fail "secrets.env is deploy/.env without the private keys"
 docker run --rm --log-driver none -i --entrypoint sh "$tool" -c '
-  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e test-BRIDGE_PRIVATE_KEY -e test-AGENT_ACCESS_PRIVATE_KEY /x' <"$backup/archive.tgz" &&
+  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e "$1" -e "$2" /x' sh "$bk" "$ak" <"$backup/archive.tgz" &&
   check ok "the archive holds neither private key" || check fail "the archive holds neither private key"
 [ "$(entries | wc -l)" = 1 ] && check ok "nothing else is left in the directory" || check fail "nothing else is left in the directory"
 
@@ -100,39 +104,91 @@ else
   check fail "the backup was caught after reserving its name"
 fi
 
-# Interrupted in the instant between choosing the name and making it: a stub mkdir makes the
-# directory, then ignores the interrupt for a moment, so it's acted on just after mkdir.
+# Interrupted while it makes its name's directory (a stub mkdir that takes a moment): the
+# interrupt is held off there, so the directory is either made and recorded, or not made
+# at all. Either way, no empty directory is left: a finished backup, or nothing.
 rm -rf "${backups:?}"/*
 rm -f "$root/stub/mv"
-printf '#!/bin/sh\ntrap "" INT\n/bin/mkdir "$@" || exit\ncase "$*" in *%s-20*) sleep 3 ;; esac\n' "$project" >"$root/stub/mkdir"
+real_mkdir=$(command -v mkdir)
+printf '#!/bin/sh\ntrap "" INT\n%s "$@" || exit\ncase "$*" in *%s-20*) sleep 3 ;; esac\n' "$real_mkdir" "$project" >"$root/stub/mkdir"
 chmod +x "$root/stub/mkdir"
-PATH="$root/stub:$PATH" setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
-for _ in $(seq 600); do
-  pgrep -f "^/bin/sh $root/stub/mkdir .*$project-20" >/dev/null && break
-  sleep 0.1
-done
-stub=$(pgrep -f "^/bin/sh $root/stub/mkdir .*$project-20" | head -1)
-if [ -n "$stub" ]; then
-  /bin/kill -s INT -- "-$(ps -o pgid= -p "$stub" | tr -d ' ')"
+interrupt_at() { # $1: what the stub's command line has when it's to be interrupted
+  PATH="$root/stub:$PATH" setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
+  for _ in $(seq 600); do
+    pgrep -f "^/bin/sh $root/stub/mkdir .*$1" >/dev/null && break
+    sleep 0.1
+  done
+  stub=$(pgrep -f "^/bin/sh $root/stub/mkdir .*$1" | head -1)
+  [ -z "$stub" ] || /bin/kill -s INT -- "-$(ps -o pgid= -p "$stub" | tr -d ' ')"
   wait || true
-  [ -z "$(entries)" ] && check ok "interrupted just after making its directory, it leaves nothing" ||
-    check fail "interrupted just after making its directory, it leaves nothing ($(entries))"
+  [ -n "$stub" ]
+}
+if interrupt_at "$project-20"; then
+  empty=$(find "$backups" -mindepth 1 -maxdepth 1 -type d -empty | wc -l)
+  hidden=$(find "$backups" -mindepth 1 -maxdepth 1 -name '.*' | wc -l)
+  [ "$empty" = 0 ] && [ "$hidden" = 0 ] && check ok "interrupted while making its directory, it leaves no empty one" ||
+    check fail "interrupted while making its directory, it leaves no empty one ($(entries))"
 else
-  wait || true
   check fail "the backup was caught making its directory"
 fi
+
+# A directory already there at its name, empty, and an interrupt while it tries to make it
+# (and fails): the directory isn't its to remove, and stays.
+rm -rf "${backups:?}"/*
+now=$(date +%s)
+for second in $(seq 0 60); do mkdir "$backups/$project-$(date -d "@$((now + second))" +%Y%m%d-%H%M%S)"; done
+printf '#!/bin/sh\ntrap "" INT\ncase "$*" in *%s-20[0-9]*[0-9]) sleep 3 ;; esac\nexec %s "$@"\n' "$project" "$real_mkdir" >"$root/stub/mkdir"
+if interrupt_at "$project-20[0-9-]*[0-9]$"; then
+  [ "$(find "$backups" -mindepth 1 -maxdepth 1 -type d -empty -name "$project-20*" ! -name '*-2' | wc -l)" = 61 ] &&
+    check ok "an empty directory already at its name survives an interrupt" ||
+    check fail "an empty directory already at its name survives an interrupt ($(find "$backups" -mindepth 1 -maxdepth 1 -type d -empty | wc -l) left)"
+else
+  check fail "the backup was caught trying its name"
+fi
 rm -f "$root/stub/mkdir"
+
+# The lock is taken before deploy/.env is read: with it held, even a .env it would refuse
+# gets the lock's answer.
+rm -rf "${backups:?}"/*
+cp "$root/deploy/.env" "$root/env.before-lock"
+echo 'export BAD=1' >>"$root/deploy/.env"
+sh -c 'exec 9>"$1" && flock 9 && exec sleep 30' sh "$root/deploy/.operation.lock" &
+holder=$!
+sleep 1
+trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+cp "$root/env.before-lock" "$root/deploy/.env"
+[ "$status" != 0 ] && grep -q "Another backup, install or change" "$root/out" && ! grep -q "isn't all in the form" "$root/out" &&
+  check ok "it takes the lock before it reads deploy/.env" || { check fail "it takes the lock before it reads deploy/.env"; cat "$root/out" >&2; }
+
+# The last check, on the private keys' values: if it can't run (grep fails, here a stub that
+# exits 2), nothing is published.
+rm -rf "${backups:?}"/*
+real_grep=$(command -v grep)
+printf '#!/bin/sh\ncase "$*" in *-qFf*) exit 2 ;; esac\nexec %s "$@"\n' "$real_grep" >"$root/stub/grep"
+chmod +x "$root/stub/grep"
+PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+rm -f "$root/stub/grep"
+[ "$status" != 0 ] && grep -q "Couldn't check secrets.env for the private keys" "$root/out" && [ -z "$(entries)" ] &&
+  check ok "a private-key check that can't run stops the backup" || { check fail "a private-key check that can't run stops the backup"; cat "$root/out" >&2; }
 
 # A deploy/.env in forms Compose reads but the parser doesn't: each is refused before
 # anything is made (not even the backup directory), and the server is left as it was.
 cp "$root/deploy/.env" "$root/env.good"
-for form in 'export BRIDGE_PRIVATE_KEY=test-BRIDGE_PRIVATE_KEY' 'BRIDGE_PRIVATE_KEY = test-BRIDGE_PRIVATE_KEY' \
-  'BRIDGE_PRIVATE_KEY="test-BRIDGE_PRIVATE_KEY"' 'BRIDGE_PRIVATE_KEY= "test-BRIDGE_PRIVATE_KEY"' 'GATEWAY_SECRET=again' \
-  "$(printf 'BRIDGE_PRIVATE_KEY=test-BRIDGE_PRIVATE_KEY\r')"; do
+# shellcheck disable=SC2016 # the ${…} is literal: it's what the parser must refuse
+for form in "export BRIDGE_PRIVATE_KEY=$bk" "BRIDGE_PRIVATE_KEY = $bk" "BRIDGE_PRIVATE_KEY=\"$bk\"" \
+  "BRIDGE_PRIVATE_KEY= \"$bk\"" "BRIDGE_PRIVATE_KEY=$bk" "$(printf 'BRIDGE_PRIVATE_KEY=%s\r' "$bk")" \
+  'PUBLIC_HOST=a b' 'PUBLIC_HOST=${GATEWAY_SECRET}' 'PUBLIC_HOST=a#b'; do
   rm -rf "${backups:?}"
-  { grep -v '^BRIDGE_PRIVATE_KEY=' "$root/env.good"; echo "$form"; } >"$root/deploy/.env"
+  # Each replaces its setting's line (a second BRIDGE_PRIVATE_KEY line, unchanged, is the
+  # duplicate case).
+  case "$form" in
+    "BRIDGE_PRIVATE_KEY=$bk") cp "$root/env.good" "$root/deploy/.env" && echo "$form" >>"$root/deploy/.env" ;;
+    *) { grep -v "^$(echo "$form" | sed 's/^export //; s/[ =].*//')=" "$root/env.good"; echo "$form"; } >"$root/deploy/.env" ;;
+  esac
   trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
-  shown=$(printf '%s' "$form" | tr '\r' '^')
+  shown=$(printf '%s' "$form" | tr '\r' '^' | sed "s/$bk/<key>/")
   [ "$status" != 0 ] && grep -q "isn't all in the form the installer writes" "$root/out" && [ ! -e "$backups" ] &&
     check ok "a .env with '$shown' is refused before anything is made" ||
     { check fail "a .env with '$shown' is refused before anything is made"; cat "$root/out" >&2; }
@@ -146,16 +202,16 @@ backup_with() {
   trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
   secrets=$(find "$backups" -mindepth 2 -name secrets.env | head -1)
 }
-no_private_in() { [ -n "$1" ] && ! grep -qF -e test-BRIDGE_PRIVATE_KEY -e test-AGENT_ACCESS_PRIVATE_KEY "$1"; }
-backup_with '# BRIDGE_PRIVATE_KEY=test-BRIDGE_PRIVATE_KEY' '' 'OPERATOR_NOTE=keep me'
+no_private_in() { [ -n "$1" ] && ! grep -qF -e "$bk" -e "$ak" "$1"; }
+backup_with "# BRIDGE_PRIVATE_KEY=$bk" '' 'OPERATOR_NOTE=keep-me'
 [ "$status" = 0 ] && no_private_in "$secrets" && ! grep -q '^#\|^$\|OPERATOR_NOTE' "$secrets" &&
   check ok "secrets.env leaves out comments, blank lines and an unlisted setting" ||
   check fail "secrets.env leaves out comments, blank lines and an unlisted setting"
-grep -q "Left out of secrets.env.*OPERATOR_NOTE" "$root/out" && ! grep -q "keep me" "$root/out" &&
+grep -q "Left out of secrets.env.*OPERATOR_NOTE" "$root/out" && ! grep -q "keep-me" "$root/out" &&
   check ok "the unlisted setting is named, not shown" || check fail "the unlisted setting is named, not shown"
 [ "$(sort "$secrets")" = "$expected" ] &&
   check ok "secrets.env holds exactly the listed settings the .env has" || check fail "secrets.env holds exactly the listed settings the .env has"
-backup_with 'INSTALL_DOMAIN=example-test-BRIDGE_PRIVATE_KEY-example'
+backup_with "INSTALL_DOMAIN=example-$bk-example"
 [ "$status" != 0 ] && grep -q "A private key's value is in another setting" "$root/out" && [ -z "$(entries)" ] &&
   check ok "a private key's value inside a listed setting stops the backup" ||
   { check fail "a private key's value inside a listed setting stops the backup"; cat "$root/out" >&2; }

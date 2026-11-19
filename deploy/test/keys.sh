@@ -4,7 +4,8 @@
 # only the public ones (as a backup's secrets.env does), and refuses a pair that isn't this
 # server's: one whose public key differs, or whose private key isn't the private half of the
 # saved public key (mixed pairs), and any private key not exactly 32 bytes of canonical
-# unpadded base64url (a trailing word or space, padding, 31 or 33 bytes, other characters).
+# unpadded base64url (a trailing word or space, padding, 31 or 33 bytes, other characters),
+# and a key file holding a NUL or a carriage return, refused before it's read.
 # Neither prints a key. The keys are real X25519 pairs, made
 # with the bundle's Node image, since import derives each public key to check it.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
@@ -72,6 +73,16 @@ for bad in "$k typo" "$k " "$k=" "$(bytes 31)" "$(bytes 33)" "$(printf '%s' "$k"
   [ "$status" != 0 ] && grep -q "isn't a key" "$root/out" && cmp -s "$env_file" "$root/secrets.env" && no_key_in "$root/out" &&
     check ok "import refuses a private key like '$shape' ($(printf '%s' "$bad" | wc -c) chars)" ||
     { check fail "import refuses a private key like '$shape'"; cat "$root/out" >&2; }
+done
+
+# A NUL inside a key (which the shell would drop without a word), and a carriage return.
+for byte in '\000' '\r'; do
+  case "$byte" in '\000') what="a NUL" ;; *) what="a carriage return" ;; esac
+  { sed '/^BRIDGE_PRIVATE_KEY=/d' "$backups/keys"; printf "BRIDGE_PRIVATE_KEY=%s$byte%s\n" "$(key BRIDGE_PRIVATE_KEY | cut -c1-20)" "$(key BRIDGE_PRIVATE_KEY | cut -c21-)"; } >"$backups/broken"
+  trioditis keys import "$backups/broken" >"$root/out" 2>&1 && status=0 || status=$?
+  [ "$status" != 0 ] && grep -q "holds a NUL or a carriage return" "$root/out" && cmp -s "$env_file" "$root/secrets.env" &&
+    check ok "import refuses a key file with $what inside a key" ||
+    { check fail "import refuses a key file with $what inside a key"; cat "$root/out" >&2; }
 done
 
 trioditis keys import "$backups/keys" >"$root/out" 2>&1 && status=0 || status=$?

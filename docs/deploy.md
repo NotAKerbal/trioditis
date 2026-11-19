@@ -167,6 +167,10 @@ removes its bridge host; its volume and database stay, in case you add it back.
 | `bridge-<network>` | A bridge host: runs that network's connector                                       | No                           |
 
 `deploy/trioditis` is `docker compose` for this install, with its settings:
+`deploy/trioditis <command> [the command's own options]`. It sets the project, the compose
+files, the project directory and the env file itself, so it takes no Compose options before
+the command (`-p`, `-f`, `--env-file`, `--profile` and the rest are refused), and passes on
+only Compose's own commands:
 
 ```sh
 deploy/trioditis ps
@@ -294,7 +298,9 @@ them, so never another install's, and including the volume of a network you've d
 volume with its number of entries and bytes. The backup stops the server, writes both files
 in a private directory beside the destination, reserves the name with `mkdir` (which fails
 if anything is there, so it moves on to the next suffix), renames the private directory onto
-it in one step, checks both files are there, and starts again what was running. So there's
+it in one step, checks both files are there, and starts again the containers that were
+running (only those: not the finished functions job, nor a service you'd stopped), in the
+order their dependencies need. So there's
 either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
 server is still stopping, leaves nothing behind, and if the server doesn't start again the
 backup counts as failed. The destination must be outside the checkout (symlinks resolved):
@@ -307,10 +313,18 @@ backup, and the backup names it, without its value, so you can keep it yourself.
 check, it won't publish a backup in which either private key's value appears anywhere.
 
 `deploy/.env` has one form, which the installer, backup and `keys` all read the same way
-(`deploy/scripts/env.sh`): `NAME=value` lines, the value unquoted, each name once, and no
-carriage returns; comments (`#`) and blank lines are allowed. Compose reads more
-(`export NAME=…`, spaces around `=`, quoted values), so anything else is refused, by the
-installer as by backup, which refuses before it makes anything.
+(`deploy/scripts/env.sh`): `NAME=value` lines, each name once, no carriage returns, and
+every value literal, made only of `A-Z a-z 0-9 . _ ~ : / @ + = , % -`. So there's nothing for
+Compose to read differently: no `${…}` to fill in, no quotes, no spaces to trim, no `#` to
+start a comment. Three settings are a little wider, each only as far as the value the
+installer writes needs: `CONVEX_ADMIN_KEY` may hold `|`; `CADDY_GLOBAL_OPTIONS`,
+`CADDY_TRUSTED_PROXIES` and `INSTALL_TRUSTED_PROXIES` may be several words separated by
+single spaces; and the two private keys must each be exactly a key (43 characters of
+unpadded base64url). Comments (`#` lines) and blank lines are allowed. Anything else is
+refused: by the installer, which also refuses to save any value outside that form (an option
+like `--bind` with a space in it, say), and by backup, before it makes anything. Everything
+the installer writes goes through one writer, which saves only names
+`deploy/install/env-names` lists or the two private keys.
 
 Keep backups encrypted: they contain the connector state above, and `secrets.env` holds every
 other secret the server has. Keep the private keys apart from them, with
@@ -329,9 +343,9 @@ will take, and they need that version:
 
 Backup, the installer, `create-admin`, `keys import`, and every `deploy/trioditis` Compose
 command that can start, stop or change services take a lock in `deploy/`, so only one of
-them runs at a time for an install. `deploy/trioditis` acts only on this install's Compose
-project, so it refuses `-p` and `--project-name`. Only read-only commands (`ps`, `logs`, `config`, `top`,
-`images`, `ls`, `port`, `version`, `events`) run beside them.
+them runs at a time for an install. Only read-only commands (`ps`, `logs`, `config`, `top`,
+`images`, `ls`, `port`, `version`, `events`) run beside them. A backup takes the lock before
+it reads `deploy/.env`, and uses that one reading throughout.
 
 ### The server's keys
 
@@ -401,8 +415,9 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 | Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, and neither `secrets.env` nor the archive holds a private key; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused |
+| `backup-restart.sh`   | A backup starts again only the containers that were running: not a finished one-shot job a running service depends on, nor a stopped service                                                                                                                                                                                                                                                                                                             |
 | `keys.sh`             | `keys export` writes a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                             |
-| `lock.sh`             | While the lock is held, `start`, `up`, `create-admin`, `backup`, a command behind an option's value (`--profile ps stop`) and an unknown option are refused; `ps` and `config` run                                                                                                                                                                                                                                                                       |
+| `lock.sh`             | Nothing may come before the command (`-p`, `-f`, `--env-file`, `--project-directory`, `--dry-run`, an unknown option) and unknown commands are refused; `logs -f` passes; while the lock is held, `start`, `up`, `stop`, `create-admin` and `backup` are refused and `ps`, `config` and `logs` run; `restore` with no install says it isn't available yet                                                                                                |
 | `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                |
 | `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                   |
 | `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                   |

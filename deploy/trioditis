@@ -19,9 +19,11 @@ if [ "${1:-}" = restore ]; then
   echo "Restore isn't available in this version yet. Keep your backups: a later version restores them." >&2
   exit 1
 fi
-# The one parser for deploy/.env and key files: env_check, env_value, env_names.
+# The one parser and writer for deploy/.env and key files: env_check, env_value, env_names,
+# env_write.
 # shellcheck source=deploy/scripts/env.sh
 . "$here/scripts/env.sh"
+env_names_file="$here/install/env-names"
 if [ ! -f "$env_file" ]; then
   echo "No install here yet. Run deploy/install/install.sh first." >&2
   exit 1
@@ -121,17 +123,25 @@ valid_key() {
 case "${1:-}" in
   backup)
     [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
-    # deploy/.env, checked before anything is made.
+    # The lock first, then deploy/.env, read once: that snapshot is the project, the settings
+    # Compose runs with, and secrets.env, for the whole backup. It's checked before anything
+    # is made.
+    take_lock
     read_env
+    project=$(value_in COMPOSE_PROJECT_NAME "$env_text")
+    project=${project:-trioditis}
+    # Everything the backup writes is the caller's alone.
+    umask 077
+    snapshot=$(mktemp "$env_file.backup-XXXXXX")
+    printf '%s\n' "$env_text" >"$snapshot"
+    compose() { (cd "$here/compose" && docker compose --env-file "$snapshot" -p "$project" "$@"); }
+    trap 'rm -f "$snapshot"' EXIT
     mkdir -p "$2"
     # Real paths, so a symlink can't lead the backup into the checkout.
     dir=$(cd "$2" && pwd -P)
     case "$dir/" in
       "$(cd "$here/.." && pwd -P)"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;;
     esac
-    take_lock
-    # Everything the backup writes is the caller's alone.
-    umask 077
     worker="$project-backup-$(random_hex)"
     # A backup is a directory holding the archive and the .env. It's assembled in a new
     # private directory beside where it goes, and published with one rename that fails if
@@ -143,26 +153,25 @@ case "${1:-}" in
     running=''
     left_out=''
     # However it ends, even interrupted while stopping: the archive container goes first, so
-    # nothing still reads the volumes; the unpublished directory goes; and what was running
-    # starts again once any stop still under way in Docker has finished. A second interrupt
-    # can't cut this short, no step's failure skips the next, and a server that doesn't start
-    # again makes the backup a failure.
+    # nothing still reads the volumes; the unpublished directory goes; and the containers
+    # that were running start again, in order, once any stop still under way in Docker has
+    # finished. A second interrupt can't cut this short, no step's failure skips the next, and
+    # a server that doesn't start again makes the backup a failure.
     finish_backup() {
       status=$?
       trap '' INT TERM HUP
       docker rm -f "$worker" >/dev/null 2>&1 || true
       [ -z "$work" ] || rm -rf "$work" || true
-      # A name it was reserving but never published: removed only as an empty directory, which
-      # is all this backup ever makes there (rmdir refuses anything else).
-      [ -z "$reserved" ] || [ ! -d "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
+      # Only a name this backup made (recorded once mkdir succeeded), and only while empty.
+      [ -z "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
       if [ -n "$running" ]; then
         compose stop >/dev/null 2>&1 || true
-        # shellcheck disable=SC2086 # $running is a list of services
-        if ! compose start $running >/dev/null 2>&1; then
+        restart_running || {
           echo "The server didn't start again after the backup: run deploy/trioditis up -d." >&2
           status=1
-        fi
+        }
       fi
+      rm -f "$snapshot"
       if [ "$status" = 0 ]; then
         echo "Backed up project $project to $published (archive.tgz, and the secrets in secrets.env)."
         [ -z "$left_out" ] || echo "Left out of secrets.env, as settings the installer doesn't write (keep them yourself if you need them):$left_out"
@@ -174,9 +183,37 @@ case "${1:-}" in
       fi
       exit "$status"
     }
+    # Starts again exactly the containers that were running (not a finished one-shot, such as
+    # the functions job), in the order their dependencies need, each healthy before the next
+    # step: the database, the backend, Caddy, the gateway, then the bridge hosts and sidecars.
+    restart_running() {
+      for step in postgres backend caddy gateway 'bridge-*' '*'; do
+        started=''
+        for entry in $running; do
+          id=${entry%%=*}
+          service=${entry#*=}
+          case " $done_ids " in *" $id "*) continue ;; esac
+          # shellcheck disable=SC2254 # $step is a pattern
+          case "$service" in $step) ;; *) continue ;; esac
+          docker start "$id" >/dev/null || return 1
+          started="$started $id"
+          done_ids="$done_ids $id"
+        done
+        for id in $started; do
+          for _ in $(seq 120); do
+            state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo gone)
+            case "$state" in healthy | running) break ;; unhealthy | exited | dead | gone) return 1 ;; esac
+            sleep 1
+          done
+        done
+      done
+    }
+    done_ids=''
     trap finish_backup EXIT
-    # One service per line; empty if none is running, so a cold backup starts nothing.
-    running=$(compose ps --services --status running)
+    # The containers running now, as id=service, recorded before anything stops; empty if
+    # none is, so a cold backup starts nothing.
+    running=$(docker ps --filter "label=com.docker.compose.project=$project" \
+      --format '{{.ID}}={{.Label "com.docker.compose.service"}}')
 
     volumes=$(project_volumes)
     [ -n "$volumes" ] || { echo "No volumes for project $project." >&2; exit 1; }
@@ -207,38 +244,48 @@ case "${1:-}" in
         tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
         wait "$tar_pid"' >"$work/archive.tgz"
     # secrets.env holds only the settings listed in deploy/install/env-names, each as
-    # NAME=value from the checked .env: never the private keys (a backup holds sealed
-    # content, and they open it: docs/architecture/sealing.md, Bridge key exposure), and
-    # nothing else, not even a comment. A name deploy/.env has that isn't listed stays out, and
-    # is named below (its value isn't) for the operator to keep.
-    allowed=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)$/\1/p' "$here/install/env-names")
+    # NAME=value from the snapshot: never the private keys (a backup holds sealed content,
+    # and they open it: docs/architecture/sealing.md, Bridge key exposure), and nothing else,
+    # not even a comment. A name deploy/.env has that isn't listed stays out, and is named
+    # below (its value isn't) for the operator to keep.
+    allowed=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)$/\1/p' "$env_names_file")
     present=$(printf '%s\n' "$env_text" | env_names)
     for name in $allowed; do
       ! printf '%s\n' "$present" | grep -qx "$name" || printf '%s=%s\n' "$name" "$(value_in "$name" "$env_text")"
     done >"$work/secrets.env"
-    left_out=''
     for name in $present; do
       case "$name" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY) continue ;; esac
       printf '%s\n' "$allowed" | grep -qx "$name" || left_out="$left_out $name"
     done
     # And a last check that neither private key's value is anywhere in it, by any name. The
-    # values are patterns on stdin, never arguments.
-    if printf '%s\n' "$(value_in BRIDGE_PRIVATE_KEY "$env_text")" "$(value_in AGENT_ACCESS_PRIVATE_KEY "$env_text")" |
-      grep -vx '' | grep -qFf - "$work/secrets.env"; then
-      echo "A private key's value is in another setting, so it would be in the backup. Nothing was published." >&2
-      exit 1
-    fi
+    # values are patterns on stdin, never arguments; a check that couldn't run fails too.
+    scan=0
+    printf '%s\n' "$(value_in BRIDGE_PRIVATE_KEY "$env_text")" "$(value_in AGENT_ACCESS_PRIVATE_KEY "$env_text")" |
+      grep -vx '' | grep -qFf - "$work/secrets.env" || scan=$?
+    case "$scan" in
+      1) ;;
+      0) echo "A private key's value is in another setting, so it would be in the backup. Nothing was published." >&2 && exit 1 ;;
+      *) echo "Couldn't check secrets.env for the private keys. Nothing was published." >&2 && exit 1 ;;
+    esac
 
     # The name is reserved with mkdir, which fails if anything (a file, a directory, a link) is
     # there; then the private directory is renamed onto that empty one in one step, so the
     # pair of files appears whole or not at all. No exit status is taken on trust: after the
-    # rename, the private directory must be gone and the name must hold both files.
+    # rename, the private directory must be gone and the name must hold both files. Making
+    # the name and recording it happen with interrupts held off, so cleanup knows exactly the
+    # names this backup made, and never one that was there already.
     stamp="$dir/$project-$(date +%Y%m%d-%H%M%S)"
     n=1
     name=$stamp
-    # The name is recorded before mkdir, so an interrupt at any point leaves cleanup knowing it.
-    until reserved=$name && mkdir "$name" 2>/dev/null; do
-      reserved=''
+    while :; do
+      trap '' INT TERM HUP
+      made=0
+      if mkdir "$name" 2>/dev/null; then
+        reserved=$name
+        made=1
+      fi
+      trap 'exit 130' INT TERM HUP
+      [ "$made" = 0 ] || break
       [ -e "$name" ] || [ -L "$name" ] || { echo "Couldn't create the backup in $dir." >&2; exit 1; }
       n=$((n + 1))
       [ "$n" -le 100 ] || { echo "No free name for the backup in $dir." >&2; exit 1; }
@@ -290,6 +337,10 @@ $name=$value"
       # already has (from the backup's secrets.env, after a lost server). The private keys are
       # added through a temp file and a rename onto deploy/.env.
       { [ -r "$3" ] && [ ! -d "$3" ]; } || { echo "No key file at $3." >&2; exit 1; }
+      # The raw bytes first: a NUL or a carriage return is refused before the shell reads the
+      # file (it would drop a NUL without a word).
+      [ "$(tr -d '\000\r' <"$3" | wc -c)" = "$(wc -c <"$3")" ] ||
+        { echo "$3 holds a NUL or a carriage return, so it isn't a key file keys export wrote. Nothing was changed." >&2; exit 1; }
       file_text=$(cat "$3")
       if ! problems=$(printf '%s\n' "$file_text" | env_check); then
         echo "$3 isn't a key file in the form keys export writes:" >&2
@@ -323,11 +374,7 @@ $name=$value"
         new_text="$new_text
 ${pair}_PRIVATE_KEY=$private"
       done
-      umask 077
-      tmp=$(mktemp "$env_file.XXXXXX")
-      trap 'rm -f "$tmp"' EXIT
-      printf '%s\n' "$new_text" | sed '/^$/d' >"$tmp"
-      mv -T "$tmp" "$env_file"
+      printf '%s\n' "$new_text" | sed '/^$/d' | env_write "$env_file" || { echo "Nothing was changed." >&2; exit 1; }
       echo "Imported the server's private keys into deploy/.env. Run deploy/install/install.sh to start the server."
     fi
     ;;
@@ -351,30 +398,17 @@ ${pair}_PRIVATE_KEY=$private"
       deploy/scripts/create-admin.ts "$2"
     ;;
   *)
-    # Only commands that change nothing run beside a backup or install; anything else
-    # (start, stop, up, down, run, exec…) takes the lock first and holds it while it runs. The
-    # command is found past Compose's global options and their values; an option it doesn't
-    # know, or no command at all, takes the lock.
-    command=''
-    takes_value=0
-    for arg in "$@"; do
-      if [ "$takes_value" = 1 ]; then takes_value=0 && continue; fi
-      case "$arg" in
-        # This install's project is set already; another would act on another install.
-        -p | -p?* | --project-name | --project-name=*)
-          echo "deploy/trioditis acts on this install's project ($project) only; drop $arg." >&2
-          exit 2
-          ;;
-        -f | --file | --profile | --project-directory | --env-file | --ansi | --progress | --parallel | --workdir) takes_value=1 ;;
-        --file=* | --profile=* | --project-directory=* | --env-file=* | --ansi=* | --progress=* | --parallel=* | --workdir=* | -f?*) ;;
-        --compatibility | --dry-run | --all-resources | --verbose) ;;
-        -*) break ;;
-        *) command=$arg && break ;;
-      esac
-    done
-    case "$command" in
+    # `deploy/trioditis <command> [its options and arguments]`: the project, the compose
+    # files, the project directory and the env file are this install's, set here, so nothing
+    # may come before the command (no Compose global options at all), and only Compose's own
+    # commands are passed on. Those that change nothing run beside a backup or install;
+    # every other one takes the lock first and holds it while it runs.
+    case "${1:-}" in
+      '') echo "Usage: deploy/trioditis <compose command> [options], e.g. ps, logs -f gateway, restart caddy" >&2 && exit 2 ;;
+      -*) echo "deploy/trioditis takes no options before the command ($1): it sets the project, files and settings itself." >&2 && exit 2 ;;
       ps | logs | config | top | images | ls | port | version | events) ;;
-      *) take_lock ;;
+      up | down | start | stop | restart | run | exec | rm | create | kill | pause | unpause | pull | build | cp | attach | wait | watch | scale | stats) take_lock ;;
+      *) echo "deploy/trioditis doesn't know the command $1." >&2 && exit 2 ;;
     esac
     cd "$here/compose"
     exec docker compose --env-file "$env_file" -p "$project" "$@"
