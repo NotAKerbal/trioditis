@@ -247,3 +247,50 @@ export const commandPayload = v.union(
   }),
 )
 export type CommandPayload = Infer<typeof commandPayload>
+
+/**
+ * A release channel: `stable` follows the repository's `main` branch, `nightly` its `dev`
+ * branch. The updater on the host maps each to its branch; see docs/deploy.md, Updates.
+ */
+export const updateChannel = v.union(v.literal('stable'), v.literal('nightly'))
+export type UpdateChannel = Infer<typeof updateChannel>
+
+/** An admin's request to the updater: look for a new version, or install it. */
+export const updateRequest = v.object({
+  id: v.string(),
+  kind: v.union(v.literal('check'), v.literal('update')),
+  at: v.number(),
+  by: v.string(),
+})
+
+/** A commit of this repository, as the updater reports it. */
+export const commitInfo = v.object({ commit: v.string(), committedAt: v.number() })
+
+/** What the updater on the host last said. */
+export const updaterReport = v.object({
+  seenAt: v.number(),
+  state: v.union(v.literal('idle'), v.literal('checking'), v.literal('updating'), v.literal('failed')),
+  /** A short, plain-language note for the admin, such as why an update failed. */
+  message: v.optional(v.string()),
+  /** When the update in progress (or the one that failed) started. */
+  startedAt: v.optional(v.number()),
+  /** The commit this server runs. */
+  current: v.optional(commitInfo),
+  /**
+   * The newest commit on `channel`'s branch when the updater last looked (`checkedAt`), and
+   * how far it is from `current`: commits it has that the server doesn't (`behind`), and the
+   * other way round (`ahead`). Only an update with nothing ahead installs.
+   */
+  latest: v.optional(
+    v.object({
+      channel: updateChannel,
+      commit: v.string(),
+      committedAt: v.number(),
+      subject: v.string(),
+      behind: v.number(),
+      ahead: v.number(),
+      checkedAt: v.number(),
+    }),
+  ),
+})
+export type UpdaterReport = Infer<typeof updaterReport>

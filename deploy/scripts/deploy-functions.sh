@@ -31,7 +31,9 @@ done
 
 # What the functions read. Private keys and the admin key stay out: no function needs them.
 names='SITE_URL BETTER_AUTH_SECRET GATEWAY_SECRET TRIODITIS_SETUP_TOKEN TRIODITIS_NETWORKS
-  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY'
+  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY TRIODITIS_VERSION'
+# The updater's secret only while the updater is on; its calls are refused without it.
+if [ "${TRIODITIS_UPDATER:-0}" = 1 ]; then names="$names UPDATER_SECRET"; fi
 for name in $names; do
   if [ -z "$(printenv "$name" || true)" ]; then
     echo "deploy-functions: $name is not set" >&2
@@ -43,6 +45,11 @@ done
 for name in $names; do
   printf '%s=%s\n' "$name" "$(printenv "$name")"
 done | npx convex env set --force >/dev/null
+# With the updater off, a secret set while it was on is removed, so nothing can act as it.
+# Names only: `env get` succeeds whether or not it's set, and would print the value.
+if [ "${TRIODITIS_UPDATER:-0}" != 1 ] && npx convex env list --names-only | grep -qx UPDATER_SECRET; then
+  npx convex env remove UPDATER_SECRET >/dev/null
+fi
 echo "deploy-functions: environment set"
 
 # Types and lint ran in CI; the bundle only ships what they checked.

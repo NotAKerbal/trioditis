@@ -6,13 +6,17 @@ FROM node:24.21-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2c
 RUN corepack enable
 WORKDIR /repo
 COPY . .
+# The commit it's built from (install.sh passes it): baked into the app, and served as
+# /version.json, so an open page can tell when the server has a newer build.
+ARG TRIODITIS_VERSION=unknown
 # The real client plugs in here: once the branch has apps/desktop, its static build is used.
 # It bakes in no URLs: it reads /config.json at startup, which install.sh writes and Caddy
 # serves (see Caddyfile), so one image works for any address.
 RUN if [ -f apps/desktop/package.json ]; then \
       pnpm install --frozen-lockfile --filter @trioditis/desktop... \
-      && pnpm --filter @trioditis/desktop build \
-      && cp -r apps/desktop/dist /web; \
+      && VITE_TRIODITIS_VERSION="$TRIODITIS_VERSION" pnpm --filter @trioditis/desktop build \
+      && cp -r apps/desktop/dist /web \
+      && printf '{ "version": "%s" }\n' "$TRIODITIS_VERSION" >/web/version.json; \
     else \
       cp -r deploy/web/placeholder /web; \
     fi

@@ -20,6 +20,12 @@ const store = new Map<string, Draft<unknown>>()
 const listeners = new Set<() => void>()
 const EMPTY: Draft<never> = { text: '', reply: null, rev: 0 }
 
+/** Whether any chat has a draft or a reply in progress, which a reload would lose. */
+export function hasDrafts() {
+  for (const draft of store.values()) if (draft.text.trim() || draft.reply) return true
+  return false
+}
+
 export function getDraft<Reply>(chatId: string): Draft<Reply> {
   return (store.get(chatId) as Draft<Reply> | undefined) ?? EMPTY
 }

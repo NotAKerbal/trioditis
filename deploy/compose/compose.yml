@@ -106,6 +106,10 @@ services:
       TRIODITIS_NETWORKS: ${TRIODITIS_NETWORKS:?}
       BRIDGE_PUBLIC_KEY: ${BRIDGE_PUBLIC_KEY:?}
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY:?}
+      TRIODITIS_VERSION: ${TRIODITIS_VERSION:-unknown}
+      # The updater's secret reaches the backend only while the updater is on (--updater).
+      TRIODITIS_UPDATER: ${INSTALL_UPDATER:-0}
+      UPDATER_SECRET: ${UPDATER_SECRET:-}
     depends_on:
       backend: { condition: service_healthy }
 
@@ -165,6 +169,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/web.Dockerfile
+      # The commit the web app is built from, which it compares with the server's to see an update.
+      args:
+        TRIODITIS_VERSION: ${TRIODITIS_VERSION:-unknown}
     image: ${COMPOSE_PROJECT_NAME:-trioditis}/web:local
     environment:
       TRIODITIS_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-:80}

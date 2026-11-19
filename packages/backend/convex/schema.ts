@@ -12,6 +12,9 @@ import {
   sender,
   storedChatView,
   storedLastMessage,
+  updateChannel,
+  updateRequest,
+  updaterReport,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -55,6 +58,19 @@ export default defineSchema({
     key: v.literal('setup'),
     reservedUntil: v.number(),
     reservedEmail: v.string(),
+  }).index('by_key', ['key']),
+
+  /**
+   * How the server updates itself, in one row (`key: 'server'`): the release channel and
+   * whether updates install on their own, which admins choose, an admin's request the updater
+   * hasn't finished, and what the updater on the host last reported. See updates.ts.
+   */
+  serverUpdates: defineTable({
+    key: v.literal('server'),
+    channel: updateChannel,
+    autoUpdate: v.boolean(),
+    request: v.optional(updateRequest),
+    updater: v.optional(updaterReport),
   }).index('by_key', ['key']),
 
   /**

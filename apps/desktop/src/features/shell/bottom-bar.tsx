@@ -11,7 +11,7 @@ import {
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { toast } from '@trioditis/ui/toast'
-import { KeyRound, LogOut, Plus, Settings, Users } from 'lucide-react'
+import { KeyRound, LogOut, Plus, Settings, ShieldCheck } from 'lucide-react'
 import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { signOut } from '~/lib/sign-out.ts'
@@ -75,7 +75,7 @@ export function BottomBar({
           </DropdownMenuItem>
           {session.role === 'admin' ? (
             <DropdownMenuItem onSelect={() => openSettings('members')}>
-              <Users /> Members
+              <ShieldCheck /> Admin settings
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem onSelect={() => openSettings('keys')}>

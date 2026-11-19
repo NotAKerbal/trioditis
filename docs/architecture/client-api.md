@@ -780,6 +780,30 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
 `ghostId`. A query for them comes with the conversation view (see Questions).
 
+## Server updates
+
+Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the
+mutations take the page's `sessionId` like the other admin ones.
+
+- `api.updates.status` returns `{ channel, autoUpdate, version, updaterConfigured, request,
+updater }`: the release channel (`stable` or `nightly`) and whether updates install on
+  their own; the deployed commit (as `server.info`); whether the server has an updater at all;
+  the admins' request the updater hasn't finished (`{ kind: 'check' | 'update', at }`); and
+  the updater's last report, `{ seenAt, state, message?, startedAt?, current?, latest? }`.
+  `state` is `idle`, `checking`, `updating` or `failed`; `current` is the commit the server
+  runs; `latest` is the newest commit on `latest.channel` when it last looked
+  (`checkedAt`), with `behind` (commits it has that the server doesn't) and `ahead` (the
+  other way round). An update is available when `latest.channel` is the chosen channel,
+  `behind > 0` and `ahead` is 0. The updater reports every ten minutes.
+- `api.updates.setChannel({ channel })` and `api.updates.setAutoUpdate({ enabled })`.
+  Changing the channel also asks the updater to check the new one.
+- `api.updates.request({ kind })` asks the updater to check now or to update to the newest
+  version; refused while an update runs, or where the server has no updater. A check doesn't
+  replace a waiting update. `api.updates.cancelRequest({})` takes back one the updater hasn't
+  started.
+
+The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECRET`.
+
 ## Questions and follow-ups
 
 1. **Done:** mentions and message requests come from the bridge host and are applied at
@@ -804,10 +828,13 @@ request. Until one lands, the UI keeps the control disabled or shows the fallbac
 here.
 
 1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
-   `{ demo, invitations }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
+   `{ demo, invitations, version }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
    `TRIODITIS_NETWORKS=fake`, as `demo.seedForMe` needs), and `invitations` whether admins
    can invite people here (false wherever `TRIODITIS_DEMO=1`). The client hides invite controls, and shows demo-only ones, from it instead
    of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
+   `version` is the commit the installer deployed (`TRIODITIS_VERSION`), or null where none
+   was set (`pnpm dev`, previews); an open page compares it with its own build's to pick up
+   an update (`docs/deploy.md`, Updating live).
 2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
