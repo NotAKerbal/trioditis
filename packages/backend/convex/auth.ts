@@ -1,4 +1,4 @@
-import { APIError, createAuthEndpoint, getIP } from 'better-auth/api'
+import { APIError, createAuthEndpoint, createAuthMiddleware, getIP, getSessionFromCtx } from 'better-auth/api'
 import type { BetterAuthPlugin } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
@@ -52,6 +52,42 @@ const MAX_SESSION_TOKEN_LENGTH = 256
  * error and nothing was changed, or it couldn't tell. It sets no cookie, not even an expired
  * one: a late answer could otherwise clear a sign-in made meanwhile in another tab.
  */
+/**
+ * The header a page sends its session in (`members.me`'s `sessionId`) on Better Auth routes
+ * that take no body of ours, as `sessionId` binds Convex calls.
+ */
+export const SESSION_HEADER = 'x-trioditis-session-id'
+
+/** Better Auth's passkey registration: the options that hold the challenge, and the answer. */
+const PASSKEY_REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
+
+/**
+ * Adding a passkey, bound to the page's session like the key writes: a page another tab's
+ * sign-in has switched would otherwise ask for options, and so a challenge, for the other
+ * account. Both steps are refused (409, code `sessionChanged`) before anything is written when
+ * the header names another session than the cookie's. The passkey plugin itself already
+ * refuses an answer from another account than the one its challenge was made for. Without the
+ * header nothing is checked, as before.
+ */
+const passkeySessionBinding = {
+  id: 'trioditis-passkey-session',
+  hooks: {
+    before: [
+      {
+        matcher: (context) => PASSKEY_REGISTRATION_PATHS.includes(context.path ?? ''),
+        handler: createAuthMiddleware(async (context) => {
+          const expected = context.headers?.get(SESSION_HEADER)
+          if (expected === null || expected === undefined) return
+          const session = await getSessionFromCtx(context)
+          if (session?.session.id !== expected) {
+            throw new APIError('CONFLICT', { code: SESSION_CHANGED.code, message: SESSION_CHANGED.message })
+          }
+        }),
+      },
+    ],
+  },
+} satisfies BetterAuthPlugin
+
 const endSession = (ctx: GenericCtx<DataModel>) =>
   ({
     id: 'trioditis-session',
@@ -416,6 +452,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       convex({ authConfig }),
       endSession(ctx),
       accountRateLimit(ctx),
+      passkeySessionBinding,
     ],
   } satisfies BetterAuthOptions
 }
