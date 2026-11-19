@@ -242,21 +242,27 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                 </p>
               ) : null}
               {(step.type === 'userInput'
-                ? (step.fields ?? [])
-                : (step.cookies?.fields ?? []).map((f) => ({
+                ? (step.fields ?? []).map((f) => ({ ...f, required: true }))
+                : // A cookie step can ask for optional values too (LinkedIn's browser headers, which
+                  // some browsers never send); only the ones it needs block Continue.
+                  (step.cookies?.fields ?? []).map((f) => ({
                     id: f.id,
                     type: 'password',
                     name: f.id,
                     description: undefined,
+                    required: f.required,
                   }))
               ).map((f) => (
                 <label key={f.id} className="mb-3 block">
-                  <span className="mb-1.5 block text-sm font-semibold">{f.name}</span>
+                  <span className="mb-1.5 block text-sm font-semibold">
+                    {f.name}
+                    {f.required ? null : <span className="font-normal text-muted-foreground"> (optional)</span>}
+                  </span>
                   <Input
                     type={INPUT_TYPE[f.type] ?? 'text'}
                     autoComplete="off"
                     spellCheck={false}
-                    required
+                    required={f.required}
                     disabled={submission.sentStepId === step.stepId || !!loginInputBlocked(bridge.status)}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
