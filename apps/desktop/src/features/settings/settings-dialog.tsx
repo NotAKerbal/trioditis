@@ -581,6 +581,14 @@ function Members() {
   )
 }
 
+/**
+ * Whether "Add a passkey" is offered. Off until the server can finish a registration: Better Auth
+ * consumes the passkey challenge with a delete the Convex adapter refuses, so verification fails
+ * on the server today. Everything else it needs is here (the page's session on both requests,
+ * the reload on sessionChanged), so turning it on is this line.
+ */
+const ADDING_PASSKEYS = false
+
 function Keys() {
   const session = useSession()
   const { data: auth } = authClient.useSession()
@@ -751,9 +759,14 @@ function Keys() {
       </Setting>
       <Setting
         title="Passkeys"
-        about="Sign in without a password on this device. Unlocking your key with a passkey comes later."
+        about={
+          ADDING_PASSKEYS
+            ? 'Sign in without a password on this device. Unlocking your key with a passkey comes later.'
+            : 'Sign in without a password on this device. Adding a passkey is coming soon.'
+        }
       >
         <Button
+          disabled={!ADDING_PASSKEYS}
           loading={busy === 'passkey'}
           onClick={async () => {
             setBusy('passkey')
@@ -769,7 +782,7 @@ function Keys() {
             } else toast('Passkey added.')
           }}
         >
-          Add a passkey
+          {ADDING_PASSKEYS ? 'Add a passkey' : 'Coming soon'}
         </Button>
       </Setting>
       <p className="mt-2 text-sm text-subtle-foreground">
