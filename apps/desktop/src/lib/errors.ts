@@ -44,4 +44,7 @@ export function errorCode(error: unknown): string | undefined {
  * (the `sessionId` the page passed, see docs/architecture/client-api.md): the page should
  * start again, as whoever is signed in now, rather than offer to try again.
  */
-export const sessionChanged = (error: unknown) => errorCode(error) === 'sessionChanged'
+export const sessionChanged = (error: unknown) =>
+  errorCode(error) === 'sessionChanged' ||
+  // Better Auth's passkey registration gives the same refusal as its own error's `code`.
+  (!!error && typeof error === 'object' && (error as { code?: unknown }).code === 'sessionChanged')

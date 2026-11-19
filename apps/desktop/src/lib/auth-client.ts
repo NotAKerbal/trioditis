@@ -11,6 +11,13 @@ import { createAuthClient } from 'better-auth/react'
 export const authClient = createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
+    // Adding a passkey is bound to the page's session, as key writes are (client-api.md, Key writes
+    // are bound to the page's session). addPasskey passes its own fetch options only to its second
+    // step, so the header goes on both here.
+    onRequest: (context) => {
+      if (registeringAs && REGISTRATION_PATHS.some((path) => String(context.url).includes(path)))
+        context.headers.set(SESSION_HEADER, registeringAs)
+    },
     // An answer over a rate limit says how long to wait (Retry-After, in seconds): kept for the
     // screen that made the request to say so (tooManyAttempts in lib/errors.ts).
     onError: ({ response }) => {
@@ -29,6 +36,59 @@ export const authClient = createAuthClient({
 })
 
 let retryAfter: number | null = null
+let registeringAs: string | null = null
+
+/** The header that names the page's session to Better Auth's passkey registration. Matches the backend. */
+const SESSION_HEADER = 'x-trioditis-session-id'
+const REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
+
+/** The Web Lock held, in whichever tab, while a passkey ceremony with the server is under way. */
+const CEREMONY_LOCK = 'trioditis-passkey-ceremony'
+
+/** Another passkey ceremony was under way in this browser, so this one didn't start. */
+export class PasskeyBusy extends Error {
+  constructor() {
+    super('A passkey is already in use in this browser, here or in another tab. Finish that first.')
+  }
+}
+
+/**
+ * Runs `ceremony`, a passkey sign-in or registration with the server, only if no other is under
+ * way in this browser; otherwise throws PasskeyBusy, running nothing. Better Auth keeps the
+ * challenge in one cookie every tab shares, so a second ceremony would replace the first's, and
+ * both would fail, perhaps after an authenticator had already made a credential. Refused, not
+ * queued: the person is at the first one's prompt.
+ */
+export async function oneCeremony<T>(ceremony: () => Promise<T>): Promise<T> {
+  // Web Locks are on every secure page; without them, only asSession's own check holds.
+  if (typeof navigator === 'undefined' || !navigator.locks) return ceremony()
+  let started = false
+  const result = await navigator.locks.request(CEREMONY_LOCK, { ifAvailable: true }, async (lock) => {
+    if (!lock) return undefined
+    started = true
+    return await ceremony()
+  })
+  if (!started) throw new PasskeyBusy()
+  return result as T
+}
+
+/**
+ * Runs `register` (which adds a passkey) as `sessionId`, the session the page opened with: if
+ * the browser is in another by now, the server refuses both steps (409, sessionChanged) and
+ * changes nothing. The header is the page's, so a second registration in this page would leave
+ * the other's later step without it: it's refused, and oneCeremony refuses one in another tab.
+ */
+export async function asSession<T>(sessionId: string, register: () => Promise<T>): Promise<T> {
+  if (registeringAs !== null) throw new PasskeyBusy()
+  return oneCeremony(async () => {
+    registeringAs = sessionId
+    try {
+      return await register()
+    } finally {
+      registeringAs = null
+    }
+  })
+}
 const convexTokens = new Map<string, string>()
 
 /** The Better Auth session a Convex token names (its `sessionId` claim), if it can be read. */

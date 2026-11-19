@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { appendToDraft, getDraft, restoreDraft, setDraftReply, setDraftText, takeDraft } from '../src/data/drafts.ts'
 
 let n = 0
@@ -74,5 +74,28 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '')
     setDraftText(a, 'x')
     expect(getDraft(a).rev).toBeGreaterThan(before)
+  })
+})
+
+describe('what a reload would lose', () => {
+  it('counts a taken draft until its send settles, failure and restore included', async () => {
+    // A fresh store: the tests above leave drafts in theirs.
+    vi.resetModules()
+    const drafts = await import('../src/data/drafts.ts')
+    expect(drafts.hasDrafts()).toBe(false)
+    drafts.setDraftText('a', 'on its way')
+    const taken = drafts.takeDraft('a')!
+    let fail!: (e: Error) => void
+    const sending = drafts.whileSending(() =>
+      new Promise<void>((_, reject) => (fail = reject)).catch(() => drafts.restoreDraft('a', taken.text, taken.reply)),
+    )
+    // The text is in neither the draft nor the server yet.
+    expect(drafts.getDraft('a').text).toBe('')
+    expect(drafts.hasDrafts()).toBe(true)
+    fail(new Error('offline'))
+    await sending
+    expect(drafts.getDraft('a').text).toBe('on its way')
+    drafts.setDraftText('a', '')
+    expect(drafts.hasDrafts()).toBe(false)
   })
 })

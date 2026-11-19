@@ -199,8 +199,8 @@ again in a few minutes.`
 
 The person's **identity key pair** is what everything is sealed to. The private key exists
 only on their devices. So a new device can get it, the server keeps it **wrapped**: by the
-password, by the **recovery key**, and later by a passkey. The server can't unwrap any of
-them.
+password, by the **recovery key**, and by any passkey that offers WebAuthn's PRF extension.
+The server can't unwrap any of them.
 
 `api.keys.identity` returns `{ state, publicKey, kid, backups }`. What to do for each
 `state`:
@@ -209,7 +209,7 @@ them.
 | ------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `none`        | No identity key yet                                  | First-device setup, below                                                                                                                                                                                               |
 | `needsBackup` | A key, but not both a password and a recovery backup | On a device that has the key: make the missing backups and call `keys.setup` with a proof. On a device that doesn't: say "finish setup on the device you first used". Connecting networks is blocked until this is done |
-| `ready`       | Key and both backups                                 | On a new device, unlock with the password or the recovery key                                                                                                                                                           |
+| `ready`       | Key and both backups                                 | On a new device, unlock with the password, the recovery key or a passkey backup                                                                                                                                         |
 
 ### First device
 
@@ -277,7 +277,8 @@ const pair = unwrapIdentityKey(
 
 A wrong password throws `SealError`. "Use your recovery key instead" does the same with the
 `recovery` backup and `decodeRecoveryKey(text)` as the wrapping key; `decodeRecoveryKey`
-forgives case, spaces, dashes and look-alike letters, and its checksum catches typos.
+forgives case, spaces, dashes and look-alike letters, and its checksum catches typos. A
+passkey backup opens with `passkeyKey(prfOutput)` as the wrapping key (Passkeys, below).
 
 ### A new recovery key, or a passkey
 
@@ -295,10 +296,89 @@ passkey backup removed and made again gets a new one, so a device still holding 
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 
+### Passkeys
+
+A passkey signs in (`authClient.signIn.passkey()`), and one whose authenticator offers
+WebAuthn's **PRF** extension can also unlock the identity key, so a new device needs no
+password. The PRF output for an input is a secret only that passkey can produce; it never
+leaves the device. `passkeyKey(output)` (packages/crypto) turns it into a wrapping key, and the
+key is wrapped with it as a `passkey` backup for that credential:
+
+```ts
+await ready()
+const first = passkeyPrfSalt() // the PRF input; the same everywhere (below)
+const { data, error, webauthn } = await authClient.passkey.addPasskey({
+  extensions: { prf: { eval: { first } } },
+  returnWebAuthnResponse: true,
+}) // with the page's session in x-trioditis-session-id (Key writes are bound to the page's session)
+if (error || !webauthn) return // cancelled, or refused (a 409 sessionChanged: reload)
+const output = webauthn.clientExtensionResults.prf?.results?.first
+// No output: the passkey signs in, but makes no backup yet (see below).
+if (!output) return
+const context = { userId, kid, kind: 'passkey' } as const
+const wrappingKey = passkeyKey(new Uint8Array(output))
+const wrap = wrapIdentityKey(identity.privateKey, wrappingKey, context)
+// Open it again before sending, as for every backup: the server can't check a wrap.
+unwrapIdentityKey(wrap, wrappingKey, context, identity.publicKey)
+await convex.mutation(api.keys.putBackup, {
+  kind: 'passkey',
+  ...wrap,
+  credentialId: webauthn.response.id,
+  prfSalt: toBase64Url(first),
+  proof,
+  expectedRevision: 0,
+  sessionId,
+})
+```
+
+- **The PRF input is fixed**: `passkeyPrfSalt()`, a constant 32 bytes, for every person and
+  passkey. Signing in doesn't know whose passkey it is until the server answers, so only an
+  input known in advance can be evaluated in the sign-in touch itself. Pass it to
+  `signIn.passkey({ extensions: { prf: { eval: { first } } }, returnWebAuthnResponse: true })`,
+  and the same touch that signs in gives the output that opens the key. The input needn't be
+  secret or unique: each credential's PRF is keyed by its own secret, so each passkey still
+  gives its own wrapping key. Each backup keeps the input it was made with (`prfSalt`); a
+  backup with another input is opened by asking its passkey again, with `evalByCredential`.
+- **Not every authenticator gives the output when the passkey is made.** Some give it only
+  when the passkey is next used, and some (or the browser) not at all. Without it, the passkey
+  still signs in; offer to make its backup later with a `navigator.credentials.get()` naming
+  that credential (`allowCredentials`) and the input (`prf.evalByCredential`). That ceremony
+  goes nowhere near the server: only the output matters, and only the device uses it.
+- **Unlocking with a passkey** on a new device: from the sign-in touch's output if it came with
+  one and the backup for that credential used the same input, or else with a
+  `navigator.credentials.get()` naming this key's passkey backups and their inputs. The
+  credential that answered picks the backup. A passkey backup opens without its passkey being
+  registered for sign-in: it's the output that opens it.
+- **A passkey backup is only for a passkey on the account.** `keys.putBackup` with
+  `kind: 'passkey'` is refused (`That passkey isn’t on your account any more…`) unless
+  `credentialId` is a passkey Better Auth has for the signed-in person, checked in the same
+  transaction as the write: so a backup is never made for another account's credential, nor
+  lands after its passkey was removed.
+- **Listing**: `api.keys.passkeys({ sessionId })` returns the person's passkeys as
+  `{ credentialId, name, createdAt, backedUp }[]`, where `credentialId` matches a backup's.
+  Use it rather than Better Auth's `/passkey/list-user-passkeys`, which answers for whoever the
+  cookie signs in as by now.
+- **Removing**: `api.keys.removePasskey({ credentialId, proof, sessionId })` removes the
+  passkey's backups and its sign-in credential in one transaction, so nothing is left half
+  removed. A credential no longer registered just loses its backups. Better Auth's own
+  `/passkey/delete-passkey` removes only the sign-in credential; don't use it.
+- **One passkey ceremony at a time, in the whole browser.** Better Auth keeps the challenge
+  of a sign-in or a registration in one cookie every tab shares, so a second ceremony under
+  way at once would replace the other's challenge and make both fail; and the registration
+  header is the page's. The desktop app holds a Web Lock (`trioditis-passkey-ceremony`) for
+  each whole sign-in or registration and refuses a second one, in any tab, while it's held.
+  (Unlocking with a passkey makes no request, so it takes no lock.)
+- **A recent sign-in.** Better Auth adds a passkey only for a session made in the last day
+  (`SESSION_NOT_FRESH` otherwise): say to sign in again.
+- **Known gap:** the session check (Key writes are bound to the page's session) runs before
+  Better Auth stores the credential, in a separate step. A sign-out of that same session in
+  another tab in the instant between them can let the credential land just after the session
+  ended. It still lands on the same account, made by that person's own authenticator.
+
 ### Key writes are bound to the page's session
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
-`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`keys.removePasskey`, `keys.passkeys` (a query), `account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
 `preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
 take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
@@ -338,12 +418,15 @@ createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
     onRequest: (context) => {
-      if (context.url.toString().includes('/passkey/') && pageSessionId)
-        context.headers.set('x-trioditis-session-id', pageSessionId)
+      if (REGISTRATION_PATHS.some((path) => String(context.url).includes(path)) && registeringAs)
+        context.headers.set('x-trioditis-session-id', registeringAs)
     },
   },
 })
 ```
+
+The desktop app sets `registeringAs` only while it adds a passkey (`asSession` in
+apps/desktop/src/lib/auth-client.ts).
 
 Without the header nothing is checked, as before.
 
@@ -780,6 +863,30 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
 `ghostId`. A query for them comes with the conversation view (see Questions).
 
+## Server updates
+
+Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the
+mutations take the page's `sessionId` like the other admin ones.
+
+- `api.updates.status` returns `{ channel, autoUpdate, version, updaterConfigured, request,
+updater }`: the release channel (`stable` or `nightly`) and whether updates install on
+  their own; the deployed commit (as `server.info`); whether the server has an updater at all;
+  the admins' request the updater hasn't finished (`{ kind: 'check' | 'update', at }`); and
+  the updater's last report, `{ seenAt, state, message?, startedAt?, current?, latest? }`.
+  `state` is `idle`, `checking`, `updating` or `failed`; `current` is the commit the server
+  runs; `latest` is the newest commit on `latest.channel` when it last looked
+  (`checkedAt`), with `behind` (commits it has that the server doesn't) and `ahead` (the
+  other way round). An update is available when `latest.channel` is the chosen channel,
+  `behind > 0` and `ahead` is 0. The updater reports every ten minutes.
+- `api.updates.setChannel({ channel })` and `api.updates.setAutoUpdate({ enabled })`.
+  Changing the channel also asks the updater to check the new one.
+- `api.updates.request({ kind })` asks the updater to check now or to update to the newest
+  version; refused while an update runs, or where the server has no updater. A check doesn't
+  replace a waiting update. `api.updates.cancelRequest({})` takes back one the updater hasn't
+  started.
+
+The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECRET`.
+
 ## Questions and follow-ups
 
 1. **Done:** mentions and message requests come from the bridge host and are applied at
@@ -791,8 +898,8 @@ Contact profiles (name, handle, avatar) are sealed with kind `contact`, object I
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
 5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
-7. **Passkey PRF unlock**: the backup storage exists (`putBackup` with `kind: 'passkey'`),
-   but the PRF flow in the UI doesn't yet.
+7. **Done:** passkey PRF unlock. Adding a passkey makes its backup when the authenticator
+   gives a PRF output, and signing in with one unlocks the key in the same touch (Passkeys).
 8. **Label filter order**: a label view is in labelling order, not recency. Sorting it by
    recency needs a per-label recency index.
 
@@ -804,10 +911,13 @@ request. Until one lands, the UI keeps the control disabled or shows the fallbac
 here.
 
 1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
-   `{ demo, invitations }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
+   `{ demo, invitations, version }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
    `TRIODITIS_NETWORKS=fake`, as `demo.seedForMe` needs), and `invitations` whether admins
    can invite people here (false wherever `TRIODITIS_DEMO=1`). The client hides invite controls, and shows demo-only ones, from it instead
    of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
+   `version` is the commit the installer deployed (`TRIODITIS_VERSION`), or null where none
+   was set (`pnpm dev`, previews); an open page compares it with its own build's to pick up
+   an update (`docs/deploy.md`, Updating live).
 2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects

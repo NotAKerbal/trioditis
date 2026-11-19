@@ -256,8 +256,8 @@ deploy/install/install.sh
 ```
 
 The rerun keeps every secret and every setting the last run saved in `deploy/.env`: the
-mode, the domain or public URL, the port, the bind address and host, the networks, and
-`--e2e`. Pass an option only to change that one. It rebuilds the images from the new
+mode, the domain or public URL, the port, the bind address and host, the networks, `--e2e`
+and `--updater`. Pass an option only to change that one. It rebuilds the images from the new
 checkout, redeploys the functions, restarts what changed, and removes services that are no
 longer enabled. After each deploy of the functions, it runs pending migrations, which fix rows
 an older version wrote, so an upgrade needs nothing run by hand. It calls their one entry
@@ -271,6 +271,100 @@ backend's log (`deploy/trioditis logs backend`) rather than failing the install.
 pinned, and only moves when the bundle changes it.
 
 Back up before upgrading (below).
+
+## Updates
+
+With the updater on, admins update the server from the app instead: **Admin settings →
+Updates**. Turn it on with the installer (the setting is kept, like the others):
+
+```sh
+deploy/install/install.sh --updater       # --no-updater stops and removes it
+```
+
+The updater is a systemd service on the host, `trioditis-updater-<project>`: a system service
+when the installer runs as root, and otherwise a user service of the operator, which keeps
+running after they log out only with lingering on (`loginctl enable-linger <user>`; the
+installer warns when it's off). Its log is the service's journal:
+`journalctl --user -u trioditis-updater-<project>` (without `--user` as root).
+
+In the app, admins choose:
+
+- **The channel.** **Stable** follows the repository's `main` branch; **Nightly** follows
+  `dev`, every change as soon as it's merged. Stable is the default.
+- **Automatic updates**, off by default: when on, the updater installs the channel's newest
+  version once a night, during the 4 AM hour of the host's local time.
+- **Check now** and **Update now**, and **Cancel** for a request the updater hasn't started.
+
+The page shows the version the server runs, whether an update is available, and what the
+last update did: one that failed says why, with the installer's error. It warns when the
+updater hasn't reported for 25 minutes (it reports every ten), since it may be stopped.
+
+What the updater does:
+
+1. It watches the backend for the admins' choices and requests, through
+   `deploy/scripts/updater-agent.mjs` in a one-off container from the bundle's Node image on
+   the server's internal network, so it needs nothing published. It signs its calls with
+   `UPDATER_SECRET`, which the installer generates into `deploy/.env` and gives the backend
+   only while the updater is on. With it off, the backend refuses the updater's calls and
+   admins can't ask for updates.
+2. Every hour, when asked, and when the channel changes, it fetches the channel's branch from
+   the checkout's `origin` remote and compares its newest commit with the one the checkout
+   is at.
+3. To update, it checks that commit out (detached) and runs the installer, the same as
+   [Upgrade](#upgrade): every setting is kept, and only what changed restarts. Then it exits,
+   and systemd starts the new version of the updater.
+
+It only ever moves forward: it installs a commit only when the checkout is behind the branch
+and has nothing the branch lacks, so switching from Nightly to an older Stable leaves the
+server where it is until Stable passes it, and a branch that was rewritten or diverged is
+never installed. It won't move a checkout with changes to tracked files. It takes the
+install's lock before it moves the checkout and holds it until the installer is done (the
+installer it runs uses that lock rather than taking its own), so a backup or an install the
+operator starts can't run in between; if one is already running, the update says so and
+doesn't start. If the installer fails, it checks out the commit it was on and runs the
+installer again, and reports both; a commit whose update failed isn't tried again
+automatically (Update now still tries it). The installer runs with `--no-setup-link`, since its
+output goes to the journal.
+
+A request can be cancelled until the updater claims it, just before it moves the checkout;
+after that the update runs to the end. The claim names the channel too, so an update, automatic
+or asked for, doesn't start for a channel admins have switched away from meanwhile, nor an
+automatic one once they've been turned off (switching
+also makes a waiting request again, for the new channel). What must outlast a restart is in
+`deploy/.updater-state`: the update in progress and whether it was installing or going back,
+how the last one ended until the backend has that report, the day of the last automatic
+update, and the commit whose update last failed. An update cut off midway (the machine or the
+service stopped, or its state couldn't be saved) goes back to the commit it was on when the
+updater next starts, before anything else, since how it would have ended isn't known; it counts
+as failed, so it isn't tried again on its own. A request whose update is over is reported done,
+and never run a second time: until the backend has that report, the updater sends it again and
+starts no other update.
+
+The checkout belongs to the updater: leave it on the commit the updater put it on, and don't
+pull or edit it by hand. A private repository needs a `git fetch` that works without a
+prompt for the operator's user (a deploy key or a credential helper).
+
+### Updating live
+
+An update doesn't sign anyone out or restart the whole server:
+
+- The Convex backend and Postgres keep running (their images are pinned, and move only when
+  the bundle changes them). New functions are deployed into the running backend, and open
+  pages get their results straight away.
+- The installer rebuilds the images and Compose recreates only the containers whose image
+  or settings changed, and those that wait for them. Caddy restarts when the web app changed,
+  and pages reconnect to the backend by themselves. The gateway restarts when its code or the
+  backend's changed (they share the Node image), and the bridge hosts with it, since they
+  wait for it; otherwise they keep running. A bridge host reconnects to its network in
+  seconds and catches up on what arrived meanwhile.
+- Open pages move to the new web app on their own. The image is built with the commit it's
+  from (`TRIODITIS_VERSION`, written to `deploy/.env` on every run), which the app has built
+  in, Caddy serves as `/version.json` and the functions return in `server.info`. The
+  functions job reads it from `deploy/runtime/version`, not its environment, so a new commit
+  alone doesn't make Compose recreate the job and everything that waits for it. When a page
+  sees the server's version change, it waits for `/version.json` to name a build other than
+  its own, then reloads by itself if it's in the background with nothing unsaved (no draft or send under way, nothing typed in any field) and no settings, dialog or menu open,
+  and otherwise offers a reload.
 
 ## Encryption at rest
 
@@ -426,7 +520,7 @@ Each test makes its own throwaway install directory and Compose project
 never touches an install; it removes everything it made when it ends. They need Docker (run
 them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alpine image
 (pulled if missing), and `flock`. `install-settings.sh` runs the installer against a stub
-`docker` and needs none of that.
+`docker` and needs none of that, and `updater.sh` a stub `docker` and git.
 
 | Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -438,6 +532,7 @@ them as a user in the `docker` group, or under `sg docker -c`), the bundle's Alp
 | `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                   |
 | `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                   |
 | `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one                                                                                                                                                                                                                |
+| `updater.sh`          | Against a throwaway git remote and a stub installer: the updater moves the checkout to the channel's newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, installs that, and reports the installer's error; it leaves a checkout that's up to date, ahead of the channel, diverged from it, or has local changes where it is                                                                     |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).

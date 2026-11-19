@@ -8,6 +8,7 @@ import { SettingsDialog, type SettingsSection } from '~/features/settings/settin
 import { authClient } from '~/lib/auth-client.ts'
 import { BottomBar } from './bottom-bar.tsx'
 import { Sidebar, type SidebarAction } from './sidebar.tsx'
+import { UpdateNotice } from './update-notice.tsx'
 
 /** The signed-in app: one sidebar, the open chat, and its details. */
 export function Shell() {
@@ -99,6 +100,7 @@ export function Shell() {
       />
       <ChatPane chatId={selectedId as ChatId | undefined} onGone={() => select(undefined)} act={act} />
       <SettingsDialog section={search.settings} onSectionChange={openSettings} />
+      <UpdateNotice />
     </div>
   )
 }

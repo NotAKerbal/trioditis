@@ -4,7 +4,9 @@ import {
   decodeRecoveryKey,
   generateRecoveryKey,
   newPasswordParams,
+  passkeyPrfSalt,
   passwordKey,
+  ready,
   SealError,
   toBase64Url,
   unwrapIdentityKey,
@@ -14,7 +16,7 @@ import {
 import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { Checkbox } from '@trioditis/ui/checkbox'
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@trioditis/ui/dialog'
+import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { Input } from '@trioditis/ui/input'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
@@ -24,8 +26,19 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
-import { Check, Copy, Eye, KeyRound, Plug, Plus, Users } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import {
+  Check,
+  Copy,
+  Eye,
+  KeyRound,
+  Plug,
+  Plus,
+  RefreshCw,
+  Settings as SettingsIcon,
+  ShieldCheck,
+  Users,
+} from 'lucide-react'
+import { useState } from 'react'
 import {
   networkName,
   useAccounts,
@@ -36,18 +49,33 @@ import {
 } from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import {
+  addPasskey,
+  evaluatePasskeys,
+  NoPrf,
+  PasskeyCancelled,
+  passkeyBackup,
+  type PasskeyBackup,
+  type PrfResult,
+} from '~/lib/passkeys.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
+import { Heading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
+import { Updates } from './updates.tsx'
 
+// Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
+// admins only (Admin settings).
 export const SETTINGS_SECTIONS = [
   { id: 'appearance', name: 'Appearance', icon: <Eye /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
-  { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
+  { id: 'members', name: 'Members', icon: <Users />, admin: true },
+  { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
 ] as const
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]['id']
+const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
 
 /** The settings panel. The gear and the account menu open it; its section is in the URL. */
 export function SettingsDialog({
@@ -58,8 +86,13 @@ export function SettingsDialog({
   onSectionChange: (s: SettingsSection | undefined) => void
 }) {
   const session = useSession()
-  const sections = SETTINGS_SECTIONS.filter((s) => !('admin' in s) || session.role === 'admin')
+  const isAdmin = session.role === 'admin'
+  const asked = SETTINGS_SECTIONS.find((s) => s.id === section)
+  // A member who opens an admin section (an old link, say) gets their own settings instead.
+  const admin = isAdmin && !!asked && isAdminSection(asked)
+  const sections = SETTINGS_SECTIONS.filter((s) => isAdminSection(s) === admin)
   const current = sections.find((s) => s.id === section) ?? sections[0]!
+  const other = SETTINGS_SECTIONS.find((s) => isAdminSection(s) !== admin)!
   return (
     <Dialog open={!!section} onOpenChange={(open) => !open && onSectionChange(undefined)}>
       <DialogContent className="flex h-[620px] w-[min(900px,calc(100vw-32px))]" aria-describedby={undefined}>
@@ -67,7 +100,7 @@ export function SettingsDialog({
           className="flex w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px]"
           aria-label="Settings sections"
         >
-          <DialogTitle className="mx-2 mb-3.5 text-md">Settings</DialogTitle>
+          <DialogTitle className="mx-2 mb-3.5 text-md">{admin ? 'Admin settings' : 'Settings'}</DialogTitle>
           {sections.map((s) => (
             <Button
               variant="bare"
@@ -85,6 +118,17 @@ export function SettingsDialog({
               {s.name}
             </Button>
           ))}
+          {isAdmin ? (
+            <Button
+              variant="bare"
+              type="button"
+              onClick={() => onSectionChange(other.id)}
+              className="mt-auto flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4"
+            >
+              {admin ? <SettingsIcon /> : <ShieldCheck />}
+              {admin ? 'Your settings' : 'Admin settings'}
+            </Button>
+          ) : null}
         </nav>
         <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
           {current.id === 'appearance' ? (
@@ -93,43 +137,14 @@ export function SettingsDialog({
             <Accounts />
           ) : current.id === 'members' ? (
             <Members />
+          ) : current.id === 'updates' ? (
+            <Updates />
           ) : (
             <Keys />
           )}
         </div>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function Heading({ title, lead }: { title: string; lead: string }) {
-  return (
-    <>
-      <h2 className="pr-10 text-lg font-bold tracking-[-0.015em]">{title}</h2>
-      <DialogDescription className="mt-1 mb-3.5">{lead}</DialogDescription>
-    </>
-  )
-}
-
-function Setting({
-  title,
-  about,
-  children,
-  column,
-}: {
-  title: string
-  about: string
-  children: ReactNode
-  column?: boolean
-}) {
-  return (
-    <div className={cn('border-t border-border py-[15px]', column ? 'block' : 'flex items-center gap-[18px]')}>
-      <div className="min-w-0 flex-1">
-        <b className="block font-semibold">{title}</b>
-        <span className="mt-0.5 block text-sm text-muted-foreground">{about}</span>
-      </div>
-      {children}
-    </div>
   )
 }
 
@@ -679,7 +694,7 @@ function Keys() {
     <>
       <Heading
         title="Keys and devices"
-        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password and your recovery key, and can’t open it."
+        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password, your recovery key and any passkey that unlocks it, and can’t open it."
       />
       <Setting title="Your key" about={`Key ID ${session.kid}. Unlocked on this device.`}>
         <span />
@@ -749,15 +764,188 @@ function Keys() {
           </Button>
         </form>
       </Setting>
-      {/* Adding a passkey waits until the server can tie it to this page's session, as it does
-          key writes: until then a passkey could be added to whoever another tab signed in as.
-          Signing in with a passkey already added works as before. */}
-      <Setting title="Passkeys" about="Sign in without a password on this device. Adding a passkey is coming soon.">
-        <Button disabled>Coming soon</Button>
-      </Setting>
+      <Passkeys backups={identity?.backups} />
       <p className="mt-2 text-sm text-subtle-foreground">
         Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
       </p>
     </>
+  )
+}
+
+/**
+ * The person's passkeys: each signs in, and one with a passkey backup also unlocks the key on a
+ * new device (lib/passkeys.ts). A backup is made from the passkey's PRF output, which the
+ * authenticator gives when the passkey is added, or else the next time it's used.
+ */
+function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
+  const session = useSession()
+  const putBackup = useMutation(api.keys.putBackup)
+  const removePasskey = useMutation(api.keys.removePasskey)
+  // Read for the page's own session, so another tab's sign-in never shows its passkeys here.
+  const passkeys = useQuery(convexQuery(api.keys.passkeys, { sessionId: session.sessionId }))
+  const [busy, setBusy] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+  // This key's passkey backups, by credential. One for an older key no longer opens anything.
+  const backupOf = new Map(
+    (backups ?? [])
+      .filter((b) => b.kind === 'passkey' && b.kid === session.kid && b.credentialId)
+      .map((b) => [b.credentialId!, b]),
+  )
+  const registered = new Set((passkeys.data ?? []).map((p) => p.credentialId))
+  // A backup whose passkey no longer signs in (removed elsewhere) still opens the key with it.
+  const unlockOnly = [...backupOf.keys()].filter((id) => passkeys.data && !registered.has(id))
+
+  /** Wraps the key with a passkey's PRF output and stores it as that passkey's backup. */
+  async function saveBackup(prf: PrfResult) {
+    const backup = await passkeyBackup(session.userId, session.kid, session.keyPair, prf)
+    await putBackup({
+      ...backup,
+      proof: await proveKey(session.keyPair, session.sessionId),
+      // Replacing names the revision it replaces, 0 for a new one (client-api.md, Keys).
+      expectedRevision: backupOf.get(prf.credentialId)?.revision ?? 0,
+      sessionId: session.sessionId,
+    })
+  }
+
+  /** What went wrong, in a toast; a page whose session changed starts again instead. */
+  function report(e: unknown, fallback: string) {
+    if (sessionChanged(e)) return window.location.reload()
+    if (e instanceof PasskeyCancelled) return toast('The passkey prompt was closed. Nothing changed.')
+    toast(
+      e instanceof NoPrf
+        ? `${e.message} It still signs you in.`
+        : e instanceof SealError
+          ? 'The passkey’s backup didn’t check out on this device, so it wasn’t saved. Try again.'
+          : errorMessage(e, fallback),
+    )
+  }
+
+  async function add() {
+    setBusy('add')
+    let added: Awaited<ReturnType<typeof addPasskey>>
+    try {
+      added = await addPasskey(session.sessionId)
+    } catch (e) {
+      report(e, 'The passkey couldn’t be added.')
+      return setBusy(null)
+    }
+    if (!added.prf) {
+      toast('Passkey added. It signs you in. To let it unlock your key too, choose “Use to unlock”.')
+      return setBusy(null)
+    }
+    try {
+      await saveBackup({ credentialId: added.credentialId, output: added.prf })
+      toast('Passkey added. It signs you in and unlocks your key on a new device.')
+    } catch (e) {
+      report(
+        e,
+        'The passkey was added and signs you in, but it couldn’t be set to unlock your key. Try “Use to unlock”.',
+      )
+    }
+    setBusy(null)
+  }
+
+  /** Asks a passkey for its PRF output now, and makes its backup from it. */
+  async function useToUnlock(credentialId: string) {
+    setBusy(credentialId)
+    try {
+      await ready()
+      const prf = await evaluatePasskeys([{ credentialId, prfSalt: toBase64Url(passkeyPrfSalt()) }])
+      if (prf.credentialId !== credentialId) throw new Error('A different passkey answered. Try again.')
+      await saveBackup(prf)
+      toast('This passkey now unlocks your key on a new device.')
+    } catch (e) {
+      report(e, 'The passkey couldn’t be set to unlock your key.')
+    }
+    setBusy(null)
+  }
+
+  /** Removes the passkey and its backup, together, in one step on the server. */
+  async function remove(credentialId: string) {
+    setConfirming(null)
+    setBusy(credentialId)
+    try {
+      await removePasskey({
+        credentialId,
+        proof: await proveKey(session.keyPair, session.sessionId),
+        sessionId: session.sessionId,
+      })
+      toast('Passkey removed.')
+    } catch (e) {
+      report(e, 'The passkey couldn’t be removed.')
+    }
+    setBusy(null)
+  }
+
+  const row = (credentialId: string, title: string, detail: string, registeredHere: boolean) => {
+    const unlocks = backupOf.has(credentialId)
+    return (
+      <div key={credentialId} className="flex items-center gap-3 border-t border-border py-2.5">
+        <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 truncate font-semibold">
+            {title}
+            {unlocks ? <Badge variant="tag">Unlocks your key</Badge> : null}
+          </div>
+          <div className="text-sm text-muted-foreground">{detail}</div>
+        </div>
+        {confirming === credentialId ? (
+          <>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+              Keep
+            </Button>
+            <Button size="sm" onClick={() => void remove(credentialId)}>
+              Remove it
+            </Button>
+          </>
+        ) : (
+          <>
+            {!unlocks && registeredHere ? (
+              <Button
+                size="sm"
+                loading={busy === credentialId}
+                disabled={busy !== null}
+                onClick={() => void useToUnlock(credentialId)}
+              >
+                Use to unlock
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setConfirming(credentialId)}>
+              Remove
+            </Button>
+          </>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <Setting
+      title="Passkeys"
+      about="Sign in without a password. A passkey that unlocks your key also opens your messages on a new device."
+      column
+    >
+      <div className="mt-3">
+        {(passkeys.data ?? []).map((p) =>
+          row(
+            p.credentialId,
+            p.name || 'Passkey',
+            `${p.createdAt ? `Added ${new Date(p.createdAt).toLocaleDateString()}` : 'Added'}${p.backedUp ? ' · Synced' : ''}`,
+            true,
+          ),
+        )}
+        {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', false))}
+        {passkeys.isError ? (
+          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">
+            Your passkeys couldn’t be listed. Reload the page to try again.
+          </p>
+        ) : passkeys.data?.length === 0 && unlockOnly.length === 0 ? (
+          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">No passkeys yet.</p>
+        ) : null}
+        <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
+          Add a passkey
+        </Button>
+      </div>
+    </Setting>
   )
 }
