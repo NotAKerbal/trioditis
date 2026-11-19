@@ -242,12 +242,14 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                 </p>
               ) : null}
               {(step.type === 'userInput'
-                ? (step.fields ?? [])
+                ? // Every input field is required: the protocol has no optional ones.
+                  (step.fields ?? []).map((f) => ({ ...f, required: true }))
                 : (step.cookies?.fields ?? []).map((f) => ({
                     id: f.id,
                     type: 'password',
-                    name: f.id,
+                    name: f.required ? f.id : `${f.id} (if your browser has it)`,
                     description: undefined,
+                    required: f.required,
                   }))
               ).map((f) => (
                 <label key={f.id} className="mb-3 block">
@@ -256,7 +258,8 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                     type={INPUT_TYPE[f.type] ?? 'text'}
                     autoComplete="off"
                     spellCheck={false}
-                    required
+                    // An optional cookie can be left empty; the bridge host drops it.
+                    required={f.required}
                     disabled={submission.sentStepId === step.stepId || !!loginInputBlocked(bridge.status)}
                     value={values[f.id] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
