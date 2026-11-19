@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+@import '@trioditis/ui/theme.css';
+@import '@trioditis/ui/base.css';
+@import '@fontsource-variable/dm-sans';
+@source '../../../../packages/ui/src';
+
+/* The app fills the window; each screen sizes itself inside it. */
+#root {
+  height: 100%;
+}
