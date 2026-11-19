@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The updater: keeps this install up to date the way its admins choose in the app (Admin
-# settings → Updates). `deploy/install/install.sh --updater` runs it as a systemd service, as
-# the operator; see docs/deploy.md, Updates.
+# settings → Updates). `deploy/install/install.sh` runs it as a systemd service, as the
+# operator, unless --no-updater; see docs/deploy.md, Updates.
 #
 # It learns the admins' choices (the release channel, whether updates install on their own)
 # and requests from the backend, through deploy/scripts/updater-agent.mjs in a one-off

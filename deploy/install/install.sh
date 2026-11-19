@@ -320,8 +320,8 @@ if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ]
 fi
 updater_asked=${updater+1}
 updater=${updater-$(get INSTALL_UPDATER)}
-# A saved 1 whose service was never installed, as after a first install cut off before then,
-# is still only the default, not the operator's choice.
+# A saved 1 whose service was never set up (enabled), as after a first install cut off before
+# then, is still only the default, not the operator's choice.
 if [ -z "$updater_asked" ] && [ "$updater" = 1 ] && ! bash "$here/updater/service.sh" installed "$project" 2>/dev/null; then
   updater=''
 fi

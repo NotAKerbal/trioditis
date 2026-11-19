@@ -6,7 +6,7 @@
 # lingering on (loginctl enable-linger).
 #
 #   deploy/updater/service.sh check <project>      # exits 1, saying why, if it can't run here
-#   deploy/updater/service.sh installed <project>  # exits 0 if its unit is installed
+#   deploy/updater/service.sh installed <project>  # exits 0 once its unit has been enabled
 #   deploy/updater/service.sh install <project>
 #   deploy/updater/service.sh remove <project>
 #
@@ -109,6 +109,8 @@ EOF
     rm -f "$dir/$unit"
     systemctl daemon-reload
     ;;
-  installed) [ -f "$dir/$unit" ] ;;
+  # Enabled, not just written: a setup cut off before `enable` leaves the unit file but not the
+  # link `enable` makes. Read from the files, since the manager may be what's out of reach.
+  installed) [ -f "$dir/$unit" ] && [ -L "$dir/$wanted_by.wants/$unit" ] ;;
   *) echo "usage: service.sh check|installed|install|remove <project>" >&2; exit 2 ;;
 esac

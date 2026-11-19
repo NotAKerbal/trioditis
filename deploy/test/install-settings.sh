@@ -66,8 +66,9 @@ EOF
 chmod +x "$work/bin/docker"
 install() {
   runs=$((${runs:-0} + 1))
-  # Its own systemd config directory, so no updater unit of this machine's is seen.
-  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$work/config}" \
+  # Its own systemd config directory (test_config, else $work/config), never the caller's, so no
+  # updater unit of this machine's is seen.
+  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" XDG_CONFIG_HOME="${test_config:-$work/config}" \
     bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
   cp "$work/checkout/deploy/.env" "$work/env.$runs" 2>/dev/null || true
   return "$status"
@@ -237,22 +238,26 @@ if STUB_SYSTEMCTL=fail install --updater; then status=0; else status=$?; fi
   check ok "--updater where it can't run stops the install, unchanged" ||
   { check fail "--updater where it can't run stops the install, unchanged"; tail -2 "$work/out" >&2; }
 
-# A saved 1 whose service was never installed (a first install cut off before then) is still
-# the default, so where the updater can't run it goes off; once the service is installed, it's
-# the install's choice, and the install stops instead.
-printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
-if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
-[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*user manager" "$work/out" && ! grep -q "can't run here" "$work/out" &&
-  check ok "a saved 1 with no service installed is still the default" ||
-  { check fail "a saved 1 with no service installed is still the default"; tail -2 "$work/out" >&2; }
-mkdir -p "$work/config/systemd/user"
-: >"$work/config/systemd/user/trioditis-updater-trioditis-test.service"
+# A saved 1 whose service was never set up (a first install cut off before then, even after it
+# wrote the unit) is still the default, so where the updater can't run it goes off; once the
+# service is enabled, it's the install's choice, and the install stops instead.
+unit_dir="$work/config/systemd/user"
+mkdir -p "$unit_dir/default.target.wants"
+for setup in 'not written' 'written, not enabled'; do
+  [ "$setup" = 'not written' ] || : >"$unit_dir/trioditis-updater-trioditis-test.service"
+  printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
+  if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
+  [ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*user manager" "$work/out" && ! grep -q "can't run here" "$work/out" &&
+    check ok "a saved 1 with its unit $setup is still the default" ||
+    { check fail "a saved 1 with its unit $setup is still the default"; tail -2 "$work/out" >&2; }
+done
+ln -s "$unit_dir/trioditis-updater-trioditis-test.service" "$unit_dir/default.target.wants/trioditis-updater-trioditis-test.service"
 printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
 cp "$work/checkout/deploy/.env" "$work/env.updater"
 if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
 [ "$status" != 0 ] && grep -q "The updater can't run here" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
-  check ok "a saved 1 with its service installed stops the install where it can't run" ||
-  { check fail "a saved 1 with its service installed stops the install where it can't run"; tail -2 "$work/out" >&2; }
+  check ok "a saved 1 with its service enabled stops the install where it can't run" ||
+  { check fail "a saved 1 with its service enabled stops the install where it can't run"; tail -2 "$work/out" >&2; }
 rm -rf "$work/config"
 
 # A unit directory it can't write or search, and a copy unpacked inside another repository (git
@@ -260,14 +265,17 @@ rm -rf "$work/config"
 mkdir -p "$work/xdg/systemd"
 : >"$work/xdg/systemd/user"
 rm -f "$work/checkout/deploy/.env"
-XDG_CONFIG_HOME="$work/xdg" install || true
+test_config=$work/xdg
+install || true
 [ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
   check ok "with a unit directory it can't write, the updater is off, saying why" ||
   { check fail "with a unit directory it can't write, the updater is off, saying why"; tail -2 "$work/out" >&2; }
 mkdir -p "$work/xdg-closed/systemd/user"
 chmod 600 "$work/xdg-closed/systemd/user"
 rm -f "$work/checkout/deploy/.env"
-XDG_CONFIG_HOME="$work/xdg-closed" install || true
+test_config=$work/xdg-closed
+install || true
+unset test_config
 chmod 700 "$work/xdg-closed/systemd/user"
 [ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
   check ok "with a unit directory it can't search, the updater is off, saying why" ||
