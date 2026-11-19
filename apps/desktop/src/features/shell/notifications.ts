@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef } from 'react'
 import { toChat, useChatCounts, type Chat } from '~/data/chats.ts'
 import { openLastMessage } from '~/data/last-message.ts'
-import { newArrivals, notificationText, type Since } from '~/data/notify.ts'
+import { newArrivals, notificationText, type Cursor } from '~/data/notify.ts'
 import { desktop } from '~/lib/desktop.ts'
 import { usePrefs } from '~/lib/prefs.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -39,15 +39,15 @@ export function useMessageNotifications(selectedId: string | undefined, open: (c
   const prefs = usePrefs()
   const feed = useQuery(convexQuery(api.messages.arrivals, {})).data
   const unread = useChatCounts()?.inbox.count
-  const since = useRef<Since>(undefined)
+  const cursor = useRef<Cursor | undefined>(undefined)
   // As of now, for the effect below and for a click that comes later.
   const latest = useRef({ selectedId, open, prefs })
   latest.current = { selectedId, open, prefs }
 
   useEffect(() => {
     if (!feed) return
-    const { since: next, fresh } = newArrivals(since.current, feed)
-    since.current = next
+    const { cursor: next, fresh } = newArrivals(cursor.current, feed)
+    cursor.current = next
     const { selectedId, prefs } = latest.current
     if (!prefs.notifications || !canNotify()) return
     const notified = new Set<string>()

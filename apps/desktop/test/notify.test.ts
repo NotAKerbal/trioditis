@@ -1,7 +1,7 @@
 import type { Arrival, ArrivalFeed, ChatRow, LastMessage } from '@trioditis/core'
 import { describe, expect, it } from 'vitest'
 import type { Chat } from '../src/data/chats.ts'
-import { newArrivals, notificationText } from '../src/data/notify.ts'
+import { LATE_MS, newArrivals, notificationText, type Cursor } from '../src/data/notify.ts'
 
 const arrival = (messageId: string, arrivedAt: number): Arrival => ({
   arrivedAt,
@@ -13,28 +13,64 @@ const feed = (latest: number | null, ...arrivals: Arrival[]): ArrivalFeed => ({ 
 const ids = (arrivals: Arrival[]) => arrivals.map((a) => a.message.messageId)
 
 describe('which arrivals notify', () => {
+  const after = (cursor: Cursor | undefined, ...feeds: ArrivalFeed[]) => {
+    const fresh: string[][] = []
+    for (const f of feeds) {
+      const next = newArrivals(cursor, f)
+      cursor = next.cursor
+      fresh.push(ids(next.fresh))
+    }
+    return { cursor: cursor!, fresh }
+  }
+  const at = (since: number) => after(undefined, feed(since)).cursor
+
   it('only sets the cursor on the first answer', () => {
-    expect(newArrivals(undefined, feed(20, arrival('m2', 20), arrival('m1', 10)))).toEqual({ since: 20, fresh: [] })
+    const first = newArrivals(undefined, feed(20, arrival('m2', 20), arrival('m1', 10)))
+    expect(first.fresh).toEqual([])
+    expect(first.cursor.since).toBe(20)
     // Nothing has arrived yet: everything after counts.
-    expect(newArrivals(undefined, feed(null))).toEqual({ since: 0, fresh: [] })
+    expect(newArrivals(undefined, feed(null)).cursor.since).toBe(0)
   })
 
   it('notifies for what arrived after the cursor, once', () => {
-    const second = newArrivals(10, feed(30, arrival('m3', 30), arrival('m2', 20), arrival('m1', 10)))
-    expect(ids(second.fresh)).toEqual(['m3', 'm2'])
-    expect(second.since).toBe(30)
-    expect(newArrivals(second.since, feed(30, arrival('m3', 30), arrival('m2', 20))).fresh).toEqual([])
+    const { fresh, cursor } = after(
+      at(10),
+      feed(30, arrival('m3', 30), arrival('m2', 20)),
+      feed(30, arrival('m3', 30), arrival('m2', 20)),
+    )
+    expect(fresh).toEqual([['m3', 'm2'], []])
+    expect(cursor.since).toBe(30)
+  })
+
+  it('never announces what was there on the first answer, even when it comes again', () => {
+    expect(after(undefined, feed(20, arrival('m1', 20)), feed(25, arrival('m1', 20))).fresh).toEqual([[], []])
+  })
+
+  it('still notifies for a message that committed after a newer one', () => {
+    // m1's mutation started first but committed after m2: it arrives with an earlier time.
+    const start = at(100_000)
+    const { fresh } = after(
+      start,
+      feed(100_200, arrival('m2', 100_200)),
+      feed(100_200, arrival('m2', 100_200), arrival('m1', 100_100)),
+    )
+    expect(fresh).toEqual([['m2'], ['m1']])
   })
 
   it('stays quiet for an old message that comes into view later', () => {
-    // Its chat brought back from the archive: it arrived before the cursor.
-    expect(newArrivals(30, feed(30, arrival('old', 5))).fresh).toEqual([])
+    // Its chat brought back from the archive: it arrived long before the cursor.
+    expect(after(at(LATE_MS * 3), feed(LATE_MS * 3, arrival('old', 5))).fresh).toEqual([[]])
   })
 
   it('moves the cursor past the person’s own sends, which aren’t listed', () => {
-    const { since } = newArrivals(30, feed(40))
-    expect(since).toBe(40)
-    expect(newArrivals(since, feed(50, arrival('m4', 50))).fresh.length).toBe(1)
+    const { cursor } = after(at(30), feed(40))
+    expect(cursor.since).toBe(40)
+    expect(after(cursor, feed(50, arrival('m4', 50))).fresh).toEqual([['m4']])
+  })
+
+  it('forgets what it has seen once it is too old to come again', () => {
+    const { cursor } = after(at(0), feed(10, arrival('m1', 10)), feed(LATE_MS * 2))
+    expect([...cursor.seen.keys()]).toEqual([])
   })
 })
 

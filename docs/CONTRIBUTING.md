@@ -218,10 +218,15 @@ Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox
 by root there; for local testing pass `--no-sandbox` after `app`. Installers that set this up
 properly are not built yet.
 
-On a Mac, passkeys don't work in the desktop app: Electron reaches the Mac's own (iCloud
-Keychain) only from a signed app tied to the server's domain, which a self-hosted server can't
-be, and it can't ask a security key for the PIN sign-in requires. The sign-in page says so
-there; sign in with the password in the app, or use the passkey in a browser.
+On a Mac and on Linux, passkeys don't work in the desktop app: Electron reaches the Mac's own
+(iCloud Keychain) only from a signed app tied to the server's domain, which a self-hosted
+server can't be, and it can't ask a security key for the PIN that signing in, unlocking and
+adding a passkey all require. On Windows the system asks, so they work. Sign-in, unlock and
+Settings → Keys and devices say so; use the password or recovery key in the app, or the
+passkey in a browser.
+
+Unsent drafts live only in the page's memory, so reloading, closing the window or changing
+servers with one open asks first.
 
 ### Starting over
 

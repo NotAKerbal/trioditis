@@ -51,6 +51,7 @@ import {
 import type { NotificationContent } from '~/data/notify.ts'
 import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
+import { passkeysUnavailable } from '~/lib/desktop.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import {
   addPasskey,
@@ -1000,6 +1001,11 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
         <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
           Add a passkey
         </Button>
+        {passkeysUnavailable ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            {passkeysUnavailable} Add them, and set them to unlock, in a browser.
+          </p>
+        ) : null}
       </div>
     </Setting>
   )

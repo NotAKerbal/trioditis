@@ -667,10 +667,13 @@ Alongside the page:
 - `latest`: when the newest live message of any kind arrived, the person's own included, or
   null if none has. It doesn't move when a chat changes view.
 
-Keep `latest` from the first answer as a cursor and notify only for arrivals after it,
-moving it on with each answer. So opening the app announces nothing, and an old message
-that comes into view later, its chat brought back from the archive, doesn't notify. More
-than ten arriving between two answers notify only for the newest ten.
+Keep `latest` from the first answer as a cursor and notify for arrivals after it, moving it
+on with each answer. So opening the app announces nothing, and an old message that comes
+into view later, its chat brought back from the archive, doesn't notify. `arrivedAt` is when
+the storing mutation started, not when it committed, so a message can appear after a newer
+one with an earlier time: count arrivals up to ten seconds behind the cursor too, once each
+(apps/desktop `newArrivals`). More than ten arriving between two answers notify only for the
+newest ten.
 
 ### Sending
 

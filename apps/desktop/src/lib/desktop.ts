@@ -11,3 +11,14 @@ export interface DesktopBridge {
 }
 
 export const desktop = (window as { trioditisDesktop?: DesktopBridge }).trioditisDesktop
+
+/**
+ * Said wherever a passkey is used, in the desktop app on a Mac or Linux, where passkeys don't
+ * work. An unsigned Electron app can't reach the Mac's own passkeys (iCloud Keychain), and
+ * Electron can't ask a security key for its PIN, which every passkey use here requires. On
+ * Windows the system asks, so they work.
+ */
+export const passkeysUnavailable =
+  desktop && desktop.platform !== 'win32'
+    ? `Passkeys don’t work in the desktop app on ${{ darwin: 'a Mac', linux: 'Linux' }[desktop.platform] ?? 'this system'} yet.`
+    : null

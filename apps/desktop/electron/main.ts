@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   nativeTheme,
@@ -47,6 +48,8 @@ let attempt = 0
 /** A checked server is being saved and opened: from here the picker can't be cancelled or closed. */
 let committing = false
 let quitting = false
+/** Set while the app closes the server's window to change servers: told if the person stays. */
+let onStay: (() => void) | null = null
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 
@@ -136,6 +139,23 @@ function openServer(origin: string) {
   keepOnOrigin(win.webContents, origin)
   let loaded = false
   win.webContents.on('did-finish-load', () => (loaded = true))
+  // The page holds unsent text (src/features/shell/keep-unsent.ts), and is being reloaded,
+  // closed or left for another server: the person decides.
+  win.webContents.on('will-prevent-unload', (event) => {
+    reveal(win)
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'question',
+      buttons: ['Leave', 'Stay'],
+      defaultId: 1,
+      cancelId: 1,
+      message: 'Leave without sending?',
+      detail: 'You have messages you haven’t sent. If you leave, they’re lost.',
+    })
+    if (choice === 0) return event.preventDefault()
+    // Staying also stops a quit, and a change of server.
+    quitting = false
+    onStay?.()
+  })
   // A server that can't be reached at start: back to the picker, saying why. Once the app has
   // loaded, a failed reload stays put; the person can reload when the server is back.
   win.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
@@ -159,6 +179,24 @@ function openServer(origin: string) {
   void win.loadURL(`${origin}/`)
   app.setBadgeCount(0)
   previous?.destroy()
+}
+
+/** Closes the server's window, if its page lets it go: false if the person chose to stay. */
+function closeServer(win: BrowserWindow): Promise<boolean> {
+  return new Promise((resolve) => {
+    const finish = (left: boolean) => {
+      onStay = null
+      win.off('closed', closed)
+      if (!left) serverWindow = win
+      resolve(left)
+    }
+    const closed = () => finish(true)
+    onStay = () => finish(false)
+    // Not the server's window while it closes, so a Mac doesn't just hide it.
+    serverWindow = null
+    win.once('closed', closed)
+    win.close()
+  })
 }
 
 function showConnect(error?: string) {
@@ -244,12 +282,25 @@ ipcMain.handle('connect:connect', async (event, address: unknown) => {
   // Cancelled, closed or tried again while the server was being checked: this one is moot.
   if (mine !== attempt) return {}
   if (problem) return { error: problem }
+  // Already open: nothing to change.
+  if (serverWindow && parsed.origin === serverOrigin) {
+    connectWindow?.close()
+    reveal(serverWindow)
+    return {}
+  }
   // The one point of no return: nothing after it can be cancelled.
   committing = true
+  const previous = serverOrigin
   try {
-    await saveSettings({ ...settings, server: parsed.origin })
-  } catch {
-    return { error: 'That server couldn’t be saved. Try again.' }
+    // The server being left goes first, since its page may hold unsent text and keep it.
+    if (serverWindow && !(await closeServer(serverWindow)))
+      return { error: 'You stayed, so the server wasn’t changed. Send or clear your messages first.' }
+    try {
+      await saveSettings({ ...settings, server: parsed.origin })
+    } catch {
+      if (previous) openServer(previous)
+      return { error: 'That server couldn’t be saved. Try again.' }
+    }
   } finally {
     committing = false
   }

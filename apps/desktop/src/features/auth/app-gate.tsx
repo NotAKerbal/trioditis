@@ -25,6 +25,7 @@ import { Check, Copy, KeyRound, ShieldCheck } from 'lucide-react'
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { authClient, convexTokenFor } from '~/lib/auth-client.ts'
 import { config } from '~/lib/config.ts'
+import { passkeysUnavailable } from '~/lib/desktop.ts'
 import { convex } from '~/lib/convex.ts'
 import { canKeepKeys, KeepRefused, loadIdentity, onFence, saveToken, storeIdentity } from '~/lib/keys.ts'
 import {
@@ -1076,6 +1077,11 @@ function Unlock({
           >
             <KeyRound className="size-4" /> Unlock with a passkey
           </Button>
+        ) : null}
+        {passkeys.length > 0 && passkeysUnavailable ? (
+          <p className="mt-2 text-center text-sm text-muted-foreground">
+            {passkeysUnavailable} Unlock with your password or recovery key here, or use your passkey in a browser.
+          </p>
         ) : null}
         <Button type="button" block className="mt-2" onClick={onSignOut}>
           Sign out
