@@ -356,7 +356,7 @@ An update doesn't sign anyone out or restart the whole server:
   functions job reads it from `deploy/runtime/version`, not its environment, so a new commit
   alone doesn't make Compose recreate the job and everything that waits for it. When a page
   sees the server's version change, it waits for `/version.json` to name a build other than
-  its own, then reloads by itself if it's in the background with no draft or settings open,
+  its own, then reloads by itself if it's in the background with nothing unsaved (no draft or send under way, nothing typed in any field) and no settings, dialog or menu open,
   and otherwise offers a reload.
 
 ## Encryption at rest

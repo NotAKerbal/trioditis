@@ -7,8 +7,9 @@ import { buildOutdated } from '~/data/updates.ts'
 // After the server is updated, open pages move to the new web app by themselves. The server's
 // version (server.info) changes the moment the new functions are deployed, which can be a few
 // seconds before Caddy serves the new web app, so a page reloads only once /version.json names
-// a build other than its own. While nobody's looking (the page hidden, nothing unsaved, no
-// settings open) it reloads straight away; otherwise it offers a reload.
+// a build other than its own. While nobody's looking it reloads straight away: the page hidden,
+// no draft or send under way, no settings, dialog or menu open, and nothing typed in any field
+// on the page (whatever the field is for). Otherwise it offers a reload.
 
 const BUILD: string | undefined = import.meta.env.VITE_TRIODITIS_VERSION
 /** How often, and for how long, to look for the new web app once the server has a new version. */
@@ -26,6 +27,22 @@ async function servedBuild(): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+/**
+ * Whether the page holds anything a reload would lose that the app doesn't track itself: text
+ * typed in any field, or a dialog or menu open.
+ */
+function pageBusy() {
+  const fields = document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+  for (const field of fields) {
+    if (field.readOnly || field.disabled) continue
+    if (field instanceof HTMLInputElement && ['hidden', 'checkbox', 'radio', 'button', 'submit'].includes(field.type))
+      continue
+    if (field.value.trim()) return true
+  }
+  if (document.querySelector('[contenteditable="true"]:not(:empty)')) return true
+  return !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')
 }
 
 function reloadedFor() {
@@ -72,7 +89,13 @@ export function UpdateNotice() {
     if (!next) return
     const quietly = () => {
       const settingsOpen = new URLSearchParams(window.location.search).has('settings')
-      if (document.visibilityState === 'hidden' && !hasDrafts() && !settingsOpen && reloadedFor() !== next) {
+      if (
+        document.visibilityState === 'hidden' &&
+        !hasDrafts() &&
+        !settingsOpen &&
+        !pageBusy() &&
+        reloadedFor() !== next
+      ) {
         reload(next)
       }
     }
