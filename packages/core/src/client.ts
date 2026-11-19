@@ -103,8 +103,13 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'groupme',
     name: 'GroupMe',
     maturity: 'experimental',
-    // Filled in from the connector's login flows; see docs/networks/groupme.md.
-    flows: [],
+    // The connector's third flow, `web`, reads the token from an embedded browser, which the
+    // stepper doesn't have; pasting the same token is `access-token`. See docs/networks/groupme.md.
+    flows: [
+      { id: 'access-token', kind: 'form', name: 'Access token' },
+      { id: 'password', kind: 'form', name: 'Email or phone and password' },
+    ],
+    // GroupMe has a public API for third-party apps using a person's own access token.
     termsRisk: false,
   },
   gvoice: {
