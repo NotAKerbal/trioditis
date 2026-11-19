@@ -113,8 +113,8 @@ func startTelegramHost(t *testing.T, dir string) *host.Host {
 	return h
 }
 
-// waitForLoginStep returns the next step the host reports for a login session.
-func waitForLoginStep(t *testing.T, h *host.Host, session string, from *int64) *protocol.LoginStep {
+// nextTelegramLoginStep returns the next step the host reports for a login session.
+func nextTelegramLoginStep(t *testing.T, h *host.Host, session string, from *int64) *protocol.LoginStep {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -152,7 +152,7 @@ func TestTelegramPhoneLoginStartsThroughHost(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	step := waitForLoginStep(t, h, session, &from)
+	step := nextTelegramLoginStep(t, h, session, &from)
 	if step.Type != protocol.StepUserInput || len(step.Fields) != 1 {
 		t.Fatalf("first step: %+v", step)
 	}
@@ -164,7 +164,7 @@ func TestTelegramPhoneLoginStartsThroughHost(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if step = waitForLoginStep(t, h, session, &from); step.Type != protocol.StepCancelled {
+	if step = nextTelegramLoginStep(t, h, session, &from); step.Type != protocol.StepCancelled {
 		t.Fatalf("after cancel: %+v", step)
 	}
 }
