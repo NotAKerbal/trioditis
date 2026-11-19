@@ -197,6 +197,13 @@ init() {
 }
 
 main() {
+  # A user service runs with the groups the user's systemd manager started with, which lack
+  # docker if the operator was added to it since. sg starts this again in the group then.
+  if ! docker info >/dev/null 2>&1 && [ -z "${UPDATER_IN_DOCKER_GROUP:-}" ] && command -v sg >/dev/null &&
+    getent group docker | cut -d: -f4 | tr ',' '\n' | grep -qx "$(id -un)"; then
+    log "Not in the docker group in this session; starting again with sg."
+    exec env UPDATER_IN_DOCKER_GROUP=1 sg docker -c "exec bash $(printf '%q' "${BASH_SOURCE[0]}")"
+  fi
   init || exit 1
   # Containers left by an updater that was killed mid-watch.
   for container in $(docker ps -aq --filter "label=trioditis.updater=$project"); do
