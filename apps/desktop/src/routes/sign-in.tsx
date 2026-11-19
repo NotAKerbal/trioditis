@@ -11,11 +11,15 @@ import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
 import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
 import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
-import { passkeysUnavailable } from '~/lib/desktop.ts'
+import { desktop, passkeysUnavailable, serverSwitcher } from '~/lib/desktop.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 import { holdPrf, signInWithPasskey } from '~/lib/passkeys.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
+
+// In the desktop app, the server this page belongs to, so a person who picked the wrong one
+// can go back to the picker from here, as in other self-hosted apps' sign-in screens.
+const server = serverSwitcher(desktop, window.location)
 
 function SignIn() {
   const navigate = useNavigate()
@@ -74,7 +78,26 @@ function SignIn() {
   return (
     <AuthCard
       title="Sign in"
-      description="to your Trioditis server."
+      description={
+        server ? (
+          <>
+            to <span className="font-semibold text-foreground">{server.host}</span>
+            {' · '}
+            {/* Sized as the sentence it sits in, not as a control. */}
+            <Button
+              variant="link"
+              className="h-auto px-0 align-baseline text-base"
+              aria-label="Change server"
+              onClick={server.change}
+              disabled={busy !== null}
+            >
+              Change
+            </Button>
+          </>
+        ) : (
+          'to your Trioditis server.'
+        )
+      }
       footer={
         <>
           Setting up a new server?{' '}

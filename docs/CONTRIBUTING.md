@@ -202,14 +202,15 @@ pnpm --filter @trioditis/desktop app --server http://localhost:<port>    # this 
 The first run downloads Electron's binary (pnpm doesn't run its install script). The app asks
 for the address you open Trioditis at, checks that it is a Trioditis server whose web app
 works in the desktop app (its `trioditis-desktop` marker; a server from before it is turned
-away as too old), and remembers it; **File → Change
-Server…** picks another. Plain `http://` is accepted only for this machine. Each server gets
-its own session, so nothing is shared between them.
+away as too old), and remembers it; **File → Change Server…**, or **Change** beside the
+server's name on the sign-in page, picks another. Plain `http://` is accepted only for this
+machine. Each server gets its own session, so nothing is shared between them.
 
 What the server's page can do is limited: it runs sandboxed with no Node, stays on the
 server's address (other links open in your browser), may ask only for notifications, the
-clipboard and full screen, and reaches the app only to set the badge and bring the window
-forward, both checked in the main process.
+clipboard and full screen, and reaches the app only to set the badge, bring the window
+forward and open the server picker, each checked in the main process. Opening the picker
+changes nothing by itself: the person still types the address, and the picker checks it.
 
 Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
 the desktop app; a browser asks first (Settings → Notifications). They show who sent the
