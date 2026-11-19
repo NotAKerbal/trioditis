@@ -307,10 +307,11 @@ key is wrapped with it as a `passkey` backup for that credential:
 ```ts
 await ready()
 const first = passkeyPrfSalt() // the PRF input; the same everywhere (below)
-const { data, webauthn } = await authClient.passkey.addPasskey({
+const { data, error, webauthn } = await authClient.passkey.addPasskey({
   extensions: { prf: { eval: { first } } },
   returnWebAuthnResponse: true,
 }) // with the page's session in x-trioditis-session-id (Key writes are bound to the page's session)
+if (error || !webauthn) return // cancelled, or refused (a 409 sessionChanged: reload)
 const output = webauthn.clientExtensionResults.prf?.results?.first
 // No output: the passkey signs in, but makes no backup yet (see below).
 if (!output) return
@@ -361,9 +362,15 @@ await convex.mutation(api.keys.putBackup, {
   passkey's backups and its sign-in credential in one transaction, so nothing is left half
   removed. A credential no longer registered just loses its backups. Better Auth's own
   `/passkey/delete-passkey` removes only the sign-in credential; don't use it.
-- **Adding one at a time.** The registration header is the page's, so the desktop app refuses a
-  second registration while one is under way rather than let one's end leave the other without
-  it.
+- **Adding one at a time, in the whole browser.** The registration header is the page's, and
+  Better Auth keeps the challenge in one cookie every tab shares, so a second registration
+  under way at once would leave one without its header, or replace the other's challenge and
+  make both fail. The desktop app holds a Web Lock (`trioditis-passkey-registration`) for the
+  whole ceremony and refuses a second one, in any tab, while it's held.
+- **Known gap:** the session check (Key writes are bound to the page's session) runs before
+  Better Auth stores the credential, in a separate step. A sign-out of that same session in
+  another tab in the instant between them can let the credential land just after the session
+  ended. It still lands on the same account, made by that person's own authenticator.
 
 ### Key writes are bound to the page's session
 

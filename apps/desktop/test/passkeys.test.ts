@@ -1,10 +1,13 @@
 import { generateKeyPair, keyId, passkeyPrfSalt, ready, SealError, toBase64Url } from '@trioditis/crypto'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { asSession, authClient } from '../src/lib/auth-client.ts'
 import { sessionChanged } from '../src/lib/errors.ts'
 import { holdPrf, openPasskeyBackup, passkeyBackup, takePrf } from '../src/lib/passkeys.ts'
 
 beforeAll(ready)
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 const prf = (fill: number, credentialId = 'cred-1') => ({ credentialId, output: new Uint8Array(32).fill(fill) })
 
@@ -80,6 +83,20 @@ describe('adding a passkey', () => {
     await first
     // Once it's done, the next may start.
     await expect(asSession('session-1', async () => 'ok')).resolves.toBe('ok')
+  })
+
+  it('refuses, running nothing, while another tab holds the registration lock', async () => {
+    // As if another tab were adding one: the lock isn't available.
+    vi.stubGlobal('navigator', {
+      locks: { request: async (_name: string, _options: unknown, run: (lock: null) => unknown) => run(null) },
+    })
+    let ran = false
+    await expect(
+      asSession('session-1', async () => {
+        ran = true
+      }),
+    ).rejects.toThrow(/another tab/)
+    expect(ran).toBe(false)
   })
 
   it('treats Better Auth’s session refusal as the page’s session having changed', () => {

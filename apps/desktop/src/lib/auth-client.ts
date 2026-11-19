@@ -42,20 +42,37 @@ let registeringAs: string | null = null
 const SESSION_HEADER = 'x-trioditis-session-id'
 const REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
 
+/** The Web Lock held, in whichever tab, while a passkey is being added. */
+const REGISTRATION_LOCK = 'trioditis-passkey-registration'
+
 /**
  * Runs `register` (which adds a passkey) as `sessionId`, the session the page opened with: if
  * the browser is in another by now, the server refuses both steps (409, sessionChanged) and
- * changes nothing. One at a time: the header is the page's, so a second registration starting
- * meanwhile is refused, rather than one ending and leaving the other's later step without it.
+ * changes nothing. One at a time, in the whole browser: the header is the page's, so a second
+ * registration in this page would leave the other's later step without it; and the challenge is
+ * in one cookie every tab shares, so one in another tab would replace it, and both would fail
+ * after the authenticator had made a credential. So a second one is refused, not queued.
  */
 export async function asSession<T>(sessionId: string, register: () => Promise<T>): Promise<T> {
   if (registeringAs !== null) throw new Error('A passkey is already being added here. Wait for it to finish.')
-  registeringAs = sessionId
-  try {
-    return await register()
-  } finally {
-    registeringAs = null
+  const run = async () => {
+    registeringAs = sessionId
+    try {
+      return await register()
+    } finally {
+      registeringAs = null
+    }
   }
+  // Web Locks are on every secure page; without them, only this page's own check holds.
+  if (typeof navigator === 'undefined' || !navigator.locks) return run()
+  let started = false
+  const result = await navigator.locks.request(REGISTRATION_LOCK, { ifAvailable: true }, async (lock) => {
+    if (!lock) return undefined
+    started = true
+    return await run()
+  })
+  if (!started) throw new Error('A passkey is being added in another tab. Finish it there first.')
+  return result as T
 }
 const convexTokens = new Map<string, string>()
 
