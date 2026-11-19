@@ -321,7 +321,9 @@ Adding a passkey goes through Better Auth's routes, not Convex, so the page's se
 a header instead: `x-trioditis-session-id: <sessionId>` on `/passkey/generate-register-options`
 and `/passkey/verify-registration`. If the cookie's session isn't that one, both answer 409
 with `{ "code": "sessionChanged", "message": "This page’s session has changed. Reload the
-page." }` before anything is stored, so no challenge is made for the other account. (The
+page." }` before anything is stored or refreshed, so no challenge is made for the other
+account and the other session is left as it was. A bearer token sent alongside is refused the
+same way: the page signs in with its cookie. (The
 passkey plugin already refuses an answer from another account than its challenge's.)
 `addPasskey` passes its own fetch options only to the second step, so set the header for both
 in the auth client's `fetchOptions.onRequest`, from the session the page opened with:

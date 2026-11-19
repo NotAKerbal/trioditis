@@ -1,4 +1,4 @@
-import { APIError, createAuthEndpoint, createAuthMiddleware, getIP, getSessionFromCtx } from 'better-auth/api'
+import { APIError, createAuthEndpoint, createAuthMiddleware, getIP } from 'better-auth/api'
 import type { BetterAuthPlugin } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
@@ -65,9 +65,9 @@ const PASSKEY_REGISTRATION_PATHS = ['/passkey/generate-register-options', '/pass
  * Adding a passkey, bound to the page's session like the key writes: a page another tab's
  * sign-in has switched would otherwise ask for options, and so a challenge, for the other
  * account. Both steps are refused (409, code `sessionChanged`) before anything is written when
- * the header names another session than the cookie's. The passkey plugin itself already
- * refuses an answer from another account than the one its challenge was made for. Without the
- * header nothing is checked, as before.
+ * the header names another session than the cookie's, or a bearer token comes as well. The
+ * passkey plugin itself already refuses an answer from another account than the one its
+ * challenge was made for. Without the header nothing is checked, as before.
  */
 const passkeySessionBinding = {
   id: 'trioditis-passkey-session',
@@ -78,10 +78,20 @@ const passkeySessionBinding = {
         handler: createAuthMiddleware(async (context) => {
           const expected = context.headers?.get(SESSION_HEADER)
           if (expected === null || expected === undefined) return
-          const session = await getSessionFromCtx(context)
-          if (session?.session.id !== expected) {
+          const refuse = () => {
             throw new APIError('CONFLICT', { code: SESSION_CHANGED.code, message: SESSION_CHANGED.message })
           }
+          // A page signs in with its cookie. A bearer token as well would make Better Auth act
+          // on that session instead, after this check, so it isn't taken here.
+          if (context.headers?.get('authorization')) refuse()
+          // The cookie's session, read as it is: looking it up the usual way would also extend
+          // or end it, which a refused request mustn't do to someone else's session.
+          const token = await context.getSignedCookie(
+            context.context.authCookies.sessionToken.name,
+            context.context.secret,
+          )
+          const found = token ? await context.context.internalAdapter.findSession(token) : null
+          if (found?.session.id !== expected) refuse()
         }),
       },
     ],

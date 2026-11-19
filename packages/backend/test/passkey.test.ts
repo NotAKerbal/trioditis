@@ -78,4 +78,65 @@ describe('adding a passkey', () => {
     }
     expect(await challenges(t)).toBe(before)
   })
+
+  it('keeps a live challenge, sets no cookie, and leaves the other session as it was', async () => {
+    const t = setup()
+    const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
+    const asAlex = t.withIdentity({ subject: alex.session.userId, sessionId: alex.session.id })
+    const { token } = await asAlex.mutation(api.members.invite, { email: 'bea@example.com', role: 'member' })
+    const bea = await signUp(t, 'bea@example.com', token)
+    // Alex's page asked for options, so it holds a challenge and its cookie.
+    const started = await options(t, alex.cookie, { [SESSION_HEADER]: alex.session.id })
+    expect(started.status).toBe(200)
+    const challengeCookie = started.headers
+      .getSetCookie()
+      .map((value) => value.split(';')[0])
+      .join('; ')
+    expect(challengeCookie).not.toBe('')
+    const live = await challenges(t)
+    // Bea's session is due for a refresh, which a refused request mustn't give it.
+    const beaBefore = await t.run(async (ctx) => {
+      const id = bea.session.id as never
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, {
+        input: {
+          model: 'session',
+          where: [{ field: '_id', value: id }],
+          // Better Auth extends a session once less than its expiry minus a day is left.
+          update: { expiresAt: Date.now() + 2 * 24 * 60 * 60 * 1000 },
+        },
+      })
+      return await ctx.runQuery(components.betterAuth.adapter.findOne, {
+        model: 'session',
+        where: [{ field: '_id', value: id }],
+      })
+    })
+
+    // Then Bea signed in on another tab.
+    const switched = `${bea.cookie}; ${challengeCookie}`
+    const refusedOptions = await options(t, switched, { [SESSION_HEADER]: alex.session.id })
+    expect(refusedOptions.status).toBe(409)
+    expect(refusedOptions.headers.getSetCookie()).toEqual([])
+    const refusedVerify = await verify(t, switched, { [SESSION_HEADER]: alex.session.id })
+    expect(refusedVerify.status).toBe(409)
+    expect(refusedVerify.headers.getSetCookie()).toEqual([])
+    expect(await challenges(t)).toBe(live)
+    const beaAfter = await t.run(
+      async (ctx) =>
+        await ctx.runQuery(components.betterAuth.adapter.findOne, {
+          model: 'session',
+          where: [{ field: '_id', value: bea.session.id as never }],
+        }),
+    )
+    expect(beaAfter).toEqual(beaBefore)
+  })
+
+  it('refuses a bearer token alongside the cookie', async () => {
+    const t = setup()
+    const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
+    const response = await options(t, alex.cookie, {
+      [SESSION_HEADER]: alex.session.id,
+      authorization: 'Bearer someone-else',
+    })
+    expect(response.status).toBe(409)
+  })
 })
