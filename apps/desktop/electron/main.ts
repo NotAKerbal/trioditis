@@ -140,9 +140,13 @@ function openServer(origin: string) {
   serverOrigin = origin
   keepOnOrigin(win.webContents, origin)
   let loaded = false
-  // The status of the page now loading, so a server's error page (mid-update, say) isn't taken
-  // for an old web app.
+  // The status of the page now loading, so a server's error page (mid-update, say) or the
+  // network's (offline) isn't taken for an old web app. Each load starts with none; a failed
+  // one shows an error page without ever getting one.
   let status = 0
+  win.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) status = 0
+  })
   win.webContents.on('did-navigate', (_event, _url, code) => (status = code))
   win.webContents.on('did-finish-load', () => {
     loaded = true
@@ -180,6 +184,7 @@ function openServer(origin: string) {
   // A server that can't be reached at start: back to the picker, saying why. Once the app has
   // loaded, a failed reload stays put; the person can reload when the server is back.
   win.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) status = 0
     // -3 is a navigation replaced by another, not a failure.
     if (!isMainFrame || loaded || code === -3 || serverWindow !== win) return
     serverWindow = null
