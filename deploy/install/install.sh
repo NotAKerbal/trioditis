@@ -504,8 +504,11 @@ write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
-# network's service at the same time, and the builds collide on the shared tag.
-docker build -q -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
+# network's service at the same time, and the builds collide on the shared tag. Signal's
+# library (Rust) is only built when Signal is enabled: it adds a long first build.
+with_signal=0
+[[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
+docker build -q --build-arg "WITH_SIGNAL=$with_signal" -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
