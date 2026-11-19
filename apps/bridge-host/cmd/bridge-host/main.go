@@ -64,7 +64,7 @@ func main() {
 		level = zerolog.DebugLevel
 	}
 	console := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}
-	log := zerolog.New(console).Level(level).With().Timestamp().Logger()
+	log := zerolog.New(logOutput(*network, console)).Level(level).With().Timestamp().Logger()
 	// mautrix-meta's protocol decoder logs through zerolog's global logger and attaches the
 	// raw protocol data, message text included, to its warnings. The global logger writes to
 	// the same output but keeps only the fields known to be safe, never below warn.
@@ -114,6 +114,7 @@ func main() {
 		BridgeKey:     bridgeKey,
 
 		NetworkConnector: netConn,
+		ReceiveOnly:      spec.ReceiveOnly,
 		Log:              log,
 	}
 	cfg.CommandAddr = "http://" + cfg.ListenAddr
@@ -170,6 +171,16 @@ func main() {
 		log.Info().Msg("Logged in. Messages are being bridged into the journal; run `inspect` in another terminal to read them. Ctrl+C to stop.")
 	}
 	<-ctx.Done()
+}
+
+// logOutput is where the process logs: w, through the network's filter if it has one. A
+// network whose connector logs what must not be written out filters the host's log, which is
+// the one bridgev2 hands the connector.
+func logOutput(network string, w io.Writer) io.Writer {
+	if spec, ok := networks.Lookup(network); ok && spec.LogFilter != nil {
+		return spec.LogFilter(w)
+	}
+	return w
 }
 
 type keyFile struct {

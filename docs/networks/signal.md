@@ -4,8 +4,12 @@ Signal, through `go.mau.fi/mautrix-signal` **v0.2611.0** (`pkg/connector`,
 `SignalConnector`), which links Signal's own Rust library, **libsignal v0.106.1**
 (`github.com/signalapp/libsignal`, tag `v0.106.1`, commit
 `904c8dc8216073b078a5f2f5090e3da8382e6a92`), through cgo. Network ID `signal`, maturity
-**stable** (its v1 target in docs/PLAN.md), `termsRisk: false`: the bridge is a linked
-device, like Signal Desktop, made with Signal's own linking flow.
+**experimental** (stable is its v1 target in docs/PLAN.md), `termsRisk: false`: the bridge
+is a linked device, like Signal Desktop, made with Signal's own linking flow.
+
+**Receive-only for now** (`receiveOnly: true` in `NETWORK_INFO`): messages, history and
+read state come in, but the bridge host refuses sends, edits, reactions and deletions. See
+Sending.
 
 One login is one Signal account, linked as a secondary device of the phone. The phone
 stays the primary device: it must stay registered, and Signal unlinks a device that hasn't
@@ -95,6 +99,45 @@ Voice notes sent from Trioditis need ffmpeg (ogg to aac), which the image doesn'
 the connector reports them as unsupported; received voice notes come through unconverted
 (AAC). Stickers as GIF need it too.
 
+## Sending
+
+AGENTS.md: a send is never retried after an ambiguous outcome; it is reported `unknown`
+and the person decides. mautrix-signal v0.2611.0 retries on its own in two places, both
+before the connector returns, so the host never gets to say `unknown`:
+
+- **A dropped websocket.** When the connection closes with a request's response still
+  outstanding, signalmeow closes that request's response channel, and
+  `web.SignalWebsocket.sendRequestInternal` resubmits the same request on the next
+  connection, up to three times (`pkg/signalmeow/web/signalwebsocket.go`). If Signal had
+  accepted the first one, it gets it twice.
+- **A 500 or 503 from Signal.** `sendContent` (one recipient, `pkg/signalmeow/sending.go`)
+  and `sendToGroupWithSenderKey` (a group, `pkg/signalmeow/senderkey.go`) send again with
+  the same timestamp. 409 and 410 (the recipient's device list changed: Signal refused the
+  message, so sending again is right) and 428 are retried the same way.
+
+There is no seam the bridge host can use. Every request goes through signalmeow's own
+websocket client (`AuthedWS`, `UnauthedWS`). Its outgoing queue is one unexported channel
+that senders write to and each new connection's write loop reads, both through the same
+field, so it can't be wrapped without racing a reconnect; the response channels live in a
+local map; and the client and its websockets are made and connected in one call. A hook below that
+would mean reading and rewriting Signal's websocket frames under TLS. The connector's
+client type (`*SignalClient`) is asserted in several places, so it can't be wrapped either.
+
+So until mautrix-signal can be told not to resubmit (a patch upstream, or a fork), the
+bridge host runs Signal **receive-only** (`networks.Network.ReceiveOnly`): it refuses
+`send`, `edit`, `react`, `unreact` and `redact` with 409 `unsupported` before anything
+reaches bridgev2, so nothing is submitted and the refusal is certain (a stored one is
+refused when it runs and fails). `markRead` and `typing` still go out: a repeated read
+receipt or typing notice changes nothing. Turning sends back on is `ReceiveOnly: false` in
+`internal/networks/signal.go` and dropping `receiveOnly` from `NETWORK_INFO`, once a patched
+connector is in.
+
+For whoever decides that: a resubmission isn't shown twice by Signal's apps. The
+websocket case resends the same ciphertext, which libsignal refuses to decrypt a second
+time, and the 500/503 case reuses the message's timestamp, which Signal's apps use to drop
+duplicates. That's Signal's behaviour, not something the bridge host can check, so it isn't
+relied on here.
+
 ## Logging in
 
 | Flow ID | Stepper kind | First step                                         | Needs Signal's servers |
@@ -179,14 +222,20 @@ archived recipients once it has no archived chat left; backfill reads senders, q
 reaction authors from them until then. History for a chat that is never backfilled stays.
 
 **Logs.** At the default level the connector logs identifiers (service IDs, timestamps), not
-content. One exception: signalmeow logs a contact-sync entry with no Signal ID at info level
-with its details, which include the contact's name and phone number (`receiving.go`,
-"Signal Contact UUID is nil, skipping"). Phones rarely send such entries; it can't be
-turned off without patching signalmeow. `--verbose` adds error responses' bodies from
-Signal's servers, which hold no message content.
+content, with two exceptions, both at info: the history transfer's `BackupInfo`, which holds
+the account's `mediaRootBackupKey` (`backup.go`, "Received backup info"), and a contact-sync
+entry with no Signal ID, with the contact's name and phone number (`receiving.go`, "Signal
+Contact UUID is nil, skipping"). Signal's bridge host writes its whole log through a filter
+(`internal/networks/signallog.go`) that drops those fields (`backup_info`, `contact`) from
+every line, along with the trace-only fields that carry content or keys, and lists what it
+dropped in `dropped_fields`; the line itself stays. A line that isn't valid JSON is replaced.
+`--verbose` adds error responses' bodies from Signal's servers, which hold no message
+content.
 
 ## Known limits
 
+- **Receive-only** until mautrix-signal stops resubmitting after an ambiguous outcome; see
+  Sending.
 - **Building takes Rust.** See Building with Signal. The image's Rust stage hasn't been
   run yet (the agent that wrote it had no Docker access); the same libsignal tag was built
   and linked natively on x86_64.
@@ -208,11 +257,11 @@ With Isaac's account, on a host built with Signal (`pnpm dev --network signal` o
 - [ ] **Backfill:** recent chats appear with their history, DMs and groups, with names and
       avatars; Note to Self is there with no avatar.
 - [ ] **Receive:** a message from another phone arrives in a DM and in a group.
-- [ ] **Send:** text to a DM and a group; it shows on the phone (as sent from this device)
-      and on the recipient's.
-- [ ] **Reply, edit, react, delete:** each, both directions. Edit and delete within 24
-      hours.
-- [ ] **Media:** an image, a video, a file, a received voice note; sending an image.
+- [ ] **Sending is refused:** a send, edit, reaction or delete fails at once with
+      `unsupported`, and nothing appears on the phone.
+- [ ] **Their edits, reactions and deletes** arrive.
+- [ ] **Media:** an image, a video, a file and a voice note arrive.
+- [ ] **Read state:** reading a chat in Trioditis marks it read on the phone.
 - [ ] **Own messages:** one sent from the phone appears as yours.
 - [ ] **Reconnect after restart:** stop the bridge host, send it a message meanwhile, start
       it: the message arrives once.

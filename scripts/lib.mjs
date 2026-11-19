@@ -977,11 +977,20 @@ export function buildBridgeHost({ signal = false } = {}) {
  */
 export function libsignalDir(goEnvironment = goEnv()) {
   const dir = process.env.LIBSIGNAL_FFI_DIR ? resolve(process.env.LIBSIGNAL_FFI_DIR) : resolve(dataDir, 'libsignal')
-  const module = capture('go', ['list', '-m', '-f', '{{.Dir}}', 'go.mau.fi/mautrix-signal'], {
+  // `go mod download` fetches the module first if the cache doesn't have it yet, and says
+  // where it is extracted; `go list -m` gives an empty directory in that case.
+  const downloaded = capture('go', ['mod', 'download', '-json', 'go.mau.fi/mautrix-signal'], {
     cwd: bridgeDir,
     env: goEnvironment,
     quiet: true,
   })
+  let module
+  try {
+    module = JSON.parse(downloaded).Dir
+  } catch {
+    module = undefined
+  }
+  if (!module) throw new Error(`Couldn't find mautrix-signal's source: go mod download gave no directory.`)
   const pinned = readFileSync(resolve(module, 'pkg/libsignalgo/signalversion/version.go'), 'utf8')
   const version = /const Version = "v(\d+\.\d+\.\d+)"/.exec(pinned)?.[1]
   if (!version) throw new Error(`Couldn't tell which libsignal version mautrix-signal needs (${module}).`)

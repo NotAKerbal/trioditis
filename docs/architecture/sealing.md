@@ -222,8 +222,10 @@ Each network's page in `docs/networks/` lists exactly what its connector keeps; 
   tables, and RCS read receipts naming who read a message (Google Messages).
 
 None of the connectors writes message content to its logs at info level, except Telegram's
-content hash; a few log raw network responses at warn or error, and Signal logs the name and
-number of a synced contact that has no Signal ID.
+content hash; a few log raw network responses at warn or error. Signal's connector logs the
+history transfer's backup key and the name and number of a synced contact with no Signal ID,
+but its bridge host drops those fields from every line before they are written
+(docs/networks/signal.md, What's stored in plaintext).
 
 **Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
 encrypted backups**; the installer warns when its data directory isn't on an encrypted
