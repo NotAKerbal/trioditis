@@ -16,7 +16,7 @@ import {
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { isExternalAllowed, normalizeServer, sameOrigin, serverKind } from './server.ts'
+import { isExternalAllowed, normalizeServer, pageIsReady, sameOrigin, serverKind, TOO_OLD } from './server.ts'
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
 // a dock badge and a menu. Nothing from the server runs with Node: its pages are sandboxed and
@@ -140,7 +140,26 @@ function openServer(origin: string) {
   serverOrigin = origin
   keepOnOrigin(win.webContents, origin)
   let loaded = false
-  win.webContents.on('did-finish-load', () => (loaded = true))
+  // The status of the page now loading, so a server's error page (mid-update, say) isn't taken
+  // for an old web app.
+  let status = 0
+  win.webContents.on('did-navigate', (_event, _url, code) => (status = code))
+  win.webContents.on('did-finish-load', () => {
+    loaded = true
+    if (status < 200 || status >= 300) return
+    // The picker checked the server, but a saved one, `--server` or a reload can bring an older
+    // web app, which would lose unsent text without asking: back to the picker before anything
+    // is typed.
+    void win.webContents
+      .executeJavaScript(pageIsReady)
+      .catch(() => true)
+      .then((ready) => {
+        if (ready || serverWindow !== win) return
+        serverWindow = null
+        showConnect(TOO_OLD)
+        win.destroy()
+      })
+  })
   // The page holds unsent text (src/features/shell/keep-unsent.ts), and is being reloaded,
   // closed or left for another server: the person decides.
   win.webContents.on('will-prevent-unload', (event) => {
@@ -225,7 +244,10 @@ function showConnect(error?: string) {
   connectWindow = win
   win.webContents.on('will-navigate', (event) => event.preventDefault())
   win.on('close', (event) => {
-    if (committing) event.preventDefault()
+    if (!committing) return
+    event.preventDefault()
+    // That also stops a quit.
+    quitting = false
   })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.on('closed', () => {
@@ -249,8 +271,7 @@ async function probe(origin: string): Promise<string | null> {
     const config = await get(`${origin}/config.json`)
     const json: unknown =
       config.ok && config.headers.get('content-type')?.includes('json') ? await config.json().catch(() => null) : null
-    if (serverKind({ html, config: json }) === 'old')
-      return 'That Trioditis server is too old for the desktop app. Update it, then try again.'
+    if (serverKind({ html, config: json }) === 'old') return TOO_OLD
     return 'That address answered, but it isn’t a Trioditis server.'
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
@@ -388,6 +409,8 @@ if (!app.requestSingleInstanceLock()) {
   })
   app.on('activate', () => {
     if (serverWindow) reveal(serverWindow)
+    // Mid-change of server, or picking one: the picker, never the server being left.
+    else if (connectWindow) reveal(connectWindow)
     else if (serverOrigin) openServer(serverOrigin)
     else showConnect()
   })

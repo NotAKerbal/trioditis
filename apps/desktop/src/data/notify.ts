@@ -47,7 +47,9 @@ export function newArrivals(
   for (const a of feed.arrivals) seen.set(key(a), a.arrivedAt)
   // Older than this, an arrival can't count again however it shows up.
   for (const [k, at] of seen) if (at <= since - LATE_MS) seen.delete(k)
-  const movedAt = !cursor || since > cursor.since ? now : cursor.movedAt
+  // The first answer doesn't say when `since` moved, maybe days ago: late arrivals count only
+  // once it moves while the app watches.
+  const movedAt = !cursor ? -Infinity : since > cursor.since ? now : cursor.movedAt
   return { cursor: { since, movedAt, seen }, fresh }
 }
 

@@ -56,6 +56,10 @@ export function sameOrigin(target: string, origin: string): boolean {
  */
 const MARKER = /<meta\s+name=["']trioditis-desktop["']\s+content=["'](\d+)["']/i
 export const DESKTOP_VERSION = 1
+export const TOO_OLD = 'That Trioditis server is too old for the desktop app. Update it, then try again.'
+
+/** Run in a loaded page: whether it carries the marker, at least at `DESKTOP_VERSION`. */
+export const pageIsReady = `Number(document.querySelector('meta[name="trioditis-desktop"]')?.content) >= ${DESKTOP_VERSION}`
 
 /**
  * What a server answered: `ready`, a Trioditis web app that works in the desktop app; `old`,

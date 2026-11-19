@@ -65,6 +65,8 @@ describe('which arrivals notify', () => {
     // Or just before it, but the chat comes back long after the cursor last moved.
     const days = 3 * 24 * 3600_000
     expect(after(at(100_000), [feed(100_000, arrival('archived', 99_000)), days]).fresh).toEqual([[]])
+    // Or right after the app opened, when the cursor hasn't moved since.
+    expect(after(at(100_000), [feed(100_000, arrival('archived', 99_000)), 1_000]).fresh).toEqual([[]])
   })
 
   it('moves the cursor past the person’s own sends, which aren’t listed', () => {
