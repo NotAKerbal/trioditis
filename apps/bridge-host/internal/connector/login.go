@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -154,6 +156,7 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 				err = errors.New("login process doesn't accept cookies")
 				break
 			}
+			decodeCookies(step.CookiesParams, plain.Input)
 			next, err = proc.SubmitCookies(s.ctx, plain.Input)
 		default:
 			err = errors.New("the current login step doesn't take input")
@@ -294,6 +297,10 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		}
 	case bridgev2.LoginStepTypeComplete:
 		out.Type = protocol.StepComplete
+		// A connector's closing words name the account ("Logged into <workspace> as
+		// <email>"), and steps are kept by the backend and the journal in plaintext. The app
+		// says it's connected in its own words.
+		out.Instructions = ""
 		if p := step.CompleteParams; p != nil {
 			loginID, err := s.c.loginOpaque(s.c.Bridge.BackgroundCtx, p.UserLoginID)
 			if err != nil {
@@ -327,6 +334,28 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			next, err := proc.Wait(s.ctx)
 			s.advance(next, err)
 		}()
+	}
+}
+
+// decodeCookies percent-decodes what was read from a browser cookie, as bridgev2's own cookie
+// login does: developer tools show a cookie as the browser sends it, percent-encoded, and
+// connectors expect it decoded (Slack's encodes its cookie again, so an encoded one fails).
+// A value with no percent-escapes, as pasted already decoded, is left as it is.
+func decodeCookies(params *bridgev2.LoginCookiesParams, input map[string]string) {
+	if params == nil {
+		return
+	}
+	for _, field := range params.Fields {
+		value := input[field.ID]
+		isCookie := slices.ContainsFunc(field.Sources, func(src bridgev2.LoginCookieFieldSource) bool {
+			return src.Type == bridgev2.LoginCookieTypeCookie
+		})
+		if value == "" || !isCookie {
+			continue
+		}
+		if decoded, err := url.PathUnescape(value); err == nil {
+			input[field.ID] = decoded
+		}
 	}
 }
 
