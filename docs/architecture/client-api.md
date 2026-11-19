@@ -362,11 +362,14 @@ await convex.mutation(api.keys.putBackup, {
   passkey's backups and its sign-in credential in one transaction, so nothing is left half
   removed. A credential no longer registered just loses its backups. Better Auth's own
   `/passkey/delete-passkey` removes only the sign-in credential; don't use it.
-- **Adding one at a time, in the whole browser.** The registration header is the page's, and
-  Better Auth keeps the challenge in one cookie every tab shares, so a second registration
-  under way at once would leave one without its header, or replace the other's challenge and
-  make both fail. The desktop app holds a Web Lock (`trioditis-passkey-registration`) for the
-  whole ceremony and refuses a second one, in any tab, while it's held.
+- **One passkey ceremony at a time, in the whole browser.** Better Auth keeps the challenge
+  of a sign-in or a registration in one cookie every tab shares, so a second ceremony under
+  way at once would replace the other's challenge and make both fail; and the registration
+  header is the page's. The desktop app holds a Web Lock (`trioditis-passkey-ceremony`) for
+  each whole sign-in or registration and refuses a second one, in any tab, while it's held.
+  (Unlocking with a passkey makes no request, so it takes no lock.)
+- **A recent sign-in.** Better Auth adds a passkey only for a session made in the last day
+  (`SESSION_NOT_FRESH` otherwise): say to sign in again.
 - **Known gap:** the session check (Key writes are bound to the page's session) runs before
   Better Auth stores the credential, in a separate step. A sign-out of that same session in
   another tab in the instant between them can let the credential land just after the session

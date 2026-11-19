@@ -1,8 +1,8 @@
 import { generateKeyPair, keyId, passkeyPrfSalt, ready, SealError, toBase64Url } from '@trioditis/crypto'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { asSession, authClient } from '../src/lib/auth-client.ts'
+import { asSession, authClient, oneCeremony } from '../src/lib/auth-client.ts'
 import { sessionChanged } from '../src/lib/errors.ts'
-import { holdPrf, openPasskeyBackup, passkeyBackup, takePrf } from '../src/lib/passkeys.ts'
+import { holdPrf, openPasskeyBackup, passkeyBackup, signInWithPasskey, takePrf } from '../src/lib/passkeys.ts'
 
 beforeAll(ready)
 afterEach(() => {
@@ -78,7 +78,7 @@ describe('adding a passkey', () => {
   it('adds one at a time, so a second can’t lose the first’s header', async () => {
     let finish!: () => void
     const first = asSession('session-1', () => new Promise<void>((resolve) => (finish = resolve)))
-    await expect(asSession('session-1', async () => undefined)).rejects.toThrow(/already being added/)
+    await expect(asSession('session-1', async () => undefined)).rejects.toThrow(/already in use/)
     finish()
     await first
     // Once it's done, the next may start.
@@ -97,6 +97,20 @@ describe('adding a passkey', () => {
       }),
     ).rejects.toThrow(/another tab/)
     expect(ran).toBe(false)
+  })
+
+  it('keeps a passkey sign-in and a registration from running at once, either way round', async () => {
+    let finish!: () => void
+    const registering = asSession('session-1', () => new Promise<void>((resolve) => (finish = resolve)))
+    // Signing in with a passkey meanwhile (as another tab would): refused, before any request.
+    expect(await signInWithPasskey()).toEqual({ error: { message: expect.stringMatching(/already in use/) } })
+    finish()
+    await registering
+    let signedIn!: () => void
+    const signingIn = oneCeremony(() => new Promise<void>((resolve) => (signedIn = resolve)))
+    await expect(asSession('session-1', async () => undefined)).rejects.toThrow(/already in use/)
+    signedIn()
+    await signingIn
   })
 
   it('treats Better Auth’s session refusal as the page’s session having changed', () => {

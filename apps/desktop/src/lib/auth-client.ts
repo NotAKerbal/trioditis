@@ -42,37 +42,52 @@ let registeringAs: string | null = null
 const SESSION_HEADER = 'x-trioditis-session-id'
 const REGISTRATION_PATHS = ['/passkey/generate-register-options', '/passkey/verify-registration']
 
-/** The Web Lock held, in whichever tab, while a passkey is being added. */
-const REGISTRATION_LOCK = 'trioditis-passkey-registration'
+/** The Web Lock held, in whichever tab, while a passkey ceremony with the server is under way. */
+const CEREMONY_LOCK = 'trioditis-passkey-ceremony'
+
+/** Another passkey ceremony was under way in this browser, so this one didn't start. */
+export class PasskeyBusy extends Error {
+  constructor() {
+    super('A passkey is already in use in this browser, here or in another tab. Finish that first.')
+  }
+}
+
+/**
+ * Runs `ceremony`, a passkey sign-in or registration with the server, only if no other is under
+ * way in this browser; otherwise throws PasskeyBusy, running nothing. Better Auth keeps the
+ * challenge in one cookie every tab shares, so a second ceremony would replace the first's, and
+ * both would fail, perhaps after an authenticator had already made a credential. Refused, not
+ * queued: the person is at the first one's prompt.
+ */
+export async function oneCeremony<T>(ceremony: () => Promise<T>): Promise<T> {
+  // Web Locks are on every secure page; without them, only asSession's own check holds.
+  if (typeof navigator === 'undefined' || !navigator.locks) return ceremony()
+  let started = false
+  const result = await navigator.locks.request(CEREMONY_LOCK, { ifAvailable: true }, async (lock) => {
+    if (!lock) return undefined
+    started = true
+    return await ceremony()
+  })
+  if (!started) throw new PasskeyBusy()
+  return result as T
+}
 
 /**
  * Runs `register` (which adds a passkey) as `sessionId`, the session the page opened with: if
  * the browser is in another by now, the server refuses both steps (409, sessionChanged) and
- * changes nothing. One at a time, in the whole browser: the header is the page's, so a second
- * registration in this page would leave the other's later step without it; and the challenge is
- * in one cookie every tab shares, so one in another tab would replace it, and both would fail
- * after the authenticator had made a credential. So a second one is refused, not queued.
+ * changes nothing. The header is the page's, so a second registration in this page would leave
+ * the other's later step without it: it's refused, and oneCeremony refuses one in another tab.
  */
 export async function asSession<T>(sessionId: string, register: () => Promise<T>): Promise<T> {
-  if (registeringAs !== null) throw new Error('A passkey is already being added here. Wait for it to finish.')
-  const run = async () => {
+  if (registeringAs !== null) throw new PasskeyBusy()
+  return oneCeremony(async () => {
     registeringAs = sessionId
     try {
       return await register()
     } finally {
       registeringAs = null
     }
-  }
-  // Web Locks are on every secure page; without them, only this page's own check holds.
-  if (typeof navigator === 'undefined' || !navigator.locks) return run()
-  let started = false
-  const result = await navigator.locks.request(REGISTRATION_LOCK, { ifAvailable: true }, async (lock) => {
-    if (!lock) return undefined
-    started = true
-    return await run()
   })
-  if (!started) throw new Error('A passkey is being added in another tab. Finish it there first.')
-  return result as T
 }
 const convexTokens = new Map<string, string>()
 

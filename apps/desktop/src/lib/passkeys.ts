@@ -8,7 +8,7 @@ import {
   wrapIdentityKey,
 } from '@trioditis/crypto'
 import type { KeyPair } from '@trioditis/crypto'
-import { asSession, authClient } from './auth-client.ts'
+import { asSession, authClient, oneCeremony, PasskeyBusy } from './auth-client.ts'
 
 /*
  * Passkeys sign in, and, where the authenticator offers WebAuthn's PRF extension, also unlock the
@@ -86,7 +86,15 @@ export async function signInWithPasskey(): Promise<
   { error: { code?: string; message?: string; status?: number } } | { userId: string; prf: PrfResult | null }
 > {
   const first = await prfInput()
-  const result = await authClient.signIn.passkey({ extensions: prfExtension(first), returnWebAuthnResponse: true })
+  let result: Awaited<ReturnType<typeof authClient.signIn.passkey>>
+  try {
+    result = await oneCeremony(() =>
+      authClient.signIn.passkey({ extensions: prfExtension(first), returnWebAuthnResponse: true }),
+    )
+  } catch (e) {
+    if (e instanceof PasskeyBusy) return { error: { message: e.message } }
+    throw e
+  }
   if (!result || result.error || !result.data) return { error: result?.error ?? {} }
   const user = (result.data as { user?: { id?: string } }).user
   if (!user?.id) return { error: {} }
@@ -112,6 +120,10 @@ export async function addPasskey(sessionId: string): Promise<{ credentialId: str
   if (!result || result.error || !result.data) {
     const error: { code?: string; message?: string; status?: number } = result?.error ?? {}
     if (error.code === 'ERROR_CEREMONY_ABORTED') throw new PasskeyCancelled()
+    // Better Auth adds a passkey only for a sign-in from the last day.
+    if (error.code === 'SESSION_NOT_FRESH') {
+      throw new Error('Adding a passkey needs a recent sign-in. Sign out, sign in again, then add it.')
+    }
     throw failure(error, 'The passkey couldn’t be added.')
   }
   const webauthn = (
