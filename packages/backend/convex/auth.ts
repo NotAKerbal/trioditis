@@ -301,6 +301,28 @@ function tooManyRequests(retryAfter: number) {
   )
 }
 
+/** The cookies that carry a sign-in: Better Auth's session token and cache, and the Convex JWT. */
+const SESSION_COOKIE = /^(?:__Secure-)?[^=]*\.(?:session_token|session_data|convex_jwt)=/
+
+/**
+ * A failed passkey registration from a page bound to its session (`passkeySessionBinding`)
+ * keeps every cookie but the sign-in ones. Better Auth answers a session that ended between
+ * the binding's read and its own by clearing them, and in the shared browser that late answer
+ * would clear a sign-in made meanwhile in another tab. The challenge cookie is kept.
+ */
+export function withoutSessionClears(request: Request, response: Response, baseURL: string) {
+  if (response.status < 400 || !request.headers.has(SESSION_HEADER)) return response
+  const path = routedPath(request.url, baseURL)
+  if (path === null || !PASSKEY_REGISTRATION_PATHS.includes(path)) return response
+  const cookies = response.headers.getSetCookie()
+  const kept = cookies.filter((cookie) => !SESSION_COOKIE.test(cookie))
+  if (kept.length === cookies.length) return response
+  const headers = new Headers(response.headers)
+  headers.delete('set-cookie')
+  for (const cookie of kept) headers.append('set-cookie', cookie)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
 /** Better Auth's own 429 gives the wait only in X-Retry-After. */
 function withRetryAfter(response: Response) {
   const retryAfter = response.headers.get('x-retry-after')
@@ -493,7 +515,8 @@ export const createAuth = (ctx: GenericCtx<DataModel>) => {
       // The base Better Auth routes under, from its own context, so the limits match the router
       // whatever path SITE_URL has.
       authBase ??= (await auth.$context).baseURL
-      return withRetryAfter(await auth.handler(request))
+      const response = await auth.handler(request)
+      return withRetryAfter(withoutSessionClears(request, response, authBase))
     },
   }
 }

@@ -324,8 +324,11 @@ with `{ "code": "sessionChanged", "message": "This page’s session has changed.
 page." }`. That refusal stores and refreshes nothing: no challenge is made, no session is
 extended or ended, and no cookie is set (the rate limit may still count the request, and a 429
 can come first). A bearer token sent alongside is refused the same way, since the page signs
-in with its cookie, and so is a session within a minute of expiring, which Better Auth would
-otherwise end with a cookie that could clear another tab's newer sign-in. (The
+in with its cookie. So is a session within a minute of expiring: if it had expired by the time
+Better Auth reads it again, Better Auth would answer by clearing the sign-in cookies, and a late
+answer like that could clear another tab's newer sign-in. For the same reason, any failed answer
+on these two routes, with the header, never carries a cookie that clears the sign-in; the
+passkey challenge's own cookie is kept. (The
 passkey plugin already refuses an answer from another account than its challenge's.)
 `addPasskey` passes its own fetch options only to the second step, so set the header for both
 in the auth client's `fetchOptions.onRequest`, from the session the page opened with:

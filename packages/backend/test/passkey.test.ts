@@ -57,6 +57,34 @@ async function challenges(t: T) {
 }
 
 describe('adding a passkey', () => {
+  it('keeps a failed answer from clearing the sign-in, but not the challenge cookie', async () => {
+    setup()
+    const { withoutSessionClears } = await import('../convex/auth')
+    const base = 'https://trioditis.test/api/auth'
+    const request = (path: string, bound = true) =>
+      new Request(`${base}${path}`, { headers: bound ? { [SESSION_HEADER]: 'session' } : {} })
+    const failed = () => {
+      const headers = new Headers()
+      headers.append('set-cookie', 'better-auth.session_token=; Max-Age=0; Path=/')
+      headers.append('set-cookie', '__Secure-better-auth.session_data=; Max-Age=0; Path=/')
+      headers.append('set-cookie', 'better-auth.convex_jwt=; Max-Age=0; Path=/')
+      headers.append('set-cookie', 'better-auth.passkey-challenge=abc; Path=/')
+      return new Response('{}', { status: 401, headers })
+    }
+    for (const path of ['/passkey/generate-register-options', '/passkey/verify-registration']) {
+      const kept = withoutSessionClears(request(path), failed(), base)
+      expect(kept.status).toBe(401)
+      expect(kept.headers.getSetCookie()).toEqual(['better-auth.passkey-challenge=abc; Path=/'])
+    }
+    // Unbound requests, other routes and successes are left as they are.
+    expect(
+      withoutSessionClears(request('/passkey/verify-registration', false), failed(), base).headers.getSetCookie(),
+    ).toHaveLength(4)
+    expect(withoutSessionClears(request('/sign-out'), failed(), base).headers.getSetCookie()).toHaveLength(4)
+    const ok = new Response('{}', { status: 200, headers: { 'set-cookie': 'better-auth.session_token=x' } })
+    expect(withoutSessionClears(request('/passkey/verify-registration'), ok, base)).toBe(ok)
+  })
+
   it('refuses a session about to expire, setting no cookie and keeping it', async () => {
     const t = setup()
     const alex = await signUp(t, 'alex@example.com', SETUP_TOKEN)
