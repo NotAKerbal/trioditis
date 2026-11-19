@@ -75,8 +75,12 @@ The connector's example config is loaded as defaults (`withDefaults`), with thes
   mautrix-gmessages waits and sends the same request again, up to three times
   (`handlematrix.go`, `sendRetryBackoff`), while reporting those failures as uncertain: the
   SMS may have gone out. The bridge host empties that list (a `go:linkname` to the
-  connector's variable; a rename upstream breaks the build rather than silently resending),
-  so such a send is reported once, as `unknown`.
+  connector's variable, since the connector has no option for it), so such a send is
+  reported once, as `unknown`. A rename upstream would not break the build: the linkname
+  would then name a variable of the bridge host's own. The bridge host checks that the list
+  it empties held the connector's waits, and refuses to start Google Messages if it didn't
+  (`TestGMessagesConnector` fails too).
+- **A send is posted to the relay once** (`gmessagesSendOnce`, below).
 - **No bridgev2 echo timeouts.** The connector asks bridgev2 to report a send as uncertain if
   the phone hasn't echoed it within a minute or so (`OutgoingMessageTimeouts`). An uncertain
   report settles the send as `unknown` and the echo that follows is dropped, so a slow phone
@@ -95,11 +99,21 @@ voice note must be MP4/AAC (Ogg voice notes are refused). Other media go as they
 ## Sends and retries
 
 A send is handed to the phone through Google's relay and confirmed when the phone echoes it
-back (`Pending`), usually within seconds. What can still repeat a send at the transport:
-libgm resends a request that got a 5xx from Google's relay, up to three times
-(`libgm/http.go`), with the same body and the same request ID, so the relay can recognise the
-repeat. That is the same kind of resend as whatsmeow's frame retry (bridge host README,
-Stubbed or not covered).
+back (`Pending`), usually within seconds.
+
+Nothing repeats a send at the transport. libgm posts a request to the relay again, same body,
+after a 5xx (`libgm/http.go`, up to three attempts), and Go's HTTP client follows a 307 or
+308 by posting the body again; a relay that had passed the message to the phone before
+answering would get it twice. libgm builds its HTTP clients from the bridge's client
+settings, and the bridge host's connector hands it settings whose transport is wrapped
+(`gmessagesSendOnce`, through `WrapHTTPTransport`). Every request to the phone goes to the
+same relay endpoint; the wrapper reads the request's action, which is not encrypted, and for
+a `SEND_MESSAGE` replaces a 5xx or a redirect with an error that is an uncertain message
+status. libgm doesn't retry a request that fails that way, the connector passes a message
+status on as it is, and the send is recorded `unknown`. A relay post whose action can't be
+read is treated as a send. Other requests (sync, read markers, media lookups) keep libgm's
+retries. A send that fails in transport is already final in libgm and reported as uncertain
+by the connector, so it is `unknown` too.
 
 If the relay accepted a send but the phone didn't answer, the connector reports "phone not
 responding" (uncertain, so `unknown`); the phone may still send it when it comes back. That
