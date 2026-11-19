@@ -181,6 +181,10 @@ describe('rows left on the fake network', () => {
     expect(page.map((chat) => chat.network)).toEqual(['whatsapp'])
     expect((await as.query(api.logins.accounts, {})).map((account) => account.network)).toEqual(['whatsapp'])
     expect(await as.query(api.logins.session, { loginSessionId: sessionId })).toBeNull()
+    // What an agent sees through MCP's list_networks, too.
+    expect((await t.query(internal.mcp.networksForUser, { userId: 'user_a' })).map((n) => n.network)).toEqual([
+      'whatsapp',
+    ])
   })
 })
 

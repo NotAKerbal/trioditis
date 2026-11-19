@@ -246,7 +246,8 @@ async function purgeCommands(ctx: MutationCtx, cursor: string | null): Promise<P
 
 /** The fake bridge hosts, after what they quarantined. */
 async function purgeHosts(ctx: MutationCtx): Promise<PurgeNext> {
-  const host = (await ctx.db.query('bridgeHosts').take(PURGE_SMALL)).find((row) => row.network === FAKE)
+  // One row per bridge host there has ever been: few, so all of them.
+  const host = (await ctx.db.query('bridgeHosts').collect()).find((row) => row.network === FAKE)
   if (!host) return null
   const held = await ctx.db
     .query('quarantine')

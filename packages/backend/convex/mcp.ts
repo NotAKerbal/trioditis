@@ -5,6 +5,7 @@ import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
 import { action, internalQuery, type ActionCtx } from './_generated/server'
 import { currentUserId, requireSessionIfGiven } from './auth'
+import { retired } from './lib/networks'
 import { loginState, network } from './validators'
 
 // The Trioditis MCP server, at <site>/mcp, for the person's own agents (Dots, Grokbot, any
@@ -30,11 +31,13 @@ export const networksForUser = internalQuery({
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .take(100)
-    return accounts.map((account) => ({
-      network: account.network,
-      state: account.state,
-      lastHealthyAt: account.lastHealthyAt ?? null,
-    }))
+    return accounts
+      .filter((account) => !retired(account))
+      .map((account) => ({
+        network: account.network,
+        state: account.state,
+        lastHealthyAt: account.lastHealthyAt ?? null,
+      }))
   },
 })
 

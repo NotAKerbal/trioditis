@@ -109,7 +109,7 @@ export function Networks() {
               variant="ghost"
               loading={busy === entry.network}
               disabled={busy !== null}
-              onClick={() => (entry.accounts ? setConfirm(entry) : removeNow(entry))}
+              onClick={() => setConfirm(entry)}
             >
               Remove
             </Button>
@@ -135,9 +135,10 @@ export function Networks() {
         </div>
         {confirm?.network === entry.network ? (
           <div className="mt-2.5 rounded-lg bg-warning-soft p-3.5 text-sm text-warning-ink">
+            {/* Asked every time: the count is a capped estimate, and a removal logs everyone out. */}
             <b className="font-semibold">
-              Removing {entry.name} disconnects {entry.accounts === 1 ? '1 account' : `all ${entry.accounts} accounts`}{' '}
-              on it, everyone’s.
+              Removing {entry.name} disconnects every account on it, everyone’s
+              {entry.accounts ? ` (${accounts(entry.accounts)})` : ''}.
             </b>{' '}
             Their chats stay, but nothing new arrives until it’s installed and they connect again.
             <div className="mt-2.5 flex gap-2">
