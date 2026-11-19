@@ -17,6 +17,14 @@ async function connect(t: T, userId: string, loginId: string, seq: number) {
   })
 }
 
+/** Runs the jobs a removal schedules right away, batch after batch, not the later deadlines. */
+async function runBatches(t: T) {
+  for (let i = 0; i < 20; i++) {
+    vi.advanceTimersByTime(1)
+    await t.finishInProgressScheduledFunctions()
+  }
+}
+
 describe('installing networks', () => {
   it('lists every network for admins, installed or not', async () => {
     const t = setup()
@@ -47,6 +55,7 @@ describe('installing networks', () => {
   })
 
   it('removes a network, disconnecting everyone’s accounts on it and stopping logins', async () => {
+    vi.useFakeTimers()
     const t = setup()
     const admin = await signIn(t, 'admin_a', 'admin')
     const member = await signIn(t, 'member_a')
@@ -61,7 +70,8 @@ describe('installing networks', () => {
       bridgeOnline: true,
     })
 
-    expect(await admin.mutation(api.networks.remove, { network: 'whatsapp' })).toEqual({ disconnecting: 2 })
+    await admin.mutation(api.networks.remove, { network: 'whatsapp' })
+    await runBatches(t)
     expect((await member.query(api.networks.list, {})).map((n) => n.network)).toEqual(['signal'])
     await expect(member.mutation(api.logins.start, { network: 'whatsapp' })).rejects.toThrow(/installed/)
     const [accounts, commands] = await t.run(async (ctx) => [
@@ -75,13 +85,102 @@ describe('installing networks', () => {
         (command) => command.payload.type === 'loginCancel' && command.payload.loginSessionId === pending,
       ),
     ).toHaveLength(1)
+    // The login ends at once, so a step the bridge host sends meanwhile can't bring it back.
+    expect((await member.query(api.logins.session, { loginSessionId: pending }))!.state).toBe('cancelled')
     // Removing it again asks for nothing more.
-    expect(await admin.mutation(api.networks.remove, { network: 'whatsapp' })).toEqual({ disconnecting: 0 })
+    await admin.mutation(api.networks.remove, { network: 'whatsapp' })
+    await runBatches(t)
+    expect(
+      (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter((c) => c.payload.type === 'logout'),
+    ).toHaveLength(2)
     // What the bridge host sends before the logouts land still arrives.
     await connect(t, 'member_a', 'login_member', 3)
     // Installing it again makes it connectable.
     await admin.mutation(api.networks.install, { network: 'whatsapp' })
     expect((await member.query(api.networks.list, {})).map((n) => n.network)).toEqual(['whatsapp', 'signal'])
+  })
+
+  it('logs out every account on a removed network, however many, in batches', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const admin = await signIn(t, 'admin_a', 'admin')
+    await admin.mutation(api.networks.install, { network: 'whatsapp' })
+    await t.run(async (ctx) => {
+      // Logged-out rows first in the index, as a long history leaves them, then live ones.
+      for (let i = 0; i < 1100; i++) {
+        await ctx.db.insert('networkAccounts', {
+          userId: `u${i}`,
+          network: 'whatsapp',
+          loginId: `a${String(i).padStart(4, '0')}`,
+          state: i < 1000 ? 'LOGGED_OUT' : 'CONNECTED',
+          updatedAt: 1,
+        })
+      }
+    })
+    await admin.mutation(api.networks.remove, { network: 'whatsapp' })
+    await runBatches(t)
+    const accounts = await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())
+    expect(accounts.filter((account) => account.state === 'CONNECTED' && !account.logoutPending)).toEqual([])
+  })
+
+  it('logs out an account whose login finishes after its network was removed', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const admin = await signIn(t, 'admin_a', 'admin')
+    await admin.mutation(api.networks.install, { network: 'whatsapp' })
+    await admin.mutation(api.networks.remove, { network: 'whatsapp' })
+    await runBatches(t)
+    // The bridge host finished the login before the cancel reached it.
+    await connect(t, 'admin_a', 'late', 1)
+    const [account] = await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())
+    expect(account).toMatchObject({ state: 'CONNECTED', logoutPending: true })
+    // A network nobody has decided on yet (an older server before its migrations) is left alone.
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'signal-1',
+      network: 'signal',
+      events: [{ seq: 1, type: 'loginState', userId: 'admin_a', loginId: 's', at: Date.now(), state: 'CONNECTED' }],
+    })
+    const signal = (await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())).find(
+      (row) => row.network === 'signal',
+    )
+    expect(signal!.logoutPending).toBeUndefined()
+  })
+})
+
+describe('rows left on the fake network', () => {
+  it('are skipped by reads until they’re purged', async () => {
+    const t = setup()
+    const as = await signIn(t, 'user_a')
+    const fake = 'fake' as 'whatsapp'
+    const sessionId = await t.run(async (ctx) => {
+      for (const network of [fake, 'whatsapp' as const]) {
+        await ctx.db.insert('networkAccounts', {
+          userId: 'user_a',
+          network,
+          loginId: 'l',
+          state: 'CONNECTED',
+          updatedAt: 1,
+        })
+        const row = {
+          userId: 'user_a',
+          network,
+          loginId: 'l',
+          portalId: `p_${network}`,
+          kind: 'dm' as const,
+          lastMessageAt: 0,
+          unreadCount: 0,
+          pinned: false,
+          archived: false,
+        }
+        await ctx.db.insert('chats', { ...row, view: chatViewOf(row) })
+      }
+      return await ctx.db.insert('loginSessions', { userId: 'user_a', network: fake, state: 'pending', updatedAt: 1 })
+    })
+    const { page } = await as.query(api.chats.list, { paginationOpts: { numItems: 10, cursor: null } })
+    expect(page.map((chat) => chat.network)).toEqual(['whatsapp'])
+    expect((await as.query(api.logins.accounts, {})).map((account) => account.network)).toEqual(['whatsapp'])
+    expect(await as.query(api.logins.session, { loginSessionId: sessionId })).toBeNull()
   })
 })
 
@@ -150,6 +249,19 @@ describe('migrations for installed networks', () => {
           createdAt: 1,
         })
       }
+      // A fake login started and cancelled before it made an account: its commands, someone else's.
+      for (const type of ['loginStart', 'loginCancel'] as const) {
+        const commandId = await ctx.db.insert('outbox', {
+          userId: 'user_b',
+          network: fake,
+          payload: type === 'loginStart' ? { type, loginSessionId: 's', network: fake } : { type, loginSessionId: 's' },
+          state: 'expired',
+          attempts: 0,
+          createdAt: 1,
+        })
+        await ctx.db.insert('outboxPayloads', { commandId, sealed: sealed(`l${type}`) })
+      }
+      await ctx.db.insert('loginSessions', { userId: 'user_b', network: fake, state: 'cancelled', updatedAt: 1 })
       await ctx.db.insert('quarantine', {
         hostId: 'fake-1',
         seq: 1,
@@ -200,6 +312,41 @@ describe('migrations for installed networks', () => {
       }
       return await ctx.db.insert('chats', chatRow('whatsapp', 'kept'))
     })
+
+    // A chat of big messages: together far past what one transaction may read.
+    const bigChat = await t.run(async (ctx) => {
+      const row = {
+        userId: 'user_a',
+        network: fake,
+        loginId: 'l',
+        portalId: 'big',
+        kind: 'dm' as const,
+        lastMessageAt: 0,
+        unreadCount: 0,
+        pinned: false,
+        archived: false,
+      }
+      return await ctx.db.insert('chats', { ...row, view: chatViewOf(row) })
+    })
+    for (let batch = 0; batch < 4; batch++) {
+      await t.run(async (ctx) => {
+        for (let m = 0; m < 8; m++) {
+          const eventId = `big${batch}_${m}`
+          await ctx.db.insert('messages', {
+            userId: 'user_a',
+            chatId: bigChat,
+            network: fake,
+            eventId,
+            networkTs: m,
+            sortKey: eventId,
+            sender: { self: true },
+            sealed: { ...sealed(eventId), ct: 'A'.repeat(600_000) },
+            sealedObjectId: eventId,
+            historical: false,
+          })
+        }
+      })
+    }
 
     await t.action(internal.migrations.runAll, {})
     await t.finishAllScheduledFunctions(vi.runAllTimers)

@@ -28,3 +28,20 @@ export async function offeredNetworks(ctx: QueryCtx): Promise<Set<Network>> {
   const bridged = bridgedNetworks()
   return new Set([...(await installedNetworks(ctx))].filter((name) => bridged.has(name)))
 }
+
+/** Whether an admin removed this network (it has a row, not installed), not just never installed it. */
+export async function removedNetwork(ctx: QueryCtx, name: Network) {
+  const row = await ctx.db
+    .query('serverNetworks')
+    .withIndex('by_network', (q) => q.eq('network', name))
+    .unique()
+  return row !== null && !row.installed
+}
+
+/**
+ * A row on the fake network, which only migrations.purgeFakeNetwork still handles. Reads skip
+ * them until it has deleted them, since the functions' return types no longer have it.
+ */
+export function retired(row: { network: string }) {
+  return row.network === 'fake'
+}

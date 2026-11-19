@@ -39,3 +39,39 @@ export async function deletePayload(ctx: MutationCtx, commandId: Id<'outbox'>) {
   if (payload) await ctx.db.delete(payload._id)
   return payload
 }
+
+/**
+ * Asks the bridge host to log an account out of its network, unless it's out already or a
+ * logout is on its way. Returns whether one was asked for.
+ */
+export async function queueLogout(ctx: MutationCtx, account: Doc<'networkAccounts'>) {
+  if (account.state === 'LOGGED_OUT' || account.logoutPending) return false
+  const now = Date.now()
+  const logoutCommandId = await queueCommand(ctx, {
+    userId: account.userId,
+    network: account.network,
+    loginId: account.loginId,
+    payload: { type: 'logout' },
+    state: 'queued',
+    attempts: 0,
+    createdAt: now,
+    expiresAt: now + LOGIN_COMMAND_TTL_MS,
+  })
+  await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
+  return true
+}
+
+/** Asks the bridge host to stop a login that hasn't finished. */
+export async function queueLoginCancel(ctx: MutationCtx, session: Doc<'loginSessions'>) {
+  const now = Date.now()
+  await queueCommand(ctx, {
+    userId: session.userId,
+    network: session.network,
+    payload: { type: 'loginCancel', loginSessionId: session._id },
+    ...(session.hostId ? { hostId: session.hostId } : {}),
+    state: 'queued',
+    attempts: 0,
+    createdAt: now,
+    expiresAt: now + LOGIN_COMMAND_TTL_MS,
+  })
+}

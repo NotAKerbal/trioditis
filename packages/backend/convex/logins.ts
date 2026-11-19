@@ -1,14 +1,13 @@
 import { ConvexError, v } from 'convex/values'
 import { NETWORK_INFO } from '@trioditis/core'
-import type { Doc } from './_generated/dataModel'
-import { mutation, query, type MutationCtx } from './_generated/server'
+import { mutation, query } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
 import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
-import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
-import { offeredNetworks } from './lib/networks'
+import { LOGIN_COMMAND_TTL_MS, queueCommand, queueLoginCancel, queueLogout } from './lib/outbox'
+import { offeredNetworks, retired } from './lib/networks'
 import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
@@ -38,16 +37,18 @@ export const accounts = query({
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
       .take(100)
-    return rows.map((row) => ({
-      _id: row._id,
-      network: row.network,
-      state: row.state,
-      error: row.error ?? null,
-      lastHealthyAt: row.lastHealthyAt ?? null,
-      updatedAt: row.updatedAt,
-      logoutPending: row.logoutPending ?? false,
-      logoutError: row.logoutError ?? null,
-    }))
+    return rows
+      .filter((row) => !retired(row))
+      .map((row) => ({
+        _id: row._id,
+        network: row.network,
+        state: row.state,
+        error: row.error ?? null,
+        lastHealthyAt: row.lastHealthyAt ?? null,
+        updatedAt: row.updatedAt,
+        logoutPending: row.logoutPending ?? false,
+        logoutError: row.logoutError ?? null,
+      }))
   },
 })
 
@@ -76,7 +77,7 @@ export const session = query({
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
-    if (!session || session.userId !== member.userId) return null
+    if (!session || session.userId !== member.userId || retired(session)) return null
     return {
       _id: session._id,
       network: session.network,
@@ -204,39 +205,3 @@ export const logout = mutation({
     return null
   },
 })
-
-/**
- * Asks the bridge host to log an account out of its network, unless it's out already or a
- * logout is on its way. Returns whether one was asked for.
- */
-export async function queueLogout(ctx: MutationCtx, account: Doc<'networkAccounts'>) {
-  if (account.state === 'LOGGED_OUT' || account.logoutPending) return false
-  const now = Date.now()
-  const logoutCommandId = await queueCommand(ctx, {
-    userId: account.userId,
-    network: account.network,
-    loginId: account.loginId,
-    payload: { type: 'logout' },
-    state: 'queued',
-    attempts: 0,
-    createdAt: now,
-    expiresAt: now + LOGIN_COMMAND_TTL_MS,
-  })
-  await ctx.db.patch(account._id, { logoutPending: true, logoutError: undefined, logoutCommandId })
-  return true
-}
-
-/** Asks the bridge host to stop a login that hasn't finished. */
-export async function queueLoginCancel(ctx: MutationCtx, session: Doc<'loginSessions'>) {
-  const now = Date.now()
-  await queueCommand(ctx, {
-    userId: session.userId,
-    network: session.network,
-    payload: { type: 'loginCancel', loginSessionId: session._id },
-    ...(session.hostId ? { hostId: session.hostId } : {}),
-    state: 'queued',
-    attempts: 0,
-    createdAt: now,
-    expiresAt: now + LOGIN_COMMAND_TTL_MS,
-  })
-}

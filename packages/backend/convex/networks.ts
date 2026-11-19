@@ -1,11 +1,12 @@
 import { ConvexError, v } from 'convex/values'
 import { NETWORK_INFO, type Network } from '@trioditis/core'
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { internal } from './_generated/api'
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireAdmin, requireMember } from './lib/access'
 import { audit } from './lib/audit'
-import { bridgedNetworks, installedNetworks, offeredNetworks } from './lib/networks'
-import { queueLoginCancel, queueLogout } from './logins'
+import { bridgedNetworks, installedNetworks, offeredNetworks, removedNetwork } from './lib/networks'
+import { queueLoginCancel, queueLogout } from './lib/outbox'
 import { errorCode, loginState, network } from './validators'
 
 // The networks this server offers, how to connect each, and how each is doing for the person;
@@ -13,8 +14,10 @@ import { errorCode, loginState, network } from './validators'
 
 /** A bridge host heard from within this long is online; it heartbeats every 30 seconds. */
 const HOST_STALE_MS = 2 * 60_000
-/** The most accounts, and login sessions, one removal goes through. */
-const MAX_REMOVED = 1000
+/** How many accounts, or login sessions, one batch of a removal goes through. */
+const REMOVE_BATCH = 100
+/** How many accounts `catalog` counts per network before saying "at least". */
+const MAX_COUNTED = 1000
 
 const flow = v.object({
   id: v.string(),
@@ -102,13 +105,13 @@ export const health = query({
   },
 })
 
-/** Every account on a network that hasn't been logged out, anyone's, up to MAX_REMOVED. */
+/** How many accounts on a network haven't been logged out, anyone's, counting up to MAX_COUNTED rows. */
 async function liveAccounts(ctx: QueryCtx, name: Network) {
   const accounts = await ctx.db
     .query('networkAccounts')
     .withIndex('by_login', (q) => q.eq('network', name))
-    .take(MAX_REMOVED)
-  return accounts.filter((account) => account.state !== 'LOGGED_OUT')
+    .take(MAX_COUNTED)
+  return accounts.filter((account) => account.state !== 'LOGGED_OUT').length
 }
 
 /**
@@ -146,7 +149,7 @@ export const catalog = query({
         installed: installed.has(info.network),
         bridged: bridged.has(info.network),
         bridgeOnline: online.has(info.network),
-        accounts: (await liveAccounts(ctx, info.network)).length,
+        accounts: await liveAccounts(ctx, info.network),
       })
     }
     return result
@@ -185,27 +188,61 @@ export const install = mutation({
 /**
  * Removes a network: nobody can connect it any more, and every account on it, anyone's, is
  * logged out of it, as if its owner had disconnected it. Their chats stay. Logins still in
- * progress on it are stopped. Returns how many accounts are being disconnected.
+ * progress on it end. The logouts go out in batches (`disconnect`), after this returns; an
+ * account whose login finishes anyway is logged out when it reports in (lib/ingest.ts).
  */
 export const remove = mutation({
   args: { network, sessionId: v.optional(v.string()) },
-  returns: v.object({ disconnecting: v.number() }),
+  returns: v.null(),
   handler: async (ctx, args) => {
     await requireSessionIfGiven(ctx, args.sessionId)
     const admin = await requireAdmin(ctx)
     await decide(ctx, args.network, false, admin.userId)
-    let disconnecting = 0
-    for (const account of await liveAccounts(ctx, args.network)) {
-      if (await queueLogout(ctx, account)) disconnecting++
-    }
-    // Sessions have no index by network; there are few, and old ones are settled.
-    const sessions = await ctx.db.query('loginSessions').order('desc').take(MAX_REMOVED)
-    for (const session of sessions) {
-      if (session.network === args.network && (session.state === 'pending' || session.state === 'active')) {
-        await queueLoginCancel(ctx, session)
-      }
-    }
+    await ctx.scheduler.runAfter(0, internal.networks.disconnect, { network: args.network })
     await audit(ctx, { kind: 'user', id: admin.userId }, 'networks.remove', args.network)
-    return { disconnecting }
+    return null
+  },
+})
+
+/**
+ * One batch of a removal: ends the logins in progress on the network, then logs out its
+ * accounts a page at a time, carrying on until it has been through them all. It stops if an
+ * admin installs the network again meanwhile.
+ */
+export const disconnect = internalMutation({
+  args: { network, cursor: v.optional(v.union(v.null(), v.string())) },
+  returns: v.null(),
+  handler: async (ctx, { network: name, cursor }) => {
+    if (!(await removedNetwork(ctx, name))) return null
+    if (cursor === undefined) {
+      // Ended here, not only when the bridge host confirms the cancel, so a step it sends
+      // meanwhile can't bring one back. Each batch leaves these states, so the next finds the rest.
+      let ended = 0
+      for (const state of ['pending', 'active'] as const) {
+        const sessions = await ctx.db
+          .query('loginSessions')
+          .withIndex('by_network_state', (q) => q.eq('network', name).eq('state', state))
+          .take(REMOVE_BATCH - ended)
+        for (const session of sessions) {
+          await queueLoginCancel(ctx, session)
+          await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: Date.now() })
+        }
+        ended += sessions.length
+      }
+      await ctx.scheduler.runAfter(0, internal.networks.disconnect, {
+        network: name,
+        ...(ended === REMOVE_BATCH ? {} : { cursor: null }),
+      })
+      return null
+    }
+    const page = await ctx.db
+      .query('networkAccounts')
+      .withIndex('by_login', (q) => q.eq('network', name))
+      .paginate({ numItems: REMOVE_BATCH, cursor })
+    for (const account of page.page) await queueLogout(ctx, account)
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.networks.disconnect, { network: name, cursor: page.continueCursor })
+    }
+    return null
   },
 })

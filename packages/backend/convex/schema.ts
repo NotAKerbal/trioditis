@@ -141,7 +141,9 @@ export default defineSchema({
     /** The step input was last sent for: each step takes one submission, as the bridge host does. */
     submittedStepId: v.optional(v.string()),
     updatedAt: v.number(),
-  }).index('by_user', ['userId']),
+  })
+    .index('by_user', ['userId'])
+    .index('by_network_state', ['network', 'state']),
 
   chats: defineTable({
     userId: v.string(),

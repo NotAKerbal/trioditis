@@ -55,10 +55,10 @@ export function Networks() {
     void run(
       entry.network,
       async () => {
-        const { disconnecting } = await remove({ network: entry.network, sessionId: session.sessionId })
+        await remove({ network: entry.network, sessionId: session.sessionId })
         toast(
-          disconnecting
-            ? `${entry.name} removed. Disconnecting ${disconnecting === 1 ? '1 account' : `${disconnecting} accounts`}…`
+          entry.accounts
+            ? `${entry.name} removed. Disconnecting ${entry.accounts === 1 ? '1 account' : `${entry.accounts} accounts`}…`
             : `${entry.name} removed.`,
         )
       },

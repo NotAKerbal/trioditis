@@ -873,9 +873,10 @@ those people can connect:
 - `api.networks.install({ network, sessionId? })` installs one: it appears in
   `networks.list` for everyone. Installing one already installed does nothing.
 - `api.networks.remove({ network, sessionId? })` removes one: nobody can start connecting it,
-  every account on it, anyone's, gets a logout as if its owner had disconnected it, and logins
-  still in progress on it are cancelled. It returns `{ disconnecting }`, how many logouts it
-  asked for. Chats stay; what the bridge host sends before a logout lands still arrives.
+  logins in progress on it end (`cancelled`), and every account on it, anyone's, gets a logout
+  as if its owner had disconnected it. The logouts go out in batches just after it returns; an
+  account whose login finishes anyway is logged out as soon as it reports in. Chats stay; what
+  the bridge host sends before a logout lands still arrives.
 
 All three are for admins only (`Only an admin can do that.`). Errors: `This server doesn’t run
 a bridge for <network>, so it can’t be installed here.`
