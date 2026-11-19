@@ -12,6 +12,8 @@ func TestEveryNetworkMakesItsConnector(t *testing.T) {
 	if got := Names(); !slices.Equal(got, want) {
 		t.Fatalf("networks: got %v, want %v", got, want)
 	}
+	// What an operator must supply, since no default can stand in for it.
+	setTelegramCredentials(t)
 	for _, name := range Names() {
 		conn, err := registry[name].New()
 		if name == "signal" && !signalBuiltIn {

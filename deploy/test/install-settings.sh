@@ -183,5 +183,24 @@ if install; then status=0; else status=$?; fi
 [ "$status" != 0 ] && grep -q "holds a NUL or a carriage return" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.nul" &&
   check ok "a NUL in deploy/.env stops the install, unchanged" || { check fail "a NUL in deploy/.env stops the install, unchanged"; tail -2 "$work/out" >&2; }
 
+# Telegram needs the operator's own app credentials: without them, or with ones that can't be
+# right, the install stops before saving anything; with them they're saved, and a rerun that
+# doesn't pass them keeps them.
+checkout
+if install --networks whatsapp,telegram; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "my.telegram.org/apps" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+  check ok "telegram without an API ID and hash stops the install, saving nothing" ||
+  { check fail "telegram without an API ID and hash stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+if install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q -- "--telegram-api-hash must be" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+  check ok "a short API hash stops the install, saving nothing" ||
+  { check fail "a short API hash stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef0123456789abcdef || true
+[ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
+  check ok "the API ID and hash are saved" || { check fail "the API ID and hash are saved"; tail -2 "$work/out" >&2; }
+install || true
+[ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
+  [ "$(value TRIODITIS_NETWORKS)" = telegram ] && check ok "and a rerun keeps them" || check fail "and a rerun keeps them"
+
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

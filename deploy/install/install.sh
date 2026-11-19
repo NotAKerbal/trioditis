@@ -50,16 +50,20 @@ Options (each one is kept for later reruns):
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
   --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
                        or stop exposing it (default off)
+  --telegram-api-id <n>, --telegram-api-hash <hash>
+                       The App api_id and api_hash from https://my.telegram.org/apps, which
+                       Telegram needs from whoever runs the bridge (required with telegram
+                       in --networks)
 EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url trusted domain networks e2e
+unset -v mode port host bind proxy_url trusted domain networks e2e telegram_api_id telegram_api_hash
 local_flag=0
 new_server_keys=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
+    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks | --telegram-api-id | --telegram-api-hash)
       [ $# -ge 2 ] || die "$1 needs a value."
       ;;
   esac
@@ -72,6 +76,8 @@ while [ $# -gt 0 ]; do
     --trusted-proxies) trusted=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
+    --telegram-api-id) telegram_api_id=$2; shift ;;
+    --telegram-api-hash) telegram_api_hash=$2; shift ;;
     --new-server-keys) new_server_keys=1 ;;
     --e2e) e2e=1 ;;
     --no-e2e) e2e=0 ;;
@@ -152,6 +158,8 @@ check_option() {
 [ -z "${domain+set}" ] || check_option domain INSTALL_DOMAIN "$domain"
 [ -z "${networks+set}" ] || check_option networks TRIODITIS_NETWORKS "$networks"
 [ -z "${port+set}" ] || check_option port HTTP_PORT "$port"
+[ -z "${telegram_api_id+set}" ] || check_option telegram-api-id TELEGRAM_API_ID "$telegram_api_id"
+[ -z "${telegram_api_hash+set}" ] || check_option telegram-api-hash TELEGRAM_API_HASH "$telegram_api_hash"
 # Several ranges, separated by commas or single spaces.
 [ -z "${trusted+set}" ] || literal_setting INSTALL_TRUSTED_PROXIES "${trusted//,/ }" ||
   die "--trusted-proxies must be one line of ranges (A-Z a-z 0-9 . _ ~ : / @ + = % -), separated by commas or single spaces."
@@ -285,6 +293,17 @@ for network in "${network_list[@]}"; do
     *) die "Unknown network '$network'. This version supports: whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack, groupme, linkedin, twitter, bluesky, fake." ;;
   esac
 done
+# Telegram lets a client in only with an app's credentials, issued to whoever runs it. The
+# bridge host checks them too, but an install that can't start Telegram stops here instead.
+telegram_api_id=${telegram_api_id-$(get TELEGRAM_API_ID)}
+telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
+[ -z "$telegram_api_id" ] || [[ "$telegram_api_id" =~ ^[1-9][0-9]{0,9}$ ]] ||
+  die "--telegram-api-id must be the number my.telegram.org shows as App api_id."
+[ -z "$telegram_api_hash" ] || [[ "$telegram_api_hash" =~ ^[0-9a-fA-F]{32}$ ]] ||
+  die "--telegram-api-hash must be the 32 hex digits my.telegram.org shows as App api_hash."
+if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
+  die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+fi
 if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
   warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
 fi
@@ -422,7 +441,9 @@ set_var \
   COMPOSE_FILE "$compose_files" \
   COMPOSE_PROFILES "$networks" \
   TRIODITIS_NETWORKS "$networks" \
-  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
+  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")" \
+  TELEGRAM_API_ID "$telegram_api_id" \
+  TELEGRAM_API_HASH "$telegram_api_hash"
 
 # --- Secrets ------------------------------------------------------------------------------
 

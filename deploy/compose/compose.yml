@@ -188,6 +188,14 @@ services:
       BRIDGE_NETWORK: telegram
       BRIDGE_HOST_ID: telegram-1
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_telegram?sslmode=disable
+      # The operator's app credentials from my.telegram.org (install.sh --telegram-api-id,
+      # --telegram-api-hash). Empty unless Telegram is enabled; the bridge host refuses to
+      # start without them.
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      # The connector converts some images it sends in temporary files; this keeps their
+      # plaintext in memory-backed storage rather than on the container's disk.
+      TMPDIR: /dev/shm
     volumes:
       - bridge-telegram:/data
 
