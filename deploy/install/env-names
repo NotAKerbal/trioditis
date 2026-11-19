@@ -35,3 +35,6 @@ TRIODITIS_SETUP_TOKEN
 CONVEX_ADMIN_KEY
 BRIDGE_PUBLIC_KEY
 AGENT_ACCESS_PUBLIC_KEY
+# Not written by install.sh: settings an operator may add by hand, which backups keep too.
+META_PROXY
+INSTAGRAM_PROXY

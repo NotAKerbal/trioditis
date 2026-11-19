@@ -199,6 +199,8 @@ services:
       BRIDGE_NETWORK: meta
       BRIDGE_HOST_ID: meta-1
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_meta?sslmode=disable
+      # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/meta.md).
+      META_PROXY: ${META_PROXY:-}
     volumes:
       - bridge-meta:/data
 
@@ -210,6 +212,8 @@ services:
       BRIDGE_NETWORK: instagram
       BRIDGE_HOST_ID: instagram-1
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_instagram?sslmode=disable
+      # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/instagram.md).
+      INSTAGRAM_PROXY: ${INSTAGRAM_PROXY:-}
     volumes:
       - bridge-instagram:/data
 

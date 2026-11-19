@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	globallog "github.com/rs/zerolog/log"
 	"github.com/skip2/go-qrcode"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/devkeys"
@@ -63,6 +64,10 @@ func main() {
 		level = zerolog.DebugLevel
 	}
 	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.Kitchen}).Level(level).With().Timestamp().Logger()
+	// Some connectors (mautrix-meta's protocol decoder) log through zerolog's global logger,
+	// and add the raw protocol data, message text included, when its level is trace, which
+	// it is until set. It is the host's logger instead, as in the mautrix bridges.
+	globallog.Logger = log.With().Bool("global_log", true).Logger()
 	// Checked before anything starts, so a usage error never leaves a host running.
 	switch command {
 	case "run", "inspect":
