@@ -98,11 +98,8 @@ func (cli *Client) sendToGroupWithSenderKey(
 	}
 	groupIDStr := types.GroupIdentifier(groupID.String())
 
-	if retries == 0 {
-		for _, recipientID := range allRecipients {
-			cli.addSendCache(recipientID, groupIDStr, messageTimestamp, content)
-		}
-	}
+	// Trioditis: upstream cached the content for every recipient here, before sending; the
+	// caller now caches it for the members Signal accepted it for (cacheConfirmedSends).
 
 	deviceIDs, senderKeyRecipients, fallbackRecipients := cli.getDevicesIDs(ctx, allRecipients, sec, result)
 	if len(senderKeyRecipients) == 0 {

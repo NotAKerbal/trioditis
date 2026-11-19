@@ -32,4 +32,6 @@ that plus the patch.
 4. Check the libsignal version (`pkg/libsignalgo/signalversion`) against the image's pin
    (`docs/networks/signal.md`, Building with Signal), `go mod tidy`, and
    `node scripts/signal-fork.mjs diff`.
-5. Run the tagged tests with libsignal: `go test -tags libsignal ./internal/networks/`.
+5. Run the tests with libsignal on the linker path (`LIBRARY_PATH`): the bridge host's,
+   `go test -tags libsignal ./internal/networks/`, and the patch's own, which `./...` doesn't
+   reach: `go test go.mau.fi/mautrix-signal/pkg/signalmeow`.

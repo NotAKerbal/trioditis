@@ -183,6 +183,12 @@ var ErrForcedReconnect = errors.New("forced reconnect")
 // submitted again (see sendRequestInternal).
 var ErrRequestUncertain = errors.New("signal may or may not have received the request")
 
+// MessageSendResponseTimeout is how long a message send waits for Signal's answer once it has
+// been handed to the connection. Trioditis: upstream waited without limit, so a connection
+// that stayed up but never answered one send held its caller forever. Past this, the send is
+// reported with ErrRequestUncertain: it may already have gone out.
+var MessageSendResponseTimeout = 60 * time.Second
+
 func (s *SignalWebsocket) ForceReconnect() {
 	if s == nil {
 		return
@@ -695,7 +701,23 @@ func (s *SignalWebsocket) sendRequestInternal(
 	if err != nil {
 		return nil, err
 	}
-	response := <-responseChannel
+	var response *signalpb.WebSocketResponseMessage
+	if isMessageSend(request) {
+		// Trioditis: bounded; see MessageSendResponseTimeout. An answer that comes later goes
+		// into the channel's one-slot buffer, which nothing reads, so the read loop never
+		// blocks on it.
+		timer := time.NewTimer(MessageSendResponseTimeout)
+		defer timer.Stop()
+		select {
+		case response = <-responseChannel:
+		case <-timer.C:
+			return nil, fmt.Errorf("%w: Signal didn't answer within %v", ErrRequestUncertain, MessageSendResponseTimeout)
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w: %w", ErrRequestUncertain, ctx.Err())
+		}
+	} else {
+		response = <-responseChannel
+	}
 
 	isSelfDelete := request.GetVerb() == http.MethodDelete && strings.HasPrefix(request.GetPath(), "/v1/devices/")
 	if response == nil && written.Load() && isMessageSend(request) {

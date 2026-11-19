@@ -150,6 +150,53 @@ func TestSignalSendsAllComeBackWhenConnectionsDrop(t *testing.T) {
 	}
 }
 
+// A send Signal never answers, on a connection that stays up, comes back uncertain once its
+// time is up or its caller gives up, instead of holding the caller forever.
+func TestSignalSendUnansweredOnALiveConnectionComesBack(t *testing.T) {
+	var sends atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		// Reads (and so answers pings) for as long as the client is connected; answers nothing.
+		for {
+			var msg signalpb.WebSocketMessage
+			if err := wspb.Read(r.Context(), ws, &msg); err != nil {
+				return
+			}
+			sends.Add(1)
+		}
+	}))
+	defer srv.Close()
+
+	before := web.MessageSendResponseTimeout
+	web.MessageSendResponseTimeout = 300 * time.Millisecond
+	defer func() { web.MessageSendResponseTimeout = before }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ws := connectToFake(t, ctx, srv)
+	defer ws.Close()
+
+	_, err := ws.SendRequest(ctx, http.MethodPut, "/v1/messages/timeout", []byte(`{}`), nil)
+	if !errors.Is(err, web.ErrRequestUncertain) {
+		t.Fatalf("unanswered send: got %v, want it uncertain after the timeout", err)
+	}
+
+	web.MessageSendResponseTimeout = time.Minute
+	callerCtx, callerCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer callerCancel()
+	_, err = ws.SendRequest(callerCtx, http.MethodPut, "/v1/messages/cancelled", []byte(`{}`), nil)
+	if !errors.Is(err, web.ErrRequestUncertain) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("send whose caller gave up: got %v, want it uncertain", err)
+	}
+	if n := sends.Load(); n != 2 {
+		t.Errorf("the fake received %d sends, want 2", n)
+	}
+}
+
 // connectToFake connects a signalmeow websocket to srv, a fake Signal, and waits until it is
 // connected.
 func connectToFake(t *testing.T, ctx context.Context, srv *httptest.Server) *web.SignalWebsocket {

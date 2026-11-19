@@ -550,17 +550,19 @@ func (cli *Client) addSendCache(recipient libsignalgo.ServiceID, groupID types.G
 	}, content)
 }
 
-// withdrawSendCache keeps a send's content from being resent on a retry receipt.
-// Trioditis: done when the send's outcome is uncertain. A retry receipt resends to every one
-// of the recipient's devices, so it would submit again to devices that already have the
-// message; the send is reported instead, and the person decides. A withdrawn entry holds nil,
-// which handleRetryRequest treats as not cached.
-func (cli *Client) withdrawSendCache(recipient libsignalgo.ServiceID, groupID types.GroupIdentifier, ts uint64) {
-	cli.sendCache.Replace(sendCacheKey{
-		recipient: recipient,
-		groupID:   groupID,
-		timestamp: ts,
-	}, nil)
+// cacheConfirmedSends makes a group send available to retry receipts, for the members
+// Signal accepted it for.
+// Trioditis: upstream cached it for every member before sending. A retry receipt resends to
+// every one of the member's devices, so for a member whose send was uncertain, or still
+// unanswered, it would submit the message again to devices that may already have it. A
+// receipt that comes before Signal's answer finds nothing cached, as for an old message.
+func (cli *Client) cacheConfirmedSends(result *GroupMessageSendResult, groupID types.GroupIdentifier, ts uint64, content *signalpb.Content) {
+	if result == nil {
+		return
+	}
+	for _, sent := range result.SuccessfullySentTo {
+		cli.addSendCache(sent.Recipient, groupID, ts, content)
+	}
 }
 
 func (cli *Client) SendGroupUpdate(ctx context.Context, group *Group, groupContext *signalpb.GroupContextV2, groupChange *GroupChange) (*GroupMessageSendResult, error) {
@@ -583,24 +585,23 @@ func (cli *Client) SendGroupUpdate(ctx context.Context, group *Group, groupConte
 	for _, member := range group.Members {
 		serviceID := member.UserServiceID()
 		recipients = append(recipients, serviceID)
-		cli.addSendCache(serviceID, group.GroupIdentifier, timestamp, content)
 	}
 	for _, member := range group.PendingMembers {
 		recipients = append(recipients, member.ServiceID)
-		cli.addSendCache(member.ServiceID, group.GroupIdentifier, timestamp, content)
 	}
 	if groupChange != nil {
 		for _, member := range groupChange.AddPendingMembers {
 			recipients = append(recipients, member.ServiceID)
-			cli.addSendCache(member.ServiceID, group.GroupIdentifier, timestamp, content)
 		}
 		for _, member := range groupChange.AddMembers {
 			serviceID := member.UserServiceID()
 			recipients = append(recipients, serviceID)
-			cli.addSendCache(serviceID, group.GroupIdentifier, timestamp, content)
 		}
 	}
-	return cli.sendToGroup(ctx, recipients, content, timestamp, nil, &gidBytes)
+	result, err := cli.sendToGroup(ctx, recipients, content, timestamp, nil, &gidBytes)
+	// Trioditis: cached once Signal has answered; see cacheConfirmedSends.
+	cli.cacheConfirmedSends(result, group.GroupIdentifier, timestamp, content)
+	return result, err
 }
 
 const enableSenderKeySend = true
@@ -641,13 +642,9 @@ func (cli *Client) SendGroupMessage(ctx context.Context, gid types.GroupIdentifi
 	}
 	if enableSenderKeySend {
 		result, err := cli.sendToGroupWithSenderKey(ctx, &gidBytes, recipients, ptr.Val(endorsement), content, messageTimestamp, 0)
-		if errors.Is(err, ErrSendUncertain) {
-			// Trioditis: see withdrawSendCache. The key is the one sendToGroupWithSenderKey
-			// cached it under.
-			for _, recipient := range recipients {
-				cli.withdrawSendCache(recipient, types.GroupIdentifier(gidBytes.String()), messageTimestamp)
-			}
-		}
+		// Trioditis: cached once Signal has answered (cacheConfirmedSends), under the key
+		// upstream's sendToGroupWithSenderKey used.
+		cli.cacheConfirmedSends(result, types.GroupIdentifier(gidBytes.String()), messageTimestamp, content)
 		return result, err
 	}
 	return cli.sendToGroup(ctx, recipients, content, messageTimestamp, nil, &gidBytes)
@@ -852,13 +849,9 @@ func (cli *Client) SendMessage(ctx context.Context, recipientID libsignalgo.Serv
 		}
 	}
 
-	cli.addSendCache(recipientID, "", messageTimestamp, content)
 	// Send to the recipient
 	sentUnidentified, err := cli.sendContent(ctx, recipientID, messageTimestamp, content, 0, true, nil, nil)
 	if err != nil {
-		if errors.Is(err, ErrSendUncertain) {
-			cli.withdrawSendCache(recipientID, "", messageTimestamp)
-		}
 		return SendMessageResult{
 			WasSuccessful: false,
 			FailedSendResult: FailedSendResult{
@@ -867,6 +860,8 @@ func (cli *Client) SendMessage(ctx context.Context, recipientID libsignalgo.Serv
 			},
 		}
 	}
+	// Trioditis: cached only once Signal has accepted it; see cacheConfirmedSends.
+	cli.addSendCache(recipientID, "", messageTimestamp, content)
 	result := SendMessageResult{
 		WasSuccessful: true,
 		SuccessfulSendResult: SuccessfulSendResult{
