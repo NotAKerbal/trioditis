@@ -223,7 +223,12 @@ export function MessageList(props: MessageListProps) {
         <div key={s.id} className="mb-2 ml-auto flex max-w-[78%] flex-col items-end">
           <div className="rounded-[18px] px-3 py-2 leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
             {s.body === undefined ? (
-              <span className="text-subtle-foreground">Opening…</span>
+              // Its text is still on its way: a quiet bar where it will go, not a word that flashes.
+              <span
+                role="status"
+                aria-label="Loading the scheduled message"
+                className="block h-[1.42em] w-32 rounded-full bg-[var(--accent-ring)] opacity-30 motion-safe:animate-pulse"
+              />
             ) : s.body === null ? (
               <span className="text-subtle-foreground italic">
                 This scheduled message can’t be shown here. You can still cancel it.

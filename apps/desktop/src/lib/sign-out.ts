@@ -1,5 +1,5 @@
 import { announceAccountChange } from './account-tabs.ts'
-import { authClient } from './auth-client.ts'
+import { authClient, setPageSession } from './auth-client.ts'
 import { forgetIdentity } from './keys.ts'
 
 /** The sign-in page's address after a sign-out whose key removal couldn't be confirmed. */
@@ -123,6 +123,7 @@ let opened: string | null = null
 /** Notes the session this page opened with, for leaving when it ends (leaveForSignIn). */
 export function noteOpenedSession(sessionId: string) {
   opened ??= sessionId
+  setPageSession(sessionId)
 }
 
 /** The session this page opened with, if it has opened one. */

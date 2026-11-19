@@ -34,8 +34,8 @@ import {
   useServerInfo,
   useSidebarLayout,
 } from '~/data/chats.ts'
-import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
-import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
+import { authSessionChanged, errorMessage, sessionChanged, tooManyAttempts } from '~/lib/errors.ts'
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -591,7 +591,7 @@ function Keys() {
   const [saved, setSaved] = useState(false)
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
-  const [busy, setBusy] = useState<'recovery' | 'password' | null>(null)
+  const [busy, setBusy] = useState<'recovery' | 'password' | 'passkey' | null>(null)
   // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
   const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
@@ -749,11 +749,28 @@ function Keys() {
           </Button>
         </form>
       </Setting>
-      {/* Adding a passkey waits until the server can tie it to this page's session, as it does
-          key writes: until then a passkey could be added to whoever another tab signed in as.
-          Signing in with a passkey already added works as before. */}
-      <Setting title="Passkeys" about="Sign in without a password on this device. Adding a passkey is coming soon.">
-        <Button disabled>Coming soon</Button>
+      <Setting
+        title="Passkeys"
+        about="Sign in without a password on this device. Unlocking your key with a passkey comes later."
+      >
+        <Button
+          loading={busy === 'passkey'}
+          onClick={async () => {
+            setBusy('passkey')
+            // Both requests name this page's session (withPageSession in lib/auth-client.ts).
+            const result = await authClient.passkey.addPasskey()
+            if (result?.error && authSessionChanged(result.error)) return window.location.reload()
+            setBusy(null)
+            if (result?.error) {
+              toast(
+                tooManyAttempts(result.error, lastRetryAfter()) ??
+                  errorMessage(result.error, 'That passkey couldn’t be added.'),
+              )
+            } else toast('Passkey added.')
+          }}
+        >
+          Add a passkey
+        </Button>
       </Setting>
       <p className="mt-2 text-sm text-subtle-foreground">
         Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>

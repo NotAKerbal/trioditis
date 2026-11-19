@@ -99,6 +99,7 @@ const server = vi.hoisted(() => {
   return state
 })
 vi.mock('../src/lib/auth-client.ts', () => ({
+  setPageSession: () => undefined,
   authClient: {
     getSession: async () => {
       server.onRead()
