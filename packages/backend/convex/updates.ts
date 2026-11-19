@@ -183,6 +183,8 @@ export const report = mutation({
     claim: v.optional(v.string()),
     /** The channel an update it starts is for: refused if admins have chosen another since. */
     claimChannel: v.optional(updateChannel),
+    /** An automatic update starts on it: refused if admins have turned them off since. */
+    claimAuto: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -194,6 +196,7 @@ export const report = mutation({
     if (args.claim !== undefined && row.request?.id !== args.claim) throw new ConvexError('That request was cancelled.')
     if (args.claimChannel !== undefined && row.channel !== args.claimChannel)
       throw new ConvexError('The channel changed.')
+    if (args.claimAuto && !row.autoUpdate) throw new ConvexError('Automatic updates were turned off.')
     const previous = row.updater
     const now = Date.now()
     // An update's start is when it was first reported; a failure keeps the start of the update

@@ -52,7 +52,7 @@ load_settings() {
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
 # The secret and a report's values reach it as UPDATER_* variables, never as arguments (an
 # unset one isn't passed); --init so it stops on a signal.
-AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CLAIM_CHANNEL CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
+AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CLAIM_CHANNEL CLAIM_AUTO CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
   LATEST_SUBJECT BEHIND AHEAD CHECKED_AT'
 agent() {
   local passed=() name
@@ -169,8 +169,9 @@ run_install() {
   [ "$status" = 0 ]
 }
 
-# update CHANNEL: installs the channel's newest commit, if that moves the server forward.
-# Exits after a successful update, so the new version of this script takes over.
+# update CHANNEL [AUTO]: installs the channel's newest commit, if that moves the server forward;
+# AUTO 1 for an automatic update, which starts only while admins still have them on. Exits
+# after a successful update, so the new version of this script takes over.
 update() {
   local channel=$1 name target previous
   name=$(channel_branch "$channel")
@@ -206,9 +207,10 @@ update() {
   # Claimed before anything moves, request and channel both: an admin who cancelled or chose
   # another channel meanwhile gets their way, and an update the backend can't hear about
   # doesn't start. The request stays until the update is over, so it isn't marked done yet.
-  if ! UPDATER_CLAIM=$done_id UPDATER_CLAIM_CHANNEL=$channel done_id='' report updating "Installing ${target:0:7}."; then
+  if ! UPDATER_CLAIM=$done_id UPDATER_CLAIM_CHANNEL=$channel UPDATER_CLAIM_AUTO=${2:-0} done_id='' \
+    report updating "Installing ${target:0:7}."; then
     release_lock
-    outcome idle "The update didn't start: it was cancelled, the channel changed, or the server couldn't be reached."
+    outcome idle "The update didn't start: it was cancelled, the channel or automatic updates changed, or the server couldn't be reached."
     return
   fi
   pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install
@@ -380,7 +382,7 @@ handle() {
     auto_day=$(date +%F)
     save_state
     if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
-      update "$channel"
+      update "$channel" 1
     fi
   fi
   report "$outcome_state" "$outcome_message"

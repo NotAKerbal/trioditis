@@ -321,7 +321,8 @@ output goes to the journal.
 
 A request can be cancelled until the updater claims it, just before it moves the checkout;
 after that the update runs to the end. The claim names the channel too, so an update, automatic
-or asked for, doesn't start for a channel admins have switched away from meanwhile (switching
+or asked for, doesn't start for a channel admins have switched away from meanwhile, nor an
+automatic one once they've been turned off (switching
 also makes a waiting request again, for the new channel). What must outlast a restart is in
 `deploy/.updater-state`: the update in progress and whether it was installing or going back,
 how the last one ended until the backend has that report, the day of the last automatic

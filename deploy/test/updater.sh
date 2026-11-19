@@ -63,6 +63,8 @@ case " $* " in
     [ "${UPDATER_CLAIM:-}" != cancelled ] || exit 1
     # Admins chose stable after the updater began on nightly.
     [ "${UPDATER_CLAIM_CHANNEL:-}" != nightly ] || [ ! -e "$REPORT_LOG.stable" ] || exit 1
+    # Admins turned automatic updates off after the updater began one.
+    [ "${UPDATER_CLAIM_AUTO:-0}" != 1 ] || [ ! -e "$REPORT_LOG.manual" ] || exit 1
     # The backend out of reach, for one test.
     [ ! -e "$REPORT_LOG.down" ] || exit 1
     echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
@@ -127,6 +129,12 @@ rm -f "$work/reports.stable"
 head_is "$c1" && grep -q "^idle|The update didn't start" "$work/out" && [ ! -s "$work/installs" ] &&
   check ok "an update for a channel admins have since left installs nothing" ||
   check fail "an update for a channel admins have since left installs nothing ($(cat "$work/out"))"
+touch "$work/reports.manual"
+run update nightly 1
+rm -f "$work/reports.manual"
+head_is "$c1" && grep -q "^idle|The update didn't start" "$work/out" && [ ! -s "$work/installs" ] &&
+  check ok "an automatic update admins have since turned off installs nothing" ||
+  check fail "an automatic update admins have since turned off installs nothing ($(cat "$work/out"))"
 flock "$work/checkout/deploy/.operation.lock" sleep 5 &
 holder=$!
 sleep 0.5

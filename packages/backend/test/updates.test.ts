@@ -188,4 +188,26 @@ describe('updates', () => {
     await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'idle', done: claimed.id })
     expect((await t.query(api.updates.poll, { secret: UPDATER_SECRET })).request).toBeNull()
   })
+
+  it('refuses to start an automatic update once they’re turned off', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    await admin.mutation(api.updates.setAutoUpdate, { enabled: true })
+    await admin.mutation(api.updates.setAutoUpdate, { enabled: false })
+    await expect(
+      t.mutation(api.updates.report, {
+        secret: UPDATER_SECRET,
+        state: 'updating',
+        claimChannel: 'stable',
+        claimAuto: true,
+      }),
+    ).rejects.toThrow(/turned off/)
+    await admin.mutation(api.updates.setAutoUpdate, { enabled: true })
+    await t.mutation(api.updates.report, {
+      secret: UPDATER_SECRET,
+      state: 'updating',
+      claimChannel: 'stable',
+      claimAuto: true,
+    })
+  })
 })
