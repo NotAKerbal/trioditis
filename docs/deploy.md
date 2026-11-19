@@ -602,7 +602,9 @@ server beside it. `deploy/trioditis` always uses the saved project, whatever
 `COMPOSE_PROJECT_NAME` says.
 
 ```sh
-TRIODITIS_PROJECT=trioditis-test deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1 --port 18080
+TRIODITIS_PROJECT=trioditis-test deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1 --port 18080 --no-updater
 ```
 
-Remove it with `deploy/trioditis down -v` in that checkout.
+`--no-updater` keeps it from starting an updater of its own, a systemd service that removing
+its containers would leave behind. Remove it with `deploy/trioditis down -v` in that checkout
+(and, if it has an updater, `deploy/install/install.sh --no-updater` first).
