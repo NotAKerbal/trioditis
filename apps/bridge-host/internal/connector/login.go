@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"sync"
 	"time"
 
@@ -154,6 +155,9 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 				err = errors.New("login process doesn't accept cookies")
 				break
 			}
+			// A cookie left blank is an optional one the person doesn't have. Connectors put
+			// every cookie they are given into their requests, so it isn't passed on empty.
+			maps.DeleteFunc(plain.Input, func(_, value string) bool { return value == "" })
 			next, err = proc.SubmitCookies(s.ctx, plain.Input)
 		default:
 			err = errors.New("the current login step doesn't take input")
