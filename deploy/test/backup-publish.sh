@@ -7,7 +7,8 @@
 # its process group, as Ctrl-C sends) while the archive is streaming, or after it reserved
 # its name, publishes nothing and leaves nothing behind (an interrupt while it makes its
 # name's directory is held off, and one already there is never removed); one that can't run
-# its last check on the private keys (grep failing, or the patterns not built), or finds
+# its last check on the private keys (grep failing, or the patterns not built), or can't
+# copy the settings exactly (a lookup failing or wrong, or the second reader failing), or finds
 # the lock held (taken before .env is even opened), publishes nothing; a NUL in deploy/.env
 # is refused before it's read; one with a deploy/.env not in the form the installer writes (export,
 # spaces around =, quoted values, a name twice, a carriage return) is refused before it
@@ -209,6 +210,36 @@ PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 
 rm -f "$root/stub/grep"
 [ "$status" != 0 ] && grep -q "Couldn't check secrets.env for the private keys" "$root/out" && [ -z "$(entries)" ] &&
   check ok "a private-key check that can't run stops the backup" || { check fail "a private-key check that can't run stops the backup"; cat "$root/out" >&2; }
+
+# Copying the settings into secrets.env with a lookup that fails: a grep that exits 2 on a
+# whole-line name match (it isn't what decides what's kept, so the backup still holds it,
+# with its value), then the parser's lookup of a value failing (sed exiting 2) or giving a
+# wrong one (and exiting 0), then the second reader failing (awk exiting 2): each of the
+# last three stops the backup, unpublished.
+password=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$root/deploy/.env")
+copy_with_stub() {
+  rm -rf "${backups:?}"/*
+  real=$(command -v "$1")
+  printf '#!/bin/sh\ncase "$*" in %s) %s ;; esac\nexec %s "$@"\n' "$2" "$3" "$real" >"$root/stub/$1"
+  chmod +x "$root/stub/$1"
+  PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+  rm -f "$root/stub/$1"
+}
+copy_with_stub grep '*"-qx POSTGRES_PASSWORD"*' 'exit 2'
+secrets=$(find "$backups" -mindepth 2 -name secrets.env | head -1)
+[ "$status" = 0 ] && [ -n "$secrets" ] && [ "$(sed -n 's/^POSTGRES_PASSWORD=//p' "$secrets")" = "$password" ] &&
+  check ok "a grep that fails on a setting's name doesn't leave it out" ||
+  { check fail "a grep that fails on a setting's name doesn't leave it out"; cat "$root/out" >&2; }
+for stub in "sed|*'s/^POSTGRES_PASSWORD=//p'*|exit 2|a lookup that fails" \
+  "sed|*'s/^POSTGRES_PASSWORD=//p'*|echo wrong; exit 0|a lookup that gives the wrong value" \
+  "awk|*want*|exit 2|a second reader that fails"; do
+  IFS='|' read -r tool_name pattern action what <<EOF
+$stub
+EOF
+  copy_with_stub "$tool_name" "$pattern" "$action"
+  [ "$status" != 0 ] && grep -qE "Couldn't copy the settings|doesn't hold exactly the listed settings" "$root/out" && [ -z "$(entries)" ] &&
+    check ok "$what, copying the settings, stops the backup" || { check fail "$what, copying the settings, stops the backup"; cat "$root/out" >&2; }
+done
 
 # A deploy/.env in forms Compose reads but the parser doesn't: each is refused before
 # anything is made (not even the backup directory), and the server is left as it was.

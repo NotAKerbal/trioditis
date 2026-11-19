@@ -216,11 +216,15 @@ case "${1:-}" in
         done
         # Each healthy (or running, without a healthcheck) within two minutes, or the next
         # step doesn't start.
+        # A container that's still running may yet recover (a healthcheck can fail once while
+        # it starts), so only one that has stopped ends the wait early.
         for id in $started; do
           ready=0
-          for _ in $(seq 120); do
-            state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo gone)
-            case "$state" in healthy | running) ready=1 && break ;; unhealthy | exited | dead | gone) break ;; esac
+          state=unknown
+          deadline=$(($(date +%s) + 120))
+          while left=$((deadline - $(date +%s))) && [ "$left" -gt 0 ]; do
+            state=$(timeout "$left" docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null) || state=unknown
+            case "$state" in running/healthy | running/none) ready=1 && break ;; exited/* | dead/*) break ;; esac
             sleep 1
           done
           if [ "$ready" = 0 ]; then
@@ -270,15 +274,32 @@ case "${1:-}" in
     # and they open it: docs/architecture/sealing.md, Bridge key exposure), and nothing else,
     # not even a comment. A name deploy/.env has that isn't listed stays out, and is named
     # below (its value isn't) for the operator to keep.
-    allowed=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)$/\1/p' "$env_names_file")
-    present=$(printf '%s\n' "$env_text" | env_names)
-    for name in $allowed; do
-      ! printf '%s\n' "$present" | grep -qx "$name" || printf '%s=%s\n' "$name" "$(value_in "$name" "$env_text")"
-    done >"$work/secrets.env"
+    # One pass over the snapshot's settings, every lookup checked: a step that fails stops the
+    # backup, rather than reading as a setting that isn't there.
+    copy_failed() {
+      echo "Couldn't copy the settings into secrets.env. Nothing was published." >&2
+      exit 1
+    }
+    allowed=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)$/\1/p' "$env_names_file") || copy_failed
+    # shellcheck disable=SC2086 # one name per word
+    allowed=" $(printf '%s ' $allowed)"
+    present=$(env_names <"$snapshot") || copy_failed
+    kept=0
+    : >"$work/secrets.env"
     for name in $present; do
       case "$name" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY) continue ;; esac
-      printf '%s\n' "$allowed" | grep -qx "$name" || left_out="$left_out $name"
+      case "$allowed" in *" $name "*) ;; *) left_out="$left_out $name" && continue ;; esac
+      value=$(env_value "$name" <"$snapshot") || copy_failed
+      printf '%s=%s\n' "$name" "$value" >>"$work/secrets.env" || copy_failed
+      kept=$((kept + 1))
     done
+    # Then checked again, by a second reader: every listed setting the snapshot has is in
+    # secrets.env once, with its value, and nothing else is.
+    verified=$(env_kept "$env_names_file" "$snapshot" "$work/secrets.env") || verified=failed
+    if [ "$verified" != "$kept" ]; then
+      echo "secrets.env doesn't hold exactly the listed settings from deploy/.env. Nothing was published." >&2
+      exit 1
+    fi
     # And a last check that neither private key's value is anywhere in it, by any name. The
     # values go in a private patterns file, never arguments. Each step is checked: secrets.env
     # counts as clean only if grep found nothing (exit 1) with exactly as many patterns as

@@ -301,8 +301,9 @@ in a private directory beside the destination, reserves the name with `mkdir` (w
 if anything is there, so it moves on to the next suffix), renames the private directory onto
 it in one step, checks both files are there, and starts again the containers that were
 running (only those: not the finished functions job, nor a service you'd stopped), in the
-order their dependencies need, each healthy within two minutes before the next starts; if
-one isn't, it stops there, names it, and the backup counts as failed
+order their dependencies need, each healthy within two minutes before the next starts (one
+that's running but briefly unhealthy is waited for; one that stops isn't); if one isn't
+healthy in time, it stops there, names it, and the backup counts as failed
 (`deploy/trioditis up -d` starts the rest). So there's
 either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
 server is still stopping, leaves nothing behind, and if the server doesn't start again the
@@ -312,8 +313,11 @@ image builds copy the checkout.
 `secrets.env` holds only the settings the installer writes, as `NAME=value` lines: the names
 listed in `deploy/install/env-names`, never the two private keys, and nothing else, not even
 a comment. Anything else in `deploy/.env` (a setting you added yourself) stays out of the
-backup, and the backup names it, without its value, so you can keep it yourself. As a last
-check, it won't publish a backup in which either private key's value appears anywhere.
+backup, and the backup names it, without its value, so you can keep it yourself. Before it
+publishes, a second reader checks that `secrets.env` holds every listed setting from
+`deploy/.env` exactly once, with its value, and nothing else; and, as a last check, it
+won't publish a backup in which either private key's value appears anywhere. If a check
+can't run, nothing is published.
 
 `deploy/.env` has one form, which the installer, backup and `keys` all read the same way
 (`deploy/scripts/env.sh`): `NAME=value` lines, each name once, no carriage returns, and

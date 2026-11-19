@@ -52,6 +52,30 @@ env_names() {
   sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'
 }
 
+# env_kept NAMES SETTINGS KEPT: checks that KEPT (a backup's secrets.env) holds exactly the
+# settings in SETTINGS (a checked deploy/.env) whose names NAMES (env-names) lists, other
+# than the private keys: each once, with its value, and nothing else. Prints how many, and
+# fails if it doesn't. It reads them apart from the shell's copy, so the two agree or the
+# backup isn't published.
+env_kept() {
+  awk '
+    function parse() { name = $0; sub(/=.*/, "", name); value = $0; sub(/^[^=]*=/, "", value) }
+    FILENAME == ARGV[1] { if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*$/) listed[$0] = 1; next }
+    FILENAME == ARGV[2] {
+      if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/) next
+      parse()
+      if ((name in listed) && name != "BRIDGE_PRIVATE_KEY" && name != "AGENT_ACCESS_PRIVATE_KEY") { want[name] = value; wanted++ }
+      next
+    }
+    {
+      parse()
+      if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/ || !(name in want) || (name in got) || want[name] != value) bad = 1
+      got[name] = 1
+      count++
+    }
+    END { if (bad || count != wanted) exit 1; print count }' "$1" "$2" "$3"
+}
+
 # env_classified NAME: whether NAME is one a deploy/.env may hold: listed in env-names (what
 # a backup keeps), or one of the two private keys (what it never does).
 env_classified() {
