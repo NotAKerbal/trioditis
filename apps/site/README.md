@@ -9,7 +9,8 @@ To look at it locally:
 python3 -m http.server --directory apps/site
 ```
 
-It deploys as its own Vercel project with **Root Directory** set to `apps/site`; `vercel.json`
+It deploys as its own Vercel project, `trioditis-site` in `notakerbals-projects`, with **Root
+Directory** set to `apps/site`; `vercel.json`
 here holds its headers, and skips a deploy only when git shows nothing in this folder changed
 since the last one. It isn't part of
 the web app's deployment (the root `vercel.json`).
