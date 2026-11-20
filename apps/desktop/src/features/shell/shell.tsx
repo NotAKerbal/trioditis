@@ -10,6 +10,7 @@ import { BottomBar } from './bottom-bar.tsx'
 import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, type SidebarAction } from './sidebar.tsx'
+import { SidebarBoundary } from './sidebar-boundary.tsx'
 import { UpdateNotice } from './update-notice.tsx'
 
 /** The signed-in app: one sidebar, the open chat, and its details. */
@@ -90,20 +91,24 @@ export function Shell() {
       })
   }
 
+  const bottomBar = (
+    <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
+  )
+
   return (
     <div className="flex h-full bg-background">
-      <Sidebar
-        selectedId={selectedId}
-        openedUnreadId={openedUnreadId}
-        onOpen={open}
-        onClose={() => select(undefined)}
-        onAction={onSidebarAction}
-        shownRef={shownRef}
-        chatsRef={chatsById}
-        bottomBar={
-          <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
-        }
-      />
+      <SidebarBoundary bottomBar={bottomBar}>
+        <Sidebar
+          selectedId={selectedId}
+          openedUnreadId={openedUnreadId}
+          onOpen={open}
+          onClose={() => select(undefined)}
+          onAction={onSidebarAction}
+          shownRef={shownRef}
+          chatsRef={chatsById}
+          bottomBar={bottomBar}
+        />
+      </SidebarBoundary>
       <ChatPane chatId={selectedId as ChatId | undefined} onGone={() => select(undefined)} act={act} />
       <SettingsDialog
         section={search.settings}
