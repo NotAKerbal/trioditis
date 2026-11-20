@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/host"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/networks"
 )
 
 // TestMain lets a test run this binary's main in a child process: the test binary re-runs
@@ -137,4 +140,19 @@ func outString(buf *bytes.Buffer) string {
 	outLock <- struct{}{}
 	defer func() { <-outLock }()
 	return buf.String()
+}
+
+// A network's own backfill pacing replaces the host's, and only for that network.
+func TestNetworkBackfillDelayReachesBridgev2(t *testing.T) {
+	if adjust := adjustBridgeConfig(networks.Network{}); adjust != nil {
+		t.Error("a network without its own pacing still changes bridgev2's settings")
+	}
+	cfg := host.BridgeConfig()
+	adjustBridgeConfig(networks.Network{BackfillBatchDelay: 5})(cfg)
+	if got := cfg.Backfill.Queue.BatchDelay; got != 5 {
+		t.Errorf("batch delay: got %d, want 5", got)
+	}
+	if def := host.BridgeConfig().Backfill.Queue.BatchDelay; def == 5 {
+		t.Errorf("the host default is already %d, so this test proves nothing", def)
+	}
 }

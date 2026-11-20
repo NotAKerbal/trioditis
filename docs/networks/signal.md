@@ -89,7 +89,13 @@ address book must not name it for the others.
 
 Backfill is on in the bridge host (`host.BridgeConfig`), so linking asks the phone to
 **transfer message history** (the link advertises the `backup5` capability). The phone
-offers it during linking; accepting brings recent history in.
+offers it during linking; accepting brings recent history in. A new chat's newest 50
+messages come in first, then the backfill queue imports the rest of the archive 100 at a
+time, with a 5-second pause between batches (Signal's `BackfillBatchDelay`; the host's
+default for other networks is 20). The pauses alone come to about 17 minutes for 20,000
+messages (200 batches), and attachments, profile lookups and chats that end in a partial
+batch add to that. A batch asks Signal's servers for its attachments and for senders'
+profiles not already cached; a faster pace hasn't been measured against Signal's rate limits.
 
 Voice notes sent from Trioditis need ffmpeg (ogg to aac), which the image doesn't have, so
 the connector reports them as unsupported; received voice notes come through unconverted

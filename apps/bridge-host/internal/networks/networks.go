@@ -27,6 +27,9 @@ type Network struct {
 	// LogFilter, if set, wraps the process's log output, to drop what the connector logs
 	// that must not be written out.
 	LogFilter func(io.Writer) io.Writer
+	// BackfillBatchDelay, if set, is how many seconds the backfill queue waits between
+	// batches of older history, in place of the host's default.
+	BackfillBatchDelay int
 }
 
 var registry = map[string]Network{}
