@@ -75,7 +75,11 @@ jobs:
           sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone || true
           ls -l "$(dirname "$(readlink -f "$(command -v google-chrome)")")/chrome-sandbox" || true
           google-chrome --version
-          timeout 60 google-chrome --headless=new --disable-gpu --dump-dom about:blank 2>&1 | tail -30 || true
+          ls -l /usr/bin/chromium "$(readlink -f /usr/bin/chromium)" || true
+          chromium --version || true
+          timeout 60 chromium --headless=new --disable-gpu --dump-dom about:blank 2>&1 | grep -v dbus | tail -30 || true
+          cd apps/bridge-host
+          CHROMIUM_PATH=google-chrome go test -count=1 -run TestBrowserSignsIn -v ./internal/signin 2>&1 | tail -15 || true
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
       # The bridge host builds against a patched copy of mautrix-signal
