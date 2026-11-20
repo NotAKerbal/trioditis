@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog"
 	globallog "github.com/rs/zerolog/log"
 	"github.com/skip2/go-qrcode"
+	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/devkeys"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/host"
@@ -115,6 +116,7 @@ func main() {
 		NetworkConnector: netConn,
 		Log:              log,
 	}
+	cfg.AdjustBridgeConfig = adjustBridgeConfig(spec)
 	cfg.CommandAddr = "http://" + cfg.ListenAddr
 	keyStore := &devkeys.Keys{Dir: filepath.Join(*dataDir, "dev-keys")}
 	// Dev identity keys are generated and kept on this machine, so whoever runs it could
@@ -171,6 +173,14 @@ func main() {
 // logOutput is where the process logs: w, through the network's filter if it has one. A
 // network whose connector logs what must not be written out filters the host's log, which is
 // the one bridgev2 hands the connector.
+// adjustBridgeConfig applies the network's own bridgev2 settings, or is nil when it has none.
+func adjustBridgeConfig(spec networks.Network) func(*bridgeconfig.BridgeConfig) {
+	if spec.BackfillBatchDelay <= 0 {
+		return nil
+	}
+	return func(cfg *bridgeconfig.BridgeConfig) { cfg.Backfill.Queue.BatchDelay = spec.BackfillBatchDelay }
+}
+
 func logOutput(network string, w io.Writer) io.Writer {
 	if spec, ok := networks.Lookup(network); ok && spec.LogFilter != nil {
 		return spec.LogFilter(w)

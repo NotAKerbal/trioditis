@@ -44,6 +44,10 @@ func init() {
 		// signalmeow logs the history transfer's backup key and a contact's name and number at
 		// info level; see signallog.go.
 		LogFilter: signalLogFilter,
+		// Older history comes from the archive the phone transferred at linking, already in
+		// the database, so a batch costs Signal's servers nothing beyond its attachments. At
+		// the host's default a large archive took hours to come in.
+		BackfillBatchDelay: 5,
 	})
 }
 
