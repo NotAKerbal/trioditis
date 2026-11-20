@@ -22,20 +22,17 @@ import {
 } from '~/data/updates.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Setting } from './layout.tsx'
+import { Heading, Loading, Setting } from './layout.tsx'
 
 const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
 /** Admin settings → Updates: the release channel, automatic updates, and updating now. */
 export function Updates() {
-  const { data: status } = useQuery(convexQuery(api.updates.status, {}))
+  const { data: status, isError } = useQuery(convexQuery(api.updates.status, {}))
   return (
     <>
-      <Heading
-        title="Updates"
-        lead="Keep this server up to date. An update doesn’t sign anyone out: pages pick up the new version on their own."
-      />
-      {status ? <UpdateSettings status={status} /> : null}
+      <Heading title="Updates" />
+      {status ? <UpdateSettings status={status} /> : <Loading failed={isError} />}
     </>
   )
 }
@@ -44,7 +41,6 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
   const session = useSession()
   const setChannel = useMutation(api.updates.setChannel)
   const setAutoUpdate = useMutation(api.updates.setAutoUpdate)
-  const version = runningVersion(status)
   const off = !status.updaterConfigured
 
   async function run(action: () => Promise<unknown>, failure: string) {
@@ -58,18 +54,12 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
 
   return (
     <>
-      <Setting
-        title="This server"
-        about={
-          version
-            ? `Version ${shortCommit(version.commit)}${version.committedAt ? `, from ${date.format(version.committedAt)}` : ''}.`
-            : 'Its version isn’t known.'
-        }
-      >
-        {null}
-      </Setting>
       <UpdateState status={status} />
-      <Setting title="Channel" about={CHANNELS.find((c) => c.id === status.channel)!.about}>
+      {/* Only nightly's line is a warning worth keeping in view. */}
+      <Setting
+        title="Channel"
+        about={status.channel === 'nightly' ? CHANNELS.find((c) => c.id === 'nightly')!.about : undefined}
+      >
         <Segmented
           value={status.channel}
           onValueChange={(v) =>
@@ -88,14 +78,7 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
           ))}
         </Segmented>
       </Setting>
-      <Setting
-        title="Install updates automatically"
-        about={
-          off
-            ? 'Needs the updater, which is off on this server.'
-            : `Overnight, around 4 AM server time, when ${channelName(status.channel)} has a new version.`
-        }
-      >
+      <Setting title="Install updates automatically" about={off ? undefined : 'Around 4 AM server time.'}>
         <Switch
           checked={status.autoUpdate}
           disabled={off}
@@ -112,7 +95,7 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
   )
 }
 
-/** Where updating stands, and the button for what to do next. */
+/** The version this server runs, where updating stands, and the button for what to do next. */
 function UpdateState({ status }: { status: UpdateStatus }) {
   const session = useSession()
   const request = useMutation(api.updates.request)
@@ -129,6 +112,7 @@ function UpdateState({ status }: { status: UpdateStatus }) {
     const timer = setTimeout(() => recheck((n) => n + 1), wait)
     return () => clearTimeout(timer)
   }, [seenAt])
+  const version = runningVersion(status)
   const view = updateView(status)
   const stale = updaterStale(status)
   const channel = channelName(status.channel)
@@ -151,30 +135,26 @@ function UpdateState({ status }: { status: UpdateStatus }) {
 
   let body: ReactNode
   let action: ReactNode = null
-  let tone: 'plain' | 'good' | 'warn' = 'plain'
+  let warn = false
   switch (view.kind) {
     case 'off':
       body = (
         <>
-          This server’s updater is off, so it’s updated by hand on the server. To update it from here, its operator runs
-          the installer again with <code className="font-mono text-[0.92em]">--updater</code>.
+          The updater is off. To update from here, rerun the installer with{' '}
+          <code className="font-mono text-[0.92em]">--updater</code>.
         </>
       )
       break
     case 'updating':
-      tone = 'good'
       body = (
         <>
-          <b className="font-semibold">Updating now.</b> {view.message ?? ''}
-          {view.startedAt ? ` Started ${when(view.startedAt)}.` : ''} The server restarts only what changed; this page
-          reloads itself once the new version is ready.
+          <b className="font-semibold text-foreground">Updating now.</b> {view.message ?? ''}
+          {view.startedAt ? ` Started ${when(view.startedAt)}.` : ''}
         </>
       )
       break
     case 'waiting':
-      body = (
-        <>{view.request === 'update' ? 'The update starts' : 'The check runs'} as soon as the updater picks it up.</>
-      )
+      body = `${view.request === 'update' ? 'The update' : 'The check'} is waiting for the updater.`
       action = (
         <Button
           size="sm"
@@ -190,7 +170,7 @@ function UpdateState({ status }: { status: UpdateStatus }) {
       )
       break
     case 'failed':
-      tone = 'warn'
+      warn = true
       body = view.message
       action = (
         <Button size="sm" loading={busy} onClick={() => void ask('update')}>
@@ -199,10 +179,9 @@ function UpdateState({ status }: { status: UpdateStatus }) {
       )
       break
     case 'available':
-      tone = 'good'
       body = (
         <>
-          <b className="font-semibold">
+          <b className="font-semibold text-foreground">
             An update is available: {shortCommit(view.commit)}, from {date.format(view.committedAt)}
           </b>
           {view.behind > 1 ? ` (${view.behind} changes)` : ''}. {view.subject}
@@ -215,40 +194,43 @@ function UpdateState({ status }: { status: UpdateStatus }) {
       )
       break
     case 'current':
-      body = `Up to date with ${channel}. Checked ${when(view.checkedAt)}.`
+      body = `Up to date. Checked ${when(view.checkedAt)}.`
       action = check
       break
     case 'ahead':
       body =
         view.behind > 0
-          ? `This server runs changes ${channel} doesn’t have, so it can’t move to ${channel} without going back. It stays where it is.`
-          : `This server is newer than ${channel}. It updates again once ${channel} gets ahead of it.`
+          ? `It runs changes ${channel} doesn’t have, so it stays where it is.`
+          : `Newer than ${channel}. It updates again once ${channel} passes it.`
       action = check
       break
     case 'unchecked':
-      body = `The updater hasn’t looked at ${channel} yet.`
+      body = 'Not checked yet.'
       action = check
       break
   }
 
   return (
-    <div className="border-t border-border py-[15px]">
-      <div
-        className={cn(
-          'flex items-center gap-3 rounded-lg p-3 text-sm shadow-[inset_0_0_0_1px_var(--border)]',
-          tone === 'good' ? 'bg-primary-soft' : 'bg-surface-2',
-        )}
-      >
-        <span className={cn('min-w-0 flex-1', tone === 'warn' ? 'text-warning' : 'text-foreground')}>{body}</span>
-        {action}
-      </div>
-      {stale && view.kind !== 'off' ? (
-        <p className="mt-2 text-sm text-warning">
-          {status.updater
-            ? `The updater last checked in ${when(status.updater.seenAt)}. It may be stopped on the server.`
-            : 'The updater hasn’t checked in yet. It may not be running on the server.'}
-        </p>
-      ) : null}
-    </div>
+    <Setting
+      title={
+        version
+          ? `Version ${shortCommit(version.commit)}${version.committedAt ? `, from ${date.format(version.committedAt)}` : ''}`
+          : 'Version unknown'
+      }
+      about={
+        <>
+          <span className={cn(warn && 'text-warning')}>{body}</span>
+          {stale && view.kind !== 'off' ? (
+            <span className="mt-0.5 block text-warning">
+              {status.updater
+                ? `The updater last checked in ${when(status.updater.seenAt)}. It may be stopped on the server.`
+                : 'The updater hasn’t checked in yet. It may not be running on the server.'}
+            </span>
+          ) : null}
+        </>
+      }
+    >
+      {action}
+    </Setting>
   )
 }

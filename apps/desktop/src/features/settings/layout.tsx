@@ -1,14 +1,30 @@
-import { DialogDescription } from '@trioditis/ui/dialog'
 import { cn } from '@trioditis/ui/lib/utils'
 import type { ReactNode } from 'react'
 
-/** A settings section's title, and the line under it that the dialog is described by. */
-export function Heading({ title, lead }: { title: string; lead: string }) {
+/** A settings section's title, for assistive tech: the selected section in the nav already shows it. */
+export function Heading({ title }: { title: string }) {
+  return <h2 className="sr-only">{title}</h2>
+}
+
+/** A small heading over a group of rows within a section. */
+export function Subheading({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <>
-      <h2 className="pr-10 text-lg font-bold tracking-[-0.015em]">{title}</h2>
-      <DialogDescription className="mt-1 mb-3.5">{lead}</DialogDescription>
-    </>
+    <h3 className={cn('mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase', className)}>
+      {children}
+    </h3>
+  )
+}
+
+/** What an empty pane shows while its data is on the way, or once it has failed to come. */
+export function Loading({ failed }: { failed?: boolean }) {
+  return failed ? (
+    <p role="alert" className="py-2 text-sm text-muted-foreground">
+      This couldn’t be loaded. Reload the page to try again.
+    </p>
+  ) : (
+    <p className="py-2 text-sm text-muted-foreground" aria-busy="true">
+      Loading…
+    </p>
   )
 }
 
@@ -20,15 +36,15 @@ export function Setting({
   column,
 }: {
   title: string
-  about: string
+  about?: ReactNode
   children: ReactNode
   column?: boolean
 }) {
   return (
-    <div className={cn('border-t border-border py-[15px]', column ? 'block' : 'flex items-center gap-[18px]')}>
+    <div className={cn('py-3', column ? 'block' : 'flex min-h-[52px] items-center gap-[18px]')}>
       <div className="min-w-0 flex-1">
         <b className="block font-semibold">{title}</b>
-        <span className="mt-0.5 block text-sm text-muted-foreground">{about}</span>
+        {about ? <span className="mt-0.5 block text-sm text-muted-foreground">{about}</span> : null}
       </div>
       {children}
     </div>
