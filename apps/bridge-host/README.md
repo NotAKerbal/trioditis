@@ -280,8 +280,13 @@ suite. WhatsApp additionally uses:
   ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead:
   pairing asks the phone for a full sync (about a year rather than three months), and once a
   chat's synced history is imported the backfill queue asks the phone for older messages on
-  demand. Both are mautrix-whatsapp settings the host turns on; a login paired before they
-  were on gets the on-demand part but needs relinking for the full sync.
+  demand (50 at a time, one request per chat in flight). Both are mautrix-whatsapp settings
+  the host turns on, and both take effect at pairing: the on-demand part needs the sync to
+  say a chat has more on the phone, and a chat whose backfill already finished isn't
+  reopened. A login paired before they were on needs relinking (scanning a new QR) to get
+  either. Relinking keeps the chats already bridged, and history is only imported before a
+  chat's oldest bridged message or after its newest, so messages the new sync has between
+  those are skipped (the connector's range queries; changing that means patching it).
 - **`notAfter` is best effort for WhatsApp sends in Phase 0.** A send handed to bridgev2 can
   still reach the network after `notAfter`, by any amount (bridge-protocol.md, Delivery
   rules): behind more than two incoming events that each hit bridgev2's 5-minute handler
@@ -325,7 +330,9 @@ suite). But the connectors' own storage, in the same database, does:
   each batch once imported (its `CompleteCallback`), so rows only remain for history not yet
   imported. Deleting them earlier would lose that history, so the host doesn't. Pairing
   asks for a full sync, so right after pairing up to a year of history waits here while the
-  backfill queue works through it.
+  backfill queue works through it, and longer if an import stalls. The queued sync
+  notifications (`whatsapp_history_sync_notification`) are stored whole until processed,
+  and the first one can carry history inline.
 - whatsmeow's store holds the session keys (expected; it is what makes the bridge work)
   and its contacts table, which has push names and phone numbers.
 - **whatsmeow's `whatsmeow_event_buffer`** holds each incoming message's decrypted protobuf
