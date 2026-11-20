@@ -185,7 +185,6 @@ export function MessageList(props: MessageListProps) {
           return (
             <div
               key={m.id}
-              data-message-id={m.id}
               className={cn(
                 // Joined bubbles sit close; another sender on the same side a little further off.
                 !showTime && (!first ? 'mt-0.5' : prev?.self === m.self ? 'mt-1.5' : 'mt-3'),
@@ -202,7 +201,10 @@ export function MessageList(props: MessageListProps) {
                   {messageTime(m.at)}
                 </p>
               ) : null}
+              {/* The anchor for loading earlier messages is the message itself, not its time label:
+                  the label can go when the page above brings messages from around the same time. */}
               <div
+                data-message-id={m.id}
                 className={cn(
                   'group relative flex w-fit max-w-[min(78%,38rem)] flex-col',
                   m.self ? 'ml-auto items-end' : 'items-start',
@@ -237,6 +239,8 @@ export function MessageList(props: MessageListProps) {
                   ) : (
                     'This message can’t be opened on this device.'
                   )}
+                  {/* The exact time is the tooltip for a mouse; said here for assistive tech. */}
+                  <span className="sr-only">, {fullTime(m.at)}</span>
                   {meta ? (
                     <>
                       {/* Room at the end of the last line, so the time sits beside the text when it fits. */}

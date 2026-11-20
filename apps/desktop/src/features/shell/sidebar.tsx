@@ -166,9 +166,9 @@ export function Sidebar({
   const unread = (inbox ?? []).filter(isUnread)
   if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
   // Newest first. The server pages Focused that way already, except with a label, whose pages
-  // come in the order chats were labelled: then it's the loaded chats that are sorted.
+  // come in the order chats were labelled: then the loaded chats are sorted, by the same key.
   const read = (inbox ?? []).filter((c) => !isUnread(c))
-  if (focused) read.sort((a, b) => lastActivity(b) - lastActivity(a))
+  if (focused && labelId) read.sort((a, b) => b.row.lastMessageAt - a.row.lastMessageAt)
 
   // Scheduled messages, each with its chat (when one of the loaded views has it) and its opened text.
   const scheduled = useMemo(
@@ -483,9 +483,6 @@ export function Sidebar({
     </aside>
   )
 }
-
-/** When a chat last had a message, as its row shows it: imported history may have no time (0). */
-const lastActivity = (c: Chat) => Math.max(c.row.lastMessageAt, c.last?.at ?? 0)
 
 /** A badge count from chats.counts: it stops at 99, and `more` says there may be others. */
 const badge = (c: { count: number; more: boolean }) => `${c.count}${c.more ? '+' : ''}`
