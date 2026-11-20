@@ -4,7 +4,15 @@ import { requireSessionIfGiven } from './auth'
 import { requireAdmin } from './lib/access'
 import { audit } from './lib/audit'
 import { constantTimeEqual, randomToken } from './lib/hash'
-import { commitInfo, updateChannel, updaterReport, type UpdateChannel, type UpdaterReport } from './validators'
+import {
+  commitInfo,
+  releaseNote,
+  updateChannel,
+  updaterReport,
+  type ReleaseNote,
+  type UpdateChannel,
+  type UpdaterReport,
+} from './validators'
 
 // How admins update the server from the app. The work is done by the updater, a service on the
 // host beside the Docker Compose bundle (deploy/updater): it watches `poll` for the admins'
@@ -17,6 +25,9 @@ const DEFAULT_CHANNEL: UpdateChannel = 'stable'
 const COMMIT = /^[0-9a-f]{40}$/
 const MAX_MESSAGE = 500
 const MAX_SUBJECT = 200
+// What scripts/release-notes.mjs allows a line, and more lines than an update is likely to bring.
+const MAX_NOTE = 200
+const MAX_NOTES = 100
 
 const requestKind = v.union(v.literal('check'), v.literal('update'))
 
@@ -106,6 +117,13 @@ export const setAutoUpdate = mutation({
   },
 })
 
+/** Release notes cut to what's kept, so a report can't grow the row without bound. */
+function keptNotes(notes: ReleaseNote[]): ReleaseNote[] {
+  return notes
+    .slice(0, MAX_NOTES)
+    .map(({ label, text }) => ({ label, text: Array.from(text).slice(0, MAX_NOTE).join('') }))
+}
+
 function newRequest(kind: 'check' | 'update', by: string) {
   return { id: randomToken(12), kind, at: Date.now(), by }
 }
@@ -178,6 +196,8 @@ export const report = mutation({
     message: v.optional(v.string()),
     current: v.optional(commitInfo),
     latest: v.optional(updaterReport.fields.latest),
+    /** The update that just went in, sent with the report that ends it. */
+    installed: v.optional(v.object({ from: v.string(), to: v.string(), notes: v.array(releaseNote) })),
     done: v.optional(v.string()),
     /** The request this report starts on: refused if it was cancelled meanwhile. */
     claim: v.optional(v.string()),
@@ -189,7 +209,7 @@ export const report = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     assertUpdater(args.secret)
-    for (const commit of [args.current?.commit, args.latest?.commit]) {
+    for (const commit of [args.current?.commit, args.latest?.commit, args.installed?.from, args.installed?.to]) {
       if (commit !== undefined && !COMMIT.test(commit)) throw new ConvexError('Not a commit ID')
     }
     const row = await ensureSettingsRow(ctx)
@@ -211,8 +231,15 @@ export const report = mutation({
           : undefined
     const current = args.current ?? previous?.current
     const latest = args.latest
-      ? { ...args.latest, subject: args.latest.subject.slice(0, MAX_SUBJECT) }
+      ? {
+          ...args.latest,
+          subject: args.latest.subject.slice(0, MAX_SUBJECT),
+          ...(args.latest.notes ? { notes: keptNotes(args.latest.notes) } : {}),
+        }
       : previous?.latest
+    const installed = args.installed
+      ? { from: args.installed.from, to: args.installed.to, at: now, notes: keptNotes(args.installed.notes) }
+      : previous?.installed
     const updater: UpdaterReport = {
       seenAt: now,
       state: args.state,
@@ -220,6 +247,7 @@ export const report = mutation({
       ...(startedAt ? { startedAt } : {}),
       ...(current ? { current } : {}),
       ...(latest ? { latest } : {}),
+      ...(installed ? { installed } : {}),
     }
     const finished = args.done !== undefined && row.request?.id === args.done
     await ctx.db.patch(row._id, { updater, ...(finished ? { request: undefined } : {}) })

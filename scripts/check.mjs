@@ -1,6 +1,7 @@
 // Runs exactly what CI runs (.github/workflows/checks.yml), so a branch can be checked locally
-// when GitHub Actions can't run: the TypeScript typecheck, lint and tests, and the bridge
-// host's Go vet and tests. Prints a summary and exits non-zero if any check failed.
+// when GitHub Actions can't run: the TypeScript typecheck, lint and tests, the release notes'
+// format, and the bridge host's Go vet and tests. Prints a summary and exits non-zero if any
+// check failed.
 //
 //   pnpm check
 import { existsSync } from 'node:fs'
@@ -13,6 +14,8 @@ const checks = [
   { name: 'pnpm lint', cmd: 'pnpm', args: ['lint'] },
   { name: 'pnpm test', cmd: 'pnpm', args: ['test'] },
   { name: 'pnpm test:scripts', cmd: 'pnpm', args: ['test:scripts'] },
+  // CI also checks that a pull request adds a note; that needs the pull request's base.
+  { name: 'release notes', cmd: 'node', args: ['scripts/release-notes.mjs', 'check'] },
 ]
 let go = null
 if (existsSync(resolve(bridgeDir, 'go.mod'))) {
