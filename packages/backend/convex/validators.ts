@@ -191,6 +191,13 @@ export const bridgeEvent = v.union(
   v.object({ ...base, type: v.literal('contactIdentifiers'), ghostId: v.string(), sealed: envelope }),
   v.object({
     ...base,
+    type: v.literal('chatStarted'),
+    requestId: v.string(),
+    portalId: v.optional(v.string()),
+    error: v.optional(errorCode),
+  }),
+  v.object({
+    ...base,
     type: v.literal('loginState'),
     state: loginState,
     error: v.optional(errorCode),
@@ -253,6 +260,7 @@ export const commandPayload = v.union(
   v.object({ type: v.literal('loginCancel'), loginSessionId: v.string() }),
   v.object({ type: v.literal('logout') }),
   v.object({ type: v.literal('syncContacts') }),
+  v.object({ type: v.literal('startChat'), requestId: v.string(), ghostId: v.optional(v.string()) }),
   v.object({
     type: v.literal('backfill'),
     portalId: v.string(),

@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
+import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
 import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { authClient } from '~/lib/auth-client.ts'
@@ -34,6 +35,12 @@ export function Shell() {
   const openSettings = (section: SettingsSection | undefined, connect?: boolean) =>
     void navigate({ search: (s) => ({ ...s, settings: section, connect: connect ? (true as const) : undefined }) })
   const openPeople = (people: PeopleView | undefined) => void navigate({ search: (s) => ({ ...s, people }) })
+  const [newChat, setNewChat] = useState(false)
+  // A chat just started opens at once, though its row may not be in the list yet.
+  const openStarted = (chatId: string) => {
+    setNewChat(false)
+    void navigate({ search: (s) => ({ ...s, people: undefined, chat: chatId }) })
+  }
 
   function open(chat: Chat) {
     if (chat.id !== selectedId) setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
@@ -110,6 +117,7 @@ export function Shell() {
             onClose={() => select(undefined)}
             onAction={onSidebarAction}
             onPeople={() => openPeople('all')}
+            onNewChat={() => setNewChat(true)}
             shownRef={shownRef}
             chatsRef={chatsById}
           />
@@ -121,7 +129,8 @@ export function Shell() {
         connect={!!search.connect}
         onSectionChange={(section) => openSettings(section)}
       />
-      <PeopleDialog view={search.people} onViewChange={openPeople} />
+      <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />
+      <NewChatDialog open={newChat} onOpenChange={setNewChat} onStarted={openStarted} />
       <UpdateNotice />
     </div>
   )

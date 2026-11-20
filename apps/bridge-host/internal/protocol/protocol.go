@@ -74,6 +74,9 @@ type Event struct {
 	Direction string `json:"direction,omitempty"`
 	More      *bool  `json:"more,omitempty"`
 
+	// RequestID is the startChat request a chatStarted event answers.
+	RequestID string `json:"requestId,omitempty"`
+
 	// bare marks a stand-in for a journal event too big to send: only the fields every event
 	// has are written, so the gateway quarantines it instead of refusing the whole batch.
 	bare bool
@@ -112,6 +115,7 @@ var eventShapes = map[string]eventShape{
 	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted"}},
 	EventContact:            {[]string{"ghostId", "sealed"}, nil},
 	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
+	EventChatStarted:        {[]string{"requestId"}, []string{"portalId", "error"}},
 	EventLoginState:         {[]string{"state"}, []string{"error"}},
 	EventLoginStep:          {[]string{"loginSessionId", "step"}, nil},
 	EventSendStatus:         {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
@@ -172,6 +176,8 @@ func (e *Event) field(name string) (any, bool) {
 		return str(e.Direction)
 	case "more":
 		return e.More, e.More != nil
+	case "requestId":
+		return str(e.RequestID)
 	}
 	return nil, false
 }
@@ -272,10 +278,12 @@ const (
 	EventContact        = "contact"
 	// EventContactIdentifiers carries what one of the person's own logins knows a contact by.
 	EventContactIdentifiers = "contactIdentifiers"
-	EventLoginState         = "loginState"
-	EventLoginStep          = "loginStep"
-	EventSendStatus         = "sendStatus"
-	EventBackfillDone       = "backfillDone"
+	// EventChatStarted is a startChat command's outcome: the chat, or why there is none.
+	EventChatStarted  = "chatStarted"
+	EventLoginState   = "loginState"
+	EventLoginStep    = "loginStep"
+	EventSendStatus   = "sendStatus"
+	EventBackfillDone = "backfillDone"
 )
 
 // Send statuses.
@@ -301,6 +309,8 @@ const (
 	ErrBadCredentials  = "bad_credentials"
 	ErrLoginFailed     = "login_failed"
 	ErrInternal        = "internal"
+	// ErrNotFound: the network has no one by that phone number, email or username.
+	ErrNotFound = "not_found"
 )
 
 // LoginStep is one step of a login flow, rendered by the app's generic login stepper.
@@ -403,6 +413,11 @@ type Command struct {
 
 	BeforeEventID string `json:"beforeEventId,omitempty"`
 	Limit         int    `json:"limit,omitempty"`
+
+	// RequestID names a startChat request, so its outcome finds it; GhostID is the contact to
+	// start a chat with, when it isn't a sealed identifier.
+	RequestID string `json:"requestId,omitempty"`
+	GhostID   string `json:"ghostId,omitempty"`
 }
 
 // Command types.
@@ -421,6 +436,8 @@ const (
 	CommandBackfill    = "backfill"
 	// CommandSyncContacts asks a login for its network's contact list.
 	CommandSyncContacts = "syncContacts"
+	// CommandStartChat opens a direct chat with a contact or a phone number, email or username.
+	CommandStartChat = "startChat"
 )
 
 // LoginSubmitPlaintext is what a sealed loginSubmit envelope holds.

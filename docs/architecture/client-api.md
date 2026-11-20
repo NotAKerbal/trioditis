@@ -1030,6 +1030,33 @@ ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
 person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
 people at once.` · `You can have at most 10,000 people.`
 
+## New chats
+
+A chat starts on one of the person's connected accounts, with one of their contacts there or
+with whoever a phone number, email or username belongs to. The identifier is sealed to the
+bridge key (kind `outbound`, object ID `requestId`, plaintext `{ identifier }`), so the server
+never sees it.
+
+| Function          | Arguments                                                                                                  | Returns                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `newChats.start`  | `networkAccountId`, `requestId` (16 to 64 of `A-Za-z0-9_-`), `ghostId` or `sealedIdentifier`, `sessionId?` | null. The same `requestId` again does nothing                             |
+| `newChats.status` | `requestId`                                                                                                | `{ state: 'pending' \| 'started' \| 'failed', chatId?, error? }`, or null |
+
+The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
+already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
+on the network has that identifier), `unsupported`, `not_connected`, `rate_limited`,
+`network_rejected`, or `expired`/`timeout` when no bridge host took it in ten minutes. The
+networks in `START_CHAT_NETWORKS` (packages/core) can start chats; the desktop app offers a card's
+linked contacts first, then its numbers on networks that find people by number
+(`PHONE_NETWORKS`), then its usernames on their own network. A `ghostId` must be one of the
+person's contacts on that account's network. A person can start 20 chats a minute; requests
+are kept a day.
+
+Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
+`That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
+sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
+then try again.`
+
 ## Server updates
 
 Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the
@@ -1095,14 +1122,7 @@ here.
 3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
    envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
    replaced the `sealedPreview` planned here, so nothing new is sealed for it.
-4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
-   email, sealed to the bridge key) and `startChat`, following bridgev2's
-   `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls
-   `api.chats.start({ networkAccountId, sealedIdentifier })` and watches the returned
-   `commandId` until it gives a `chatId` or an error code (`not_found`, `unsupported`).
-   Networks that can't resolve identifiers report `unsupported`, and the button stays
-   disabled for them (`api.networks.list` gains `canStartChats`). Fallback: "New message"
-   disabled.
+4. **New chat (built).** See New chats.
 5. **Media.** Files go through Convex file storage as ciphertext only (the key and nonce
    stay in the sealed message, see `sealing.md`, Media):
    - **Download:** `api.media.url({ chatId, mediaId })` returns a short-lived URL for the

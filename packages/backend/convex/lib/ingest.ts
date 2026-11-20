@@ -31,6 +31,7 @@ export type UnmappableReason =
   | 'unknown_send'
   | 'malformed_envelope'
   | 'too_large'
+  | 'unknown_chat_start'
 
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
 export class Unmappable extends Error {
@@ -95,7 +96,7 @@ async function findChatRow(ctx: MutationCtx, userId: string, network: Network, p
  * The chat for a portal, created bare if the bridge host hasn't described it yet. Its
  * `chat` event fills it in when it comes.
  */
-async function chatFor(
+export async function chatFor(
   ctx: MutationCtx,
   event: { userId: string; loginId: string; portalId: string },
   network: Network,
@@ -466,6 +467,32 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 }
 
 /**
+ * A new chat's outcome settles its request (newChats.start): the chat, created bare if its
+ * `chat` event hasn't come yet, or why there is none. Only the request's own login can answer.
+ */
+async function applyChatStarted(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'chatStarted' }>,
+  network: Network,
+) {
+  const request = await ctx.db
+    .query('chatStarts')
+    .withIndex('by_request', (q) => q.eq('userId', event.userId).eq('requestId', event.requestId))
+    .unique()
+  charge(ctx, request)
+  if (!request || request.network !== network || request.loginId !== event.loginId) {
+    throw new Unmappable('unknown_chat_start')
+  }
+  if (request.state !== 'pending') return
+  if (event.portalId) {
+    const chat = await chatFor(ctx, { userId: event.userId, loginId: event.loginId, portalId: event.portalId }, network)
+    await ctx.db.patch(request._id, { state: 'started', chatId: chat._id })
+  } else {
+    await ctx.db.patch(request._id, { state: 'failed', error: event.error ?? 'internal' })
+  }
+}
+
+/**
  * What one of the person's logins knows a contact by, sealed to them apart from the profile
  * (kind `contact`, object ID `<ghostId>/identifiers/<loginId>`), so a profile update, which
  * every member with the contact gets, leaves it as it is. Each login's replaces only its own,
@@ -613,6 +640,7 @@ const ID_FIELDS = [
   'loginSessionId',
   'parentPortalId',
   'key',
+  'requestId',
 ] as const
 
 function hasOversizedId(event: BridgeEventDoc) {
@@ -687,6 +715,8 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
       return await applyContact(ctx, event, network)
     case 'contactIdentifiers':
       return await applyContactIdentifiers(ctx, event, network)
+    case 'chatStarted':
+      return await applyChatStarted(ctx, event, network)
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':

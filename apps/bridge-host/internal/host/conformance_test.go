@@ -161,6 +161,7 @@ var eventFields = map[string][2][]string{
 	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
 	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
 	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
 	protocol.EventLoginState:         {{"state"}, {"error"}},
 	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
 	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
@@ -455,6 +456,61 @@ func TestConformance(t *testing.T) {
 			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Peer-family")) {
 				t.Fatalf("journal event %d holds a plaintext name", evt.Seq)
 			}
+		}
+	})
+
+	t.Run("starts a direct chat from an identifier or a contact, and says when there's no one", func(t *testing.T) {
+		started := func(requestID string) *protocol.Event {
+			return gw.waitFor(t, "chatStarted "+requestID, func(e *protocol.Event) bool {
+				return e.Type == protocol.EventChatStarted && e.RequestID == requestID
+			})
+		}
+		byIdentifier := "request-erin-000001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: byIdentifier, Sealed: h.sealForBridge("alice", byIdentifier, map[string]string{"identifier": "testnet:erin"}),
+		})
+		evt := started(byIdentifier)
+		if evt.PortalID == "" || evt.Error != "" || evt.UserID != "alice" {
+			t.Fatalf("chatStarted %+v", evt)
+		}
+		chat := gw.waitFor(t, "erin's chat", func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == evt.PortalID })
+		if chat.Kind != "dm" {
+			t.Fatalf("started chat kind %q", chat.Kind)
+		}
+
+		// The same person again, by the contact this time: the chat they already have.
+		erin := gw.waitFor(t, "erin's contact", func(e *protocol.Event) bool {
+			if e.Type != protocol.EventContact || e.UserID != "alice" {
+				return false
+			}
+			var plain protocol.ContactPlaintext
+			h.open("alice", e, &plain)
+			return plain.Name == "Erin"
+		})
+		byContact := "request-erin-000002"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: byContact, GhostID: erin.GhostID,
+		})
+		if again := started(byContact); again.PortalID != evt.PortalID {
+			t.Fatalf("starting a chat with erin again gave %+v, not %s", again, evt.PortalID)
+		}
+
+		nobody := "request-nobody-0001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: nobody, Sealed: h.sealForBridge("alice", nobody, map[string]string{"identifier": "nobody"}),
+		})
+		if miss := started(nobody); miss.PortalID != "" || miss.Error != protocol.ErrNotFound {
+			t.Fatalf("starting a chat with nobody gave %+v", miss)
+		}
+
+		status, body := h.command(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin, RequestID: "short", GhostID: erin.GhostID,
+		})
+		if status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("a bad request ID got %d %s", status, body)
 		}
 	})
 
@@ -893,6 +949,7 @@ func TestConformance(t *testing.T) {
 			protocol.ErrNetworkRejected: true, protocol.ErrNotConnected: true, protocol.ErrTimeout: true,
 			protocol.ErrInvalidCommand: true, protocol.ErrExpired: true, protocol.ErrUnsupported: true,
 			protocol.ErrRateLimited: true, protocol.ErrBadCredentials: true, protocol.ErrLoginFailed: true, protocol.ErrInternal: true,
+			protocol.ErrNotFound: true,
 		}
 		for _, evt := range gw.snapshot() {
 			raw, _ := json.Marshal(evt)

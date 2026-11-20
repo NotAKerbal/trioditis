@@ -3,7 +3,7 @@ import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
 
 // What a command's failure means to the person, beyond the outbox row: a logout that didn't
-// happen. (A failed login command ends its session in gateway.ts.) `gateway.ts` calls these
+// happen, or a new chat that won't come. (A failed login command ends its session in gateway.ts.) `gateway.ts` calls these
 // when the bridge host rejects a command, it expires undelivered, or it was taken but never
 // reported on; ingest calls `onLoggedOut` when a logout is confirmed.
 
@@ -21,14 +21,26 @@ async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: Error
   await ctx.db.patch(account._id, { logoutPending: false, logoutError: error, logoutCommandId: undefined })
 }
 
+/** A new chat whose command never ran won't come: its request ends with why. */
+async function failChatStart(ctx: MutationCtx, command: Doc<'outbox'>, error: ErrorCode) {
+  if (command.payload.type !== 'startChat') return
+  const request = await ctx.db
+    .query('chatStarts')
+    .withIndex('by_command', (q) => q.eq('commandId', command._id))
+    .unique()
+  if (request?.state === 'pending') await ctx.db.patch(request._id, { state: 'failed', error })
+}
+
 /** The bridge host refused the command as invalid (`commandResult` with `accepted: false`). */
 export async function onCommandRejected(ctx: MutationCtx, command: Doc<'outbox'>, error: ErrorCode) {
   await failLogout(ctx, command, error)
+  await failChatStart(ctx, command, error)
 }
 
 /** The command ran out of time before a bridge host took it. */
 export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>) {
   await failLogout(ctx, command, 'expired')
+  await failChatStart(ctx, command, 'expired')
 }
 
 /**
@@ -37,6 +49,7 @@ export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>)
  */
 export async function onCommandOverdue(ctx: MutationCtx, command: Doc<'outbox'>) {
   await failLogout(ctx, command, 'timeout')
+  await failChatStart(ctx, command, 'timeout')
 }
 
 /** The bridge host reports the account `LOGGED_OUT`: a pending logout is done. */

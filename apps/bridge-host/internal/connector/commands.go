@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/provisionutil"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -214,6 +218,8 @@ func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check boo
 		return c.handleBackfill(ctx, cmd, check)
 	case protocol.CommandSyncContacts:
 		return c.handleSyncContacts(ctx, cmd, check)
+	case protocol.CommandStartChat:
+		return c.handleStartChat(ctx, cmd, check)
 	default:
 		return badRequest("unknown command type %q", cmd.Type)
 	}
@@ -646,6 +652,112 @@ func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Comman
 		}
 	}()
 	return nil
+}
+
+// startChatPlaintext is what a client seals for a startChat command with an identifier.
+type startChatPlaintext struct {
+	Identifier string `json:"identifier"`
+}
+
+// requestIDPattern is what a startChat request ID may be: what clients pick for their IDs.
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+
+// maxIdentifierBytes bounds the phone number, email or username a startChat names.
+const maxIdentifierBytes = 512
+
+// handleStartChat opens a direct chat on a login: with one of the person's contacts
+// (ghostId), or with whoever a sealed phone number, email or username belongs to. An
+// existing chat is returned as it is. bridgev2's provisioning helper does the work, as a
+// Matrix client's "start a DM" would; the outcome is a chatStarted event.
+func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, check bool) error {
+	if !requestIDPattern.MatchString(cmd.RequestID) {
+		return badRequest("requestId is required")
+	}
+	if (cmd.GhostID == "") == (cmd.Sealed == nil) {
+		return badRequest("give either ghostId or a sealed identifier")
+	}
+	t, err := c.resolve(ctx, cmd, false)
+	if err != nil {
+		return err
+	}
+	if _, ok := t.login.Client.(bridgev2.IdentifierResolvingNetworkAPI); !ok {
+		return conflict(protocol.ErrUnsupported, "the network can't start chats")
+	}
+	var identifier string
+	if cmd.GhostID != "" {
+		raw, err := c.Store.LookupID(ctx, cmd.GhostID, ids.KindGhost)
+		if err != nil {
+			return err
+		} else if raw == "" {
+			return conflict(protocol.ErrInvalidCommand, "unknown ghost")
+		}
+		// The helper takes a ghost's Matrix ID as "this user", and starts a chat with them
+		// directly where the connector can.
+		identifier = string(ids.GhostMXID(networkid.UserID(raw)))
+	} else {
+		var plain startChatPlaintext
+		if err := c.openOutbound(cmd, cmd.UserID, cmd.RequestID, &plain); err != nil {
+			return err
+		}
+		identifier = strings.TrimSpace(plain.Identifier)
+		if identifier == "" || len(identifier) > maxIdentifierBytes {
+			return badRequest("the identifier is empty or too long")
+		}
+	}
+	if check {
+		return nil
+	}
+	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
+	login := t.login
+	go func() {
+		bgCtx := c.Bridge.BackgroundCtx
+		evt := &protocol.Event{Type: protocol.EventChatStarted, UserID: o.userID, LoginID: o.loginID, RequestID: cmd.RequestID}
+		resp, err := provisionutil.ResolveIdentifier(bgCtx, login, identifier, true)
+		switch {
+		case err != nil:
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Starting a chat failed")
+			evt.Error = startChatErrorCode(err)
+		case resp == nil || resp.Portal == nil || resp.Portal.MXID == "":
+			evt.Error = protocol.ErrNotFound
+		default:
+			if evt.PortalID, err = c.portalOpaqueForRoom(bgCtx, resp.Portal.MXID); err != nil {
+				c.Log.Err(err).Msg("Naming a started chat failed")
+				evt.PortalID, evt.Error = "", protocol.ErrInternal
+			}
+		}
+		if err := c.emit(bgCtx, evt); err != nil {
+			c.Log.Err(err).Msg("Reporting a started chat failed")
+		}
+	}()
+	return nil
+}
+
+// startChatErrorCode is the code for why a chat couldn't be started. Connectors answer an
+// identifier nobody has with a Matrix "not found" (or a bad parameter, for one that can't be a
+// number or username at all).
+func startChatErrorCode(err error) string {
+	if errors.Is(err, bridgev2.ErrNotLoggedIn) {
+		return protocol.ErrNotConnected
+	}
+	// Connectors return mautrix's error type, and bridgev2 its own copy of it.
+	var code string
+	var matrixErr mautrix.RespError
+	var bridgeErr bridgev2.RespError
+	if errors.As(err, &matrixErr) {
+		code = matrixErr.ErrCode
+	} else if errors.As(err, &bridgeErr) {
+		code = bridgeErr.ErrCode
+	}
+	switch code {
+	case mautrix.MNotFound.ErrCode, mautrix.MInvalidParam.ErrCode:
+		return protocol.ErrNotFound
+	case mautrix.MUnrecognized.ErrCode:
+		return protocol.ErrUnsupported
+	case mautrix.MLimitExceeded.ErrCode:
+		return protocol.ErrRateLimited
+	default:
+		return protocol.ErrNetworkRejected
+	}
 }
 
 // maxBackfillLimit bounds one backfill command.

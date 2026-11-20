@@ -34,6 +34,26 @@ export interface NetworkInfo {
  */
 export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp']
 
+/**
+ * The networks whose connector can start a direct chat from a phone number, email or username
+ * (`newChats.start`). Mirrors the bridge host's connectors.
+ */
+export const START_CHAT_NETWORKS: readonly Network[] = [
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'gvoice',
+  'telegram',
+  'meta',
+  'instagram',
+  'slack',
+  'linkedin',
+  'twitter',
+]
+
+/** The networks that find people by phone number, for starting a chat from a card's numbers. */
+export const PHONE_NETWORKS: readonly Network[] = ['whatsapp', 'signal', 'gmessages', 'gvoice', 'telegram']
+
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   whatsapp: {
