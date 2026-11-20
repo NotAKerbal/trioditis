@@ -18,29 +18,26 @@ interface Property {
 
 /**
  * A structured value's parts (N, ADR, ORG), each decoded. Only a `;` written as one separates
- * parts (an encoded `=3B` is text), and it's escaped when an odd number of backslashes come
- * just before it, however they were written (`\\`, or `=5C` in quoted-printable). Counted as
- * it goes, so a long value is read once.
+ * parts (an encoded `=3B` is text, and no charset has `;` inside a character), and it's
+ * escaped when the decoded text before it ends in an odd number of backslashes: decoded, so a
+ * Shift-JIS character whose second byte is `5C` isn't taken for one. Each piece is decoded
+ * once, so a long value is read in one pass.
  */
 function components(p: Property): string[] {
-  const qp = p.params.get('ENCODING')?.[0]?.toUpperCase() === 'QUOTED-PRINTABLE'
+  const pieces = p.raw.split(';').map(p.decode)
   const parts: string[] = []
-  let start = 0
-  let backslashes = 0
-  for (let i = 0; i < p.raw.length; i++) {
-    const ch = p.raw[i]!
-    if (ch === '\\') backslashes++
-    else if (qp && ch === '=' && p.raw.slice(i + 1, i + 3).toUpperCase() === '5C') {
-      backslashes++
-      i += 2
-    } else if (ch === ';' && backslashes % 2 === 0) {
-      parts.push(p.raw.slice(start, i))
-      start = i + 1
-      backslashes = 0
-    } else backslashes = 0
-  }
-  parts.push(p.raw.slice(start))
-  return parts.map(p.decode)
+  let current = ''
+  pieces.forEach((piece, i) => {
+    current += piece
+    let backslashes = 0
+    while (backslashes < current.length && current[current.length - 1 - backslashes] === '\\') backslashes++
+    if (i < pieces.length - 1 && backslashes % 2 === 1) current += ';'
+    else {
+      parts.push(current)
+      current = ''
+    }
+  })
+  return parts
 }
 
 /** The most cards one file gives, as many as an address book can hold (people.ts, MAX_PEOPLE). */
