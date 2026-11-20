@@ -22,7 +22,7 @@ import {
 } from '~/data/updates.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Loading, Setting } from './layout.tsx'
+import { Group, Heading, Loading, Setting } from './layout.tsx'
 
 const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
@@ -54,43 +54,47 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
 
   return (
     <>
-      <UpdateState status={status} />
-      {/* Only nightly's line is a warning worth keeping in view. */}
-      <Setting
-        title="Channel"
-        about={status.channel === 'nightly' ? CHANNELS.find((c) => c.id === 'nightly')!.about : undefined}
-      >
-        <Segmented
-          value={status.channel}
-          onValueChange={(v) =>
-            void run(
-              () => setChannel({ channel: v as Channel, sessionId: session.sessionId }),
-              'The channel couldn’t be changed.',
-            )
-          }
-          className="w-[200px]"
-          aria-label="Channel"
+      <Group title="This server">
+        <UpdateState status={status} />
+      </Group>
+      <Group title="Preferences">
+        {/* Only nightly's line is a warning worth keeping in view. */}
+        <Setting
+          title="Channel"
+          about={status.channel === 'nightly' ? CHANNELS.find((c) => c.id === 'nightly')!.about : undefined}
         >
-          {CHANNELS.map((c) => (
-            <SegmentedItem key={c.id} value={c.id}>
-              {c.name}
-            </SegmentedItem>
-          ))}
-        </Segmented>
-      </Setting>
-      <Setting title="Install updates automatically" about={off ? undefined : 'Around 4 AM server time.'}>
-        <Switch
-          checked={status.autoUpdate}
-          disabled={off}
-          onCheckedChange={(enabled) =>
-            void run(
-              () => setAutoUpdate({ enabled, sessionId: session.sessionId }),
-              'Automatic updates couldn’t be changed.',
-            )
-          }
-          aria-label="Install updates automatically"
-        />
-      </Setting>
+          <Segmented
+            value={status.channel}
+            onValueChange={(v) =>
+              void run(
+                () => setChannel({ channel: v as Channel, sessionId: session.sessionId }),
+                'The channel couldn’t be changed.',
+              )
+            }
+            className="w-[200px]"
+            aria-label="Channel"
+          >
+            {CHANNELS.map((c) => (
+              <SegmentedItem key={c.id} value={c.id}>
+                {c.name}
+              </SegmentedItem>
+            ))}
+          </Segmented>
+        </Setting>
+        <Setting title="Install updates automatically" about={off ? undefined : 'Around 4 AM server time.'}>
+          <Switch
+            checked={status.autoUpdate}
+            disabled={off}
+            onCheckedChange={(enabled) =>
+              void run(
+                () => setAutoUpdate({ enabled, sessionId: session.sessionId }),
+                'Automatic updates couldn’t be changed.',
+              )
+            }
+            aria-label="Install updates automatically"
+          />
+        </Setting>
+      </Group>
     </>
   )
 }

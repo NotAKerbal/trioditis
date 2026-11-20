@@ -32,7 +32,7 @@ export function BottomBar({
 }: {
   name: string
   email: string
-  openSettings: (section: SettingsSection) => void
+  openSettings: (section: SettingsSection, connect?: boolean) => void
 }) {
   const session = useSession()
   const health = useNetworkHealth()
@@ -70,7 +70,7 @@ export function BottomBar({
           <DropdownMenuItem onSelect={() => openSettings('appearance')}>
             <Settings /> Settings
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openSettings('accounts')}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
             <Plus /> Connect a network
           </DropdownMenuItem>
           {session.role === 'admin' ? (
@@ -127,7 +127,7 @@ export function BottomBar({
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openSettings('accounts')}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
             <Plus /> Connect a network
           </DropdownMenuItem>
         </DropdownMenuContent>
