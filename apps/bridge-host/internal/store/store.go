@@ -86,6 +86,14 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_login_session (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, started_at BIGINT NOT NULL)`,
 		})
 	}).
+	WithRaw(3, 4, 0, "Who gave each reaction", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// bridgev2 can overwrite its own record of a reaction before it takes the reaction away
+		// (one reaction per person, as on WhatsApp), so the index keeps who gave it. Empty for
+		// reactions indexed before this.
+		return execAll(ctx, db, []string{
+			`ALTER TABLE trioditis_reaction ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
+		})
+	}).
 	Finish()
 
 func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
@@ -672,13 +680,24 @@ func (s *Store) strings(ctx context.Context, query string, args ...any) ([]strin
 
 // PutReaction records a reaction event's target and key, so its removal can be reported
 // with them. Reaction keys are metadata, not sealed content, per the protocol.
-func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key string) error {
+func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key, sender string) error {
 	_, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key) VALUES ($1, $2, $3)
-		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key`,
-		eventID, targetEventID, key,
+		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key, sender) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key, sender=excluded.sender`,
+		eventID, targetEventID, key, sender,
 	)
 	return err
+}
+
+// ReactionSender is who gave an indexed reaction, as PutReaction was told: empty if it was
+// indexed before senders were kept.
+func (s *Store) ReactionSender(ctx context.Context, eventID string) (string, error) {
+	var sender string
+	err := s.DB.QueryRow(ctx, `SELECT sender FROM trioditis_reaction WHERE event_id=$1`, eventID).Scan(&sender)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return sender, err
 }
 
 // GetReaction returns a reaction's target and key.

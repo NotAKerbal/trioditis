@@ -1057,7 +1057,7 @@ func (c *Connector) handleOutcome(ctx context.Context, pending *pendingCommand, 
 		if !success {
 			return nil
 		}
-		if err := c.Store.PutReaction(ctx, eventID, pending.targetEventID, pending.key); err != nil {
+		if err := c.Store.PutReaction(ctx, eventID, pending.targetEventID, pending.key, sender{self: true}.indexKey()); err != nil {
 			return err
 		}
 		return c.emit(ctx, &protocol.Event{

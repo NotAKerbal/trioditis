@@ -109,20 +109,26 @@ func privateField[T any](ptr any, name string) (T, error) {
 }
 
 // linkedinMessagesPath is where linkedingo creates a message (SendMessage, and NewChat for a
-// new group's first message), with ?action=createMessage.
+// new group's first message), with ?action=createMessage, and adds or takes away a reaction,
+// with ?action=reactWithEmoji or unreactWithEmoji.
 const linkedinMessagesPath = "/voyager/api/voyagerMessagingDashMessengerMessages"
 
-func isLinkedInCreateMessage(req *http.Request) bool {
+// linkedinOnceActions are the actions that go to LinkedIn once: repeating one could add a
+// message twice, or undo what the person did meanwhile elsewhere (a reaction they took away).
+var linkedinOnceActions = map[string]bool{"createMessage": true, "reactWithEmoji": true, "unreactWithEmoji": true}
+
+func isLinkedInOnce(req *http.Request) bool {
 	return req.Method == http.MethodPost && req.URL.Host == "www.linkedin.com" &&
-		req.URL.Path == linkedinMessagesPath && req.URL.Query().Get("action") == "createMessage"
+		req.URL.Path == linkedinMessagesPath && linkedinOnceActions[req.URL.Query().Get("action")]
 }
 
-// linkedinSendOnce makes an ambiguous outcome of creating a message final. DoRaw gives a
+// linkedinSendOnce makes an ambiguous outcome of creating a message, or of a reaction, final. DoRaw gives a
 // response back without repeating it unless it is a 502, 503 or 504, so a create that failed
 // in transport, with any 5xx, or with a redirect (which the client doesn't follow, and which
 // says nothing of whether the message was created) comes back as 500 Internal Server Error.
 // The connector reports a 5xx as a server error it isn't certain about, which the bridge
-// host records as unknown. Every other request, edits and reactions included, is untouched.
+// host records as unknown; a reaction it isn't sure of is never confirmed, so the client goes
+// back to what the server says. Every other request, edits included, is untouched.
 type linkedinSendOnce struct {
 	next http.RoundTripper
 }
@@ -132,7 +138,7 @@ func (t *linkedinSendOnce) RoundTrip(req *http.Request) (*http.Response, error) 
 	if next == nil {
 		next = http.DefaultTransport
 	}
-	if !isLinkedInCreateMessage(req) {
+	if !isLinkedInOnce(req) {
 		return next.RoundTrip(req)
 	}
 	resp, err := next.RoundTrip(req)

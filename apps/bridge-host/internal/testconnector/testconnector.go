@@ -313,9 +313,12 @@ func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit)
 
 func (c *Client) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
 	key := msg.Content.RelatesTo.Key
-	return bridgev2.MatrixReactionPreResponse{
-		SenderID: c.self(), EmojiID: networkid.EmojiID(key), Emoji: key, MaxReactions: int(c.n.maxReactions.Load()),
-	}, nil
+	max := int(c.n.maxReactions.Load())
+	emojiID := networkid.EmojiID(key)
+	if max == 1 {
+		emojiID = ""
+	}
+	return bridgev2.MatrixReactionPreResponse{SenderID: c.self(), EmojiID: emojiID, Emoji: key, MaxReactions: max}, nil
 }
 
 func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
@@ -326,8 +329,10 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	return &database.Reaction{}, nil
 }
 
-// SetMaxReactions limits how many reactions a person can have on one message, as WhatsApp
-// allows one: bridgev2 then takes away the oldest when a new one is added. 0 is no limit.
+// SetMaxReactions limits how many reactions a person can have on one message: bridgev2 then
+// takes away the oldest when a new one is added. 0 is no limit. At 1 the person has one
+// reaction slot per message, with no emoji ID, as on WhatsApp and Signal, so bridgev2
+// overwrites the old reaction's record with the new one before taking the old one away.
 func (n *Network) SetMaxReactions(max int) { n.maxReactions.Store(int32(max)) }
 
 // Reactions is how many reactions the test connector has taken.

@@ -273,9 +273,11 @@ export const reactions = query({
         const seen = new Set(rows.map((row) => row._id))
         const own = await ctx.db
           .query('reactions')
-          .withIndex('by_message', (q) => q.eq('messageId', messageId).eq('senderKey', 'self'))
+          .withIndex('by_message_sender_active', (q) =>
+            q.eq('messageId', messageId).eq('senderKey', 'self').eq('removedAt', undefined),
+          )
           .take(MAX_OWN_REACTIONS)
-        rows.push(...own.filter((row) => row.removedAt === undefined && !seen.has(row._id)))
+        rows.push(...own.filter((row) => !seen.has(row._id)))
         bytes += byteSize(own)
       }
       out[messageId] = rows

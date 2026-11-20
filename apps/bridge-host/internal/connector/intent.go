@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -71,6 +72,23 @@ func (in *Intent) sender() (sender, bool) {
 	default:
 		return sender{}, false
 	}
+}
+
+// indexKey is how the reaction index keeps a sender: `self`, or `ghost:` and the network ID.
+func (s sender) indexKey() string {
+	if s.self {
+		return "self"
+	}
+	return "ghost:" + string(s.ghostID)
+}
+
+func senderFromIndex(key string) (sender, bool) {
+	if key == "self" {
+		return sender{self: true}, true
+	} else if ghost, ok := strings.CutPrefix(key, "ghost:"); ok && ghost != "" {
+		return sender{ghostID: networkid.UserID(ghost)}, true
+	}
+	return sender{}, false
 }
 
 func (c *Connector) senderForMXID(mxid id.UserID) (sender, bool) {
@@ -148,10 +166,16 @@ func (c *Connector) reactionSender(ctx context.Context, content *event.Content) 
 	if !ok {
 		return sender{}, false, nil
 	}
-	if _, _, err := c.Store.GetReaction(ctx, string(redaction.Redacts)); errors.Is(err, store.ErrNotFound) {
+	indexed, err := c.Store.ReactionSender(ctx, string(redaction.Redacts))
+	if errors.Is(err, store.ErrNotFound) {
 		return sender{}, false, nil
 	} else if err != nil {
 		return sender{}, false, err
+	}
+	// The index says who, since bridgev2 may already have given the person's one reaction
+	// slot to the new reaction. One indexed before it kept senders is looked up in bridgev2.
+	if s, ok := senderFromIndex(indexed); ok {
+		return s, true, nil
 	}
 	reaction, err := c.Bridge.DB.Reaction.GetByMXID(ctx, redaction.Redacts)
 	if err != nil || reaction == nil {
@@ -247,7 +271,7 @@ func (c *Connector) emitContent(ctx context.Context, o *owner, s sender, eventTy
 			return fmt.Errorf("unexpected %T for reaction", content.Parsed)
 		}
 		base.Type, base.EventID, base.TargetEventID, base.Key = protocol.EventReaction, string(eventID), string(reaction.RelatesTo.EventID), reactionKey(reaction.RelatesTo.Key)
-		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key); err != nil {
+		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key, s.indexKey()); err != nil {
 			return err
 		}
 		return c.emit(ctx, &base)

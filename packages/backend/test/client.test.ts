@@ -373,8 +373,10 @@ describe('the person’s own reaction on a busy message', () => {
     })
     await t.run(async (ctx) => {
       for (let r = 0; r < 100; r++) await ctx.db.insert('reactions', row(`ghost:g${r}`, '👍', `r${r}`))
+      // Taken away earlier: these mustn't use up the room for the one that's still there.
+      for (let r = 0; r < 25; r++)
+        await ctx.db.insert('reactions', { ...row('self', `x${r}`, `gone${r}`), removedAt: 2 })
       await ctx.db.insert('reactions', row('self', '🎉', 'mine'))
-      await ctx.db.insert('reactions', { ...row('self', '😮', 'gone'), removedAt: 2 })
     })
     const list = (await a.query(api.messages.reactions, { chatId, messageIds: [messageId] }))[messageId]!
     expect(list).toHaveLength(101)

@@ -567,6 +567,12 @@ func TestConformance(t *testing.T) {
 		h.mustCommand(react("🎉", time.Now().Add(time.Hour)))
 		gw.waitFor(t, "the second reaction", isOwn(protocol.EventReaction, "🎉"))
 		gw.waitFor(t, "the first one taken away", isOwn(protocol.EventReactionRemove, "👍"))
+		// And the one that replaced it can still be taken away.
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandUnreact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			TargetEventID: target, Key: "🎉", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+		})
+		gw.waitFor(t, "the second one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
 
 		before := h.net.Reactions()
 		if status, body := h.command(react("😮", time.Now().Add(-time.Second))); status != http.StatusConflict || !strings.Contains(body, protocol.ErrExpired) {
