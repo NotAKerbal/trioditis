@@ -384,28 +384,33 @@ export function moveLinks(people: readonly Person[], personKey: string, contacts
 }
 
 /**
- * The cards an import makes or changes. A card whose UID is already here replaces that card's
- * fields with the file's, keeping its links (and its photo, if the file has none); a UID the
- * file repeats updates one card. The rest are new cards, keyed with `newKey`.
+ * The cards an import makes or changes, worked out from the cards there are now. A card whose
+ * UID is already here gets the file's fields, keeping its links (and its photo, if the file
+ * has none); a UID the file repeats is one card. Every other entry gets the key `keyFor` gives
+ * its place in the file, so working the import out again later (after another device changed
+ * the address book) gives the same cards, and keeps the links they have by then. Cards that
+ * wouldn't change are left out.
  */
 export function planImport(
   existing: readonly Person[],
   imported: readonly PersonPlaintext[],
-  newKey: () => string,
+  keyFor: (index: number) => string,
 ): Person[] {
   const byUid = new Map(existing.filter((p) => p.card.uid).map((p) => [p.card.uid!, p]))
+  const byKey = new Map(existing.map((p) => [p.personKey, p]))
   const keyForUid = new Map<string, string>()
   const out = new Map<string, Person>()
-  for (const card of imported) {
-    const same = card.uid ? byUid.get(card.uid) : undefined
-    const personKey = same?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined) ?? newKey()
+  imported.forEach((card, index) => {
+    const personKey =
+      byUid.get(card.uid ?? '')?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined) ?? keyFor(index)
     if (card.uid) keyForUid.set(card.uid, personKey)
+    const now = byKey.get(personKey)?.card
     const next: PersonPlaintext = { ...card }
-    if (same?.card.links?.length) next.links = same.card.links
-    if (!next.photo && same?.card.photo) next.photo = same.card.photo
+    if (now?.links?.length) next.links = now.links
+    if (!next.photo && now?.photo) next.photo = now.photo
     out.set(personKey, { personKey, card: next })
-  }
-  return [...out.values()]
+  })
+  return [...out.values()].filter((p) => JSON.stringify(byKey.get(p.personKey)?.card) !== JSON.stringify(p.card))
 }
 
 /** What a card is listed as: its name, else its organization, first email or number. */

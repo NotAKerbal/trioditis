@@ -44,7 +44,7 @@ import { networkName } from '~/data/chats.ts'
 import {
   contactsByKey,
   download,
-  importPlan,
+  importPlanner,
   shrinkPhoto,
   useNetworkContacts,
   usePeople,
@@ -169,8 +169,12 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
           else delete card.photo
         }
       }
-      const plan = await actions.saveMany((fresh) => importPlan(fresh, cards))
-      toast(`Imported ${plan.length.toLocaleString()} ${plan.length === 1 ? 'person' : 'people'}`)
+      const written = await actions.saveMany(importPlanner(cards))
+      toast(
+        written
+          ? `Imported ${written.toLocaleString()} ${written === 1 ? 'person' : 'people'}`
+          : 'Everyone in that file is here already.',
+      )
       onViewChange('suggested')
     } catch (err) {
       if (sessionChanged(err)) window.location.reload()
@@ -186,7 +190,13 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
       onViewChange('all')
       toast(`Deleted ${cardTitle(person.card)}`, {
         label: 'Undo',
-        onClick: () => void run(() => [person], 'It couldn’t be put back.'),
+        // Put back without any contact linked to another card since.
+        onClick: () =>
+          void run((fresh) => {
+            const linked = linkIndex(fresh)
+            const links = (person.card.links ?? []).filter((l) => !linked.has(contactKey(l)))
+            return [{ personKey: person.personKey, card: { ...person.card, links } }]
+          }, 'It couldn’t be put back.'),
       })
     } catch (err) {
       toast(errorMessage(err, 'That person couldn’t be deleted.'))

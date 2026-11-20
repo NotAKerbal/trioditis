@@ -13,6 +13,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -663,7 +664,14 @@ func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid
 	if err != nil || !added {
 		return err
 	}
-	return c.emitContact(ctx, o, ghost, nil, nil)
+	if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
+		return err
+	}
+	// On WhatsApp the ghost's ID can be their phone number, which this chat gave the person.
+	if number := whatsAppNumber(ghost); c.Network == "whatsapp" && number != "" {
+		return c.emitContactIdentifiers(ctx, o, ghost, []string{number})
+	}
+	return nil
 }
 
 func contactRoom(userID string) string { return "contacts:" + userID }
@@ -694,6 +702,11 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 			plain.AvatarUnchanged = true
 		}
 	}
+	return c.emitContactProfile(ctx, o, ghost, plain)
+}
+
+// emitContactProfile seals a contact's profile and sends it to the person.
+func (c *Connector) emitContactProfile(ctx context.Context, o *owner, ghost networkid.UserID, plain protocol.ContactPlaintext) error {
 	ghostID, err := c.ghostOpaque(ctx, ghost)
 	if err != nil {
 		return err
@@ -712,9 +725,11 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	})
 }
 
-// syncContact sends one entry of a login's contact list to the login's owner: the contact,
-// the first time, and what the login knows them by. A contact the person has no chat with is
-// named from the list, since the ghost may have no name yet; it is the person's own list.
+// syncContact sends one entry of a login's contact list to the login's owner: what the login
+// knows them by, and, the first time, a profile with the login's own name for them. Only the
+// login's own data goes in: the shared ghost's name could be another member's name for them.
+// The profile is sent before the membership is recorded, so a crash in between sends it again
+// next time rather than never.
 func (c *Connector) syncContact(ctx context.Context, o *owner, resp *bridgev2.ResolveIdentifierResponse) error {
 	ghost := resp.UserID
 	if ghost == "" && resp.Ghost != nil {
@@ -723,43 +738,74 @@ func (c *Connector) syncContact(ctx context.Context, o *owner, resp *bridgev2.Re
 	if ghost == "" {
 		return nil
 	}
-	added, err := c.Store.AddMember(ctx, contactRoom(o.userID), string(ids.GhostMXID(ghost)))
+	room, mxid := contactRoom(o.userID), string(ids.GhostMXID(ghost))
+	known, err := c.Store.IsMember(ctx, room, mxid)
 	if err != nil {
 		return err
 	}
-	if added {
-		var name *string
+	if !known {
+		var plain protocol.ContactPlaintext
 		if resp.UserInfo != nil && resp.UserInfo.Name != nil {
-			if dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghost); err != nil {
-				return err
-			} else if dbGhost == nil || dbGhost.Name == "" {
-				name = resp.UserInfo.Name
-			}
+			plain.Name = *resp.UserInfo.Name
 		}
-		if err = c.emitContact(ctx, o, ghost, name, nil); err != nil {
+		if err = c.emitContactProfile(ctx, o, ghost, plain); err != nil {
+			return err
+		}
+		if _, err = c.Store.AddMember(ctx, room, mxid); err != nil {
 			return err
 		}
 	}
-	if resp.UserInfo == nil || len(resp.UserInfo.Identifiers) == 0 {
-		return nil
+	var identifiers []string
+	if resp.UserInfo != nil {
+		identifiers = resp.UserInfo.Identifiers
 	}
-	return c.emitContactIdentifiers(ctx, o, ghost, resp.UserInfo.Identifiers)
+	return c.emitContactIdentifiers(ctx, o, ghost, identifiers)
+}
+
+// whatsAppNumber is the phone number a WhatsApp ghost's ID is, as a tel: URI, or "" for one
+// that isn't a number (a LID, a bot).
+func whatsAppNumber(ghost networkid.UserID) string {
+	digits := string(ghost)
+	if len(digits) < 7 || len(digits) > 15 || strings.Trim(digits, "0123456789") != "" {
+		return ""
+	}
+	return "tel:+" + digits
+}
+
+// syncWhatsAppNumbers sends, for each of the person's WhatsApp contacts whose ID is their phone
+// number, that number: WhatsApp gave the person's own login that ID in their chats.
+func (c *Connector) syncWhatsAppNumbers(ctx context.Context, o *owner) error {
+	members, err := c.Store.Members(ctx, contactRoom(o.userID))
+	if err != nil {
+		return err
+	}
+	for _, mxid := range members {
+		ghost, ok := ids.ParseGhostMXID(id.UserID(mxid))
+		if !ok {
+			continue
+		}
+		if number := whatsAppNumber(ghost); number != "" {
+			if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // emitContactIdentifiers sends what one of the person's logins knows a contact by, sealed to
-// that person only and apart from the shared profile (see ContactIdentifiersPlaintext).
+// that person only and apart from the shared profile (see ContactIdentifiersPlaintext). Each
+// login's are their own object (`<ghostId>/identifiers/<loginId>`), so two logins that know a
+// contact differently don't overwrite each other, and an empty list clears that login's.
 func (c *Connector) emitContactIdentifiers(ctx context.Context, o *owner, ghost networkid.UserID, identifiers []string) error {
 	ghostID, err := c.ghostOpaque(ctx, ghost)
 	if err != nil {
 		return err
 	}
 	plain := protocol.ContactIdentifiersPlaintext{Identifiers: fitIdentifiers(identifiers)}
-	if len(plain.Identifiers) == 0 {
-		return nil
-	}
 	contactOwner := *o
 	contactOwner.portalID = ""
-	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID+"/identifiers", plain)
+	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID+"/identifiers/"+o.loginID, plain)
 	if err != nil {
 		return err
 	}

@@ -85,12 +85,18 @@ export function useNetworkContacts(): NetworkContact[] | undefined {
     return results.flatMap((r) => {
       const profile = open<ContactPlaintext>(contactCache, r.sealedProfile, r.ghostId)
       if (!profile) return []
-      const identifiers = open<ContactIdentifiersPlaintext>(
-        identifierCache,
-        r.sealedIdentifiers,
-        `${r.ghostId}/identifiers`,
-      )?.identifiers
-      return [{ network: r.network, ghostId: r.ghostId, profile, ...(identifiers ? { identifiers } : {}) }]
+      // Each of the person's logins on the network has its own; together they're all the
+      // person knows this contact by.
+      const identifiers = [
+        ...new Set(
+          (r.identifiers ?? []).flatMap(
+            ({ loginId, sealed }) =>
+              open<ContactIdentifiersPlaintext>(identifierCache, sealed, `${r.ghostId}/identifiers/${loginId}`)
+                ?.identifiers ?? [],
+          ),
+        ),
+      ]
+      return [{ network: r.network, ghostId: r.ghostId, profile, ...(identifiers.length ? { identifiers } : {}) }]
     })
   }, [results, status, session])
 }
@@ -113,11 +119,14 @@ export function fitCard(card: PersonPlaintext): PersonPlaintext {
   return JSON.parse(JSON.stringify(out)) as PersonPlaintext
 }
 
-/** Resolves once `ready` holds, checking each frame, or after `ms` regardless. */
+/**
+ * Resolves once `ready` holds, or after `ms` regardless. It checks on a timer, not each frame,
+ * so it carries on in a window that's hidden.
+ */
 function until(ready: () => boolean, ms: number) {
   const start = Date.now()
   return new Promise<void>((resolve) => {
-    const check = () => (ready() || Date.now() - start > ms ? resolve() : requestAnimationFrame(check))
+    const check = () => (ready() || Date.now() - start > ms ? resolve() : setTimeout(check, 50))
     check()
   })
 }
@@ -174,23 +183,24 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
   }
 
   /**
-   * Saves many cards in calls of 100, as an import does. The cards are worked out once; a call
-   * refused as stale is made again at the new revision, after the calls before it.
+   * Saves many cards in calls of 100, as an import does. When a call is refused as stale, the
+   * whole change is worked out again from the new cards, which have the calls before it: so
+   * `cards` must leave out what's already done (an import plan does) and work out links again.
+   * Returns how many cards were written.
    */
   async function saveMany(cards: (people: readonly StoredPerson[]) => Person[], onProgress?: (done: number) => void) {
-    let planned: Person[] | undefined
-    let done = 0
+    const written = new Set<string>()
     await withRevision(async (people, revision) => {
-      planned ??= cards(people)
+      const planned = cards(people)
       let at = revision
-      while (done < planned.length) {
-        const batch = planned.slice(done, done + PER_CALL)
+      for (let i = 0; i < planned.length; i += PER_CALL) {
+        const batch = planned.slice(i, i + PER_CALL)
         at = await put({ people: batch.map(seal), revision: at, sessionId: session.sessionId })
-        done += batch.length
-        onProgress?.(done)
+        for (const p of batch) written.add(p.personKey)
+        onProgress?.(written.size)
       }
     })
-    return planned ?? []
+    return written.size
   }
 
   async function removeAll(personKeys: readonly string[]) {
@@ -208,9 +218,14 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
   return { apply, saveMany, remove: removeAll }
 }
 
-/** The cards an import makes or changes (packages/core, planImport), with new keys for new cards. */
-export const importPlan = (existing: readonly Person[], imported: readonly PersonPlaintext[]) =>
-  planImport(existing, imported, newClientId)
+/**
+ * The cards an import makes or changes (packages/core, planImport). Each entry's new key is
+ * picked once, so the plan comes out the same however often it's worked out again.
+ */
+export function importPlanner(imported: readonly PersonPlaintext[]) {
+  const keys = imported.map(() => newClientId())
+  return (existing: readonly Person[]) => planImport(existing, imported, (index) => keys[index]!)
+}
 
 /**
  * Asks each of the person's connected accounts on a network that can list contacts for them.

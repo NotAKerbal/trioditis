@@ -325,8 +325,11 @@ export default defineSchema({
     network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
-    /** What the person's own logins know them by (contactIdentifiers events), sealed to the person. */
-    sealedIdentifiers: v.optional(envelope),
+    /**
+     * What each of the person's logins on the network knows them by (contactIdentifiers
+     * events), sealed to the person: one envelope per login, so they don't overwrite each other.
+     */
+    identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
 
   messages: defineTable({

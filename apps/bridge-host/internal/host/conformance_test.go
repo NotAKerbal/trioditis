@@ -357,7 +357,7 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 	case protocol.EventContact:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
 	case protocol.EventContactIdentifiers:
-		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers"
+		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -492,6 +492,28 @@ func TestConformance(t *testing.T) {
 		}
 		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
 			t.Fatalf("%d identifier events went to someone else", n)
+		}
+
+		// Bob has dana in his own list, under another name and number: he gets only his.
+		// A login of its own, since a later test logs bob in as bob-testnet.
+		bobLogin := h.login("bob", "bob-contacts")
+		h.net.SetContacts("bob-contacts", []testconnector.Contact{{ID: "dana", Name: "D (Bob's)", Identifiers: []string{"tel:+15550009999"}}})
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})
+		bobIdents := gw.waitFor(t, "bob's identifiers for dana", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "bob"
+		})
+		var bobPlain protocol.ContactIdentifiersPlaintext
+		h.open("bob", bobIdents, &bobPlain)
+		if !slices.Equal(bobPlain.Identifiers, []string{"tel:+15550009999"}) {
+			t.Fatalf("bob's identifiers for dana %q", bobPlain.Identifiers)
+		}
+		bobContact := gw.waitFor(t, "bob's contact dana", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContact && e.UserID == "bob" && e.GhostID == bobIdents.GhostID
+		})
+		var bobProfile protocol.ContactPlaintext
+		h.open("bob", bobContact, &bobProfile)
+		if bobProfile.Name != "D (Bob's)" {
+			t.Fatalf("bob got dana as %q", bobProfile.Name)
 		}
 	})
 

@@ -153,8 +153,7 @@ describe('importing again', () => {
       links: [{ network: 'signal', ghostId: 'g1' }],
     },
   }
-  let n = 0
-  const newKey = () => `person-new-${String(++n).padStart(6, '0')}`
+  const newKey = (index: number) => `person-new-${String(index).padStart(6, '0')}`
 
   it('replaces a known card’s fields with the file’s, keeping its links and photo', () => {
     const file = { name: 'Ann Lee', uid: 'u1', note: 'new', addresses: [{ street: '1 Main St' }] }
@@ -165,9 +164,17 @@ describe('importing again', () => {
         card: { ...file, links: existing.card.links, photo: existing.card.photo },
       },
     ])
-    // Importing the same file twice changes nothing more.
-    const again = planImport([{ personKey: existing.personKey, card: plan[0]!.card }], [file], newKey)
-    expect(again).toEqual(plan)
+    // Importing the same file again changes nothing.
+    expect(planImport([{ personKey: existing.personKey, card: plan[0]!.card }], [file], newKey)).toEqual([])
+  })
+
+  it('works out the same cards again after another device changed them, keeping their links', () => {
+    const file = [{ name: 'New One' }, { name: 'New Two' }]
+    const first = planImport([], file, newKey)
+    // Another device linked a contact to the first new card before the rest went in.
+    const linked = { ...first[0]!, card: { ...first[0]!.card, links: [{ network: 'signal' as const, ghostId: 'g9' }] } }
+    const again = planImport([linked], file, newKey)
+    expect(again.map((p) => p.personKey)).toEqual([first[1]!.personKey])
   })
 
   it('makes one card for a UID the file repeats, and new cards for the rest', () => {

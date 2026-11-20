@@ -466,10 +466,14 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     })
 }
 
+/** The most logins on one network whose identifiers a contact keeps. */
+const MAX_IDENTIFIER_LOGINS = 10
+
 /**
  * What one of the person's logins knows a contact by, sealed to them apart from the profile
- * (kind `contact`, object ID `<ghostId>/identifiers`), so a profile update, which every
- * member with the contact gets, leaves it as it is. The bridge host sends the contact first.
+ * (kind `contact`, object ID `<ghostId>/identifiers/<loginId>`), so a profile update, which
+ * every member with the contact gets, leaves it as it is. Each login's replaces only its own.
+ * The bridge host sends the contact first.
  */
 async function applyContactIdentifiers(
   ctx: MutationCtx,
@@ -482,7 +486,9 @@ async function applyContactIdentifiers(
     .unique()
   charge(ctx, existing)
   if (!existing) throw new Unmappable('unknown_contact')
-  await ctx.db.patch(existing._id, { sealedIdentifiers: event.sealed })
+  const others = (existing.identifiers ?? []).filter((entry) => entry.loginId !== event.loginId)
+  const identifiers = [...others.slice(-(MAX_IDENTIFIER_LOGINS - 1)), { loginId: event.loginId, sealed: event.sealed }]
+  await ctx.db.patch(existing._id, { identifiers })
 }
 
 async function applyLoginState(

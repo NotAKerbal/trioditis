@@ -183,7 +183,22 @@ describe('contacts', () => {
     // A later profile update leaves the identifiers alone.
     await ingest(t, [{ type: 'contact', ghostId: 'g_1', sealed: sealed('profile2') }])
     const [row] = (await a.query(api.contacts.list, { paginationOpts: first })).page
-    expect(row).toMatchObject({ ghostId: 'g_1', sealedProfile: sealed('profile2'), sealedIdentifiers: sealed('idents') })
+    expect(row).toMatchObject({
+      ghostId: 'g_1',
+      sealedProfile: sealed('profile2'),
+      identifiers: [{ loginId: 'login_a', sealed: sealed('idents') }],
+    })
+    // Each login's identifiers are its own: another login's don't replace these.
+    await ingest(t, [
+      { type: 'loginState', state: 'CONNECTED', loginId: 'login_b' },
+      { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents_b'), loginId: 'login_b' },
+      { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents2') },
+    ])
+    const [again] = (await a.query(api.contacts.list, { paginationOpts: first })).page
+    expect(again!.identifiers).toEqual([
+      { loginId: 'login_b', sealed: sealed('idents_b') },
+      { loginId: 'login_a', sealed: sealed('idents2') },
+    ])
     // Identifiers for a contact the person doesn't have are quarantined, never stored alone.
     await ingest(t, [{ type: 'contactIdentifiers', ghostId: 'g_2', sealed: sealed('x') }])
     const quarantine = await t.run(async (ctx) => await ctx.db.query('quarantine').collect())

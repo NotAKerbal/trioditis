@@ -6,7 +6,7 @@ import { retired } from './lib/networks'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { envelope, network } from './validators'
 
-/** The most contacts a page holds; each is at most 16 KiB sealed (ingest's metadata cap, twice). */
+/** The most contacts a page holds; the byte bound below ends a page early where rows are big. */
 const MAX_PAGE_ITEMS = 500
 const MAX_PAGE_BYTES = 8 * 1024 * 1024
 /** How often one login's contact list can be asked for: it can be thousands of contacts. */
@@ -16,14 +16,14 @@ const contactRow = v.object({
   network,
   ghostId: v.string(),
   sealedProfile: envelope,
-  sealedIdentifiers: v.optional(envelope),
+  identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
 })
 
 /**
  * Every contact the person has on every network, a page at a time, in no meaningful order:
  * the address book matches them against its cards and links them (client-api.md, People).
- * Profiles are sealed (kind `contact`, object ID `ghostId`), and so is what the person's own
- * logins know each contact by (object ID `<ghostId>/identifiers`).
+ * Profiles are sealed (kind `contact`, object ID `ghostId`), and so is what each of the
+ * person's logins knows a contact by (object ID `<ghostId>/identifiers/<loginId>`).
  */
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
@@ -43,11 +43,11 @@ export const list = query({
       ...result,
       page: result.page
         .filter((contact) => !retired(contact))
-        .map(({ network, ghostId, sealedProfile, sealedIdentifiers }) => ({
+        .map(({ network, ghostId, sealedProfile, identifiers }) => ({
           network,
           ghostId,
           sealedProfile,
-          ...(sealedIdentifiers ? { sealedIdentifiers } : {}),
+          ...(identifiers?.length ? { identifiers } : {}),
         })),
     }
   },

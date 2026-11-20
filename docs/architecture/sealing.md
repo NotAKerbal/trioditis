@@ -65,19 +65,19 @@ without padding.
 `kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`, `person`. The object ID
 for each:
 
-| Object                              | Kind       | Object ID                   |
-| ----------------------------------- | ---------- | --------------------------- |
-| A message                           | `message`  | its `eventId`               |
-| An edit                             | `message`  | the edit's own `eventId`    |
-| The person's pending copy of a send | `message`  | its `clientMessageId`       |
-| Chat metadata                       | `chat`     | `portalId`                  |
-| A contact                           | `contact`  | `ghostId`                   |
-| What a login knows a contact by     | `contact`  | `<ghostId>/identifiers`     |
-| A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
-| Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
-| A file                              | `media`    | its `mediaId`               |
-| A label (name and colour)           | `label`    | its `labelKey`              |
-| An address book card                | `person`   | its `personKey`             |
+| Object                              | Kind       | Object ID                         |
+| ----------------------------------- | ---------- | --------------------------------- |
+| A message                           | `message`  | its `eventId`                     |
+| An edit                             | `message`  | the edit's own `eventId`          |
+| The person's pending copy of a send | `message`  | its `clientMessageId`             |
+| Chat metadata                       | `chat`     | `portalId`                        |
+| A contact                           | `contact`  | `ghostId`                         |
+| What a login knows a contact by     | `contact`  | `<ghostId>/identifiers/<loginId>` |
+| A `send` or `edit` command          | `outbound` | its `clientMessageId`             |
+| Login input                         | `outbound` | `<loginSessionId>/<stepId>`       |
+| A file                              | `media`    | its `mediaId`                     |
+| A label (name and colour)           | `label`    | its `labelKey`                    |
+| An address book card                | `person`   | its `personKey`                   |
 
 ## Recipients
 

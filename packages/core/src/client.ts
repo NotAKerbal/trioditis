@@ -27,10 +27,11 @@ export interface NetworkInfo {
 }
 
 /**
- * The networks whose connector can list a login's contacts (`contacts.sync`): the address book
- * the person's phone shares with them. Mirrors the bridge host's connectors.
+ * The networks `contacts.sync` works on: the ones whose connector lists a login's contacts from
+ * that login's own data (on WhatsApp, the numbers the person's chats give), so one member never
+ * gets what another's login knows. Mirrors the bridge host's privateContactLists.
  */
-export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp', 'signal', 'gmessages', 'telegram', 'groupme']
+export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp', 'signal', 'gmessages', 'groupme']
 
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {

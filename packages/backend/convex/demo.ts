@@ -225,7 +225,12 @@ export const writeContacts = internalMutation({
   args: {
     userId: v.string(),
     contacts: v.array(
-      v.object({ network, ghostId: v.string(), sealed: envelope, sealedIdentifiers: v.optional(envelope) }),
+      v.object({
+        network,
+        ghostId: v.string(),
+        sealed: envelope,
+        identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
+      }),
     ),
     sessionId: v.optional(v.string()),
   },
@@ -241,7 +246,7 @@ export const writeContacts = internalMutation({
         network: contact.network,
         ghostId: contact.ghostId,
         sealedProfile: contact.sealed,
-        ...(contact.sealedIdentifiers ? { sealedIdentifiers: contact.sealedIdentifiers } : {}),
+        ...(contact.identifiers ? { identifiers: contact.identifiers } : {}),
       })
     }
     return null
@@ -354,15 +359,20 @@ export const seedForMe = action({
           sealed: seal({ name, handle }, 'contact', ghostId),
           // What a login's contact list sends (contacts.sync): the identifiers as URIs, so the
           // address book can match them.
-          sealedIdentifiers: seal(
+          identifiers: [
             {
-              identifiers: [
-                handle.startsWith('+') ? `tel:${handle.replaceAll(' ', '')}` : `${network}:${handle.slice(1)}`,
-              ],
+              loginId: loginIdFor(userId),
+              sealed: seal(
+                {
+                  identifiers: [
+                    handle.startsWith('+') ? `tel:${handle.replaceAll(' ', '')}` : `${network}:${handle.slice(1)}`,
+                  ],
+                },
+                'contact',
+                `${ghostId}/identifiers/${loginIdFor(userId)}`,
+              ),
             },
-            'contact',
-            `${ghostId}/identifiers`,
-          ),
+          ],
         })),
       })
     }

@@ -608,17 +608,31 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 	return nil
 }
 
-// handleSyncContacts fetches a login's contact list from its network (the address book a
-// phone shares with WhatsApp or Signal, say) and sends each contact, with what this login
-// knows them by, to the login's owner only. It runs in the background: a long list can take
-// a while, and the contacts arrive as events.
+// privateContactLists are the networks whose connector lists a login's contacts from that
+// login's own data, without changing what other members see: Signal reads the login's own
+// recipient store, Google Messages keeps contacts per login, and GroupMe asks for the
+// login's own relations. Others are left out on purpose: mautrix-telegram's list updates the
+// shared ghost with the login's own name for the contact (and stores their phone number in
+// its shared table), and mautrix-whatsapp's fills in phone numbers from a map every login on
+// the host shares. testnet is the conformance tests' connector.
+var privateContactLists = map[string]bool{"signal": true, "gmessages": true, "groupme": true, "testnet": true}
+
+// handleSyncContacts sends a login's contacts to its owner only, with what the login knows
+// each one by. Where the network can list contacts privately (privateContactLists), that's
+// the list, including people the person has no chat with yet. On WhatsApp, it's the
+// contacts the person already has whose WhatsApp ID is their phone number, which the
+// person's own chats with them carry. It runs in the background: a long list takes a while,
+// and the contacts arrive as events.
 func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Command, check bool) error {
+	if c.Network != "whatsapp" && !privateContactLists[c.Network] {
+		return conflict(protocol.ErrUnsupported, "the network can't list contacts privately")
+	}
 	t, err := c.resolve(ctx, cmd, false)
 	if err != nil {
 		return err
 	}
-	api, ok := t.login.Client.(bridgev2.ContactListingNetworkAPI)
-	if !ok {
+	api, lists := t.login.Client.(bridgev2.ContactListingNetworkAPI)
+	if c.Network != "whatsapp" && !lists {
 		return conflict(protocol.ErrUnsupported, "the network can't list contacts")
 	}
 	if check {
@@ -627,16 +641,21 @@ func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Comman
 	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
 	go func() {
 		bgCtx := c.Bridge.BackgroundCtx
-		list, err := api.GetContactList(bgCtx)
-		if err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Listing a login's contacts failed")
-			return
-		}
-		for _, resp := range list {
-			if err := c.syncContact(bgCtx, o, resp); err != nil {
-				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Sending a listed contact failed")
-				return
+		var err error
+		if c.Network == "whatsapp" {
+			err = c.syncWhatsAppNumbers(bgCtx, o)
+		} else {
+			var list []*bridgev2.ResolveIdentifierResponse
+			if list, err = api.GetContactList(bgCtx); err == nil {
+				for _, resp := range list {
+					if err = c.syncContact(bgCtx, o, resp); err != nil {
+						break
+					}
+				}
 			}
+		}
+		if err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Syncing a login's contacts failed")
 		}
 	}()
 	return nil

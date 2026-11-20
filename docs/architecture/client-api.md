@@ -923,22 +923,26 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 
 Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID `ghostId`;
 the plaintext is `ContactPlaintext`. A profile is shared: every member who has the contact gets
-the same one. What the person's own logins know a contact by is sealed apart, to the person only
-(object ID `<ghostId>/identifiers`, plaintext `ContactIdentifiersPlaintext`: URIs such as
-`tel:+15551234567`, `mailto:a@b.c`, `telegram:alice`), since what each login can see differs (a
-number in one person's phone book, say). It comes from a login's contact list, so a contact has
-it only once the person has synced that login.
+the same one. What each of the person's own logins knows a contact by is sealed apart, to the
+person only (object ID `<ghostId>/identifiers/<loginId>`, plaintext
+`ContactIdentifiersPlaintext`: URIs such as `tel:+15551234567`, `mailto:a@b.c`,
+`signal:alice.01`), since what each login can see differs (a number in one person's phone book,
+say). Each login's replaces only its own, and the client uses them all.
 
-| Function        | Arguments                           | Returns                                                                                                |
-| --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `contacts.list` | `paginationOpts` (up to 500 a page) | `{ network, ghostId, sealedProfile, sealedIdentifiers? }` pages, every network, in no meaningful order |
-| `contacts.sync` | `networkAccountId`                  | `{ queued }`. Asks a connected account for its contact list; again within ten minutes does nothing     |
+| Function        | Arguments                           | Returns                                                                                                                 |
+| --------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `contacts.list` | `paginationOpts` (up to 500 a page) | `{ network, ghostId, sealedProfile, identifiers?: { loginId, sealed }[] }` pages, every network, in no meaningful order |
+| `contacts.sync` | `networkAccountId`                  | `{ queued }`. Asks a connected account for its contact list; again within ten minutes does nothing                      |
 
 The address book reads every page of `contacts.list` to match contacts to its cards (People). A
 page can come back short, or empty, before the end; keep going while `isDone` is false.
-`contacts.sync` works on the networks in `CONTACT_LIST_NETWORKS` (WhatsApp, Signal, Google
-Messages, Telegram, GroupMe); the contacts arrive as they're listed, including people the person
-has no chat with yet.
+`contacts.sync` works on the networks in `CONTACT_LIST_NETWORKS`, those whose connector lists a
+login's contacts from that login's own data: Signal, Google Messages and GroupMe send the
+login's contact list, including people the person has no chat with yet; WhatsApp sends, for the
+contacts the person has, the phone number their WhatsApp ID is (which the person's own chats
+with them carry), as it does for each new contact anyway. Telegram is left out: its connector's
+contact list changes the profile every member sees, and stores phone numbers in a shared table.
+A listed contact the person didn't have arrives with the login's own name for them only.
 
 Errors: `That account doesn’t exist.` · `That account isn’t connected.`
 
@@ -953,11 +957,12 @@ addresses (each with a label), birthday, note, a small photo, and `links`, the n
 so the server stores ciphertext and how many cards there are, never who is on them or which
 contacts a card links.
 
-| Function        | Arguments                                                     | Returns                                                            |
-| --------------- | ------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `people.list`   | `paginationOpts` (up to 100 a page)                           | `{ personKey, sealed, updatedAt }` pages, in `personKey` order     |
-| `people.put`    | `people: { personKey, sealed }[]` (at most 100), `sessionId?` | null. Adds cards or replaces the ones with those keys, all or none |
-| `people.remove` | `personKeys` (at most 100)                                    | null. A key with no card is skipped                                |
+| Function          | Arguments                                                                 | Returns                                                                        |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `people.list`     | `paginationOpts` (up to 100 a page)                                       | `{ personKey, sealed, updatedAt }` pages, in `personKey` order                 |
+| `people.revision` |                                                                           | The address book's revision                                                    |
+| `people.put`      | `people: { personKey, sealed }[]` (at most 100), `revision`, `sessionId?` | The new revision. Adds cards or replaces the ones with those keys, all or none |
+| `people.remove`   | `personKeys` (at most 100), `revision`                                    | The new revision. A key with no card is skipped                                |
 
 A sealed card is at most 64 KiB, and a person can have at most 10,000. `people.put` takes the
 page's `sessionId`, like the other sealed writes, and refuses it once the browser has signed in
