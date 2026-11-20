@@ -120,10 +120,21 @@ func (s *Store) BackfillReactionSenders(ctx context.Context) error {
 	return backfillReactionSenders(ctx, s.DB)
 }
 
+// bridgeReactionsExist is whether the `reaction` the backfill joins exists. On PostgreSQL it
+// is looked up as the join will be, through search_path, rather than in every schema.
+func bridgeReactionsExist(ctx context.Context, db *dbutil.Database) (bool, error) {
+	if db.Dialect != dbutil.Postgres {
+		return db.TableExists(ctx, "reaction")
+	}
+	var exists bool
+	err := db.QueryRow(ctx, `SELECT to_regclass('reaction') IS NOT NULL`).Scan(&exists)
+	return exists, err
+}
+
 // backfillReactionSenders fills in who gave each indexed reaction bridgev2 still has a record
 // of. A new install has no bridgev2 tables yet, and nothing to fill in.
 func backfillReactionSenders(ctx context.Context, db *dbutil.Database) error {
-	if exists, err := db.TableExists(ctx, "reaction"); err != nil || !exists {
+	if exists, err := bridgeReactionsExist(ctx, db); err != nil || !exists {
 		return err
 	}
 	rows, err := db.Query(ctx, `SELECT t.event_id, r.sender_mxid, r.sender_id
