@@ -182,6 +182,12 @@ describe('CSV', () => {
     expect(parseVCards(vcf)[0]!.addresses).toEqual([{ street: 'Test; Suite', locality: 'City' }])
   })
 
+  it('reads a Shift-JIS character whose second byte is a backslash’s', () => {
+    // ソ is 0x83 0x5C in Shift-JIS.
+    const vcf = 'BEGIN:VCARD\nVERSION:2.1\nN;CHARSET=SHIFT_JIS;ENCODING=QUOTED-PRINTABLE:=83=5C;Taro;;;\nEND:VCARD\n'
+    expect(parseVCards(vcf)[0]).toMatchObject({ family: 'ソ', given: 'Taro' })
+  })
+
   it('keeps a note’s Windows line breaks through a vCard export', () => {
     const [card] = parseContactsCsv('Name,Notes\r\nAnn,"one\r\ntwo\rthree"\r\n')
     expect(parseVCards(toVCards([card!]))[0]!.note).toBe('one\ntwo\nthree')
