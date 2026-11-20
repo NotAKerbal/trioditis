@@ -3,7 +3,6 @@ import type { Id } from '@trioditis/backend/dataModel'
 import {
   contactKey,
   parseIdentifier,
-  PHONE_NETWORKS,
   START_TARGETS,
   type Network,
   type NetworkContact,
@@ -21,21 +20,32 @@ import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 
-// Starting a chat: with a contact (by ghost ID) or a phone number, email or username, sealed to
-// the bridge key. See client-api.md, New chats.
+// Starting a chat: with a contact (by ghost ID) or a phone number or username, sealed to the
+// bridge key. See client-api.md, New chats.
 
 export type ChatTarget = { ghostId: string } | { identifier: string }
 
-/** The person's connected accounts that can start a chat from `from`, first one per network. */
-export function useStartableAccounts(from: 'contact' | 'identifier' | 'either' = 'either') {
+/** A connected account that can start chats, and what it can start them from. */
+export interface StartableAccount {
+  networkAccountId: Id<'networkAccounts'>
+  network: Network
+}
+
+/** The person's connected accounts that can start chats, in the order they connected. */
+export function useStartableAccounts(): StartableAccount[] {
   const accounts = useAccounts()
-  const out = new Map<Network, Id<'networkAccounts'>>()
-  for (const a of accounts ?? []) {
-    const targets = START_TARGETS[a.network]
-    const can = from === 'either' ? targets?.contact || targets?.identifier : targets?.[from]
-    if (a.state === 'CONNECTED' && can && !out.has(a.network)) out.set(a.network, a._id)
-  }
-  return out
+  return (accounts ?? []).flatMap((a) =>
+    a.state === 'CONNECTED' && START_TARGETS[a.network] ? [{ networkAccountId: a._id, network: a.network }] : [],
+  )
+}
+
+/** What the New chat field asks for on a network, or null where it can't start from one. */
+export function identifierPrompt(network: Network): string | null {
+  const t = START_TARGETS[network]
+  if (t?.phone && t.username) return 'Phone number or username'
+  if (t?.phone) return 'Phone number'
+  if (t?.username) return 'Username'
+  return null
 }
 
 /** What to tell the person when a chat couldn't start. */
@@ -101,9 +111,10 @@ export function useStartChat(onStarted: (chatId: Id<'chats'>) => void) {
   return { begin, busy: !!request, error, clearError: () => setError(null) }
 }
 
-/** A way to start a chat with someone on one network: what the menu says, and what's asked for. */
+/** A way to start a chat with someone on one account: what the menu says, and what's asked for. */
 export interface ChatOption {
   network: Network
+  networkAccountId: Id<'networkAccounts'>
   label: string
   target: ChatTarget
 }
@@ -115,35 +126,47 @@ const USERNAME_NETWORKS: Record<string, Network> = {
 }
 
 /**
- * The ways a card offers to start a chat on these networks, as each network's connector can
- * (START_TARGETS): its linked contacts first (the chat they already have, or a new one), then
- * its numbers on networks that find people by number, and its usernames on their own network.
+ * The ways a card offers to start a chat on these accounts, as each network's connector can
+ * (START_TARGETS): its linked contacts first, on the account that sent them (the chat they
+ * already have, or a new one), then its numbers on networks that find people by number, and
+ * its usernames on their own network, each on the first account there.
  */
 export function chatOptions(
   card: PersonPlaintext,
-  networks: ReadonlySet<Network>,
+  accounts: readonly StartableAccount[],
   byContact: ReadonlyMap<string, NetworkContact>,
 ): ChatOption[] {
   const out: ChatOption[] = []
-  const can = (network: Network, from: 'contact' | 'identifier') =>
-    networks.has(network) && !!START_TARGETS[network]?.[from]
+  const first = (network: Network) => accounts.find((a) => a.network === network)
   for (const link of card.links ?? []) {
-    if (!can(link.network, 'contact')) continue
+    if (!START_TARGETS[link.network]?.contact) continue
     const contact = byContact.get(contactKey(link))
-    out.push({ network: link.network, label: contact?.profile.name || 'Contact', target: { ghostId: link.ghostId } })
+    const account =
+      accounts.find((a) => a.network === link.network && a.networkAccountId === contact?.networkAccountId) ??
+      first(link.network)
+    if (!account) continue
+    out.push({
+      network: link.network,
+      networkAccountId: account.networkAccountId,
+      label: contact?.profile.name || 'Contact',
+      target: { ghostId: link.ghostId },
+    })
   }
   const linked = new Set(out.map((o) => o.network))
-  for (const network of PHONE_NETWORKS) {
-    if (!can(network, 'identifier') || linked.has(network)) continue
-    for (const phone of card.phones ?? [])
-      out.push({ network, label: phone.value, target: { identifier: phone.value } })
+  const add = (network: Network, label: string, identifier: string) => {
+    const account = first(network)
+    if (account && !linked.has(network)) {
+      out.push({ network, networkAccountId: account.networkAccountId, label, target: { identifier } })
+    }
+  }
+  for (const network of Object.keys(START_TARGETS) as Network[]) {
+    if (!START_TARGETS[network]?.phone) continue
+    for (const phone of card.phones ?? []) add(network, phone.value, phone.value)
   }
   for (const handle of card.handles ?? []) {
     const id = parseIdentifier(handle.value)
     const network = id?.kind === 'username' ? USERNAME_NETWORKS[id.service] : undefined
-    if (id?.kind === 'username' && network && can(network, 'identifier') && !linked.has(network)) {
-      out.push({ network, label: `@${id.value}`, target: { identifier: id.value } })
-    }
+    if (id?.kind === 'username' && network && START_TARGETS[network]?.username) add(network, `@${id.value}`, id.value)
   }
   return out
 }

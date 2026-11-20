@@ -667,25 +667,32 @@ var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 const maxIdentifierBytes = 512
 
 // startTargets is what a startChat can start a chat from on each network, per its connector:
-// one of the person's contacts there, or a phone number, email or username. Each was audited:
+// one of the person's contacts there, a phone number, or a username. Each was audited:
 // mautrix-telegram's identifier lookup reads a phone table every login on the host shares, and
 // mautrix-gvoice's portal keys (which bridgev2 logs) are phone numbers, so neither starts from
 // an identifier (Google Voice not at all); mautrix-meta's resolves only numeric IDs, so
 // Messenger and Instagram start from contacts; mautrix-twitter's resolves screen names, not
-// the numeric IDs contacts have, so X starts from a username. testnet is the conformance
-// tests' connector.
-var startTargets = map[string]struct{ contact, identifier bool }{
-	"whatsapp":  {contact: true, identifier: true},
-	"signal":    {contact: true, identifier: true},
-	"gmessages": {contact: true, identifier: true},
+// the numeric IDs contacts have, so X starts from a username. WhatsApp and Google Messages
+// take only phone numbers: mautrix-whatsapp also resolves a LID, and fills in its phone number
+// from a map every login on the host shares. testnet is the conformance tests' connector.
+var startTargets = map[string]struct{ contact, phone, username bool }{
+	"whatsapp":  {contact: true, phone: true},
+	"signal":    {contact: true, phone: true, username: true},
+	"gmessages": {contact: true, phone: true},
 	"telegram":  {contact: true},
 	"meta":      {contact: true},
 	"instagram": {contact: true},
 	"slack":     {contact: true},
 	"linkedin":  {contact: true},
-	"twitter":   {identifier: true},
-	"testnet":   {contact: true, identifier: true},
+	"twitter":   {username: true},
+	"testnet":   {contact: true, phone: true, username: true},
 }
+
+// phonePattern is what a phone number looks like as people write one.
+var phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 ().-]{5,}[0-9]$`)
+
+// usernamePattern is what a username looks like: no spaces, nothing a number would be.
+var usernamePattern = regexp.MustCompile(`^@?[A-Za-z0-9._-]*[A-Za-z][A-Za-z0-9._-]*$`)
 
 // startChatTimeout bounds how long a network has to find someone and open the chat.
 const startChatTimeout = 2 * time.Minute
@@ -704,7 +711,7 @@ func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, 
 		return badRequest("give either ghostId or a sealed identifier")
 	}
 	targets := startTargets[c.Network]
-	if (cmd.GhostID != "" && !targets.contact) || (cmd.Sealed != nil && !targets.identifier) {
+	if (cmd.GhostID != "" && !targets.contact) || (cmd.Sealed != nil && !targets.phone && !targets.username) {
 		return conflict(protocol.ErrUnsupported, "the network can't start chats that way")
 	}
 	t, err := c.resolve(ctx, cmd, false)
@@ -733,6 +740,10 @@ func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, 
 		identifier = strings.TrimSpace(plain.Identifier)
 		if identifier == "" || len(identifier) > maxIdentifierBytes {
 			return badRequest("the identifier is empty or too long")
+		}
+		// Only the kinds the network's connector resolves safely; anything else is nobody here.
+		if !(targets.phone && phonePattern.MatchString(identifier)) && !(targets.username && usernamePattern.MatchString(identifier)) {
+			return conflict(protocol.ErrNotFound, "the network doesn't start chats from that kind of identifier")
 		}
 	}
 	if check {

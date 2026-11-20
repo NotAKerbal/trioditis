@@ -468,7 +468,7 @@ func TestConformance(t *testing.T) {
 		byIdentifier := "request-erin-000001"
 		h.mustCommand(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
-			RequestID: byIdentifier, Sealed: h.sealForBridge("alice", byIdentifier, map[string]string{"identifier": "testnet:erin"}),
+			RequestID: byIdentifier, Sealed: h.sealForBridge("alice", byIdentifier, map[string]string{"identifier": "erin"}),
 		})
 		evt := started(byIdentifier)
 		if evt.PortalID == "" || evt.Error != "" || evt.UserID != "alice" {
@@ -516,7 +516,17 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("a late start gave %+v", expired)
 		}
 
+		// Only the kinds of identifier the network takes: this one is neither a number nor a username.
+		odd := "request-odd-0000001"
 		status, body := h.command(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: odd, Sealed: h.sealForBridge("alice", odd, map[string]string{"identifier": "lid:12345 x"}),
+		})
+		if status != http.StatusConflict || strings.TrimSpace(body) != `{"error":"not_found"}` {
+			t.Fatalf("an identifier of no kind the network takes got %d %s", status, body)
+		}
+
+		status, body = h.command(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin, RequestID: "short", GhostID: erin.GhostID,
 		})
 		if status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {

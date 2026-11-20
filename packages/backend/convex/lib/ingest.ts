@@ -456,13 +456,20 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     .withIndex('by_ghost', (q) => q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId))
     .unique()
   charge(ctx, existing)
-  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed })
+  const loginId = event.loginId
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', loginId))
+    .unique()
+  const accountId = account?.userId === event.userId ? account._id : undefined
+  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed, accountId })
   else
     await ctx.db.insert('contacts', {
       userId: event.userId,
       network,
       ghostId: event.ghostId,
       sealedProfile: event.sealed,
+      ...(accountId ? { accountId } : {}),
     })
 }
 

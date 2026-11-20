@@ -52,7 +52,15 @@ const pageOptions = (opts: typeof paginationOptsValidator.type) => ({
  */
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
-  returns: paginationResultValidator(v.object({ network, ghostId: v.string(), sealedProfile: envelope })),
+  returns: paginationResultValidator(
+    v.object({
+      network,
+      ghostId: v.string(),
+      sealedProfile: envelope,
+      /** The account a chat with them starts on (newChats.start). */
+      networkAccountId: v.optional(v.id('networkAccounts')),
+    }),
+  ),
   handler: async (ctx, { paginationOpts }) => {
     const member = await requireMember(ctx)
     const result = await ctx.db
@@ -63,7 +71,12 @@ export const list = query({
       ...result,
       page: result.page
         .filter((contact) => !retired(contact))
-        .map(({ network, ghostId, sealedProfile }) => ({ network, ghostId, sealedProfile })),
+        .map(({ network, ghostId, sealedProfile, accountId }) => ({
+          network,
+          ghostId,
+          sealedProfile,
+          ...(accountId ? { networkAccountId: accountId } : {}),
+        })),
     }
   },
 })

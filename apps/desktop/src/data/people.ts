@@ -99,7 +99,15 @@ export function useNetworkContacts(): NetworkContact[] | undefined {
       const profile = open<ContactPlaintext>(contactCache, r.sealedProfile, r.ghostId)
       if (!profile) return []
       const ids = known.get(contactKey(r))
-      return [{ network: r.network, ghostId: r.ghostId, profile, ...(ids?.size ? { identifiers: [...ids] } : {}) }]
+      return [
+        {
+          network: r.network,
+          ghostId: r.ghostId,
+          profile,
+          ...(r.networkAccountId ? { networkAccountId: r.networkAccountId } : {}),
+          ...(ids?.size ? { identifiers: [...ids] } : {}),
+        },
+      ]
     })
   }, [contacts.results, contacts.status, identifiers.results, identifiers.status, session])
 }

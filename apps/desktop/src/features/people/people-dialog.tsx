@@ -560,7 +560,7 @@ function MessageButton({
 }) {
   const accounts = useStartableAccounts()
   const start = useStartChat(onOpenChat)
-  const options = chatOptions(card, new Set(accounts.keys()), byContact)
+  const options = chatOptions(card, accounts, byContact)
   useEffect(() => {
     if (start.error) toast(start.error)
   }, [start.error])
@@ -574,7 +574,7 @@ function MessageButton({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {options.map((o, i) => (
-          <DropdownMenuItem key={i} onSelect={() => void start.begin(o.network, accounts.get(o.network)!, o.target)}>
+          <DropdownMenuItem key={i} onSelect={() => void start.begin(o.network, o.networkAccountId, o.target)}>
             <NetworkBadge network={o.network} label={networkName(o.network)} />
             {o.label}
           </DropdownMenuItem>

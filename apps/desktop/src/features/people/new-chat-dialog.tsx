@@ -7,7 +7,7 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
 import { useState } from 'react'
 import { networkName } from '~/data/chats.ts'
-import { useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
+import { identifierPrompt, useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
 
 /** Starts a chat with a phone number, email or username on one of the person's networks. */
 export function NewChatDialog({
@@ -29,7 +29,11 @@ export function NewChatDialog({
 }
 
 function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
-  const accounts = useStartableAccounts('identifier')
+  // The first account on each network that can start from a number or username.
+  const accounts = new Map<Network, Id<'networkAccounts'>>()
+  for (const a of useStartableAccounts()) {
+    if (identifierPrompt(a.network) && !accounts.has(a.network)) accounts.set(a.network, a.networkAccountId)
+  }
   const networks = [...accounts.keys()]
   const [chosen, setChosen] = useState<Network | undefined>()
   const network = chosen && accounts.has(chosen) ? chosen : networks[0]
@@ -71,7 +75,7 @@ function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
               setValue(e.target.value)
               start.clearError()
             }}
-            placeholder="Phone number, email or username"
+            placeholder={identifierPrompt(network) ?? ''}
             aria-label={`Who to message on ${networkName(network)}`}
             aria-invalid={start.error ? true : undefined}
           />

@@ -1033,7 +1033,7 @@ people at once.` · `You can have at most 10,000 people.`
 ## New chats
 
 A chat starts on one of the person's connected accounts, with one of their contacts there or
-with whoever a phone number, email or username belongs to. The identifier is sealed to the
+with whoever a phone number or username belongs to. The identifier is sealed to the
 bridge key (kind `outbound`, object ID `requestId`, plaintext `{ identifier }`), so the server
 never sees it.
 
@@ -1050,16 +1050,21 @@ on the network has that identifier), `unsupported`, `not_connected`, `rate_limit
 the host the command went to can answer it.
 
 What a chat can start from depends on the network's connector (`START_TARGETS` in
-packages/core, mirroring the bridge host's `startTargets`): WhatsApp, Signal and Google Messages
-take a contact or an identifier; Telegram, Messenger, Instagram, Slack and LinkedIn a contact;
-X a username. Telegram's identifier lookup reads a phone table the whole host shares, Google
-Voice's chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only
-numeric IDs and X's only screen names, so those are left out. The desktop app offers a card's
-linked contacts first, then its numbers on networks that find people by number, then its
-usernames on their own network. A `ghostId` must be one of the person's contacts on that
+packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google Messages take a
+contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
+Instagram, Slack and LinkedIn a contact; X a username. An identifier of another kind is
+`not_found` (WhatsApp would also resolve a LID, filling in its number from a map the whole host
+shares). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
+chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
+IDs and X's only screen names, so those are left out. A contact's chat starts on the account
+that sent the contact (`contacts.list` gives its `networkAccountId`),
+since some networks' contact IDs belong to one login. The desktop app offers a card's linked
+contacts first, then its numbers on networks that take them, then its usernames on their own
+network, on the first account there. A `ghostId` must be one of the person's contacts on that
 account's network. A person can start 20 chats a minute; requests are kept a day. The bridge
 host silences connector logging while it resolves an identifier, since what connectors log can
-include it.
+include it (whatsmeow's own debug output still names it: never run WhatsApp with `--verbose` in
+production).
 
 Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
 `That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t

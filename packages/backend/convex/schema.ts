@@ -347,6 +347,11 @@ export default defineSchema({
     network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
+    /**
+     * The account whose login last sent the contact: a chat with them starts there, since
+     * some networks' contact IDs belong to one login (Google Messages').
+     */
+    accountId: v.optional(v.id('networkAccounts')),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
 
   /**
