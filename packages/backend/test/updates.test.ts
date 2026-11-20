@@ -127,6 +127,48 @@ describe('updates', () => {
     ).rejects.toThrow(/commit/)
   })
 
+  it('keeps the release notes of an update on offer and of the last one installed', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    const latest = {
+      channel: 'stable' as const,
+      commit: B,
+      committedAt: 2,
+      subject: 'Merge',
+      notes: [
+        { label: 'new' as const, text: 'n'.repeat(300) },
+        ...Array.from({ length: 150 }, () => ({ label: 'fixed' as const, text: 'Fix' })),
+      ],
+      behind: 3,
+      ahead: 0,
+      checkedAt: 5,
+    }
+    await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'idle', latest })
+    const offered = (await admin.query(api.updates.status, {})).updater!.latest!.notes!
+    // Cut to what's kept: a line to 200 characters, and at most 100 lines.
+    expect(offered).toHaveLength(100)
+    expect(offered[0]).toEqual({ label: 'new', text: 'n'.repeat(200) })
+
+    const notes = [{ label: 'security' as const, text: 'Close a hole' }]
+    await t.mutation(api.updates.report, {
+      secret: UPDATER_SECRET,
+      state: 'idle',
+      current: { commit: B, committedAt: 2 },
+      installed: { from: A, to: B, notes },
+    })
+    // Later reports keep it, until another update goes in.
+    await t.mutation(api.updates.report, { secret: UPDATER_SECRET, state: 'idle' })
+    expect((await admin.query(api.updates.status, {})).updater!.installed).toMatchObject({ from: A, to: B, notes })
+
+    await expect(
+      t.mutation(api.updates.report, {
+        secret: UPDATER_SECRET,
+        state: 'idle',
+        installed: { from: 'nope', to: B, notes },
+      }),
+    ).rejects.toThrow(/commit/)
+  })
+
   it('takes back a request the updater hasn’t started, which it then can’t claim', async () => {
     const t = setup()
     const admin = await signIn(t, 'admin', 'admin')

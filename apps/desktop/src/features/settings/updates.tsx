@@ -1,4 +1,5 @@
 import { api } from '@trioditis/backend/api'
+import { badgeVariants } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
 import { Switch } from '@trioditis/ui/switch'
@@ -11,18 +12,21 @@ import { useEffect, useState, type ReactNode } from 'react'
 import {
   CHANNELS,
   channelName,
+  groupNotes,
   runningVersion,
   shortCommit,
   updaterStale,
   UPDATER_STALE_MS,
   updateView,
   when,
+  whatsNew,
   type Channel,
+  type ReleaseNote,
   type UpdateStatus,
 } from '~/data/updates.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Group, Heading, Loading, Setting } from './layout.tsx'
+import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 
 const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
@@ -56,6 +60,7 @@ function UpdateSettings({ status }: { status: UpdateStatus }) {
     <>
       <Group title="This server">
         <UpdateState status={status} />
+        <ReleaseNotes status={status} />
       </Group>
       <Group title="Preferences">
         {/* Only nightly's line is a warning worth keeping in view. */}
@@ -188,7 +193,9 @@ function UpdateState({ status }: { status: UpdateStatus }) {
           <b className="font-semibold text-foreground">
             An update is available: {shortCommit(view.commit)}, from {date.format(view.committedAt)}
           </b>
-          {view.behind > 1 ? ` (${view.behind} changes)` : ''}. {view.subject}
+          {view.behind > 1 ? ` (${view.behind} changes)` : ''}.
+          {/* Its release notes say what's in it, below; the newest commit's subject is the fallback. */}
+          {view.notes.length ? '' : ` ${view.subject}`}
         </>
       )
       action = (
@@ -236,5 +243,55 @@ function UpdateState({ status }: { status: UpdateStatus }) {
     >
       {action}
     </Setting>
+  )
+}
+
+/**
+ * The release notes of the update on offer, and of the update that brought the version this
+ * server runs, each grouped by label behind a row that opens them.
+ */
+function ReleaseNotes({ status }: { status: UpdateStatus }) {
+  const view = updateView(status)
+  const offered = view.kind === 'available' ? view.notes : []
+  const installed = whatsNew(status)
+  // Keyed by whose notes they are, so another update's start closed.
+  return (
+    <>
+      {installed.length ? (
+        <NotesDisclosure key={`installed:${status.updater?.installed?.to}`} title="What’s new" notes={installed} />
+      ) : null}
+      {view.kind === 'available' && offered.length ? (
+        <NotesDisclosure key={`latest:${view.commit}`} title="Release notes" notes={offered} />
+      ) : null}
+    </>
+  )
+}
+
+function NotesDisclosure({ title, notes }: { title: string; notes: ReleaseNote[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Disclosure open={open} onOpenChange={setOpen}>
+        {title}
+      </Disclosure>
+      {open ? <NoteList notes={notes} /> : null}
+    </>
+  )
+}
+
+function NoteList({ notes }: { notes: ReleaseNote[] }) {
+  return (
+    <div className="space-y-3.5 px-4 pt-3 pb-4 text-sm">
+      {groupNotes(notes).map((group) => (
+        <section key={group.label}>
+          <h4 className={badgeVariants({ variant: 'tag' })}>{group.name}</h4>
+          <ul className="mt-1.5 list-disc space-y-1 pl-5 marker:text-subtle-foreground">
+            {group.texts.map((text, i) => (
+              <li key={i}>{text}</li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
   )
 }
