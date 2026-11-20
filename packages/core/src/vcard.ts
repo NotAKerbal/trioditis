@@ -9,8 +9,15 @@ interface Property {
   group: string
   name: string
   params: Map<string, string[]>
+  /** The value, decoded. */
   value: string
+  /** The value as written, and how to decode a part of it: a structured value is split first. */
+  raw: string
+  decode: (text: string) => string
 }
+
+/** A structured value's parts (N, ADR, ORG), each decoded: an encoded `;` is text, not a separator. */
+const components = (p: Property) => splitEscaped(p.raw, ';').map(p.decode)
 
 /** The most cards one file gives, as many as an address book can hold (people.ts, MAX_PEOPLE). */
 export const MAX_IMPORT_CARDS = 10_000
@@ -101,14 +108,17 @@ function parseProperty(line: string): Property | null {
     if (eq < 0 && /^(QUOTED-PRINTABLE|BASE64|B|8BIT)$/i.test(raw)) params.set('ENCODING', [raw])
     else params.set(key, [...(params.get(key) ?? []), ...values])
   }
-  let value = line.slice(colon + 1)
+  const raw = line.slice(colon + 1)
   const encoding = params.get('ENCODING')?.[0]?.toUpperCase()
-  if (encoding === 'QUOTED-PRINTABLE') value = decodeQuotedPrintable(value, params.get('CHARSET')?.[0] ?? 'utf-8')
+  const charset = params.get('CHARSET')?.[0] ?? 'utf-8'
+  const decode = (text: string) => (encoding === 'QUOTED-PRINTABLE' ? decodeQuotedPrintable(text, charset) : text)
   return {
     group: dot < 0 ? '' : head!.slice(0, dot).toLowerCase(),
     name: (dot < 0 ? head! : head!.slice(dot + 1)).toUpperCase(),
     params,
-    value,
+    value: decode(raw),
+    raw,
+    decode,
   }
 }
 
@@ -182,7 +192,7 @@ function cardFrom(props: Property[]): PersonPlaintext | null {
         card.name = text()
         break
       case 'N': {
-        const [family, given, middle, prefix, suffix] = splitEscaped(p.value, ';').map((s) => unescapeText(s).trim())
+        const [family, given, middle, prefix, suffix] = components(p).map((s) => unescapeText(s).trim())
         Object.assign(card, {
           ...(family ? { family } : {}),
           ...(given ? { given } : {}),
@@ -196,7 +206,7 @@ function cardFrom(props: Property[]): PersonPlaintext | null {
         if (text()) card.nickname = text()
         break
       case 'ORG': {
-        const org = splitEscaped(p.value, ';')
+        const org = components(p)
           .map((s) => unescapeText(s).trim())
           .filter(Boolean)
           .join(', ')
@@ -246,7 +256,7 @@ function cardFrom(props: Property[]): PersonPlaintext | null {
         break
       }
       case 'ADR': {
-        const [pobox, ext, street, locality, region, postcode, country] = splitEscaped(p.value, ';').map((s) =>
+        const [pobox, ext, street, locality, region, postcode, country] = components(p).map((s) =>
           unescapeText(s).trim(),
         )
         const address: PersonAddress = {}
@@ -508,7 +518,23 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
         }
         return
       }
+      // Google: "Address 1 - Formatted", or its parts ("Address 1 - Street", "- City", …).
       const formatted = /^address \d+ - formatted$/.exec(c)
+      const part = /^address (\d+) - street$/.exec(c)
+      if (part && !cell(col(`address ${part[1]} - formatted`))) {
+        const at = (name: string) => cell(col(`address ${part[1]} - ${name}`))
+        const address: PersonAddress = {}
+        const street = [at('po box'), at('street'), at('extended address')].filter(Boolean).join('\n')
+        if (street) address.street = street
+        if (at('city')) address.locality = at('city')
+        if (at('region')) address.region = at('region')
+        if (at('postal code')) address.postcode = at('postal code')
+        if (at('country')) address.country = at('country')
+        const label = csvLabel(at('label') || at('type'))
+        if (label) address.label = label
+        if (Object.keys(address).some((k) => k !== 'label')) addresses.push(address)
+        return
+      }
       if (formatted && cell(i)) {
         const label = csvLabel(cell(col(c.replace('formatted', 'label'), c.replace('formatted', 'type'))))
         addresses.push(label ? { street: cell(i), label } : { street: cell(i) })

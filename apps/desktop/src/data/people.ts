@@ -76,29 +76,32 @@ export function usePeople(): StoredPerson[] | undefined {
 /** Every contact on every network, opened with what the person's logins know them by, or undefined until loaded. */
 export function useNetworkContacts(): NetworkContact[] | undefined {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.contacts.list, {}, { initialNumItems: 500 })
-  useEveryPage(status, loadMore, 500)
+  const contacts = usePaginatedQuery(api.contacts.list, {}, { initialNumItems: 500 })
+  useEveryPage(contacts.status, contacts.loadMore, 500)
+  const identifiers = usePaginatedQuery(api.contacts.identifiers, {}, { initialNumItems: 500 })
+  useEveryPage(identifiers.status, identifiers.loadMore, 500)
   return useMemo(() => {
-    if (status !== 'Exhausted') return undefined
-    const open = <T>(cache: Map<string, T | null>, sealed: Envelope | undefined, objectId: string) =>
+    if (contacts.status !== 'Exhausted' || identifiers.status !== 'Exhausted') return undefined
+    const open = <T>(cache: Map<string, T | null>, sealed: Envelope, objectId: string) =>
       openCached<T>(cache, sealed, session.keyPair, session.kid, 'contact', session.userId, objectId)
-    return results.flatMap((r) => {
+    // Each of the person's logins has its own; together they're all the person knows a contact by.
+    const known = new Map<string, Set<string>>()
+    for (const r of identifiers.results) {
+      const plain = open<ContactIdentifiersPlaintext>(
+        identifierCache,
+        r.sealed,
+        `${r.ghostId}/identifiers/${r.loginId}`,
+      )
+      const key = contactKey(r)
+      for (const id of plain?.identifiers ?? []) known.set(key, (known.get(key) ?? new Set()).add(id))
+    }
+    return contacts.results.flatMap((r) => {
       const profile = open<ContactPlaintext>(contactCache, r.sealedProfile, r.ghostId)
       if (!profile) return []
-      // Each of the person's logins on the network has its own; together they're all the
-      // person knows this contact by.
-      const identifiers = [
-        ...new Set(
-          (r.identifiers ?? []).flatMap(
-            ({ loginId, sealed }) =>
-              open<ContactIdentifiersPlaintext>(identifierCache, sealed, `${r.ghostId}/identifiers/${loginId}`)
-                ?.identifiers ?? [],
-          ),
-        ),
-      ]
-      return [{ network: r.network, ghostId: r.ghostId, profile, ...(identifiers.length ? { identifiers } : {}) }]
+      const ids = known.get(contactKey(r))
+      return [{ network: r.network, ghostId: r.ghostId, profile, ...(ids?.size ? { identifiers: [...ids] } : {}) }]
     })
-  }, [results, status, session])
+  }, [contacts.results, contacts.status, identifiers.results, identifiers.status, session])
 }
 
 /** Contacts by `contactKey`, for showing a card's links. */
@@ -188,7 +191,10 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
    * cards already written are left out, so a change made to one since (or its deletion) stands.
    * Returns how many cards were written.
    */
-  async function saveMany(cards: (people: readonly StoredPerson[]) => Person[], onProgress?: (done: number) => void) {
+  async function saveMany(
+    cards: (people: readonly StoredPerson[]) => Person[],
+    onWritten?: (personKeys: readonly string[]) => void,
+  ) {
     const written = new Set<string>()
     await withRevision(async (people, revision) => {
       const planned = cards(people).filter((p) => !written.has(p.personKey))
@@ -197,7 +203,7 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
         const batch = planned.slice(i, i + PER_CALL)
         at = await put({ people: batch.map(seal), revision: at, sessionId: session.sessionId })
         for (const p of batch) written.add(p.personKey)
-        onProgress?.(written.size)
+        onWritten?.(batch.map((p) => p.personKey))
       }
     })
     return written.size
@@ -219,12 +225,30 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
 }
 
 /**
- * The cards an import makes or changes (packages/core, planImport). Each entry's new key is
- * picked once, so the plan comes out the same however often it's worked out again.
+ * The cards an import makes or changes (packages/core, planImport), for saveMany. Each entry's
+ * new key is picked once, so the plan comes out the same however often it's worked out again,
+ * and an entry once written is left out of later plans, so a card it made or changed that's
+ * edited or deleted elsewhere meanwhile stays as that left it.
  */
 export function importPlanner(imported: readonly PersonPlaintext[]) {
   const keys = imported.map(() => newClientId())
-  return (existing: readonly Person[]) => planImport(existing, imported, (index) => keys[index]!)
+  const done = new Set<number>()
+  const entriesOf = new Map<string, number[]>()
+  return {
+    plan: (existing: readonly Person[]) => {
+      const pending = imported.flatMap((card, index) => (done.has(index) ? [] : [{ card, index }]))
+      const planned = planImport(
+        existing,
+        pending.map((p) => p.card),
+        (i) => keys[pending[i]!.index]!,
+        (i, personKey) => entriesOf.set(personKey, [...(entriesOf.get(personKey) ?? []), pending[i]!.index]),
+      )
+      return planned
+    },
+    written: (personKeys: Iterable<string>) => {
+      for (const key of personKeys) for (const index of entriesOf.get(key) ?? []) done.add(index)
+    },
+  }
 }
 
 /**

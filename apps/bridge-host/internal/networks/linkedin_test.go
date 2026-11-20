@@ -280,8 +280,8 @@ func TestLinkedInSendIsNotRepeated(t *testing.T) {
 	})
 }
 
-// Only message creation is changed: an edit, at the same endpoint with the message's URN,
-// gets LinkedIn's own answer, and other actions keep DoRaw's retries.
+// Only message creation and reactions are changed: an edit, at the same endpoint with the
+// message's URN, gets LinkedIn's own answer, and other actions keep DoRaw's retries.
 func TestLinkedInOtherRequestsPassThrough(t *testing.T) {
 	linkedIn := &countingTransport{fail: status(http.StatusTeapot)}
 	cli := linkedingo.NewClient(context.Background(), linkedingo.NewURN("me"), linkedingo.NewEmptyStringCookieJar(), "", "", "", linkedingo.Handlers{})
@@ -299,13 +299,42 @@ func TestLinkedInOtherRequestsPassThrough(t *testing.T) {
 	sendOnce := &linkedinSendOnce{next: &countingTransport{fail: status(http.StatusBadGateway)}}
 	for _, target := range []string{
 		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages/urn%3Ali%3Amsg_message%3A1",
-		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages?action=reactWithEmoji",
+		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages?action=markAllRead",
 	} {
 		req, _ := http.NewRequest(http.MethodPost, target, nil)
 		resp, err := sendOnce.RoundTrip(req)
 		if err != nil || resp.StatusCode != http.StatusBadGateway {
 			t.Errorf("%s: got %v %v, want the 502 untouched", target, resp, err)
 		}
+	}
+}
+
+// A reaction, added or taken away, reaches LinkedIn once even when its outcome is ambiguous:
+// repeated, it could undo what the person did meanwhile on another device.
+func TestLinkedInReactionIsNotRepeated(t *testing.T) {
+	for name, react := range map[string]func(*linkedingo.Client) error{
+		"add": func(cli *linkedingo.Client) error {
+			return cli.SendReaction(context.Background(), linkedingo.NewURN("urn:li:msg_message:1"), "👍")
+		},
+		"remove": func(cli *linkedingo.Client) error {
+			return cli.RemoveReaction(context.Background(), linkedingo.NewURN("urn:li:msg_message:1"), "👍")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			linkedIn := &countingTransport{fail: status(http.StatusBadGateway)}
+			cli := linkedingo.NewClient(context.Background(), linkedingo.NewURN("me"), linkedingo.NewEmptyStringCookieJar(), "", "", "", linkedingo.Handlers{})
+			httpClient, err := linkedingoHTTPClient(cli)
+			if err != nil {
+				t.Fatal(err)
+			}
+			httpClient.Transport = &linkedinSendOnce{next: linkedIn}
+			if err := react(cli); err == nil {
+				t.Fatal("an ambiguous reaction was reported as done")
+			}
+			if n := linkedIn.calls.Load(); n != 1 {
+				t.Fatalf("the reaction reached LinkedIn %d times, want once", n)
+			}
+		})
 	}
 }
 

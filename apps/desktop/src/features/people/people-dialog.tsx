@@ -169,7 +169,8 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
           else delete card.photo
         }
       }
-      const written = await actions.saveMany(importPlanner(cards))
+      const planner = importPlanner(cards)
+      const written = await actions.saveMany(planner.plan, planner.written)
       toast(
         written
           ? `Imported ${written.toLocaleString()} ${written === 1 ? 'person' : 'people'}`

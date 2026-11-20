@@ -121,8 +121,9 @@ export interface ContactEvent extends EventBase {
 }
 
 /**
- * What one of the person's own logins knows a contact by: kind `contact`, object ID
- * `<ghostId>/identifiers`, plaintext `ContactIdentifiersPlaintext`. Sent to that person only.
+ * What the event's login knows a contact by: kind `contact`, object ID
+ * `<ghostId>/identifiers/<loginId>`, plaintext `ContactIdentifiersPlaintext`. Sent to that
+ * login's owner only.
  */
 export interface ContactIdentifiersEvent extends EventBase {
   type: 'contactIdentifiers'

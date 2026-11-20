@@ -75,6 +75,23 @@ func (in *Intent) sender() (sender, bool) {
 	}
 }
 
+// indexKey is how the reaction index keeps a sender: `self`, or `ghost:` and the network ID.
+func (s sender) indexKey() string {
+	if s.self {
+		return "self"
+	}
+	return "ghost:" + string(s.ghostID)
+}
+
+func senderFromIndex(key string) (sender, bool) {
+	if key == "self" {
+		return sender{self: true}, true
+	} else if ghost, ok := strings.CutPrefix(key, "ghost:"); ok && ghost != "" {
+		return sender{ghostID: networkid.UserID(ghost)}, true
+	}
+	return sender{}, false
+}
+
 func (c *Connector) senderForMXID(mxid id.UserID) (sender, bool) {
 	if ghost, ok := ids.ParseGhostMXID(mxid); ok {
 		return sender{ghostID: ghost}, true
@@ -118,6 +135,16 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		eventID = ids.LocalEventID(string(roomID), string(in.mxid), eventType.Type, strconv.FormatInt(ts.UnixNano(), 10), digest(content))
 	}
 	s, ok := in.sender()
+	if !ok && eventType == event.EventRedaction {
+		// bridgev2's bot takes away a person's older reaction when the network allows only
+		// one (WhatsApp, Signal): that removal is the person's, so it is said as theirs.
+		s, ok, err := in.c.reactionSender(ctx, content)
+		if err != nil {
+			return nil, err
+		} else if ok {
+			return in.c.botRedaction(ctx, roomID, s, eventType, content, eventID, ts)
+		}
+	}
 	if !ok {
 		return &mautrix.RespSendEvent{EventID: eventID}, nil
 	}
@@ -128,6 +155,47 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		return nil, err
 	}
 	if err = in.c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
+		return nil, err
+	}
+	return &mautrix.RespSendEvent{EventID: eventID}, nil
+}
+
+// reactionSender is who gave the reaction a redaction takes away, if it takes away one the
+// bridge host has indexed.
+func (c *Connector) reactionSender(ctx context.Context, content *event.Content) (sender, bool, error) {
+	redaction, ok := content.Parsed.(*event.RedactionEventContent)
+	if !ok {
+		return sender{}, false, nil
+	}
+	indexed, err := c.Store.ReactionSender(ctx, string(redaction.Redacts))
+	if errors.Is(err, store.ErrNotFound) {
+		return sender{}, false, nil
+	} else if err != nil {
+		return sender{}, false, err
+	}
+	// The index says who, since bridgev2 may already have given the person's one reaction
+	// slot to the new reaction. The upgrade that added senders filled them in from bridgev2;
+	// one it couldn't is looked up there now, in case bridgev2 still has it.
+	if s, ok := senderFromIndex(indexed); ok {
+		return s, true, nil
+	}
+	reaction, err := c.Bridge.DB.Reaction.GetByMXID(ctx, redaction.Redacts)
+	if err != nil || reaction == nil {
+		return sender{}, false, err
+	}
+	s, ok := senderFromIndex(store.ReactorKey(string(reaction.SenderMXID), string(reaction.SenderID)))
+	return s, ok, nil
+}
+
+// botRedaction emits a redaction the bot sent on someone's behalf (reactionSender).
+func (c *Connector) botRedaction(ctx context.Context, roomID id.RoomID, s sender, eventType event.Type, content *event.Content, eventID id.EventID, ts time.Time) (*mautrix.RespSendEvent, error) {
+	o, err := c.owner(ctx, roomID)
+	if errors.Is(err, errNotPortal) {
+		return &mautrix.RespSendEvent{EventID: eventID}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if err = c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
 		return nil, err
 	}
 	return &mautrix.RespSendEvent{EventID: eventID}, nil
@@ -203,7 +271,7 @@ func (c *Connector) emitContent(ctx context.Context, o *owner, s sender, eventTy
 			return fmt.Errorf("unexpected %T for reaction", content.Parsed)
 		}
 		base.Type, base.EventID, base.TargetEventID, base.Key = protocol.EventReaction, string(eventID), string(reaction.RelatesTo.EventID), reactionKey(reaction.RelatesTo.Key)
-		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key); err != nil {
+		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key, s.indexKey()); err != nil {
 			return err
 		}
 		return c.emit(ctx, &base)
@@ -657,27 +725,54 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
-// one of their chats. Profiles go only to people who share a chat with the ghost. The profile
-// is sent before the membership is recorded, so a failure in between sends it again next time
-// rather than never (sending it twice is harmless). Then, where the ghost's ID is their phone
-// number, that number, which this chat gave the person's login.
+// one of their chats. Profiles go only to people who share a chat with the ghost. The
+// membership is the claim to send it: recorded first, so a profile update meanwhile reaches the
+// person too, and taken back if sending fails, so the next time tries again. Then, where the
+// ghost's ID is their phone number, that number, once for each of the person's logins.
 func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid.UserID) error {
 	room, mxid := contactRoom(o.userID), string(ids.GhostMXID(ghost))
-	known, err := c.Store.IsMember(ctx, room, mxid)
-	if err != nil || known {
+	added, err := c.Store.AddMember(ctx, room, mxid)
+	if err != nil {
 		return err
 	}
-	if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
+	if added {
+		if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
+			c.unclaim(ctx, room, mxid)
+			return err
+		}
+	}
+	return c.ensureNumber(ctx, o, ghost)
+}
+
+// ensureNumber sends the phone number a contact's ID is to the person, the first time one of
+// their logins sees the contact: each login's is its own (numbersRoom), since the number is
+// what that login's chats gave it.
+func (c *Connector) ensureNumber(ctx context.Context, o *owner, ghost networkid.UserID) error {
+	number := numberID(ghost)
+	if !numberIDNetworks[c.Network] || number == "" {
+		return nil
+	}
+	room, mxid := numbersRoom(o.userID, o.loginID), string(ids.GhostMXID(ghost))
+	added, err := c.Store.AddMember(ctx, room, mxid)
+	if err != nil || !added {
 		return err
 	}
-	if _, err = c.Store.AddMember(ctx, room, mxid); err != nil {
+	if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
+		c.unclaim(ctx, room, mxid)
 		return err
-	}
-	if number := numberID(ghost); numberIDNetworks[c.Network] && number != "" {
-		return c.emitContactIdentifiers(ctx, o, ghost, []string{number})
 	}
 	return nil
 }
+
+// unclaim takes back a membership recorded for something that then couldn't be sent.
+func (c *Connector) unclaim(ctx context.Context, room, mxid string) {
+	if err := c.Store.RemoveMember(ctx, room, mxid); err != nil {
+		c.Log.Err(err).Msg("Taking back a contact's claim failed; it won't be sent again until it changes")
+	}
+}
+
+// numbersRoom records which contacts' numbers a person's login has sent.
+func numbersRoom(userID, loginID string) string { return "numbers:" + userID + ":" + loginID }
 
 func contactRoom(userID string) string { return "contacts:" + userID }
 

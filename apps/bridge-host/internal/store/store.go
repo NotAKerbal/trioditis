@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"go.mau.fi/util/dbutil"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
@@ -86,7 +87,83 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_login_session (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, started_at BIGINT NOT NULL)`,
 		})
 	}).
+	WithRaw(3, 4, 0, "Who gave each reaction", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// bridgev2 can overwrite its own record of a reaction before it takes the reaction away
+		// (one reaction per person, as on WhatsApp), so the index keeps who gave it, filled in
+		// now from bridgev2's records for the reactions indexed before.
+		if err := execAll(ctx, db, []string{
+			`ALTER TABLE trioditis_reaction ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
+		}); err != nil {
+			return err
+		}
+		return backfillReactionSenders(ctx, db)
+	}).
 	Finish()
+
+// ReactorKey is how the reaction index keeps who gave a reaction, from bridgev2's record of
+// it: `self` for the person (their Matrix user), `ghost:` and the network's ID for anyone
+// else, or empty if the record says neither.
+func ReactorKey(senderMXID, senderID string) string {
+	if ghost, ok := ids.ParseGhostMXID(id.UserID(senderMXID)); ok {
+		return "ghost:" + string(ghost)
+	} else if _, ok = ids.ParseUserMXID(id.UserID(senderMXID)); ok {
+		return "self"
+	} else if senderID != "" {
+		return "ghost:" + senderID
+	}
+	return ""
+}
+
+// BackfillReactionSenders is the 3→4 upgrade's backfill, for a test that makes its rows look
+// older to check it against bridgev2's own tables.
+func (s *Store) BackfillReactionSenders(ctx context.Context) error {
+	return backfillReactionSenders(ctx, s.DB)
+}
+
+// bridgeReactionsExist is whether the `reaction` the backfill joins exists. On PostgreSQL it
+// is looked up as the join will be, through search_path, rather than in every schema.
+func bridgeReactionsExist(ctx context.Context, db *dbutil.Database) (bool, error) {
+	if db.Dialect != dbutil.Postgres {
+		return db.TableExists(ctx, "reaction")
+	}
+	var exists bool
+	err := db.QueryRow(ctx, `SELECT to_regclass('reaction') IS NOT NULL`).Scan(&exists)
+	return exists, err
+}
+
+// backfillReactionSenders fills in who gave each indexed reaction bridgev2 still has a record
+// of. A new install has no bridgev2 tables yet, and nothing to fill in.
+func backfillReactionSenders(ctx context.Context, db *dbutil.Database) error {
+	if exists, err := bridgeReactionsExist(ctx, db); err != nil || !exists {
+		return err
+	}
+	rows, err := db.Query(ctx, `SELECT t.event_id, r.sender_mxid, r.sender_id
+		FROM trioditis_reaction t JOIN reaction r ON r.mxid = t.event_id WHERE t.sender = ''`)
+	if err != nil {
+		return err
+	}
+	type found struct{ eventID, sender string }
+	var all []found
+	for rows.Next() {
+		var eventID, senderMXID, senderID string
+		if err = rows.Scan(&eventID, &senderMXID, &senderID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if sender := ReactorKey(senderMXID, senderID); sender != "" {
+			all = append(all, found{eventID, sender})
+		}
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, f := range all {
+		if _, err = db.Exec(ctx, `UPDATE trioditis_reaction SET sender=$2 WHERE event_id=$1`, f.eventID, f.sender); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
 	for _, statement := range statements {
@@ -643,13 +720,6 @@ func (s *Store) RemoveMember(ctx context.Context, roomID, mxid string) error {
 	return err
 }
 
-// IsMember reports whether mxid is in roomID.
-func (s *Store) IsMember(ctx context.Context, roomID, mxid string) (bool, error) {
-	var n int
-	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_member WHERE room_id=$1 AND mxid=$2`, roomID, mxid).Scan(&n)
-	return n > 0, err
-}
-
 // Members lists a room's members.
 func (s *Store) Members(ctx context.Context, roomID string) ([]string, error) {
 	return s.strings(ctx, `SELECT mxid FROM trioditis_member WHERE room_id=$1`, roomID)
@@ -679,13 +749,24 @@ func (s *Store) strings(ctx context.Context, query string, args ...any) ([]strin
 
 // PutReaction records a reaction event's target and key, so its removal can be reported
 // with them. Reaction keys are metadata, not sealed content, per the protocol.
-func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key string) error {
+func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key, sender string) error {
 	_, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key) VALUES ($1, $2, $3)
-		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key`,
-		eventID, targetEventID, key,
+		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key, sender) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key, sender=excluded.sender`,
+		eventID, targetEventID, key, sender,
 	)
 	return err
+}
+
+// ReactionSender is who gave an indexed reaction, as PutReaction was told: empty if it was
+// indexed before senders were kept.
+func (s *Store) ReactionSender(ctx context.Context, eventID string) (string, error) {
+	var sender string
+	err := s.DB.QueryRow(ctx, `SELECT sender FROM trioditis_reaction WHERE event_id=$1`, eventID).Scan(&sender)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return sender, err
 }
 
 // GetReaction returns a reaction's target and key.

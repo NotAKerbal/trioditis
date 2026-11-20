@@ -172,40 +172,35 @@ describe('contacts', () => {
     expect(seen.sort((x, y) => x.localeCompare(y))).toEqual(['g_1', 'g_2'])
   })
 
-  it('keeps what a login knows a contact by apart from the profile every member gets', async () => {
+  it('keeps what each login knows a contact by apart from the profile every member gets', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     await ingest(t, [{ type: 'loginState', state: 'CONNECTED' }])
+    // Identifiers need no profile first; a later profile update leaves them alone.
     await ingest(t, [
-      { type: 'contact', ghostId: 'g_1', sealed: sealed('profile') },
       { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents') },
+      { type: 'contact', ghostId: 'g_1', sealed: sealed('profile') },
+      { type: 'contact', ghostId: 'g_1', sealed: sealed('profile2') },
     ])
-    // A later profile update leaves the identifiers alone.
-    await ingest(t, [{ type: 'contact', ghostId: 'g_1', sealed: sealed('profile2') }])
-    const [row] = (await a.query(api.contacts.list, { paginationOpts: first })).page
-    expect(row).toMatchObject({
-      ghostId: 'g_1',
-      sealedProfile: sealed('profile2'),
-      identifiers: [{ loginId: 'login_a', sealed: sealed('idents') }],
-    })
-    // Each login's identifiers are its own: another login's don't replace these.
+    expect((await a.query(api.contacts.list, { paginationOpts: first })).page).toEqual([
+      { network: 'whatsapp', ghostId: 'g_1', sealedProfile: sealed('profile2') },
+    ])
+    // Each login's are its own: another login's don't replace these, and a login's newer ones do.
     await ingest(t, [
       { type: 'loginState', state: 'CONNECTED', loginId: 'login_b' },
       { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents_b'), loginId: 'login_b' },
       { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents2') },
     ])
-    const [again] = (await a.query(api.contacts.list, { paginationOpts: first })).page
-    expect(again!.identifiers).toEqual([
-      { loginId: 'login_b', sealed: sealed('idents_b') },
-      { loginId: 'login_a', sealed: sealed('idents2') },
+    const rows = (await a.query(api.contacts.identifiers, { paginationOpts: first })).page
+    expect(rows.map((r) => [r.ghostId, r.loginId, r.sealed.nonce])).toEqual([
+      ['g_1', 'login_a', sealed('idents2').nonce],
+      ['g_1', 'login_b', sealed('idents_b').nonce],
     ])
-    // Identifiers for a contact the person doesn't have are quarantined, never stored alone.
-    await ingest(t, [{ type: 'contactIdentifiers', ghostId: 'g_2', sealed: sealed('x') }])
-    const quarantine = await t.run(async (ctx) => await ctx.db.query('quarantine').collect())
-    expect(quarantine.map((q) => q.reason)).toEqual(['unknown_contact'])
+    const b = await signIn(t, 'user_b')
+    expect((await b.query(api.contacts.identifiers, { paginationOpts: first })).page).toEqual([])
   })
 
-  it('asks a connected login for its contact list, at most every ten minutes', async () => {
+  it('asks a connected login for its contacts’ numbers again, at most every ten minutes', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const b = await signIn(t, 'user_b')

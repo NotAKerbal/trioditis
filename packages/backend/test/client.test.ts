@@ -286,6 +286,137 @@ describe('messages alongside the page', () => {
   })
 })
 
+describe('reacting', () => {
+  const messageIdOf = async (t: T, eventId: string) =>
+    await t.run(
+      async (ctx) =>
+        (await ctx.db
+          .query('messages')
+          .filter((q) => q.eq(q.field('eventId'), eventId))
+          .first())!._id,
+    )
+
+  it('asks the bridge host to add or take away a reaction, with a deadline', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await messageIdOf(t, 'net_1')
+    const before = Date.now()
+    await a.mutation(api.messages.react, { chatId, messageId, key: '❤️' })
+    await a.mutation(api.messages.react, { chatId, messageId, key: '❤', remove: true })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((c) => [c.payload, c.chatId])).toEqual([
+      [{ type: 'react', portalId: 'p', targetEventId: 'net_1', key: '❤️' }, chatId],
+      [{ type: 'unreact', portalId: 'p', targetEventId: 'net_1', key: '❤' }, chatId],
+    ])
+    for (const c of commands) expect(c.expiresAt).toBeGreaterThanOrEqual(before + 10 * 60 * 1000)
+    // Nothing shows until the bridge host's echo.
+    expect(await a.query(api.messages.reactions, { chatId, messageIds: [messageId] })).toEqual({ [messageId]: [] })
+  })
+
+  it('refuses a message that never reached the network, is deleted, or is in another chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const other = await aChat(t, 'user_a', 'q')
+    await aMessage(t, chatId, `pending:${id(1)}`, 1)
+    await aMessage(t, chatId, 'net_gone', 2, { redactedAt: 3, sealed: undefined })
+    await aMessage(t, other, 'net_other', 4)
+    for (const eventId of [`pending:${id(1)}`, 'net_gone', 'net_other']) {
+      const messageId = await messageIdOf(t, eventId)
+      await expect(a.mutation(api.messages.react, { chatId, messageId, key: '👍' })).rejects.toThrow(
+        /can’t be reacted to/,
+      )
+    }
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+  })
+
+  it('refuses a key that isn’t one reaction, a network without reactions, and someone else’s chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const b = await signIn(t, 'user_b')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await messageIdOf(t, 'net_1')
+    for (const key of ['', 'two words', 'x'.repeat(65), 'a\u0007']) {
+      await expect(a.mutation(api.messages.react, { chatId, messageId, key })).rejects.toThrow(/can’t be sent/)
+    }
+    await expect(b.mutation(api.messages.react, { chatId, messageId, key: '👍' })).rejects.toThrow(/doesn’t exist/)
+    const voice = await aChat(t, 'user_a', 'v', { network: 'gvoice' })
+    await aMessage(t, voice, 'net_v', 1, { network: 'gvoice' })
+    const voiceMessage = await messageIdOf(t, 'net_v')
+    await expect(a.mutation(api.messages.react, { chatId: voice, messageId: voiceMessage, key: '👍' })).rejects.toThrow(
+      /Google Voice doesn’t have reactions/,
+    )
+    // A long joined emoji is one reaction.
+    await a.mutation(api.messages.react, { chatId, messageId, key: '👨‍👩‍👧‍👦' })
+  })
+})
+
+describe('the person’s own reaction on a busy message', () => {
+  it('comes back past the first 100, so it can be taken away', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await t.run(async (ctx) => (await ctx.db.query('messages').first())!._id)
+    const row = (senderKey: string, key: string, eventId: string) => ({
+      userId: 'user_a',
+      chatId,
+      messageId,
+      senderKey,
+      key,
+      eventId,
+      addedAt: 1,
+      networkTs: 1,
+    })
+    await t.run(async (ctx) => {
+      for (let r = 0; r < 100; r++) await ctx.db.insert('reactions', row(`ghost:g${r}`, '👍', `r${r}`))
+      // Taken away earlier: these mustn't use up the room for the one that's still there.
+      for (let r = 0; r < 25; r++)
+        await ctx.db.insert('reactions', { ...row('self', `x${r}`, `gone${r}`), removedAt: 2 })
+      await ctx.db.insert('reactions', row('self', '🎉', 'mine'))
+    })
+    const list = (await a.query(api.messages.reactions, { chatId, messageIds: [messageId] }))[messageId]!
+    expect(list).toHaveLength(101)
+    expect(list.filter((r) => r.senderKey === 'self')).toEqual([{ key: '🎉', senderKey: 'self' }])
+  })
+})
+
+describe('contacts', () => {
+  it('returns the person’s own contacts on that network, leaving out ones it doesn’t have', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await t.run(async (ctx) => {
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        ghostId: 'g1',
+        sealedProfile: sealed('a1'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'signal',
+        ghostId: 'g2',
+        sealedProfile: sealed('a2'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_b',
+        network: 'whatsapp',
+        ghostId: 'g2',
+        sealedProfile: sealed('b2'),
+      })
+    })
+    expect(await a.query(api.contacts.get, { network: 'whatsapp', ghostIds: ['g1', 'g2', 'g1'] })).toEqual([
+      { ghostId: 'g1', sealedProfile: sealed('a1') },
+    ])
+    await expect(
+      a.query(api.contacts.get, { network: 'whatsapp', ghostIds: Array.from({ length: 101 }, (_, i) => `g${i}`) }),
+    ).rejects.toThrow(/at most 100/)
+  })
+})
+
 describe('reads that large messages could push past the read limit', () => {
   const big = (tag: string) => ({ ...sealed(tag), ct: 'A'.repeat(349_524) })
 

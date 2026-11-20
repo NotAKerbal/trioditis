@@ -152,6 +152,28 @@ describe('CSV', () => {
     ])
   })
 
+  it('reads a Google address given in parts, and a quoted-printable semicolon as text', () => {
+    const csv = [
+      'First Name,Address 1 - Label,Address 1 - Street,Address 1 - City,Address 1 - Region,Address 1 - Postal Code,Address 1 - Country',
+      'Ann,Home,1 Main St,Springfield,IL,62701,USA',
+    ].join('\n')
+    expect(parseContactsCsv(csv)[0]!.addresses).toEqual([
+      { street: '1 Main St', locality: 'Springfield', region: 'IL', postcode: '62701', country: 'USA', label: 'home' },
+    ])
+    const vcf =
+      'BEGIN:VCARD\nVERSION:2.1\nFN:Ann\nADR;HOME;ENCODING=QUOTED-PRINTABLE:;;Flat 2=3B 1 Main St;Springfield;IL;62701;USA\nEND:VCARD\n'
+    expect(parseVCards(vcf)[0]!.addresses).toEqual([
+      {
+        street: 'Flat 2; 1 Main St',
+        locality: 'Springfield',
+        region: 'IL',
+        postcode: '62701',
+        country: 'USA',
+        label: 'home',
+      },
+    ])
+  })
+
   it('keeps a note’s Windows line breaks through a vCard export', () => {
     const [card] = parseContactsCsv('Name,Notes\r\nAnn,"one\r\ntwo\rthree"\r\n')
     expect(parseVCards(toVCards([card!]))[0]!.note).toBe('one\ntwo\nthree')

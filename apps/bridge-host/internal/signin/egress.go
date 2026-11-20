@@ -474,7 +474,10 @@ func ListenEgress(e *Egress, addr, host string) (string, func(), error) {
 	}
 	server := &http.Server{Handler: e, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(listener) }()
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(tcp.Port)), func() { _ = server.Close(); e.closeAll() }, nil
+	// The listener is closed here too: server.Close only closes the ones Serve has started on,
+	// so a proxy stopped right after it opened would otherwise take a moment to stop answering.
+	stop := func() { _ = server.Close(); _ = listener.Close(); e.closeAll() }
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(tcp.Port)), stop, nil
 }
 
 // FromBrowser reports whether a connection comes from the sign-in browser's own address,

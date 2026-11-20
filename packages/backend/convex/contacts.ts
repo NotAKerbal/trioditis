@@ -6,57 +6,96 @@ import { retired } from './lib/networks'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { envelope, network } from './validators'
 
-/** The most contacts a page holds; the byte bound below ends a page early where rows are big. */
+/** The most contacts one `contacts.get` asks for: a page of messages' senders. */
+const MAX_GHOST_IDS = 100
+/** The most rows a page of `list` or `identifiers` holds; the byte bound ends a page early where rows are big. */
 const MAX_PAGE_ITEMS = 500
 const MAX_PAGE_BYTES = 8 * 1024 * 1024
-/** How often one login's contact list can be asked for: it can be thousands of contacts. */
+/** How often one login's contacts' numbers can be asked for again. */
 export const CONTACT_SYNC_INTERVAL_MS = 10 * 60 * 1000
 
-const contactRow = v.object({
-  network,
-  ghostId: v.string(),
-  sealedProfile: envelope,
-  identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
+/**
+ * The person's contacts on a network with these ghost IDs, for naming the senders on a page of
+ * messages. Profiles are sealed (kind `contact`, object ID `ghostId`), and each is at most 8 KiB
+ * (ingest's metadata cap), so a full answer stays small. A ghost the person has no contact for
+ * is left out.
+ */
+export const get = query({
+  args: { network, ghostIds: v.array(v.string()) },
+  returns: v.array(v.object({ ghostId: v.string(), sealedProfile: envelope })),
+  handler: async (ctx, { network, ghostIds }) => {
+    const member = await requireMember(ctx)
+    if (ghostIds.length > MAX_GHOST_IDS) throw new ConvexError('Ask for at most 100 contacts at once.')
+    const out: { ghostId: string; sealedProfile: typeof envelope.type }[] = []
+    for (const ghostId of new Set(ghostIds)) {
+      const contact = await ctx.db
+        .query('contacts')
+        .withIndex('by_ghost', (q) => q.eq('userId', member.userId).eq('network', network).eq('ghostId', ghostId))
+        .unique()
+      if (contact) out.push({ ghostId, sealedProfile: contact.sealedProfile })
+    }
+    return out
+  },
+})
+
+const pageOptions = (opts: typeof paginationOptsValidator.type) => ({
+  ...opts,
+  numItems: Math.min(Math.max(1, opts.numItems), MAX_PAGE_ITEMS),
+  maximumRowsRead: Math.min(opts.maximumRowsRead ?? MAX_PAGE_ITEMS + 1, MAX_PAGE_ITEMS + 1),
+  maximumBytesRead: Math.min(opts.maximumBytesRead ?? MAX_PAGE_BYTES, MAX_PAGE_BYTES),
 })
 
 /**
  * Every contact the person has on every network, a page at a time, in no meaningful order:
  * the address book matches them against its cards and links them (client-api.md, People).
- * Profiles are sealed (kind `contact`, object ID `ghostId`), and so is what each of the
- * person's logins knows a contact by (object ID `<ghostId>/identifiers/<loginId>`).
+ * Profiles are sealed (kind `contact`, object ID `ghostId`).
  */
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
-  returns: paginationResultValidator(contactRow),
+  returns: paginationResultValidator(v.object({ network, ghostId: v.string(), sealedProfile: envelope })),
   handler: async (ctx, { paginationOpts }) => {
     const member = await requireMember(ctx)
     const result = await ctx.db
       .query('contacts')
       .withIndex('by_ghost', (q) => q.eq('userId', member.userId))
-      .paginate({
-        ...paginationOpts,
-        numItems: Math.min(Math.max(1, paginationOpts.numItems), MAX_PAGE_ITEMS),
-        maximumRowsRead: Math.min(paginationOpts.maximumRowsRead ?? MAX_PAGE_ITEMS + 1, MAX_PAGE_ITEMS + 1),
-        maximumBytesRead: Math.min(paginationOpts.maximumBytesRead ?? MAX_PAGE_BYTES, MAX_PAGE_BYTES),
-      })
+      .paginate(pageOptions(paginationOpts))
     return {
       ...result,
       page: result.page
         .filter((contact) => !retired(contact))
-        .map(({ network, ghostId, sealedProfile, identifiers }) => ({
-          network,
-          ghostId,
-          sealedProfile,
-          ...(identifiers?.length ? { identifiers } : {}),
-        })),
+        .map(({ network, ghostId, sealedProfile }) => ({ network, ghostId, sealedProfile })),
     }
   },
 })
 
 /**
- * Asks a connected account's network for its contact list (the address book a phone shares
- * with WhatsApp or Signal, say). The contacts arrive as `contact` and `contactIdentifiers`
- * events. Asking again within ten minutes does nothing; `queued` says whether it asked.
+ * What each of the person's logins knows their contacts by, a page at a time: one row per
+ * login and contact, sealed to the person (kind `contact`, object ID
+ * `<ghostId>/identifiers/<loginId>`). The address book matches cards on them.
+ */
+export const identifiers = query({
+  args: { paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(v.object({ network, ghostId: v.string(), loginId: v.string(), sealed: envelope })),
+  handler: async (ctx, { paginationOpts }) => {
+    const member = await requireMember(ctx)
+    const result = await ctx.db
+      .query('contactIdentifiers')
+      .withIndex('by_contact', (q) => q.eq('userId', member.userId))
+      .paginate(pageOptions(paginationOpts))
+    return {
+      ...result,
+      page: result.page
+        .filter((row) => !retired(row))
+        .map(({ network, ghostId, loginId, sealed }) => ({ network, ghostId, loginId, sealed })),
+    }
+  },
+})
+
+/**
+ * Asks a connected account for the numbers its chats know contacts by, again (each new
+ * contact's comes by itself): on networks where a contact's ID can be their phone number. The
+ * numbers arrive as `contactIdentifiers` events. Asking again within ten minutes does nothing;
+ * `queued` says whether it asked.
  */
 export const sync = mutation({
   args: { networkAccountId: v.id('networkAccounts') },

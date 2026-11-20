@@ -31,7 +31,6 @@ export type UnmappableReason =
   | 'unknown_send'
   | 'malformed_envelope'
   | 'too_large'
-  | 'unknown_contact'
 
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
 export class Unmappable extends Error {
@@ -466,14 +465,11 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     })
 }
 
-/** The most logins on one network whose identifiers a contact keeps. */
-const MAX_IDENTIFIER_LOGINS = 10
-
 /**
  * What one of the person's logins knows a contact by, sealed to them apart from the profile
  * (kind `contact`, object ID `<ghostId>/identifiers/<loginId>`), so a profile update, which
- * every member with the contact gets, leaves it as it is. Each login's replaces only its own.
- * The bridge host sends the contact first.
+ * every member with the contact gets, leaves it as it is. Each login's replaces only its own,
+ * and it needs no profile first.
  */
 async function applyContactIdentifiers(
   ctx: MutationCtx,
@@ -481,14 +477,21 @@ async function applyContactIdentifiers(
   network: Network,
 ) {
   const existing = await ctx.db
-    .query('contacts')
-    .withIndex('by_ghost', (q) => q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId))
+    .query('contactIdentifiers')
+    .withIndex('by_contact', (q) =>
+      q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId).eq('loginId', event.loginId),
+    )
     .unique()
   charge(ctx, existing)
-  if (!existing) throw new Unmappable('unknown_contact')
-  const others = (existing.identifiers ?? []).filter((entry) => entry.loginId !== event.loginId)
-  const identifiers = [...others.slice(-(MAX_IDENTIFIER_LOGINS - 1)), { loginId: event.loginId, sealed: event.sealed }]
-  await ctx.db.patch(existing._id, { identifiers })
+  if (existing) await ctx.db.patch(existing._id, { sealed: event.sealed })
+  else
+    await ctx.db.insert('contactIdentifiers', {
+      userId: event.userId,
+      network,
+      ghostId: event.ghostId,
+      loginId: event.loginId,
+      sealed: event.sealed,
+    })
 }
 
 async function applyLoginState(

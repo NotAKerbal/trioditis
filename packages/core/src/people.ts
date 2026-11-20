@@ -395,6 +395,8 @@ export function planImport(
   existing: readonly Person[],
   imported: readonly PersonPlaintext[],
   keyFor: (index: number) => string,
+  /** Told which card each entry went to, for a caller that tracks entries across plans. */
+  placed?: (index: number, personKey: string) => void,
 ): Person[] {
   const byUid = new Map(existing.filter((p) => p.card.uid).map((p) => [p.card.uid!, p]))
   const byKey = new Map(existing.map((p) => [p.personKey, p]))
@@ -404,6 +406,7 @@ export function planImport(
     const personKey =
       byUid.get(card.uid ?? '')?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined) ?? keyFor(index)
     if (card.uid) keyForUid.set(card.uid, personKey)
+    placed?.(index, personKey)
     const now = byKey.get(personKey)?.card
     const next: PersonPlaintext = { ...card }
     if (now?.links?.length) next.links = now.links

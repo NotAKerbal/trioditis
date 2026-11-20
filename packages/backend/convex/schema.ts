@@ -325,12 +325,20 @@ export default defineSchema({
     network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
-    /**
-     * What each of the person's logins on the network knows them by (contactIdentifiers
-     * events), sealed to the person: one envelope per login, so they don't overwrite each other.
-     */
-    identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
+
+  /**
+   * What one of the person's logins knows a contact by (contactIdentifiers events), sealed to
+   * the person. Its own table, one row per login and contact, so it never waits on the
+   * contact's profile and two logins never overwrite each other.
+   */
+  contactIdentifiers: defineTable({
+    userId: v.string(),
+    network: storedNetwork,
+    ghostId: v.string(),
+    loginId: v.string(),
+    sealed: envelope,
+  }).index('by_contact', ['userId', 'network', 'ghostId', 'loginId']),
 
   messages: defineTable({
     userId: v.string(),
@@ -385,7 +393,9 @@ export default defineSchema({
   })
     .index('by_message', ['messageId', 'senderKey', 'key'])
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
-    .index('by_message_active', ['messageId', 'removedAt']),
+    .index('by_message_active', ['messageId', 'removedAt'])
+    // The person's own active reactions on a message, past the first 100 (`messages.reactions`).
+    .index('by_message_sender_active', ['messageId', 'senderKey', 'removedAt']),
 
   /**
    * A deleted message whose reactions are still being removed (in batches, by

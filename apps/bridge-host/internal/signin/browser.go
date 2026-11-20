@@ -358,6 +358,11 @@ func (b *Browser) attach(ctx context.Context, target string) (*page, error) {
 		{"Page.setInterceptFileChooserDialog", map[string]any{"enabled": true}},
 		// Without focus a headless page draws no caret and some sites' fields never react.
 		{"Emulation.setFocusEmulationEnabled", map[string]any{"enabled": true}},
+		// A passkey request (Google's "Verifying it's you") otherwise opens a prompt headless
+		// Chromium never shows, and until it ends the page takes no input and draws nothing.
+		// With WebAuthn's virtual authenticators on and none added, the request just waits, so
+		// the person can choose another way to sign in, and no passkey can be made here.
+		{"WebAuthn.enable", map[string]any{"enableUI": false}},
 		{"Emulation.setDeviceMetricsOverride", metrics(view)},
 	} {
 		if err := conn.call(ctx, session, step.method, step.params, nil); err != nil {

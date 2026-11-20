@@ -246,8 +246,16 @@ export const writeContacts = internalMutation({
         network: contact.network,
         ghostId: contact.ghostId,
         sealedProfile: contact.sealed,
-        ...(contact.identifiers ? { identifiers: contact.identifiers } : {}),
       })
+      for (const { loginId, sealed } of contact.identifiers ?? []) {
+        await ctx.db.insert('contactIdentifiers', {
+          userId,
+          network: contact.network,
+          ghostId: contact.ghostId,
+          loginId,
+          sealed,
+        })
+      }
     }
     return null
   },
@@ -357,8 +365,8 @@ export const seedForMe = action({
           network,
           ghostId,
           sealed: seal({ name, handle }, 'contact', ghostId),
-          // What a login's contact list sends (contacts.sync): the identifiers as URIs, so the
-          // address book can match them.
+          // What a bridge host sends for a login's contact (contactIdentifiers): the identifiers
+          // as URIs, so the address book can match them.
           identifiers: [
             {
               loginId: loginIdFor(userId),
