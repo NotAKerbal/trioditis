@@ -67,21 +67,12 @@ jobs:
       - if: steps.module.outputs.present == 'true'
         name: go vet -tags libsignal ./...
         run: go vet -tags libsignal ./...
-      # TEMPORARY: why Chromium stops on GitHub's runner. Remove before merging.
-      - if: steps.module.outputs.present == 'true'
-        working-directory: .
-        continue-on-error: true
-        run: |
-          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone || true
-          ls -l "$(dirname "$(readlink -f "$(command -v google-chrome)")")/chrome-sandbox" || true
-          google-chrome --version
-          ls -l /usr/bin/chromium "$(readlink -f /usr/bin/chromium)" || true
-          chromium --version || true
-          timeout 60 chromium --headless=new --disable-gpu --dump-dom about:blank 2>&1 | grep -v dbus | tail -30 || true
-          cd apps/bridge-host
-          CHROMIUM_PATH=google-chrome go test -count=1 -run TestBrowserSignsIn -v ./internal/signin 2>&1 | tail -15 || true
+      # The runner's /usr/bin/chromium is a bare build that aborts at startup because AppArmor
+      # blocks its sandbox; Google Chrome's own AppArmor profile lets it sandbox.
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
+        env:
+          CHROMIUM_PATH: google-chrome
       # The bridge host builds against a patched copy of mautrix-signal
       # (apps/bridge-host/third_party/README.md); this fails unless the copy is upstream at
       # go.mod's version plus third_party/mautrix-signal.patch, so the patch is the whole change.
