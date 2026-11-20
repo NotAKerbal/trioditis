@@ -1052,12 +1052,14 @@ the host the command went to can answer it.
 What a chat can start from depends on the network's connector (`START_TARGETS` in
 packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google Messages take a
 contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
-Instagram, Slack and LinkedIn a contact; X a username. An identifier of another kind is
-`not_found` (WhatsApp would also resolve a LID, filling in its number from a map the whole host
-shares). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
+Instagram, Slack and LinkedIn a contact; X a username. The bridge host passes a number on as digits with
+its `+` (Signal needs the country code) and a username without its `@`, checked against the
+network's own username grammar; anything else is `not_found` (it could be one of the
+connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
+host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
 chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
-IDs and X's only screen names, so those are left out. A contact's chat starts on the account
-that sent the contact (`contacts.list` gives its `networkAccountId`),
+IDs and X's only screen names, so those are left out. A contact's chat starts only on the account
+that sent the contact (`contacts.list` gives its `networkAccountId`; `newChats.start` refuses another),
 since some networks' contact IDs belong to one login. The desktop app offers a card's linked
 contacts first, then its numbers on networks that take them, then its usernames on their own
 network, on the first account there. A `ghostId` must be one of the person's contacts on that
@@ -1067,6 +1069,7 @@ include it (whatsmeow's own debug output still names it: never run WhatsApp with
 production).
 
 Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
+`That contact is on another of your accounts.` ·
 `That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
 sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
 then try again.`

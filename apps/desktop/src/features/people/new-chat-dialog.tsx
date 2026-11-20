@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { networkName } from '~/data/chats.ts'
 import { identifierPrompt, useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
 
-/** Starts a chat with a phone number, email or username on one of the person's networks. */
+/** Starts a chat with a phone number or username on one of the person's networks. */
 export function NewChatDialog({
   open,
   onOpenChange,

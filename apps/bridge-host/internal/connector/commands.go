@@ -663,7 +663,7 @@ type startChatPlaintext struct {
 // requestIDPattern is what a startChat request ID may be: what clients pick for their IDs.
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
-// maxIdentifierBytes bounds the phone number, email or username a startChat names.
+// maxIdentifierBytes bounds the phone number or username a startChat names.
 const maxIdentifierBytes = 512
 
 // startTargets is what a startChat can start a chat from on each network, per its connector:
@@ -691,14 +691,52 @@ var startTargets = map[string]struct{ contact, phone, username bool }{
 // phonePattern is what a phone number looks like as people write one.
 var phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 ().-]{5,}[0-9]$`)
 
-// usernamePattern is what a username looks like: no spaces, nothing a number would be.
-var usernamePattern = regexp.MustCompile(`^@?[A-Za-z0-9._-]*[A-Za-z][A-Za-z0-9._-]*$`)
+// usernamePatterns are each network's own username grammar, after a leading @ is taken off:
+// anything else could be an internal ID the connector resolves another way (a Signal ACI, say).
+var usernamePatterns = map[string]*regexp.Regexp{
+	"signal":  regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{2,31}\.[0-9]{2,9}$`),
+	"twitter": regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`),
+	"testnet": regexp.MustCompile(`^[a-z][a-z0-9-]*$`),
+}
+
+// internationalOnly are the networks that take a phone number only with its country code.
+var internationalOnly = map[string]bool{"signal": true}
+
+// canonicalIdentifier is the identifier as the network's connector gets it: a phone number as
+// digits with its leading + (never dots or spaces, which a connector could take for one of its
+// own IDs, as mautrix-gmessages does), or a username without its @. Empty if it's neither kind
+// the network takes.
+func (c *Connector) canonicalIdentifier(identifier string) string {
+	targets := startTargets[c.Network]
+	if targets.phone && phonePattern.MatchString(identifier) {
+		plus := strings.HasPrefix(identifier, "+")
+		if !plus && internationalOnly[c.Network] {
+			return ""
+		}
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, identifier)
+		if plus {
+			return "+" + digits
+		}
+		return digits
+	}
+	if pattern := usernamePatterns[c.Network]; targets.username && pattern != nil {
+		if name := strings.TrimPrefix(identifier, "@"); pattern.MatchString(name) {
+			return name
+		}
+	}
+	return ""
+}
 
 // startChatTimeout bounds how long a network has to find someone and open the chat.
 const startChatTimeout = 2 * time.Minute
 
 // handleStartChat opens a direct chat on a login: with one of the person's contacts
-// (ghostId), or with whoever a sealed phone number, email or username belongs to, where the
+// (ghostId), or with whoever a sealed phone number or username belongs to, where the
 // network's connector can (startTargets). An existing chat is returned as it is. bridgev2's
 // provisioning helper does the work, as a Matrix client's "start a DM" would; the outcome is
 // a chatStarted event. One login's starts run one at a time, so two for the same new chat
@@ -742,7 +780,7 @@ func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, 
 			return badRequest("the identifier is empty or too long")
 		}
 		// Only the kinds the network's connector resolves safely; anything else is nobody here.
-		if !(targets.phone && phonePattern.MatchString(identifier)) && !(targets.username && usernamePattern.MatchString(identifier)) {
+		if identifier = c.canonicalIdentifier(identifier); identifier == "" {
 			return conflict(protocol.ErrNotFound, "the network doesn't start chats from that kind of identifier")
 		}
 	}

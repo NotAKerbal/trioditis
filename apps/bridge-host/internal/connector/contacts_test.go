@@ -61,3 +61,24 @@ func TestStartChatRefusedWhereTheConnectorCant(t *testing.T) {
 		}
 	}
 }
+
+// An identifier reaches the connector only in the form the network takes: a number as digits
+// with its +, a username without its @, nothing that could be one of the connector's own IDs.
+func TestIdentifiersAreCanonicalForTheirNetwork(t *testing.T) {
+	for _, tc := range []struct{ network, in, want string }{
+		{"gmessages", "+1 (555) 123-4567", "+15551234567"},
+		{"gmessages", "555.123.4567", "5551234567"},
+		{"gmessages", "login.participant", ""},
+		{"whatsapp", "lid-123456789", ""},
+		{"signal", "5551234567", ""},
+		{"signal", "+15551234567", "+15551234567"},
+		{"signal", "@alice.01", "alice.01"},
+		{"signal", "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", ""},
+		{"twitter", "@jack", "jack"},
+		{"twitter", "+15551234567", ""},
+	} {
+		if got := New(Options{Network: tc.network}).canonicalIdentifier(tc.in); got != tc.want {
+			t.Errorf("%s %q: got %q, want %q", tc.network, tc.in, got, tc.want)
+		}
+	}
+}

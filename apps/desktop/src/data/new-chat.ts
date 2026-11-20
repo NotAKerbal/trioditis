@@ -129,7 +129,8 @@ const USERNAME_NETWORKS: Record<string, Network> = {
  * The ways a card offers to start a chat on these accounts, as each network's connector can
  * (START_TARGETS): its linked contacts first, on the account that sent them (the chat they
  * already have, or a new one), then its numbers on networks that find people by number, and
- * its usernames on their own network, each on the first account there.
+ * its usernames on their own network, each on the first account there. A number or username
+ * goes as written; the bridge host puts it in the form the network takes.
  */
 export function chatOptions(
   card: PersonPlaintext,
@@ -141,16 +142,21 @@ export function chatOptions(
   for (const link of card.links ?? []) {
     if (!START_TARGETS[link.network]?.contact) continue
     const contact = byContact.get(contactKey(link))
-    const account =
-      accounts.find((a) => a.network === link.network && a.networkAccountId === contact?.networkAccountId) ??
-      first(link.network)
-    if (!account) continue
-    out.push({
-      network: link.network,
-      networkAccountId: account.networkAccountId,
-      label: contact?.profile.name || 'Contact',
-      target: { ghostId: link.ghostId },
-    })
+    const label = contact?.profile.name || 'Contact'
+    // On the account that sent the contact, and no other: its ID can belong to that login. One
+    // sent before contacts named their account could be on any of them, so each is offered.
+    const onNetwork = accounts.filter((a) => a.network === link.network)
+    const candidates = contact?.networkAccountId
+      ? onNetwork.filter((a) => a.networkAccountId === contact.networkAccountId)
+      : onNetwork
+    candidates.forEach((account, i) =>
+      out.push({
+        network: link.network,
+        networkAccountId: account.networkAccountId,
+        label: candidates.length > 1 ? `${label} (account ${i + 1})` : label,
+        target: { ghostId: link.ghostId },
+      }),
+    )
   }
   const linked = new Set(out.map((o) => o.network))
   const add = (network: Network, label: string, identifier: string) => {

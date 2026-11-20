@@ -155,3 +155,24 @@ describe('new chats', () => {
     ).rejects.toThrow(/Too many new chats/)
   })
 })
+
+describe('a contact’s account', () => {
+  it('starts a contact’s chat only on the account that sent the contact', async () => {
+    const t = setup()
+    const { a, networkAccountId } = await connected(t)
+    const other = await t.run(
+      async (ctx) =>
+        await ctx.db.insert('networkAccounts', {
+          userId: 'user_a',
+          network: 'whatsapp',
+          loginId: 'login_other',
+          state: 'CONNECTED',
+          updatedAt: 0,
+        }),
+    )
+    await expect(
+      a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(50), ghostId: 'g_erin' }),
+    ).rejects.toThrow(/another of your accounts/)
+    await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(51), ghostId: 'g_erin' })
+  })
+})

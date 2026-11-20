@@ -7,13 +7,13 @@ import { isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'
 import { envelope, errorCode } from './validators'
 
-// Starting a chat: with one of the person's contacts, or with whoever a phone number, email or
+// Starting a chat: with one of the person's contacts, or with whoever a phone number or
 // username belongs to. The identifier is sealed to the bridge key (kind `outbound`, object ID
 // `requestId`), so the server never sees it; the bridge host answers with `chatStarted`. See
 // client-api.md, New chats.
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/
-/** A phone number, email or username, sealed: far less than this. */
+/** A phone number or username, sealed: far less than this. */
 const MAX_IDENTIFIER_SEALED_BYTES = 4 * 1024
 /** How many chats one person can start a minute: enough to work through a list, not to probe a network. */
 const STARTS_PER_MINUTE = 20
@@ -62,6 +62,10 @@ export const start = mutation({
         )
         .unique()
       if (!contact) throw new ConvexError('That contact doesn’t exist.')
+      // A contact's ID can belong to the login that sent it, so its chat starts there only.
+      if (contact.accountId && contact.accountId !== networkAccountId) {
+        throw new ConvexError('That contact is on another of your accounts.')
+      }
     }
     const now = Date.now()
     const recent = await ctx.db
