@@ -545,6 +545,10 @@ function addMadeLink(made: MadeLink) {
   madeLinks = [made, ...madeLinks]
   for (const listener of madeLinkListeners) listener()
 }
+function dropMadeLink(invitationId: string) {
+  madeLinks = madeLinks.filter((made) => made.invitationId !== invitationId)
+  for (const listener of madeLinkListeners) listener()
+}
 function subscribeMadeLinks(listener: () => void) {
   madeLinkListeners.add(listener)
   return () => void madeLinkListeners.delete(listener)
@@ -708,8 +712,10 @@ function Members() {
                   size="sm"
                   variant="ghost"
                   onClick={() =>
-                    void revoke({ invitationId: inv._id as Id<'invitations'> }).catch((e: unknown) =>
-                      toast(errorMessage(e, 'That invitation couldn’t be revoked.')),
+                    void revoke({ invitationId: inv._id as Id<'invitations'> }).then(
+                      // Its link goes at once: a list holding its full 100 can't show the invitation is gone.
+                      () => dropMadeLink(inv._id),
+                      (e: unknown) => toast(errorMessage(e, 'That invitation couldn’t be revoked.')),
                     )
                   }
                 >
