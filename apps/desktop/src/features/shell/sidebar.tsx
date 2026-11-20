@@ -27,6 +27,7 @@ import {
   Inbox,
   Search,
   UserPlus,
+  Users,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -62,6 +63,7 @@ interface SidebarProps {
   onOpen: (chat: Chat) => void
   onClose: () => void
   onAction: (action: SidebarAction) => void
+  onPeople: () => void
   /** Kept up to date with the on-screen order, for actions taken outside the sidebar. */
   shownRef: { current: string[] }
   chatsRef: { current: Map<string, Chat> }
@@ -82,6 +84,7 @@ export function Sidebar({
   onOpen,
   onClose,
   onAction,
+  onPeople,
   shownRef,
   chatsRef,
   bottomBar,
@@ -253,6 +256,9 @@ export function Sidebar({
             aria-label="Search chats"
           />
         </InputGroup>
+        <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
+          <Users className="size-[17px]" />
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button

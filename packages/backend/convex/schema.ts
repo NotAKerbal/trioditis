@@ -36,6 +36,8 @@ export default defineSchema({
      * removed and made again.
      */
     backupRevision: v.optional(v.number()),
+    /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
+    peopleCount: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -219,6 +221,18 @@ export default defineSchema({
     sealed: envelope,
     createdAt: v.number(),
   }).index('by_user', ['userId']),
+
+  /**
+   * The person's address book: one card per person they know, which can link that person's
+   * contacts on several networks. Everything on a card is sealed to the person (kind `person`,
+   * object ID `personKey`, which the client chooses before sealing); see client-api.md, People.
+   */
+  people: defineTable({
+    userId: v.string(),
+    personKey: v.string(),
+    sealed: envelope,
+    updatedAt: v.number(),
+  }).index('by_user', ['userId', 'personKey']),
 
   chatLabels: defineTable({
     userId: v.string(),

@@ -1,6 +1,8 @@
 package connector
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -48,6 +50,23 @@ func TestEscapedMetadataSealsWithinItsLimit(t *testing.T) {
 	fitContact(&contact)
 	if n := sealedLen(t, contact); n > protocol.MaxMetadataSealedBytes {
 		t.Fatalf("contact seals to %d bytes", n)
+	}
+	// Identifiers go whole or not at all, the last ones first, before the handle is cut.
+	var idents []string
+	for i := range 40 {
+		idents = append(idents, fmt.Sprintf("tel:+1555%07d%s", i, strings.Repeat("<", 60)))
+	}
+	idents = append([]string{"telegram:" + strings.Repeat("x", 600)}, idents...)
+	many := protocol.ContactPlaintext{Name: "Ann", Handle: "tel:+15550000000", Identifiers: slices.Clone(idents)}
+	fitContact(&many)
+	if n := sealedLen(t, many); n > protocol.MaxMetadataSealedBytes {
+		t.Fatalf("contact with identifiers seals to %d bytes", n)
+	}
+	if len(many.Identifiers) == 0 || len(many.Identifiers) >= maxIdentifiers || many.Identifiers[0] != idents[1] {
+		t.Fatalf("kept %d identifiers, first %q", len(many.Identifiers), many.Identifiers[0])
+	}
+	if many.Handle != "tel:+15550000000" || many.Name != "Ann" {
+		t.Fatal("identifiers must be cut before the handle and name")
 	}
 	short := protocol.ChatPlaintext{Name: "Family", Topic: "Weekend plans"}
 	fitChat(&short)

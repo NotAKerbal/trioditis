@@ -472,9 +472,13 @@ type ChatPlaintext struct {
 
 // ContactPlaintext is a contact's sealed profile.
 type ContactPlaintext struct {
-	Name   string      `json:"name,omitempty"`
-	Handle string      `json:"handle,omitempty"`
-	Avatar *Attachment `json:"avatar,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Handle string `json:"handle,omitempty"`
+	// Identifiers is everything the network knows the contact by, as URIs (tel:+1555…,
+	// mailto:…, telegram:alice), for matching them to the person's address book. Handle is
+	// the first of them.
+	Identifiers []string    `json:"identifiers,omitempty"`
+	Avatar      *Attachment `json:"avatar,omitempty"`
 	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
 	// this time (its upload expired). Clients keep the avatar they have.
 	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`

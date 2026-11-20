@@ -921,8 +921,56 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 
 ## Contacts
 
-Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
-`ghostId`. A query for them comes with the conversation view (see Questions).
+Contact profiles are sealed with kind `contact`, object ID `ghostId`; the plaintext is
+`ContactPlaintext`: name, handle, avatar, and `identifiers`, everything the network knows the
+contact by, as URIs (`tel:+15551234567`, `mailto:a@b.c`, `telegram:alice`). A contact sent
+before the bridge host sent identifiers has only its handle, until its profile changes.
+
+`api.contacts.list({ paginationOpts })` returns every contact the person has on every network,
+`{ network, ghostId, sealedProfile }`, up to 500 a page, in no meaningful order. The address
+book reads them all to match them to its cards (People). A page can come back short, or empty,
+before the end; keep going while `isDone` is false.
+
+## People
+
+The person's address book: a card for each person they know, whatever networks they're on.
+A card's plaintext is `PersonPlaintext` (packages/core, `people.ts`), modelled on vCard: name
+and its parts, nickname, organization and title, phone numbers, emails, usernames, websites and
+addresses (each with a label), birthday, note, a small photo, and `links`, the network contacts
+(`{ network, ghostId }`) the card is about. Each card is sealed to the person only (kind
+`person`, object ID `personKey`, which the client picks: 16 to 64 letters, digits, `-` and `_`),
+so the server stores ciphertext and how many cards there are, never who is on them or which
+contacts a card links.
+
+| Function        | Arguments                                                     | Returns                                                            |
+| --------------- | ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `people.list`   | `paginationOpts` (up to 100 a page)                           | `{ personKey, sealed, updatedAt }` pages, in `personKey` order     |
+| `people.put`    | `people: { personKey, sealed }[]` (at most 100), `sessionId?` | null. Adds cards or replaces the ones with those keys, all or none |
+| `people.remove` | `personKeys` (at most 100)                                    | null. A key with no card is skipped                                |
+
+A sealed card is at most 64 KiB, and a person can have at most 10,000. `people.put` takes the
+page's `sessionId`, like the other sealed writes, and refuses it once the browser has signed in
+to another account.
+
+Matching happens on the device, since only it can open both sides (packages/core):
+
+- **Import and export.** `parseContactsFile` reads a vCard file (2.1, 3.0 and 4.0: what iPhone,
+  iCloud, Android, Google Contacts, Outlook and macOS export) or a Google Contacts or Outlook
+  CSV. Importing a card whose UID matches one already here updates it and keeps its links.
+  `toVCards` writes vCard 3.0. The desktop app makes imported photos 128 pixels at most.
+- **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
+  phone number, email or username with it, or failing that has exactly the same name as one
+  card. Numbers match with or without their country code (the shorter must end the longer;
+  two with country codes must be equal). The person confirms every link; the app can link all
+  the matches that aren't by name and point at one card only, in one go.
+- **Not in People.** `groupUnlinked` groups the contacts on no card that share an identifier,
+  so one person on several networks becomes one card (`cardFromContacts`).
+- A contact is on one card at most: linking it to a card takes it off any other
+  (`moveLinks`).
+
+Errors: `That person ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
+person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
+people at once.` · `You can have at most 10,000 people.`
 
 ## Server updates
 
@@ -955,7 +1003,8 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
    recounts unread and mentions after it.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
-3. **A contacts query**: planned, see Next.
+3. **Done:** a query for all of a person's contacts (Contacts). Contacts for a page of
+   senders is Next item 2.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
 5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.

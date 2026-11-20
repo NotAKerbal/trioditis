@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
+import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { authClient } from '~/lib/auth-client.ts'
 import { BottomBar } from './bottom-bar.tsx'
@@ -31,6 +32,7 @@ export function Shell() {
   // `connect` opens Accounts with its networks showing; any other way there drops it.
   const openSettings = (section: SettingsSection | undefined, connect?: boolean) =>
     void navigate({ search: (s) => ({ ...s, settings: section, connect: connect ? (true as const) : undefined }) })
+  const openPeople = (people: PeopleView | undefined) => void navigate({ search: (s) => ({ ...s, people }) })
 
   function open(chat: Chat) {
     if (chat.id !== selectedId) setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
@@ -98,6 +100,7 @@ export function Shell() {
         onOpen={open}
         onClose={() => select(undefined)}
         onAction={onSidebarAction}
+        onPeople={() => openPeople('all')}
         shownRef={shownRef}
         chatsRef={chatsById}
         bottomBar={
@@ -110,6 +113,7 @@ export function Shell() {
         connect={!!search.connect}
         onSectionChange={(section) => openSettings(section)}
       />
+      <PeopleDialog view={search.people} onViewChange={openPeople} />
       <UpdateNotice />
     </div>
   )

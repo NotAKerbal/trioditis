@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -439,6 +440,10 @@ func TestConformance(t *testing.T) {
 		h.open("alice", contact, &contactPlain)
 		if contactPlain.Name != "Peer-family" {
 			t.Fatalf("contact name %q", contactPlain.Name)
+		}
+		// Every identifier goes along, for matching to the person's address book.
+		if contactPlain.Handle != "testnet:peer-family" || !slices.Equal(contactPlain.Identifiers, []string{"testnet:peer-family"}) {
+			t.Fatalf("contact identifiers %q, handle %q", contactPlain.Identifiers, contactPlain.Handle)
 		}
 		// Chat and contact names never appear in the journal. (bridgev2's own portal and
 		// ghost tables do hold them; see the README's spike findings.)

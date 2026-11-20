@@ -137,6 +137,9 @@ func (c *Connector) GetCapabilities() *bridgev2.MatrixCapabilities {
 		// a standard homeserver lacks.
 		BatchSending:          true,
 		ArbitraryMemberChange: true,
+		// Without it bridgev2 drops what a network says a contact is known by (phone numbers,
+		// emails, usernames). The contact's sealed profile carries them, for the address book.
+		ExtraProfileMeta: true,
 	}
 }
 

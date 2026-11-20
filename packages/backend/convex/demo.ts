@@ -348,7 +348,18 @@ export const seedForMe = action({
         contacts: DEMO_CONTACTS.map(({ network, ghostId, name, handle }) => ({
           network,
           ghostId,
-          sealed: seal({ name, handle }, 'contact', ghostId),
+          // What a bridge host sends: the identifiers as URIs, so the address book can match them.
+          sealed: seal(
+            {
+              name,
+              handle,
+              identifiers: [
+                handle.startsWith('+') ? `tel:${handle.replaceAll(' ', '')}` : `${network}:${handle.slice(1)}`,
+              ],
+            },
+            'contact',
+            ghostId,
+          ),
         })),
       })
     }
