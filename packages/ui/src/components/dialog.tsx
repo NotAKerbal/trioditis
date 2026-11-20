@@ -13,6 +13,7 @@ function DialogContent({
   className,
   children,
   closeLabel = 'Close',
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof Primitive.Content> & { closeLabel?: string }) {
   return (
@@ -24,6 +25,12 @@ function DialogContent({
           'fixed top-1/2 left-1/2 z-50 max-h-[calc(100vh-48px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl bg-surface text-foreground shadow-dialog outline-none',
           className,
         )}
+        // An Escape that cancels an IME's candidate is the IME's, not the dialog's (key code 229
+        // is how Safari marks it).
+        onEscapeKeyDown={(e) => {
+          if (e.isComposing || e.keyCode === 229) e.preventDefault()
+          else onEscapeKeyDown?.(e)
+        }}
         {...props}
       >
         {children}

@@ -219,6 +219,10 @@ describe('sign-in browser proxy', () => {
       expect(await client.closeFrame()).toBe(4409)
       client.socket.write(Buffer.from([0x88, 0x82, 1, 2, 3, 4, 0x0f ^ 1, 0xa1 ^ 2]))
       await ended
+      // The gateway's side is gone, though this one is still open.
+      await vi.waitFor(async () =>
+        expect(await new Promise((resolve) => server.getConnections((_e, n) => resolve(n)))).toBe(0),
+      )
       client.socket.end()
     }
   })

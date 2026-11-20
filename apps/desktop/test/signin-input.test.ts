@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buttonName,
   clickCounter,
-  composing,
   frameBox,
+  imeKeys,
   keyMessage,
   modifierBits,
   pageHost,
@@ -81,10 +81,25 @@ describe('pointer coordinates', () => {
 })
 
 describe('keys', () => {
-  it('leave an IME’s keys with it until its composition ends', () => {
-    expect(composing({ isComposing: true, keyCode: 13 })).toBe(true)
-    expect(composing({ isComposing: false, keyCode: 229 })).toBe(true)
-    expect(composing({ isComposing: false, keyCode: 13 })).toBe(false)
+  it('leave an IME’s presses with it, held and released, after its composition ends', () => {
+    const enter = (isComposing: boolean, repeat = false, keyCode = 13) => ({
+      isComposing,
+      keyCode,
+      code: 'Enter',
+      repeat,
+    })
+    const ime = imeKeys()
+    expect(ime.down(enter(true))).toBe(true)
+    // Held past the candidate it confirmed: its repeats and release are still the IME's.
+    expect(ime.down(enter(false, true))).toBe(true)
+    expect(ime.up(enter(false))).toBe(true)
+    expect(ime.down(enter(false))).toBe(false)
+    expect(ime.up(enter(false))).toBe(false)
+    // Safari marks the key that ends a composition with 229 instead.
+    expect(ime.down(enter(false, false, 229))).toBe(true)
+    // A press whose release never came doesn't take the next one's.
+    expect(ime.down(enter(false))).toBe(false)
+    expect(ime.up(enter(false))).toBe(false)
   })
 
   it('leave text to the input it’s typed into', () => {

@@ -168,13 +168,42 @@ export function keyMessage(
   return { type: 'key', event: 'rawKeyDown', key, code, keyCode, modifiers }
 }
 
+interface ImeKey {
+  isComposing: boolean
+  keyCode: number
+  code: string
+  repeat: boolean
+}
+
+// Browsers mark an IME's keys composing, or (Safari, for the key that ends one) with the key
+// code 229.
+const composing = (e: ImeKey) => e.isComposing || e.keyCode === 229
+
 /**
- * Whether a key belongs to an IME's composition: Enter there picks a candidate and the arrows
- * move through them, so the key stays with the person's own browser. Browsers mark such keys
- * composing, or (Safari, for the key that ends one) with the key code 229.
+ * Tracks the keys an IME owns, which stay with the person's own browser: Enter there picks a
+ * candidate and the arrows move through them. A press that went down to the IME stays its own
+ * while held and when released, even once the composition has ended.
  */
-export function composing(e: { isComposing: boolean; keyCode: number }): boolean {
-  return e.isComposing || e.keyCode === 229
+export function imeKeys() {
+  const owned = new Set<string>()
+  return {
+    /** Whether a key going down is the IME's. */
+    down(e: ImeKey): boolean {
+      if (composing(e)) {
+        owned.add(e.code)
+        return true
+      }
+      if (!owned.has(e.code)) return false
+      if (e.repeat) return true
+      // A fresh press: the last one's release went elsewhere (focus moved, say).
+      owned.delete(e.code)
+      return false
+    },
+    /** Whether a key coming up is the IME's. */
+    up(e: ImeKey): boolean {
+      return owned.delete(e.code) || composing(e)
+    },
+  }
 }
 
 /** A `page` message's address, as the person reads it: the host, without `www.`. */
