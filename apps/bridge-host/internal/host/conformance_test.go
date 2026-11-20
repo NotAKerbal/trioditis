@@ -509,7 +509,8 @@ func TestConformance(t *testing.T) {
 		// A sync sends them again; another login without a chat with them gets nothing.
 		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
 		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID && e.Seq > first.Seq
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID &&
+				e.LoginID == aliceLogin && e.Seq > second.Seq
 		})
 		bobLogin := h.login("bob", "bob-contacts")
 		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})

@@ -754,7 +754,12 @@ func (c *Connector) ensureNumber(ctx context.Context, o *owner, ghost networkid.
 	if !numberIDNetworks[c.Network] || number == "" {
 		return nil
 	}
-	room, mxid := numbersRoom(o.userID, o.loginID), string(ids.GhostMXID(ghost))
+	// The marker names the contact by its opaque ID: their Matrix ID would be their number.
+	ghostID, err := c.ghostOpaque(ctx, ghost)
+	if err != nil {
+		return err
+	}
+	room, mxid := numbersRoom(o.userID, o.loginID), ghostID
 	sent, err := c.Store.IsMember(ctx, room, mxid)
 	if err != nil || sent {
 		return err

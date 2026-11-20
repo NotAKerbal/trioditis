@@ -192,9 +192,13 @@ export function cardIdentifiers(card: PersonPlaintext): Identifier[] {
   return out
 }
 
-/** Every identifier the person's logins know a contact by, and its handle. */
+/**
+ * Every identifier the person's own logins know a contact by. Not the profile's handle: a
+ * profile is shared by every member with the contact, and its handle can be what another
+ * member's login learned.
+ */
 export function contactIdentifiers(contact: NetworkContact): Identifier[] {
-  const raw = [...(contact.identifiers ?? []), contact.profile.handle ?? '']
+  const raw = contact.identifiers ?? []
   return raw.map((r) => parseIdentifier(r, contact.network)).filter((id): id is Identifier => id !== null)
 }
 

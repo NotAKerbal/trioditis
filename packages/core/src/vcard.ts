@@ -18,19 +18,26 @@ interface Property {
 
 /**
  * A structured value's parts (N, ADR, ORG), each decoded. Only a `;` written as one separates
- * parts (an encoded `=3B` is text), and it's escaped when the text before it, decoded, ends
- * in an odd number of backslashes, however they were written (`\\` or `=5C`).
+ * parts (an encoded `=3B` is text), and it's escaped when an odd number of backslashes come
+ * just before it, however they were written (`\\`, or `=5C` in quoted-printable). Counted as
+ * it goes, so a long value is read once.
  */
 function components(p: Property): string[] {
+  const qp = p.params.get('ENCODING')?.[0]?.toUpperCase() === 'QUOTED-PRINTABLE'
   const parts: string[] = []
   let start = 0
+  let backslashes = 0
   for (let i = 0; i < p.raw.length; i++) {
-    if (p.raw[i] !== ';') continue
-    const backslashes = /\\*$/.exec(p.decode(p.raw.slice(start, i)))![0].length
-    if (backslashes % 2 === 0) {
+    const ch = p.raw[i]!
+    if (ch === '\\') backslashes++
+    else if (qp && ch === '=' && p.raw.slice(i + 1, i + 3).toUpperCase() === '5C') {
+      backslashes++
+      i += 2
+    } else if (ch === ';' && backslashes % 2 === 0) {
       parts.push(p.raw.slice(start, i))
       start = i + 1
-    }
+      backslashes = 0
+    } else backslashes = 0
   }
   parts.push(p.raw.slice(start))
   return parts.map(p.decode)
