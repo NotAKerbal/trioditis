@@ -173,7 +173,8 @@ func (c *Connector) reactionSender(ctx context.Context, content *event.Content) 
 		return sender{}, false, err
 	}
 	// The index says who, since bridgev2 may already have given the person's one reaction
-	// slot to the new reaction. One indexed before it kept senders is looked up in bridgev2.
+	// slot to the new reaction. The upgrade that added senders filled them in from bridgev2;
+	// one it couldn't is looked up there now, in case bridgev2 still has it.
 	if s, ok := senderFromIndex(indexed); ok {
 		return s, true, nil
 	}
@@ -181,10 +182,8 @@ func (c *Connector) reactionSender(ctx context.Context, content *event.Content) 
 	if err != nil || reaction == nil {
 		return sender{}, false, err
 	}
-	if s, ok := c.senderForMXID(reaction.SenderMXID); ok {
-		return s, true, nil
-	}
-	return sender{ghostID: reaction.SenderID}, true, nil
+	s, ok := senderFromIndex(store.ReactorKey(string(reaction.SenderMXID), string(reaction.SenderID)))
+	return s, ok, nil
 }
 
 // botRedaction emits a redaction the bot sent on someone's behalf (reactionSender).

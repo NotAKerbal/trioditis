@@ -567,12 +567,24 @@ func TestConformance(t *testing.T) {
 		h.mustCommand(react("🎉", time.Now().Add(time.Hour)))
 		gw.waitFor(t, "the second reaction", isOwn(protocol.EventReaction, "🎉"))
 		gw.waitFor(t, "the first one taken away", isOwn(protocol.EventReactionRemove, "👍"))
+		// A reaction indexed before the index kept senders gets its sender from bridgev2's
+		// record when the store is upgraded, so replacing it works the same.
+		ctx := context.Background()
+		if _, err := h.host.Store.DB.Exec(ctx, `UPDATE trioditis_reaction SET sender=''`); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.host.Store.BackfillReactionSenders(ctx); err != nil {
+			t.Fatal(err)
+		}
+		h.mustCommand(react("😂", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the third reaction", isOwn(protocol.EventReaction, "😂"))
+		gw.waitFor(t, "the upgraded one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
 		// And the one that replaced it can still be taken away.
 		h.mustCommand(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandUnreact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
-			TargetEventID: target, Key: "🎉", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+			TargetEventID: target, Key: "😂", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
 		})
-		gw.waitFor(t, "the second one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
+		gw.waitFor(t, "the last one taken away", isOwn(protocol.EventReactionRemove, "😂"))
 
 		before := h.net.Reactions()
 		if status, body := h.command(react("😮", time.Now().Add(-time.Second))); status != http.StatusConflict || !strings.Contains(body, protocol.ErrExpired) {

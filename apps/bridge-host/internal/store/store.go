@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"go.mau.fi/util/dbutil"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
@@ -88,13 +89,70 @@ var upgrades = dbutil.BuildUpgradeTable().
 	}).
 	WithRaw(3, 4, 0, "Who gave each reaction", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
 		// bridgev2 can overwrite its own record of a reaction before it takes the reaction away
-		// (one reaction per person, as on WhatsApp), so the index keeps who gave it. Empty for
-		// reactions indexed before this.
-		return execAll(ctx, db, []string{
+		// (one reaction per person, as on WhatsApp), so the index keeps who gave it, filled in
+		// now from bridgev2's records for the reactions indexed before.
+		if err := execAll(ctx, db, []string{
 			`ALTER TABLE trioditis_reaction ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
-		})
+		}); err != nil {
+			return err
+		}
+		return backfillReactionSenders(ctx, db)
 	}).
 	Finish()
+
+// ReactorKey is how the reaction index keeps who gave a reaction, from bridgev2's record of
+// it: `self` for the person (their Matrix user), `ghost:` and the network's ID for anyone
+// else, or empty if the record says neither.
+func ReactorKey(senderMXID, senderID string) string {
+	if ghost, ok := ids.ParseGhostMXID(id.UserID(senderMXID)); ok {
+		return "ghost:" + string(ghost)
+	} else if _, ok = ids.ParseUserMXID(id.UserID(senderMXID)); ok {
+		return "self"
+	} else if senderID != "" {
+		return "ghost:" + senderID
+	}
+	return ""
+}
+
+// BackfillReactionSenders is the 3→4 upgrade's backfill, for a test that makes its rows look
+// older to check it against bridgev2's own tables.
+func (s *Store) BackfillReactionSenders(ctx context.Context) error {
+	return backfillReactionSenders(ctx, s.DB)
+}
+
+// backfillReactionSenders fills in who gave each indexed reaction bridgev2 still has a record
+// of. A new install has no bridgev2 tables yet, and nothing to fill in.
+func backfillReactionSenders(ctx context.Context, db *dbutil.Database) error {
+	if exists, err := db.TableExists(ctx, "reaction"); err != nil || !exists {
+		return err
+	}
+	rows, err := db.Query(ctx, `SELECT t.event_id, r.sender_mxid, r.sender_id
+		FROM trioditis_reaction t JOIN reaction r ON r.mxid = t.event_id WHERE t.sender = ''`)
+	if err != nil {
+		return err
+	}
+	type found struct{ eventID, sender string }
+	var all []found
+	for rows.Next() {
+		var eventID, senderMXID, senderID string
+		if err = rows.Scan(&eventID, &senderMXID, &senderID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if sender := ReactorKey(senderMXID, senderID); sender != "" {
+			all = append(all, found{eventID, sender})
+		}
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, f := range all {
+		if _, err = db.Exec(ctx, `UPDATE trioditis_reaction SET sender=$2 WHERE event_id=$1`, f.eventID, f.sender); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
 	for _, statement := range statements {
