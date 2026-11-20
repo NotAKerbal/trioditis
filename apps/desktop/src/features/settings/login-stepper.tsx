@@ -17,6 +17,7 @@ import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { sealLoginInput } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { canSubmit, initialSubmit, submitReducer, type SubmitEvent } from './login-submit.ts'
+import { SigninBrowser } from './signin-browser.tsx'
 
 // What each error code means for the person. See docs/architecture/bridge-protocol.md, Errors.
 const ERRORS: Record<string, string> = {
@@ -54,6 +55,8 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const [loginSessionId, setLoginSessionId] = useState<Id<'loginSessions'> | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, string>>({})
+  // A cookies step the server can show in its sign-in browser can still be pasted by hand.
+  const [paste, setPaste] = useState(false)
   // Each step's input goes once (login-submit.ts). The ref holds the same state as `submission`,
   // up to date between renders, so a second submit in the same moment is refused too.
   const [submission, setSubmission] = useState(initialSubmit)
@@ -131,6 +134,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const stepId = step?.stepId
   useEffect(() => {
     setValues({})
+    setPaste(false)
     dispatch({ type: 'step', stepId: stepId ?? null })
   }, [stepId])
 
@@ -154,6 +158,10 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
 
   // Closing unmounts the stepper, which cancels an unfinished login (above).
   const close = onClose
+  // The server's browser signs in for the person (docs/architecture/signin-browser.md); a
+  // hidden page needs nobody to look at it.
+  const browser = step?.type === 'cookies' && !!step.cookies?.browser && !paste
+  const hidden = step?.type === 'cookies' && !!step.cookies?.hidden
 
   return (
     <div>
@@ -191,6 +199,26 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
         <Problem message={ERRORS[step?.error ?? ''] ?? 'The login didn’t finish. Start again.'} onRetry={begin} />
       ) : cancelled ? (
         <Problem message="The login was cancelled." onRetry={begin} />
+      ) : hidden ? (
+        step.cookies?.browser ? (
+          <p className="py-8 text-center text-sm text-muted-foreground" aria-busy="true">
+            Finishing sign-in with {networkName(network)}…
+          </p>
+        ) : (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            <p>This server can’t finish signing in to {networkName(network)}.</p>
+            <Button className="mt-3" size="sm" variant="ghost" onClick={close}>
+              Cancel
+            </Button>
+          </div>
+        )
+      ) : browser && loginSessionId ? (
+        <SigninBrowser
+          key={step.stepId}
+          loginSessionId={loginSessionId}
+          stepId={step.stepId}
+          onPaste={() => setPaste(true)}
+        />
       ) : (
         <div>
           {step.instructions ? <p className="mb-4 text-base">{step.instructions}</p> : null}
@@ -283,6 +311,17 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
                 <Button type="button" variant="ghost" onClick={close}>
                   Cancel
                 </Button>
+                {step.type === 'cookies' && step.cookies?.browser ? (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="ml-auto font-medium text-muted-foreground"
+                    onClick={() => setPaste(false)}
+                  >
+                    Use the sign-in page
+                  </Button>
+                ) : null}
               </div>
               {submission.sentStepId === step.stepId && !submission.sending ? (
                 <p className="mt-3 text-sm text-subtle-foreground" aria-live="polite">

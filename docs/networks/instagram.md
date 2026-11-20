@@ -16,7 +16,14 @@ account under Meta's terms (`termsRisk`).
 ## Connecting your account
 
 Instagram connects with the cookies of a signed-in browser session, flow `instagram`
-(**Cookies from instagram.com**):
+(**Sign in on instagram.com**). In Trioditis, **Settings → Accounts**, choose **Instagram,
+Sign in on instagram.com** and accept the terms warning. The stepper shows Instagram's login
+page, running in the server's sign-in browser (docs/architecture/signin-browser.md): sign in
+there, finishing any security check. Once the page reaches the inbox (or the "save your login"
+page), the bridge host takes the cookies and the login carries on by itself.
+
+On a server without the sign-in browser, or with **Paste cookies instead**, the cookies are
+copied by hand:
 
 | Cookie       | Needed                 |
 | ------------ | ---------------------- |
@@ -34,8 +41,8 @@ Instagram connects with the cookies of a signed-in browser session, flow `instag
    there first, then open your inbox (instagram.com/direct/inbox) once.
 2. Open the developer tools: Chrome, **Application → Storage → Cookies →
    https://www.instagram.com**; Firefox, **Storage → Cookies**.
-3. In Trioditis, **Settings → Accounts**, choose **Instagram, Cookies from
-   instagram.com**, accept the terms warning, and paste each value into its field as the
+3. In Trioditis, **Settings → Accounts**, choose **Instagram, Sign in on
+   instagram.com**, accept the terms warning, choose **Paste cookies instead**, and paste each value into its field as the
    browser shows it. Leave a cookie's field empty if the browser doesn't have it; the
    optional ones help Instagram route the session but aren't required. The step's first line comes from mautrix-meta
    and talks about a JSON object or a cURL command: ignore it, the stepper asks for each
@@ -62,8 +69,8 @@ through Instagram's Android and web APIs. They aren't in `NETWORK_INFO`: after t
 they can ask to choose a verification method from a list, to approve the login on another
 device with a cancel option, or to solve a CAPTCHA or another check in an embedded browser
 with a script that reads the result. The login protocol carries none of that (a field has
-no options, a cookie step has no script or URL to wait for, and there is no step cancel),
-so those logins would stall for many accounts.
+no options and there is no step cancel; a cookie step's script runs only in the sign-in
+browser, not when pasting), so those logins would stall for many accounts.
 
 ## Operator settings
 

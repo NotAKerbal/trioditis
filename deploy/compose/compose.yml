@@ -35,6 +35,19 @@ x-bridge-env: &bridge-env
   BRIDGE_PRIVATE_KEY: ${BRIDGE_PRIVATE_KEY:?}
   BRIDGE_DATABASE_TYPE: postgres
 
+# For the networks that sign in on their website: the sign-in browser, and the egress proxies
+# it reaches the web through, one per browser, at the name each such service gives as
+# BRIDGE_EGRESS_HOST. Only those services join signin, the browser's network, and each
+# refuses the browser everything but those proxies (docs/architecture/signin-browser.md,
+# Egress).
+x-signin-env: &signin-env
+  LOGIN_BROWSER_URL: http://login-browser:9222
+  LOGIN_BROWSER_TOKEN: ${LOGIN_BROWSER_TOKEN:?run install.sh first}
+  BRIDGE_EGRESS_BIND: 0.0.0.0
+  # More address ranges the egress proxy refuses, comma-separated, for what this server's
+  # network routes somewhere local (docs/deploy.md, The sign-in browser).
+  BRIDGE_EGRESS_DENY: ${BRIDGE_EGRESS_DENY:-}
+
 services:
   postgres:
     <<: *service
@@ -126,6 +139,8 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET}
       TRIODITIS_INTERNAL_TOKEN: ${TRIODITIS_INTERNAL_TOKEN}
       GATEWAY_INTERNAL_ADDR: 0.0.0.0:8601
+      # The sign-in browser's viewers, through Caddy (/login-browser).
+      GATEWAY_PUBLIC_ADDR: 0.0.0.0:8602
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY}
       BRIDGE_HOSTS: ${BRIDGE_HOSTS:?}
     depends_on:
@@ -169,22 +184,26 @@ services:
 
   bridge-gmessages:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [gmessages]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: gmessages
       BRIDGE_HOST_ID: gmessages-1
+      BRIDGE_EGRESS_HOST: bridge-gmessages
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gmessages?sslmode=disable
     volumes:
       - bridge-gmessages:/data
 
   bridge-gvoice:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [gvoice]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: gvoice
       BRIDGE_HOST_ID: gvoice-1
+      BRIDGE_EGRESS_HOST: bridge-gvoice
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gvoice?sslmode=disable
     volumes:
       - bridge-gvoice:/data
@@ -210,11 +229,13 @@ services:
 
   bridge-meta:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [meta]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: meta
       BRIDGE_HOST_ID: meta-1
+      BRIDGE_EGRESS_HOST: bridge-meta
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_meta?sslmode=disable
       # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/meta.md).
       META_PROXY: ${META_PROXY:-}
@@ -223,11 +244,13 @@ services:
 
   bridge-instagram:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [instagram]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: instagram
       BRIDGE_HOST_ID: instagram-1
+      BRIDGE_EGRESS_HOST: bridge-instagram
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_instagram?sslmode=disable
       # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/instagram.md).
       INSTAGRAM_PROXY: ${INSTAGRAM_PROXY:-}
@@ -236,11 +259,13 @@ services:
 
   bridge-slack:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [slack]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: slack
       BRIDGE_HOST_ID: slack-1
+      BRIDGE_EGRESS_HOST: bridge-slack
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_slack?sslmode=disable
     volumes:
       - bridge-slack:/data
@@ -258,22 +283,26 @@ services:
 
   bridge-linkedin:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [linkedin]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: linkedin
       BRIDGE_HOST_ID: linkedin-1
+      BRIDGE_EGRESS_HOST: bridge-linkedin
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_linkedin?sslmode=disable
     volumes:
       - bridge-linkedin:/data
 
   bridge-twitter:
     <<: *bridge-host
+    networks: [default, signin]
     profiles: [twitter]
     environment:
-      <<: *bridge-env
+      <<: [*bridge-env, *signin-env]
       BRIDGE_NETWORK: twitter
       BRIDGE_HOST_ID: twitter-1
+      BRIDGE_EGRESS_HOST: bridge-twitter
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_twitter?sslmode=disable
     volumes:
       - bridge-twitter:/data
@@ -288,6 +317,39 @@ services:
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_bluesky?sslmode=disable
     volumes:
       - bridge-bluesky:/data
+
+  # The sign-in browser: a Chromium for each login that signs in on a network's website. It
+  # holds no secret but its own token and is only on the signin network, which has no way out
+  # but the bridge hosts' egress proxies; the bridge hosts refuse it everything else.
+  login-browser:
+    <<: *service
+    build:
+      context: ../..
+      dockerfile: deploy/docker/login-browser.Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-trioditis}/login-browser:local
+    environment:
+      LOGIN_BROWSER_TOKEN: ${LOGIN_BROWSER_TOKEN:?run install.sh first}
+      LOGIN_BROWSER_MAX: ${LOGIN_BROWSER_MAX:-4}
+    networks: [signin]
+    # Chromium's helpers outlive the launcher's own children; an init reaps them.
+    init: true
+    read_only: true
+    # Only what the launcher needs to run each login's Chromium as a user of its own, give it
+    # its profile and end it (login-browser.Dockerfile).
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL]
+    security_opt: ['no-new-privileges:true']
+    # Each browser's profile lives in /dev/shm, never on disk.
+    shm_size: 2g
+    tmpfs:
+      - /tmp
+    mem_limit: 4g
+    pids_limit: 1024
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:9222/v1/health']
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
 
   caddy:
     <<: *service
@@ -316,6 +378,17 @@ services:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8090/healthz']
       interval: 10s
       timeout: 3s
+
+networks:
+  default:
+  # The sign-in browser's. Internal, so it has no way to the internet, and with no address
+  # for the server itself on it (isolated, Docker 28 and later), so the browser can't reach
+  # what the server runs outside the bundle either.
+  signin:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
 
 volumes:
   postgres:

@@ -38,7 +38,7 @@ make_install() {
   mkdir -p "$root/deploy/install"
   cp "$repo/deploy/install/env-names" "$root/deploy/install/env-names"
   for name in POSTGRES_PASSWORD CONVEX_INSTANCE_SECRET BETTER_AUTH_SECRET GATEWAY_SECRET \
-    TRIODITIS_INTERNAL_TOKEN BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY CONVEX_ADMIN_KEY; do
+    TRIODITIS_INTERNAL_TOKEN LOGIN_BROWSER_TOKEN BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY CONVEX_ADMIN_KEY; do
     echo "$name=test-$name"
   done >"$root/deploy/.env"
   # The private keys in the form deploy/.env requires (32 random bytes, base64url).

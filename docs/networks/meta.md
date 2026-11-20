@@ -26,20 +26,29 @@ separate bridge host processes (one network per process), so neither sees the ot
 Messenger connects with the cookies of a signed-in browser session. Two flows are offered;
 use whichever site you sign in to:
 
-| Flow ID     | In Trioditis               | Sign in at                                    | Cookies                |
-| ----------- | -------------------------- | --------------------------------------------- | ---------------------- |
-| `facebook`  | Cookies from facebook.com  | `https://www.facebook.com/`                   | `xs`, `c_user`, `datr` |
-| `messenger` | Cookies from messenger.com | `https://www.messenger.com/?no_redirect=true` | `xs`, `c_user`, `datr` |
+| Flow ID     | In Trioditis             | Sign in at                                    | Cookies                |
+| ----------- | ------------------------ | --------------------------------------------- | ---------------------- |
+| `facebook`  | Sign in on facebook.com  | `https://www.facebook.com/`                   | `xs`, `c_user`, `datr` |
+| `messenger` | Sign in on messenger.com | `https://www.messenger.com/?no_redirect=true` | `xs`, `c_user`, `datr` |
 
-All three cookies are required. To connect:
+In Trioditis, **Settings → Accounts**, choose **Messenger, Sign in on facebook.com** (or
+messenger.com) and accept the terms warning. The stepper shows the site's own login page,
+running in the server's sign-in browser (docs/architecture/signin-browser.md): sign in there,
+finishing any security check or two-factor prompt Meta shows. Once the cookies are set and
+the page reaches Facebook's home (or Messenger's inbox), the bridge host takes them and the
+login carries on by itself. The sign-in comes from the server's address (or `META_PROXY`'s),
+the one the bridge connects from.
+
+On a server without the sign-in browser, or with **Paste cookies instead**, the cookies are
+copied by hand. All three are required:
 
 1. In a desktop browser (Chrome or Firefox), open a private window and sign in at the
    address above. Finish any security check or two-factor prompt Meta shows there first.
    Open your messages once so the session is fully set up.
 2. Open the developer tools: Chrome, **Application → Storage → Cookies →
    https://www.facebook.com** (or messenger.com); Firefox, **Storage → Cookies**.
-3. In Trioditis, **Settings → Accounts**, choose **Messenger, Cookies from facebook.com**
-   (or messenger.com), accept the terms warning, and paste the values of `xs`, `c_user`
+3. In Trioditis, **Settings → Accounts**, choose **Messenger, Sign in on facebook.com**
+   (or messenger.com), accept the terms warning, choose **Paste cookies instead**, and paste the values of `xs`, `c_user`
    and `datr` into their fields, exactly as the browser shows them (`xs` contains `%3A`;
    leave it encoded). The step's first line comes from mautrix-meta and talks about a JSON
    object or a cURL command: ignore it, the stepper asks for each cookie on its own.
@@ -64,9 +73,9 @@ mautrix-meta also has `messenger-lite` and `messenger-lite-android`, username-an
 logins through Meta's mobile login pages. They aren't in `NETWORK_INFO`: after the
 password they can ask for a choice from a list, a captcha image, or a reCAPTCHA or Google
 sign-in run in an embedded browser with a script that reads the result, and can offer to
-cancel a step. The login protocol carries none of that (a field has no options, a cookie
-step has no script or URL to wait for, and there is no step cancel), so those logins would
-stall for many accounts.
+cancel a step. The login protocol carries none of that (a field has no options and there is
+no step cancel; a cookie step's script runs only in the sign-in browser, not when pasting),
+so those logins would stall for many accounts.
 
 Restoring encrypted history (`e2ee_backfill`) is turned off in code: it adds a step asking
 for the Messenger secure-storage PIN that may be left empty, and the stepper can't show an

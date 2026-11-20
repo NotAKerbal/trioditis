@@ -1,9 +1,11 @@
 import { ConvexError, v } from 'convex/values'
+import type { Doc } from './_generated/dataModel'
 import { NETWORK_INFO } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
+import { hmacBase64url, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand, queueLoginCancel, queueLogout } from './lib/outbox'
@@ -173,6 +175,77 @@ export const submit = mutation({
       args.sealed,
     )
     return null
+  },
+})
+
+/** How long a sign-in browser ticket lasts before the gateway must have redeemed it. */
+export const SIGNIN_TICKET_TTL_MS = 60_000
+
+/**
+ * Whether a login is on `stepId` and that step runs in the sign-in browser: only then may a
+ * ticket to it be issued or redeemed.
+ */
+export function browserStepOpen(session: Doc<'loginSessions'>, stepId: string) {
+  const step = session.step
+  return (
+    session.state === 'active' &&
+    step?.stepId === stepId &&
+    step.type === 'cookies' &&
+    step.cookies?.browser === true &&
+    !!session.hostId
+  )
+}
+
+/**
+ * A ticket to the sign-in browser of a login's current step, for opening its websocket
+ * through the gateway (docs/architecture/signin-browser.md). It lasts a minute and works once.
+ */
+/**
+ * The admission that lets a socket wait for its ticket at the gateway, in the socket's address:
+ * `<person>.<expiresAt>.<mac>`, where `person` is a hash of the person's ID and `mac` is
+ * HMAC-SHA256 under GATEWAY_SECRET of `login-browser-admission\n<person>.<expiresAt>`. It
+ * proves the socket was asked for by a signed-in person, so the gateway turns away every other
+ * before it takes a place, and counts the rest by person (docs/architecture/signin-browser.md,
+ * Tickets). It is no use without the ticket, which goes in the first message.
+ */
+async function admission(userId: string, expiresAt: number): Promise<string> {
+  const secret = process.env.GATEWAY_SECRET
+  if (!secret) throw new ConvexError('This server can’t show the sign-in page.')
+  const person = (await sha256Hex(`trioditis/login-browser/${userId}`)).slice(0, 32)
+  const payload = `${person}.${expiresAt}`
+  return `${payload}.${await hmacBase64url(secret, `login-browser-admission\n${payload}`)}`
+}
+
+export const openBrowser = mutation({
+  args: { loginSessionId: v.id('loginSessions'), stepId: v.string(), sessionId: v.optional(v.string()) },
+  returns: v.object({ ticket: v.string(), admission: v.string() }),
+  handler: async (ctx, args) => {
+    // The browser signs the network in for whoever owns the login, so a page another tab has
+    // signed into someone else can't open it.
+    await requireSessionIfGiven(ctx, args.sessionId)
+    const member = await requireMember(ctx)
+    const session = await ctx.db.get(args.loginSessionId)
+    if (!session || session.userId !== member.userId) throw new ConvexError('That login doesn’t exist.')
+    if (!browserStepOpen(session, args.stepId)) {
+      throw new ConvexError('That step of the login can’t be opened in a browser. Start again if it didn’t finish.')
+    }
+    // One ticket at a time: an earlier one that was never used goes.
+    const earlier = await ctx.db
+      .query('signinTickets')
+      .withIndex('by_user', (q) => q.eq('userId', member.userId))
+      .take(20)
+    for (const ticket of earlier) await ctx.db.delete(ticket._id)
+    const token = randomToken(32)
+    const expiresAt = Date.now() + SIGNIN_TICKET_TTL_MS
+    await ctx.db.insert('signinTickets', {
+      tokenHash: await sha256Hex(token),
+      loginSessionId: session._id,
+      userId: member.userId,
+      hostId: session.hostId!,
+      stepId: args.stepId,
+      expiresAt,
+    })
+    return { ticket: token, admission: await admission(member.userId, expiresAt) }
   },
 })
 

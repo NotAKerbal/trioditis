@@ -9,7 +9,11 @@ exposed publicly. JSON over HTTP, authenticated with a shared bearer token
 bridge host ── POST /v1/events ──────────────► gateway ──► Convex
 bridge host ◄── POST /v1/commands ─────────── gateway ◄── Convex outbox
 bridge host ── GET  /v1/keys/:userId ────────► gateway      (recipient public keys)
+bridge host ◄── GET  /v1/logins/:id/browser ── gateway      (sign-in browser viewer, websocket)
 ```
+
+The last is the sign-in browser's: the gateway relays a person's viewer to the bridge host
+running their login, once it has redeemed their ticket. See `signin-browser.md`.
 
 The gateway listens on `GATEWAY_INTERNAL_ADDR` (default `127.0.0.1:8601`). Each bridge
 host process has a stable `hostId` (`BRIDGE_HOST_ID`, default `<network>-1`) and listens on
@@ -223,7 +227,7 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
   "instructions": "…",
   "display": { "type": "qr | code | emoji | nothing", "data": "…" },
   "fields": [{ "id": "phone", "type": "phone_number", "name": "Phone number" }],
-  "cookies": { "url": "…", "fields": [] },
+  "cookies": { "url": "…", "fields": [], "browser": true, "hidden": false },
   "loginId": "… (on complete)",
   "error": "… (on error)"
 }
@@ -231,6 +235,11 @@ Logins follow bridgev2's login steps. A `loginStep` event's `step`:
 
 The app renders every network's login from these steps; there is no per-network login
 UI.
+
+A `cookies` step's `browser` says the bridge host can run it in the sign-in browser, where
+the person signs in on the site and the bridge host collects the values and submits them
+itself; `hidden` says the step runs there with nobody watching. Both are absent on a host
+without one, and the client asks for the values by hand. See `signin-browser.md`.
 
 Pairing data shown to the person (a QR code, a pairing code) is scrubbed from the bridge
 host's journal once the gateway has acknowledged the step, so a replay of that step has an

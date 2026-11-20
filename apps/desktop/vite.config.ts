@@ -10,7 +10,11 @@ export default defineConfig(({ mode }) => {
   // Served on the app's own origin, as the self-hosted bundle's Caddy does: Better Auth (so its
   // cookies and passkeys are first-party) and the MCP server with its OAuth discovery documents.
   const forward: ProxyOptions = { target: convexSite, changeOrigin: true }
+  // The sign-in browser's socket, which the gateway's public listener serves, as Caddy forwards
+  // it in the bundle (docs/architecture/signin-browser.md).
+  const gatewayPublic = env.VITE_GATEWAY_PUBLIC_URL ?? 'http://127.0.0.1:8602'
   const proxy = {
+    '/login-browser': { target: gatewayPublic, ws: true, changeOrigin: true },
     '/api/auth': forward,
     '/mcp': forward,
     '/.well-known/oauth-protected-resource': forward,

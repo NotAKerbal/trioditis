@@ -339,6 +339,10 @@ type LoginCookies struct {
 	URL       string             `json:"url"`
 	UserAgent string             `json:"userAgent,omitempty"`
 	Fields    []LoginCookieField `json:"fields"`
+	// Browser says the step can run in the sign-in browser; Hidden, that it runs there with
+	// nobody watching (docs/architecture/signin-browser.md, Login steps).
+	Browser bool `json:"browser,omitempty"`
+	Hidden  bool `json:"hidden,omitempty"`
 }
 
 // MarshalJSON writes no fields as `[]`: the backend wants an array, never null.

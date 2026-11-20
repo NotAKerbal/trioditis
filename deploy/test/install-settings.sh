@@ -52,7 +52,12 @@ chmod +x "$work/bin/systemctl"
 cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
-  info) [ "${2:-}" != --format ] || echo /var/lib/docker ;;
+  info)
+    case "${3:-}" in
+      *ServerVersion*) echo 29.1.3 ;;
+      *) [ "${2:-}" != --format ] || echo /var/lib/docker ;;
+    esac
+    ;;
   build) ;;
   run)
     for name in BRIDGE AGENT_ACCESS; do echo "${name}_PUBLIC_KEY=stub-public" "${name}_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | tr ' ' '\n'; done

@@ -16,6 +16,11 @@ person's network sessions. Sealing protects stored history, backups and database
 dumps; it does not protect against an operator who modifies the running server. See
 `docs/PLAN.md`, Sealed storage.
 
+The sign-in browser is the same: while someone signs in to a network on its website, the
+page and the password they type pass through the server's memory. None of it is stored or
+logged, and the browser's profile is kept in memory and removed when the step ends. See
+`signin-browser.md`.
+
 ## Why not per-chat keys
 
 An earlier draft gave each chat a symmetric key wrapped to its owner. The bridge host

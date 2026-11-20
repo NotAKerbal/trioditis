@@ -29,6 +29,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
@@ -44,6 +45,8 @@ type Options struct {
 	Notify func()
 	// SendTimeout is how long a send may wait for an outcome before it is marked unknown.
 	SendTimeout time.Duration
+	// Signin, if set, runs cookie login steps in the sign-in browser.
+	Signin *signin.Launcher
 }
 
 // Connector implements bridgev2.MatrixConnector.
@@ -58,6 +61,10 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
+	// browserSteps holds the login steps the sign-in browser submitted ("<login session
+	// ID>/<step ID>" → struct{}), for as long as the process runs: a paste of one that arrives
+	// later is dropped rather than refused.
+	browserSteps sync.Map
 	// busy holds chats (by opaque portal ID) with a command (a send, edit, reaction or
 	// redaction) still out with bridgev2 or the network; the worker runs their next command
 	// once it settles, or once the hold is released (see holdLimit).

@@ -23,8 +23,16 @@ Before you start, on the phone: open Google Messages, tap your profile picture, 
 **Device pairing**, and check that it is signed in to the Google account you're about to
 use. Keep the app open and the phone online while you pair.
 
-1. In Trioditis, Settings → Accounts → Google Messages → Sign in with Google. The stepper
-   asks for seven cookies.
+In Trioditis, Settings → Accounts → Google Messages → **Sign in with Google**. The stepper
+shows Google's account chooser, running in the server's sign-in browser
+(docs/architecture/signin-browser.md). Sign in there with that Google account; once Google
+has set the cookies below, the bridge host takes them and the stepper moves on to the emoji
+(step 4). Google may refuse to sign in from that browser ("This browser or app may not be
+secure"), judging it automated. Then, or on a server without the sign-in browser, choose
+**Paste cookies instead** and copy them by hand:
+
+1. In Trioditis, Settings → Accounts → Google Messages → Sign in with Google → Paste cookies
+   instead. The stepper asks for seven cookies.
 2. In a desktop browser, open a **private window** and go to the address the stepper shows
    (`https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config`).
    Sign in with that Google account.

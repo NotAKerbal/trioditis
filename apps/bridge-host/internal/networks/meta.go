@@ -17,6 +17,7 @@ import (
 // the login flow, so there is no `mode` setting any more; see docs/networks/meta.md.
 func init() {
 	register("meta", Network{
+		ProxyEnv: "META_PROXY",
 		New: func() (bridgev2.NetworkConnector, error) {
 			conn := &meta.MetaConnector{}
 			if _, err := withDefaults("Messenger", conn); err != nil {

@@ -9,7 +9,10 @@ import type { ErrorCode, LoginState } from './bridge-protocol.ts'
 export interface LoginFlow {
   /** Passed to `logins.start` as `flowId`. */
   id: string
-  /** What the stepper shows first: a QR code to scan, a code to type on the phone, cookies to paste, or a form. */
+  /**
+   * What the stepper shows first: a QR code to scan, a code to type on the phone, a website to
+   * sign in on (or its cookies to paste), or a form.
+   */
   kind: 'qr' | 'phone' | 'cookies' | 'form'
   name: string
 }
@@ -72,8 +75,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // mautrix-meta's cookie flows. Its username-and-password flows aren't offered: they can
     // need choices, images and in-browser checks the stepper can't show (docs/networks/meta.md).
     flows: [
-      { id: 'facebook', kind: 'cookies', name: 'Cookies from facebook.com' },
-      { id: 'messenger', kind: 'cookies', name: 'Cookies from messenger.com' },
+      { id: 'facebook', kind: 'cookies', name: 'Sign in on facebook.com' },
+      { id: 'messenger', kind: 'cookies', name: 'Sign in on messenger.com' },
     ],
     termsRisk: true,
   },
@@ -82,7 +85,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     name: 'Instagram',
     maturity: 'beta',
     // Cookies only, as for Messenger (docs/networks/instagram.md).
-    flows: [{ id: 'instagram', kind: 'cookies', name: 'Cookies from instagram.com' }],
+    flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
   },
   discord: {
@@ -103,7 +106,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // show, where the email flow can stop at a CAPTCHA or a workspace list. See
     // docs/networks/slack.md.
     flows: [
-      { id: 'token', kind: 'cookies', name: 'Token and cookie' },
+      { id: 'token', kind: 'cookies', name: 'Sign in on slack.com' },
       { id: 'email', kind: 'form', name: 'Email code' },
       { id: 'app', kind: 'form', name: 'Slack app (bot)' },
     ],
@@ -128,7 +131,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     network: 'gvoice',
     name: 'Google Voice',
     maturity: 'experimental',
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in with Google' }],
     // Google account cookies driving voice.google.com's own API as an unofficial client, which
     // Google checks for. See docs/networks/gvoice.md.
     termsRisk: true,
@@ -139,7 +142,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     maturity: 'experimental',
     // The connector's email-and-password flow isn't offered: its verification steps ask the
     // person to pick from options, which the stepper can't show yet. See docs/networks/linkedin.md.
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on linkedin.com' }],
     termsRisk: true,
   },
   twitter: {
@@ -148,7 +151,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     maturity: 'experimental',
     // The connector's password flow needs a browser token made by script in a web view, which
     // the stepper can't run. See docs/networks/twitter.md.
-    flows: [{ id: 'cookies', kind: 'cookies', name: 'Paste cookies' }],
+    flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on x.com' }],
     termsRisk: true,
   },
   bluesky: {

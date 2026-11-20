@@ -2,12 +2,13 @@ import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
-import { constantTimeEqual } from './lib/hash'
+import { constantTimeEqual, sha256Hex } from './lib/hash'
 import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
 import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
+import { browserStepOpen } from './logins'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -598,5 +599,41 @@ export const commandResult = mutation({
     await failLogin(ctx, command, error ?? 'invalid_command')
     await onCommandRejected(ctx, command, error ?? 'invalid_command')
     return null
+  },
+})
+
+/**
+ * Redeems a sign-in browser ticket (docs/architecture/signin-browser.md): what the gateway
+ * needs to open the browser's websocket on the right bridge host, or null for a ticket that
+ * is unknown, used, expired, or for a step that is over. A ticket works once.
+ */
+export const redeemSigninTicket = mutation({
+  args: { secret: v.string(), ticket: v.string() },
+  returns: v.union(
+    v.null(),
+    v.object({ loginSessionId: v.id('loginSessions'), userId: v.string(), hostId: v.string(), stepId: v.string() }),
+  ),
+  handler: async (ctx, { secret, ticket }) => {
+    assertGateway(secret)
+    if (ticket.length > 256) return null
+    const tokenHash = await sha256Hex(ticket)
+    const row = await ctx.db
+      .query('signinTickets')
+      .withIndex('by_token', (q) => q.eq('tokenHash', tokenHash))
+      .unique()
+    if (!row) return null
+    await ctx.db.delete(row._id)
+    if (row.expiresAt < Date.now()) return null
+    const session = await ctx.db.get(row.loginSessionId)
+    // The login moved on, or to another host, since the ticket was issued.
+    if (
+      !session ||
+      session.userId !== row.userId ||
+      session.hostId !== row.hostId ||
+      !browserStepOpen(session, row.stepId)
+    ) {
+      return null
+    }
+    return { loginSessionId: row.loginSessionId, userId: row.userId, hostId: row.hostId, stepId: row.stepId }
   },
 })

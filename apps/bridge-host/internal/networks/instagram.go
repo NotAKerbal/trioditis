@@ -9,6 +9,7 @@ import (
 // there is no decrypted-event buffer to sweep; see docs/networks/instagram.md.
 func init() {
 	register("instagram", Network{
+		ProxyEnv: "INSTAGRAM_PROXY",
 		New: func() (bridgev2.NetworkConnector, error) {
 			conn := &igconnector.IGConnector{}
 			if _, err := withDefaults("Instagram", conn); err != nil {

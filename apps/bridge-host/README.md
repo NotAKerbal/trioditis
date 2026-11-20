@@ -13,11 +13,13 @@ and [`docs/architecture/sealing.md`](../../docs/architecture/sealing.md). Backgr
 
 ```
 cmd/bridge-host/       the binary: run, login (terminal), inspect (dev)
+cmd/login-browser/     the sign-in browser's launcher: one Chromium per connection
 internal/connector/    the MatrixConnector and MatrixAPI intents; commands; logins
 internal/seal/         sealing, byte-compatible with packages/crypto
 internal/store/        journal, command dedup, send state, opaque IDs, key cache, membership
 internal/gateway/      journal pusher with heartbeats; key fetching
-internal/server/       POST /v1/commands
+internal/server/       POST /v1/commands; GET /v1/logins/{id}/browser (sign-in viewer)
+internal/signin/       the sign-in browser: CDP driver, field collection, egress proxy
 internal/media/        encrypted media store
 internal/keys/         recipient keys, cached in memory and in the database
 internal/ids/          Matrix-shaped IDs on a fake server; opaque protocol IDs
@@ -235,6 +237,9 @@ releases its chat; `internal/gateway` that an event too large to send goes as a 
 `internal/wabuffer`, on a seeded whatsmeow store, that the sweep deletes only rows past 14
 days, keeps sweeping, and stops while its parent context is live; `cmd/bridge-host` that
 SIGINT or SIGTERM at a login prompt, with stdin left open, stops the host and exits 1.
+`internal/signin` tests the egress proxy's address checks and the field collection, and,
+with a Chromium on `PATH` (or `CHROMIUM_PATH`), signs in on a local page through the real
+launcher, proxy and viewer protocol; it skips that test without one.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings

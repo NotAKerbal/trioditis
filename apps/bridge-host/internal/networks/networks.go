@@ -27,6 +27,9 @@ type Network struct {
 	// LogFilter, if set, wraps the process's log output, to drop what the connector logs
 	// that must not be written out.
 	LogFilter func(io.Writer) io.Writer
+	// ProxyEnv names the environment variable holding the proxy the connector goes out
+	// through, if it has one; the sign-in browser goes out through it too.
+	ProxyEnv string
 	// BackfillBatchDelay, if set, is how many seconds the backfill queue waits between
 	// batches of older history, in place of the host's default.
 	BackfillBatchDelay int
