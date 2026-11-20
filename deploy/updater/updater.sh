@@ -134,21 +134,21 @@ MAX_NOTES=100
 MAX_NOTE_BYTES=800
 
 # release_notes FROM TO: the release notes TO has that FROM doesn't, as `<Label><tab><text>`
-# lines: each line of every file in release-notes/ that TO adds, the newest file first. The
-# format is in docs/CONTRIBUTING.md, Release notes, and scripts/release-notes.mjs checks it; a
-# line that doesn't fit it is left out here.
+# lines: each line of every file in release-notes/ that TO adds, the newest file first. A note
+# renamed (or moved with small edits) isn't new, as in scripts/release-notes.mjs, which checks
+# the format (docs/CONTRIBUTING.md, Release notes); a line that doesn't fit it is left out here.
 release_notes() {
   local from=$1 to=$2 path line count=0
   local -A added=() seen=()
   local ordered=()
   while IFS= read -r path; do added[$path]=1; done < <(
-    git -C "$root" -c core.quotePath=true diff --name-only --no-renames --diff-filter=A "$from" "$to" -- release-notes/)
+    git -C "$root" -c core.quotePath=true diff --name-only --find-renames --diff-filter=A "$from" "$to" -- release-notes/)
   # Newest first: the order the commits in between added them, then any left in name order.
   while IFS= read -r path; do
     [ -n "$path" ] && [ -n "${added[$path]:-}" ] && [ -z "${seen[$path]:-}" ] || continue
     seen[$path]=1
     ordered+=("$path")
-  done < <(git -C "$root" -c core.quotePath=true log --format= --name-only --no-renames --diff-filter=A \
+  done < <(git -C "$root" -c core.quotePath=true log --format= --name-only --find-renames --diff-filter=A \
     "$from..$to" -- release-notes/; printf '%s\n' "${!added[@]}" | LC_ALL=C sort)
   for path in "${ordered[@]}"; do
     [[ "$path" =~ ^release-notes/[a-z0-9][a-z0-9-]*\.md$ ]] || continue

@@ -115,6 +115,8 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
 git_ -C "$work/source" checkout -q dev
 touch "$work/source/deploy/install/FAIL"
 echo 'Fixed: Break the build.' >"$work/source/release-notes/three.md"
+# Renaming a note the server has (c2's) doesn't make it new.
+git_ -C "$work/source" mv release-notes/two.md release-notes/two-renamed.md
 git_ -C "$work/source" add -A
 git_ -C "$work/source" commit -qm 'Break the build'
 c3=$(git -C "$work/source" rev-parse HEAD)
@@ -245,6 +247,11 @@ bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; printf "%
 [ "$(cat "$work/out")" = "$(printf 'Fixed\tBreak the build.\nNew\tMake ittwo.\nInternal\tCount higher.')" ] &&
   check ok "an update on offer carries the notes it adds, the newest first" ||
   check fail "an update on offer carries the notes it adds, the newest first ($(cat "$work/out"))"
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; printf "%s" "$latest_notes"' updater "$work/checkout" >"$work/out" 2>&1 || true
+[ "$(cat "$work/out")" = "$(printf 'Fixed\tBreak the build.')" ] &&
+  check ok "a note the server has, renamed since, isn't new" ||
+  check fail "a note the server has, renamed since, isn't new ($(cat "$work/out"))"
 git_ -C "$work/checkout" checkout -q --detach "$c3"
 bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; printf "%s|%s" "$behind" "$latest_notes"' updater "$work/checkout" >"$work/out" 2>&1 || true
 [ "$(cat "$work/out")" = "0|" ] && check ok "and none once the server is there" ||

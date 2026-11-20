@@ -77,11 +77,15 @@ export function checkNotes(dir) {
   return problems
 }
 
-/** The release notes the changes from `base` to HEAD add, in `cwd`'s repository. */
+/**
+ * The release notes the changes from `base` to HEAD add, in `cwd`'s repository. A note renamed,
+ * or moved with small edits, isn't a new one: git's rename detection finds it, as the updater's
+ * does (release_notes in deploy/updater/updater.sh).
+ */
 export function addedNotes(base, cwd) {
   const result = spawnSync(
     'git',
-    ['diff', '--name-only', '--no-renames', '--diff-filter=A', base, 'HEAD', '--', `${NOTES_DIR}/`],
+    ['diff', '--name-only', '--find-renames', '--diff-filter=A', base, 'HEAD', '--', `${NOTES_DIR}/`],
     { cwd, encoding: 'utf8' },
   )
   if (result.status !== 0) throw new Error(`git diff from ${base} failed: ${result.stderr.trim()}`)

@@ -84,6 +84,10 @@ void test('a change counts as having a note only when it adds one', () => {
     git('commit', '-qm', 'add a note')
     assert.deepEqual(addedNotes(base, dir), ['release-notes/second.md'])
     const added = git('rev-parse', 'HEAD')
+    // Nor is renaming one that's there already.
+    git('mv', 'release-notes/first.md', 'release-notes/renamed.md')
+    git('commit', '-qm', 'rename a note')
+    assert.deepEqual(addedNotes(added, dir), [])
     git('rm', '-q', 'release-notes/second.md')
     git('commit', '-qm', 'remove it')
     // Removing a note isn't writing one.
