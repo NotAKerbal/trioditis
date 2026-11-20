@@ -22,7 +22,7 @@ import {
 } from '~/data/updates.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Setting } from './layout.tsx'
+import { Heading, Loading, Setting } from './layout.tsx'
 
 const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
@@ -32,7 +32,7 @@ export function Updates() {
   return (
     <>
       <Heading title="Updates" />
-      {status ? <UpdateSettings status={status} /> : null}
+      {status ? <UpdateSettings status={status} /> : <Loading />}
     </>
   )
 }

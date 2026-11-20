@@ -15,6 +15,15 @@ export function Subheading({ children, className }: { children: ReactNode; class
   )
 }
 
+/** What an empty pane shows while its data is on the way. */
+export function Loading() {
+  return (
+    <p className="py-2 text-sm text-muted-foreground" aria-busy="true">
+      Loading…
+    </p>
+  )
+}
+
 /** One setting: what it is on the left, its control on the right (or below, with `column`). */
 export function Setting({
   title,

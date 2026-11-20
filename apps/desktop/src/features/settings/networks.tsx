@@ -11,7 +11,7 @@ import { ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Subheading } from './layout.tsx'
+import { Heading, Loading, Subheading } from './layout.tsx'
 
 type Entry = FunctionReturnType<typeof api.networks.catalog>[number]
 
@@ -186,7 +186,9 @@ export function Networks() {
             </details>
           ) : null}
         </>
-      ) : null}
+      ) : (
+        <Loading />
+      )}
     </>
   )
 }

@@ -63,7 +63,7 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Setting, Subheading } from './layout.tsx'
+import { Heading, Loading, Setting, Subheading } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
@@ -161,8 +161,19 @@ function Appearance() {
   const prefs = usePrefs()
   const [layout, setLayout] = useSidebarLayout()
   const options = [
-    { id: 'simple' as const, name: 'Simple', drawing: <MiniSimple /> },
-    { id: 'focused' as const, name: 'Focused', drawing: <MiniFocused /> },
+    // The drawings show what each layout does; `about` says it for screen readers, which skip them.
+    {
+      id: 'simple' as const,
+      name: 'Simple',
+      about: 'Every chat in one list, newest first.',
+      drawing: <MiniSimple />,
+    },
+    {
+      id: 'focused' as const,
+      name: 'Focused',
+      about: 'Unread on top; read, snoozed, scheduled and archived chats fold away.',
+      drawing: <MiniFocused />,
+    },
   ]
   return (
     <>
@@ -184,6 +195,7 @@ function Appearance() {
             >
               {o.drawing}
               <span className={cn('font-bold', layout === o.id && 'text-primary-ink')}>{o.name}</span>
+              <span className="sr-only">{o.about}</span>
             </Button>
           ))}
         </div>
@@ -233,7 +245,16 @@ function Notifications() {
   return (
     <>
       <Heading title="Notifications" />
-      <Setting title="Desktop notifications" about={supported ? undefined : 'This browser can’t show notifications.'}>
+      {/* Kept in view: a notification puts the sender and the message's text in the system's own history,
+          outside what Trioditis seals. */}
+      <Setting
+        title="Desktop notifications"
+        about={
+          supported
+            ? 'Shows the sender and message text, which your system may keep.'
+            : 'This browser can’t show notifications.'
+        }
+      >
         <Switch
           checked={prefs.notifications && allowed}
           disabled={!supported}
@@ -426,7 +447,7 @@ function Accounts() {
               <NetworkBadge network={n.network} label={n.name} size={24} />
               <span className="min-w-0 flex-1">
                 <span className="block font-semibold">{n.name}</span>
-                <span className="block truncate text-sm text-muted-foreground">
+                <span className="block text-sm text-muted-foreground">
                   {f.name}
                   {n.maturity === 'stable' ? '' : n.maturity === 'experimental' ? ' · Experimental' : ' · Beta'}
                 </span>
@@ -496,13 +517,15 @@ function Members() {
   return (
     <>
       <Heading title="Members" />
-      {server && closed ? (
+      {!server ? (
+        <Loading />
+      ) : closed ? (
         <p className="text-sm text-muted-foreground">
           {server.demo
             ? 'This is a demo server, so it doesn’t take invitations.'
             : 'This server doesn’t take invitations.'}
         </p>
-      ) : server ? (
+      ) : (
         <form
           className="flex items-end gap-2"
           onSubmit={async (e) => {
@@ -539,7 +562,7 @@ function Members() {
             Invite
           </Button>
         </form>
-      ) : null}
+      )}
       {link ? (
         <div className="mt-4">
           <p className="mb-2 text-sm text-muted-foreground">
