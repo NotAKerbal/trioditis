@@ -1,0 +1,427 @@
+/*
+ * The project site. Colours and type follow the app's tokens (packages/ui/src/styles/tokens.css),
+ * copied rather than imported so the site stays a folder of static files with no build.
+ */
+@font-face {
+  font-family: 'DM Sans Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 1000;
+  src: url('/fonts/dm-sans-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+:root {
+  --bg: #ffffff;
+  --surface-2: #f8f9fb;
+  --border: #e6e8ed;
+  --fg: #0f172a;
+  --fg-muted: #475569;
+  /* One step darker than the app's accent, so text and links on white pass 4.5:1. */
+  --accent: #0369a1;
+  --accent-hover: #075985;
+  --accent-fg: #ffffff;
+  --accent-ring: #0284c7;
+  --shot-shadow: 0 30px 80px rgb(15 23 42 / 0.18);
+
+  --font-sans: 'DM Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --radius-md: 10px;
+  --radius-xl: 18px;
+  --width: 1080px;
+  --gutter: clamp(16px, 4vw, 32px);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --surface-2: #1b1f27;
+    --border: #252a33;
+    --fg: #e9ebf0;
+    --fg-muted: #a3aab6;
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --accent-fg: #04131c;
+    --accent-ring: #38bdf8;
+    --shot-shadow: 0 30px 80px rgb(0 0 0 / 0.5);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.bar,
+main,
+footer {
+  max-width: var(--width);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 72px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg);
+  font-weight: 650;
+  font-size: 18px;
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--fg);
+}
+
+.brand img {
+  border-radius: 7px;
+}
+
+nav {
+  display: flex;
+  gap: 24px;
+}
+
+nav a {
+  color: var(--fg-muted);
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+nav a:hover {
+  color: var(--fg);
+}
+
+.hero {
+  max-width: 760px;
+  margin: clamp(40px, 9vw, 96px) auto 0;
+  text-align: center;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(36px, 6.2vw, 60px);
+  line-height: 1.08;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.lead {
+  margin: 24px auto 0;
+  max-width: 620px;
+  color: var(--fg-muted);
+  font-size: clamp(17px, 2.2vw, 20px);
+  text-wrap: pretty;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  height: 46px;
+  padding-inline: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 15.5px;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+
+.button:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.button.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.button.primary:hover {
+  background: var(--accent-hover);
+  color: var(--accent-fg);
+}
+
+.status {
+  margin: 20px 0 0;
+  color: var(--fg-muted);
+  font-size: 14px;
+}
+
+.shot {
+  margin: clamp(48px, 7vw, 72px) 0 0;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shot-shadow);
+}
+
+/* On a phone the whole window would be too small to read, so it shows the chat list. */
+@media (max-width: 640px) {
+  .shot img {
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    object-position: left top;
+  }
+}
+
+section + section,
+.shot + section {
+  margin-top: clamp(72px, 10vw, 120px);
+}
+
+h2 {
+  margin: 0 0 28px;
+  font-size: clamp(26px, 3.4vw, 34px);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.networks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-weight: 500;
+}
+
+.networks li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Each network's own colour, as on its badge in the app. */
+.networks li::before {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  background: var(--net);
+}
+
+.whatsapp {
+  --net: #25d366;
+}
+.signal {
+  --net: #3a76f0;
+}
+.google-messages {
+  --net: #f4b400;
+}
+.google-voice {
+  --net: #188038;
+}
+.telegram {
+  --net: #2aabee;
+}
+.messenger {
+  --net: linear-gradient(200deg, #ff6968, #a334fa 55%, #0695ff);
+}
+.instagram {
+  --net: linear-gradient(45deg, #fdb33a, #ee2a7b 50%, #6228d7);
+}
+.slack {
+  --net: #611f69;
+}
+.groupme {
+  --net: #00aff0;
+}
+.linkedin {
+  --net: #0a66c2;
+}
+.x {
+  --net: #3f4449;
+}
+.bluesky {
+  --net: #1185fe;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Slack's and X's marks are too dark to see on the dark page. */
+  .slack {
+    --net: #b05bb3;
+  }
+  .x {
+    --net: #9aa3ad;
+  }
+}
+
+.points {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 36px 56px;
+}
+
+.points p {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+#self-host > p,
+.note {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.note {
+  margin-top: 20px;
+  font-size: 15px;
+}
+
+p code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.code {
+  position: relative;
+  margin: 20px 0;
+}
+
+pre {
+  margin: 0;
+  padding: 20px 88px 20px 24px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+.copy {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  height: 32px;
+  padding-inline: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font: 500 13px var(--font-sans);
+  cursor: pointer;
+}
+
+.copy:hover {
+  color: var(--fg);
+}
+
+/* Where the commands don't fit on one line they scroll, so Copy moves out from over them. */
+@media (max-width: 760px) {
+  .code {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  pre {
+    align-self: stretch;
+    padding-right: 24px;
+  }
+
+  .copy {
+    position: static;
+  }
+}
+
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  margin-top: clamp(80px, 12vw, 140px);
+  padding-block: 32px 48px;
+  color: var(--fg-muted);
+  font-size: 14.5px;
+}
+
+footer p {
+  margin: 0;
+}
+
+footer p + p {
+  display: flex;
+  gap: 20px;
+}
+
+footer a {
+  color: var(--fg-muted);
+}
