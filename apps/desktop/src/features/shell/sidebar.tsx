@@ -12,7 +12,6 @@ import {
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
 import { Input, InputGroup } from '@trioditis/ui/input'
-import { Kbd } from '@trioditis/ui/kbd'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { toast } from '@trioditis/ui/toast'
@@ -27,7 +26,6 @@ import {
   Filter,
   Inbox,
   Search,
-  SquarePen,
   UserPlus,
   X,
 } from 'lucide-react'
@@ -164,7 +162,8 @@ export function Sidebar({
 
   const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || c.id === openedUnreadId
   const unread = (inbox ?? []).filter(isUnread)
-  const read = (inbox ?? []).filter((c) => !isUnread(c))
+  // Newest first, pinned or not: the server lists pins first, but here only recency matters.
+  const read = (inbox ?? []).filter((c) => !isUnread(c)).sort((a, b) => lastActivity(b) - lastActivity(a))
 
   // Scheduled messages, each with its chat (when one of the loaded views has it) and its opened text.
   const scheduled = useMemo(
@@ -240,7 +239,7 @@ export function Sidebar({
   return (
     <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
       <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
-        <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />} end={<Kbd>⌘K</Kbd>}>
+        <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
           <Input
             ref={searchRef}
             value={query}
@@ -255,12 +254,9 @@ export function Sidebar({
               variant="ghost"
               size="icon"
               aria-label="Filter chats"
-              className={cn('relative', filterActive && 'bg-primary-soft text-primary')}
+              className={cn(filterActive && 'bg-primary-soft text-primary')}
             >
               <Filter className="size-[17px]" />
-              {filterActive ? (
-                <span className="absolute top-1.5 right-1.5 size-[7px] rounded-full bg-primary ring-2 ring-rail" />
-              ) : null}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="max-h-[70vh] overflow-y-auto">
@@ -317,15 +313,6 @@ export function Sidebar({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="New message"
-          title="Starting a new chat isn’t available yet"
-          disabled
-        >
-          <SquarePen className="size-[17px]" />
-        </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-3">
@@ -378,7 +365,7 @@ export function Sidebar({
           ) : (
             <Empty>
               {simpleShow === 'inbox' && !filterActive
-                ? 'No chats yet. Connect a network in Settings → Accounts and they’ll show up here.'
+                ? 'No chats yet. Connect a network in Settings → Accounts.'
                 : 'Nothing here.'}
             </Empty>
           )
@@ -398,7 +385,7 @@ export function Sidebar({
               <Empty>
                 {everything.length
                   ? 'You’re all caught up.'
-                  : 'No chats yet. Connect a network in Settings → Accounts and they’ll show up here.'}
+                  : 'No chats yet. Connect a network in Settings → Accounts.'}
               </Empty>
             )}
             {/* The inbox's next page can hold unread chats too, so it's offered with Read folded;
@@ -491,6 +478,9 @@ export function Sidebar({
     </aside>
   )
 }
+
+/** When a chat last had a message, as its row shows it: imported history may have no time (0). */
+const lastActivity = (c: Chat) => Math.max(c.row.lastMessageAt, c.last?.at ?? 0)
 
 /** A badge count from chats.counts: it stops at 99, and `more` says there may be others. */
 const badge = (c: { count: number; more: boolean }) => `${c.count}${c.more ? '+' : ''}`

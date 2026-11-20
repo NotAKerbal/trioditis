@@ -24,7 +24,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import {
   networkName,
   useChat,
@@ -48,6 +48,7 @@ import {
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
+import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
@@ -69,7 +70,7 @@ export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
   if (!chatId || !chat) {
     return (
       <main className="flex min-w-0 flex-1 items-center justify-center bg-surface-2 text-sm text-subtle-foreground">
-        {chatId && chat === undefined ? '' : 'No chat open. Pick one from the list.'}
+        {chatId && chat === undefined ? '' : 'No chat open'}
       </main>
     )
   }
@@ -96,7 +97,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
   const setDraft = (text: string) => setDraftText(chat.id, text)
   const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
-  const [details, setDetails] = useState(true)
+  const { details } = usePrefs()
 
   // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
@@ -178,11 +179,12 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           />
           <div className="min-w-0">
             <h1 className="truncate text-md font-bold">{name}</h1>
-            <p className="flex items-center gap-1.5 truncate text-sm text-subtle-foreground">
-              {networkName(chat.network)}
-              {chat.row.kind !== 'dm' ? ' · group' : ''}
-              {chat.row.snoozedUntil && !chat.row.woke ? ` · snoozed until ${formatWhen(chat.row.snoozedUntil)}` : ''}
-            </p>
+            {/* The avatar's badge says the network; only a snooze needs saying here. */}
+            {chat.row.snoozedUntil && !chat.row.woke ? (
+              <p className="truncate text-sm text-subtle-foreground">
+                Snoozed until {formatWhen(chat.row.snoozedUntil)}
+              </p>
+            ) : null}
           </div>
           <div className="ml-auto flex items-center gap-0.5">
             {chat.row.isRequest ? (
@@ -295,7 +297,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               aria-label="Chat details"
               aria-pressed={details}
               className={cn(details && 'bg-primary-soft text-primary')}
-              onClick={() => setDetails(!details)}
+              onClick={() => setPref('details', !details)}
             >
               <Info className="size-[18px]" />
             </Button>

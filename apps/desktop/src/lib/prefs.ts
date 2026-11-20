@@ -11,6 +11,8 @@ export interface Prefs {
   networkBadges: boolean
   /** Notify for new messages, once the browser allows it. */
   notifications: boolean
+  /** The open chat's details panel is shown, for every chat until it's closed. */
+  details: boolean
 }
 
 const DEFAULTS: Prefs = {
@@ -18,6 +20,7 @@ const DEFAULTS: Prefs = {
   previews: true,
   networkBadges: true,
   notifications: true,
+  details: false,
 }
 const KEY = 'trioditis.prefs'
 
