@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -724,14 +725,62 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
-// one of their chats. Profiles go only to people who share a chat with the ghost.
+// one of their chats. Profiles go only to people who share a chat with the ghost. The
+// membership is the claim to send it: recorded first, so a profile update meanwhile reaches the
+// person too, and taken back if sending fails, so the next time tries again. Then, where the
+// ghost's ID is their phone number, that number, once for each of the person's logins.
 func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid.UserID) error {
-	added, err := c.Store.AddMember(ctx, contactRoom(o.userID), string(ids.GhostMXID(ghost)))
-	if err != nil || !added {
+	room, mxid := contactRoom(o.userID), string(ids.GhostMXID(ghost))
+	added, err := c.Store.AddMember(ctx, room, mxid)
+	if err != nil {
 		return err
 	}
-	return c.emitContact(ctx, o, ghost, nil, nil)
+	if added {
+		if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
+			c.unclaim(ctx, room, mxid)
+			return err
+		}
+	}
+	return c.ensureNumber(ctx, o, ghost)
 }
+
+// ensureNumber sends the phone number a contact's ID is to the person, the first time one of
+// their logins sees the contact: each login's is its own (numbersRoom), since the number is
+// what that login's chats gave it. It's journaled before it's marked sent, so a failure or a
+// stop in between sends it again with the contact's next message, never not at all; sending it
+// twice is harmless, since a login's identifiers replace its own.
+func (c *Connector) ensureNumber(ctx context.Context, o *owner, ghost networkid.UserID) error {
+	number := numberID(ghost)
+	if !numberIDNetworks[c.Network] || number == "" {
+		return nil
+	}
+	// The marker names the contact by its opaque ID: their Matrix ID would be their number.
+	ghostID, err := c.ghostOpaque(ctx, ghost)
+	if err != nil {
+		return err
+	}
+	room, mxid := numbersRoom(o.userID, o.loginID), ghostID
+	sent, err := c.Store.IsMember(ctx, room, mxid)
+	if err != nil || sent {
+		return err
+	}
+	if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
+		return err
+	}
+	_, err = c.Store.AddMember(ctx, room, mxid)
+	return err
+}
+
+// unclaim takes back a membership recorded for something that then couldn't be sent.
+func (c *Connector) unclaim(ctx context.Context, room, mxid string) {
+	// Even when ctx was what ended the send: the claim must go, or nothing sends it again.
+	if err := c.Store.RemoveMember(context.WithoutCancel(ctx), room, mxid); err != nil {
+		c.Log.Err(err).Msg("Taking back a contact's claim failed; it won't be sent again until it changes")
+	}
+}
+
+// numbersRoom records which contacts' numbers a person's login has sent.
+func numbersRoom(userID, loginID string) string { return "numbers:" + userID + ":" + loginID }
 
 func contactRoom(userID string) string { return "contacts:" + userID }
 
@@ -761,6 +810,11 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 			plain.AvatarUnchanged = true
 		}
 	}
+	return c.emitContactProfile(ctx, o, ghost, plain)
+}
+
+// emitContactProfile seals a contact's profile and sends it to the person.
+func (c *Connector) emitContactProfile(ctx context.Context, o *owner, ghost networkid.UserID, plain protocol.ContactPlaintext) error {
 	ghostID, err := c.ghostOpaque(ctx, ghost)
 	if err != nil {
 		return err
@@ -776,6 +830,81 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	}
 	return c.emit(ctx, &protocol.Event{
 		Type: protocol.EventContact, UserID: o.userID, LoginID: o.loginID, GhostID: ghostID, Sealed: sealed,
+	})
+}
+
+// numberID is the phone number a contact's ID is, as a tel: URI, or "" for one that isn't a
+// number (a WhatsApp LID or bot, which mautrix-whatsapp prefixes).
+func numberID(ghost networkid.UserID) string {
+	digits := string(ghost)
+	if len(digits) < 7 || len(digits) > 15 || strings.Trim(digits, "0123456789") != "" {
+		return ""
+	}
+	return "tel:+" + digits
+}
+
+// syncNumbers sends, for each of the person's contacts whose ID is a phone number and who is in
+// a chat of this login's, that number: the login's own chats gave it the ID. A contact the
+// person knows only through another login is left to that login.
+func (c *Connector) syncNumbers(ctx context.Context, o *owner) error {
+	members, err := c.Store.Members(ctx, contactRoom(o.userID))
+	if err != nil {
+		return err
+	}
+	for _, mxid := range members {
+		ghost, ok := ids.ParseGhostMXID(id.UserID(mxid))
+		if !ok {
+			continue
+		}
+		number := numberID(ghost)
+		if number == "" {
+			continue
+		}
+		seen, err := c.inChatOf(ctx, o.login, mxid)
+		if err != nil {
+			return err
+		} else if !seen {
+			continue
+		}
+		if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// inChatOf reports whether a ghost is in one of a login's chats.
+func (c *Connector) inChatOf(ctx context.Context, login networkid.UserLoginID, ghostMXID string) (bool, error) {
+	rooms, err := c.Store.RoomsOf(ctx, ghostMXID)
+	if err != nil {
+		return false, err
+	}
+	for _, room := range rooms {
+		if key, ok := ids.ParseRoomID(id.RoomID(room)); ok && key.Receiver == login {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// emitContactIdentifiers sends what one of the person's logins knows a contact by, sealed to
+// that person only and apart from the shared profile (see ContactIdentifiersPlaintext). Each
+// login's are their own object (`<ghostId>/identifiers/<loginId>`), so two logins that know a
+// contact differently don't overwrite each other, and an empty list clears that login's.
+func (c *Connector) emitContactIdentifiers(ctx context.Context, o *owner, ghost networkid.UserID, identifiers []string) error {
+	ghostID, err := c.ghostOpaque(ctx, ghost)
+	if err != nil {
+		return err
+	}
+	plain := protocol.ContactIdentifiersPlaintext{Identifiers: fitIdentifiers(identifiers)}
+	contactOwner := *o
+	contactOwner.portalID = ""
+	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID+"/identifiers/"+o.loginID, plain)
+	if err != nil {
+		return err
+	}
+	return c.emit(ctx, &protocol.Event{
+		Type: protocol.EventContactIdentifiers, UserID: o.userID, LoginID: o.loginID, GhostID: ghostID, Sealed: sealed,
 	})
 }
 
@@ -915,6 +1044,25 @@ func fitChat(plain *protocol.ChatPlaintext) {
 	if !fits() {
 		plain.Name = longestFitting(plain.Name, func(name string) bool { plain.Name = name; return fits() })
 	}
+}
+
+// maxIdentifiers is the most identifiers a contact keeps: more numbers and usernames than
+// anyone has, but a bound on what one network can make the host seal.
+const maxIdentifiers = 32
+
+// fitIdentifiers keeps the identifiers that seal within 8 KiB, dropping the last ones first.
+// Each is kept whole or not at all, since a cut phone number or username names someone else.
+func fitIdentifiers(identifiers []string) []string {
+	out := make([]string, 0, min(len(identifiers), maxIdentifiers))
+	for _, ident := range identifiers {
+		if ident != "" && len(ident) <= maxNameBytes && !slices.Contains(out, ident) && len(out) < maxIdentifiers {
+			out = append(out, ident)
+		}
+	}
+	for len(out) > 0 && sealedSize(protocol.ContactIdentifiersPlaintext{Identifiers: out}) > protocol.MaxMetadataSealedBytes {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 // fitContact cuts a contact's profile until it seals within 8 KiB: the handle first, then

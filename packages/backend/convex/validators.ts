@@ -188,6 +188,7 @@ export const bridgeEvent = v.union(
     isRequest: v.optional(v.boolean()),
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
+  v.object({ ...base, type: v.literal('contactIdentifiers'), ghostId: v.string(), sealed: envelope }),
   v.object({
     ...base,
     type: v.literal('loginState'),
@@ -251,6 +252,7 @@ export const commandPayload = v.union(
   v.object({ type: v.literal('loginSubmit'), loginSessionId: v.string(), stepId: v.string() }),
   v.object({ type: v.literal('loginCancel'), loginSessionId: v.string() }),
   v.object({ type: v.literal('logout') }),
+  v.object({ type: v.literal('syncContacts') }),
   v.object({
     type: v.literal('backfill'),
     portalId: v.string(),

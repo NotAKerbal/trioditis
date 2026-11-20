@@ -102,19 +102,20 @@ type eventShape struct{ required, optional []string }
 // against before sending it on: a field it doesn't expect, or a required one missing, gets
 // the event quarantined.
 var eventShapes = map[string]eventShape{
-	EventMessage:        {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId"}},
-	EventEdit:           {[]string{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, []string{"clientMessageId"}},
-	EventReaction:       {[]string{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	EventReactionRemove: {[]string{"portalId", "targetEventId", "sender", "key"}, nil},
-	EventRedaction:      {[]string{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	EventReceipt:        {[]string{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	EventTyping:         {[]string{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	EventChat:           {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted"}},
-	EventContact:        {[]string{"ghostId", "sealed"}, nil},
-	EventLoginState:     {[]string{"state"}, []string{"error"}},
-	EventLoginStep:      {[]string{"loginSessionId", "step"}, nil},
-	EventSendStatus:     {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
-	EventBackfillDone:   {[]string{"portalId", "direction", "more"}, nil},
+	EventMessage:            {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId"}},
+	EventEdit:               {[]string{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, []string{"clientMessageId"}},
+	EventReaction:           {[]string{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	EventReactionRemove:     {[]string{"portalId", "targetEventId", "sender", "key"}, nil},
+	EventRedaction:          {[]string{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	EventReceipt:            {[]string{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	EventTyping:             {[]string{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted"}},
+	EventContact:            {[]string{"ghostId", "sealed"}, nil},
+	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
+	EventLoginState:         {[]string{"state"}, []string{"error"}},
+	EventLoginStep:          {[]string{"loginSessionId", "step"}, nil},
+	EventSendStatus:         {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
+	EventBackfillDone:       {[]string{"portalId", "direction", "more"}, nil},
 }
 
 // field returns an event field by its JSON name, and whether it is set.
@@ -241,7 +242,7 @@ func (e *Event) Validate() error {
 	}
 	if e.Sealed != nil {
 		limit := MaxMessageSealedBytes
-		if e.Type == EventChat || e.Type == EventContact {
+		if e.Type == EventChat || e.Type == EventContact || e.Type == EventContactIdentifiers {
 			limit = MaxMetadataSealedBytes
 		}
 		if seal.DecodedLen(e.Sealed.CT) > limit {
@@ -269,10 +270,12 @@ const (
 	EventTyping         = "typing"
 	EventChat           = "chat"
 	EventContact        = "contact"
-	EventLoginState     = "loginState"
-	EventLoginStep      = "loginStep"
-	EventSendStatus     = "sendStatus"
-	EventBackfillDone   = "backfillDone"
+	// EventContactIdentifiers carries what one of the person's own logins knows a contact by.
+	EventContactIdentifiers = "contactIdentifiers"
+	EventLoginState         = "loginState"
+	EventLoginStep          = "loginStep"
+	EventSendStatus         = "sendStatus"
+	EventBackfillDone       = "backfillDone"
 )
 
 // Send statuses.
@@ -416,6 +419,8 @@ const (
 	CommandLoginCancel = "loginCancel"
 	CommandLogout      = "logout"
 	CommandBackfill    = "backfill"
+	// CommandSyncContacts asks a login for its network's contact list.
+	CommandSyncContacts = "syncContacts"
 )
 
 // LoginSubmitPlaintext is what a sealed loginSubmit envelope holds.
@@ -478,4 +483,14 @@ type ContactPlaintext struct {
 	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
 	// this time (its upload expired). Clients keep the avatar they have.
 	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
+}
+
+// ContactIdentifiersPlaintext is what one of the person's own logins knows a contact by, as
+// URIs (tel:+1555…, mailto:…, telegram:alice), for matching contacts to their address book.
+// It's sealed apart from the profile (kind contact, object ID <ghostId>/identifiers/<loginId>)
+// and sent only to that login's owner: a ghost's profile is shared by everyone on the network who
+// has them as a contact, and what each login can see of a contact differs (a phone number
+// in one person's address book, say).
+type ContactIdentifiersPlaintext struct {
+	Identifiers []string `json:"identifiers"`
 }

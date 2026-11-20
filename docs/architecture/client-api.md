@@ -945,16 +945,90 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 
 ## Contacts
 
-Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
-`ghostId`; the plaintext is `ContactPlaintext`.
+Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID `ghostId`;
+the plaintext is `ContactPlaintext`. A profile is shared: every member who has the contact gets
+the same one. What each of the person's own logins knows a contact by is sealed apart, to the
+person only (object ID `<ghostId>/identifiers/<loginId>`, plaintext
+`ContactIdentifiersPlaintext`: URIs such as `tel:+15551234567`), since what each login can see
+differs. Each login's is its own row, replaced only by that login's, and needs no profile first.
 
-`api.contacts.get({ network, ghostIds })`, at most 100 IDs, returns `[{ ghostId,
-sealedProfile }]` for the ones the person has a contact for on that network; the others are
-left out. A message's sender is `{ ghostId }` on its chat's network, so the client collects a
-page's ghost IDs and asks once (the desktop app does this in group chats, to name each sender beside
-an avatar; its picture needs Media, see Next). Each profile is at most 8 KiB.
+| Function               | Arguments                           | Returns                                                                                  |
+| ---------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `contacts.get`         | `network`, `ghostIds` (at most 100) | `[{ ghostId, sealedProfile }]` for the ones the person has a contact for on that network |
+| `contacts.list`        | `paginationOpts` (up to 500 a page) | `{ network, ghostId, sealedProfile }` pages, every network, in no meaningful order       |
+| `contacts.identifiers` | `paginationOpts` (up to 500 a page) | `{ network, ghostId, loginId, sealed }` pages: each login's identifiers for a contact    |
+| `contacts.sync`        | `networkAccountId`                  | `{ queued }`. Sends that account's contacts' numbers again; within ten minutes, nothing  |
 
-Errors: `Ask for at most 100 contacts at once.`
+A message's sender is `{ ghostId }` on its chat's network, so the client collects a page's ghost
+IDs and asks `contacts.get` once (the desktop app does this in group chats, to name each sender
+beside an avatar; its picture needs Media, see Next). Each profile is at most 8 KiB.
+
+The address book reads every page of `contacts.list` and `contacts.identifiers` to match contacts
+to its cards (People). A page can come back short, or empty, before the end; keep going while
+`isDone` is false.
+
+Identifiers come only from what a login's own chats carry: on networks where a contact's ID can
+be their phone number (WhatsApp, for a contact not hidden behind a LID; `CONTACT_LIST_NETWORKS`),
+each new contact comes with that number, sent once per login, and `contacts.sync` sends them again
+for the contacts in that account's chats. Networks' own contact lists aren't used yet: each
+connector's reaches past the login that asks (Telegram's changes the profile every member sees,
+WhatsApp's fills numbers in from a map the whole host shares, Signal's adds a username from the
+shared profile, Google Messages's logs numbers), so they wait for those connectors to be patched.
+
+Errors: `Ask for at most 100 contacts at once.` · `That account doesn’t exist.` · `That account
+isn’t connected.`
+
+## People
+
+The person's address book: a card for each person they know, whatever networks they're on.
+A card's plaintext is `PersonPlaintext` (packages/core, `people.ts`), modelled on vCard: name
+and its parts, nickname, organization and title, phone numbers, emails, usernames, websites and
+addresses (each with a label), birthday, note, a small photo, and `links`, the network contacts
+(`{ network, ghostId }`) the card is about. Each card is sealed to the person only (kind
+`person`, object ID `personKey`, which the client picks: 16 to 64 letters, digits, `-` and `_`),
+so the server stores ciphertext and how many cards there are, never who is on them or which
+contacts a card links.
+
+| Function          | Arguments                                                                 | Returns                                                                        |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `people.list`     | `paginationOpts` (up to 100 a page)                                       | `{ personKey, sealed, updatedAt }` pages, in `personKey` order                 |
+| `people.revision` |                                                                           | The address book's revision                                                    |
+| `people.put`      | `people: { personKey, sealed }[]` (at most 100), `revision`, `sessionId?` | The new revision. Adds cards or replaces the ones with those keys, all or none |
+| `people.remove`   | `personKeys` (at most 100), `revision`                                    | The new revision. A key with no card is skipped                                |
+
+A sealed card is at most 64 KiB, and a person can have at most 10,000. `people.put` takes the
+page's `sessionId`, like the other sealed writes, and refuses it once the browser has signed in
+to another account.
+
+Every write names the revision it was worked out from, and is refused with code
+`people_changed` if the address book has moved on (another device wrote to it). The server
+can't check links itself, since they're sealed; this is what keeps two devices from linking one
+contact to two cards. The client waits for the new revision and its cards, and works the change
+out again: a link is moved again, an import carries on from the call that was refused, and an
+edit to a card that changed meanwhile is given up, for the person to look at first.
+
+Matching happens on the device, since only it can open both sides (packages/core):
+
+- **Import and export.** `parseContactsFile` reads a vCard file (2.1, 3.0 and 4.0: what iPhone,
+  iCloud, Android, Google Contacts, Outlook and macOS export) or a Google Contacts or Outlook
+  CSV. Importing a card whose UID matches one already here replaces its fields with the file's,
+  keeping its links (and its photo, if the file has none); a UID the file repeats is one card.
+  `toVCards` writes vCard 3.0. The desktop app makes imported photos 128 pixels at most.
+- **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
+  phone number, email or username with it, or failing that has exactly the same name as one
+  card. Numbers match with or without their country code (the shorter must end the longer;
+  two with country codes must be equal). The person confirms every link; the app can link all
+  the matches that aren't by name and point at one card only, in one go.
+- **Not in People.** `groupUnlinked` groups the contacts on no card that share an identifier
+  exactly, so one person on several networks becomes one card (`cardFromContacts`). A number
+  saved without its country code can end two different full numbers, so it never joins them.
+- A contact is on one card at most: linking it to a card takes it off any other
+  (`moveLinks`).
+
+Errors: `Your people changed on another device. Try again.` (`people_changed`) · `That person
+ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
+person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
+people at once.` · `You can have at most 10,000 people.`
 
 ## Server updates
 
@@ -987,8 +1061,8 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
    recounts unread and mentions after it.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
-3. **Done:** a contacts query (Contacts). A list of a chat's members still needs a `members`
-   event from the bridge host.
+3. **Done:** contacts queries (Contacts): for a page's senders, and every contact for the
+   address book. A list of a chat's members still needs a `members` event from the bridge host.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
 5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.

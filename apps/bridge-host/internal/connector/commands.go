@@ -212,6 +212,8 @@ func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check boo
 		return c.handleLogout(ctx, cmd, check)
 	case protocol.CommandBackfill:
 		return c.handleBackfill(ctx, cmd, check)
+	case protocol.CommandSyncContacts:
+		return c.handleSyncContacts(ctx, cmd, check)
 	default:
 		return badRequest("unknown command type %q", cmd.Type)
 	}
@@ -612,6 +614,37 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 		return err
 	}
 	go t.login.Logout(c.Bridge.BackgroundCtx)
+	return nil
+}
+
+// numberIDNetworks are the networks where a contact's ID can be their phone number (on
+// WhatsApp, a contact who isn't hidden behind a LID), which the person's own chats with them
+// carry. testnet is the conformance tests' connector.
+//
+// Networks' own contact lists aren't used: each connector's reaches past the login that asks.
+// mautrix-telegram's changes the ghost every member shares and stores numbers in a shared
+// table, mautrix-whatsapp's fills numbers in from a map every login on the host shares,
+// mautrix-signal's adds a username from the shared ghost, and mautrix-gmessages's logs
+// numbers. Using them needs those connectors patched first.
+var numberIDNetworks = map[string]bool{"whatsapp": true, "testnet": true}
+
+// handleSyncContacts sends, for each contact the login has a chat with whose ID is their
+// phone number, that number, to the login's owner only. It runs in the background, and the
+// numbers arrive as contactIdentifiers events.
+func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Command, check bool) error {
+	if !numberIDNetworks[c.Network] {
+		return conflict(protocol.ErrUnsupported, "the network's contact IDs aren't phone numbers")
+	}
+	t, err := c.resolve(ctx, cmd, false)
+	if err != nil || check {
+		return err
+	}
+	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
+	go func() {
+		if err := c.syncNumbers(c.Bridge.BackgroundCtx, o); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Syncing a login's contact numbers failed")
+		}
+	}()
 	return nil
 }
 

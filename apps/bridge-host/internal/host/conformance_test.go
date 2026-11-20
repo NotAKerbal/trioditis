@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -150,19 +151,20 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 // for each event type, its required and optional fields beyond the ones every event has.
 // The backend refuses an event with a missing or unknown field.
 var eventFields = map[string][2][]string{
-	protocol.EventMessage:        {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
-	protocol.EventEdit:           {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
-	protocol.EventReaction:       {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	protocol.EventReactionRemove: {{"portalId", "targetEventId", "sender", "key"}, nil},
-	protocol.EventRedaction:      {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	protocol.EventReceipt:        {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	protocol.EventTyping:         {{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	protocol.EventChat:           {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
-	protocol.EventContact:        {{"ghostId", "sealed"}, nil},
-	protocol.EventLoginState:     {{"state"}, {"error"}},
-	protocol.EventLoginStep:      {{"loginSessionId", "step"}, nil},
-	protocol.EventSendStatus:     {{"clientMessageId", "status"}, {"eventId", "error"}},
-	protocol.EventBackfillDone:   {{"portalId", "direction", "more"}, nil},
+	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
+	protocol.EventEdit:               {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
+	protocol.EventReaction:           {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	protocol.EventReactionRemove:     {{"portalId", "targetEventId", "sender", "key"}, nil},
+	protocol.EventRedaction:          {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	protocol.EventReceipt:            {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	protocol.EventTyping:             {{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
+	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
+	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventLoginState:         {{"state"}, {"error"}},
+	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
+	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
+	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
 }
 
 func validateEvent(evt map[string]json.RawMessage) string {
@@ -354,6 +356,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindChat, evt.PortalID
 	case protocol.EventContact:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
+	case protocol.EventContactIdentifiers:
+		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -471,6 +475,48 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+	})
+
+	t.Run("a contact whose ID is a phone number comes with it, to the login that saw it", func(t *testing.T) {
+		const number = networkid.UserID("15550001234")
+		if err := h.net.Incoming(aliceNet, "dm-15550001234", number, "n1", "hi from a number", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		first := gw.waitFor(t, "the number's identifiers", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice"
+		})
+		var plain protocol.ContactIdentifiersPlaintext
+		h.open("alice", first, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("identifiers %q", plain.Identifiers)
+		}
+		// Another of alice's logins that sees them sends its own, under its own login.
+		aliceTwo := h.login("alice", "alice-two")
+		if err := h.net.Incoming("alice-two", "dm-15550001234", number, "n2", "hi again", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		second := gw.waitFor(t, "the number from alice's second login", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.LoginID == aliceTwo
+		})
+		if second.GhostID != first.GhostID || second.LoginID == first.LoginID {
+			t.Fatalf("second login's identifiers %+v, first %+v", second, first)
+		}
+		h.open("alice", second, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("second login's identifiers %q", plain.Identifiers)
+		}
+		// A sync sends them again; another login without a chat with them gets nothing.
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
+		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID &&
+				e.LoginID == aliceLogin && e.Seq > second.Seq
+		})
+		bobLogin := h.login("bob", "bob-contacts")
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})
+		time.Sleep(300 * time.Millisecond)
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
+			t.Fatalf("%d identifier events went to someone without a chat with the contact", n)
 		}
 	})
 

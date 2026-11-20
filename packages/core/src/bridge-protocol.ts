@@ -120,6 +120,17 @@ export interface ContactEvent extends EventBase {
   sealed: Envelope
 }
 
+/**
+ * What the event's login knows a contact by: kind `contact`, object ID
+ * `<ghostId>/identifiers/<loginId>`, plaintext `ContactIdentifiersPlaintext`. Sent to that
+ * login's owner only.
+ */
+export interface ContactIdentifiersEvent extends EventBase {
+  type: 'contactIdentifiers'
+  ghostId: string
+  sealed: Envelope
+}
+
 export const LOGIN_STATES = [
   'CONNECTING',
   'CONNECTED',
@@ -188,6 +199,7 @@ export type BridgeEvent =
   | TypingEvent
   | ChatEvent
   | ContactEvent
+  | ContactIdentifiersEvent
   | LoginStateEvent
   | LoginStepEvent
   | SendStatusEvent
@@ -254,6 +266,7 @@ export type BridgeCommand = CommandBase &
     | { type: 'loginCancel'; loginSessionId: string; loginId?: never; notAfter: number }
     | { type: 'logout' }
     | { type: 'backfill'; portalId: string; beforeEventId?: string; limit: number }
+    | { type: 'syncContacts' }
   )
 
 export interface RecipientKeys {
