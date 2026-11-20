@@ -538,7 +538,7 @@ function DemoSeed() {
 // Invitation links made on this page, newest first. The server gives each one only once, so they
 // outlive Members (another section, the dialog closing, an answer that comes after either) until
 // the page reloads. They're kept in memory only.
-type MadeLink = { email: string; link: string }
+type MadeLink = { invitationId: string; email: string; link: string }
 let madeLinks: readonly MadeLink[] = []
 const madeLinkListeners = new Set<() => void>()
 function addMadeLink(made: MadeLink) {
@@ -569,12 +569,15 @@ function Members() {
   const inviteOpener = useRef<HTMLButtonElement>(null)
   // A server that takes no invitations (a demo) has nothing to invite with or list.
   const closed = server?.invitations === false
-  // A link is shown while its invitation is still waiting: once it's joined, revoked or expired,
-  // the link no longer works. Before the list loads, every link shows.
+  // A link is shown while its invitation is still waiting: once it's joined, revoked (which
+  // deletes it) or expired, the link no longer works. The list holds only the newest 100, so a link
+  // whose invitation isn't in a full list may still work, and stays. Before the list loads, every
+  // link shows.
   const shownLinks = invitations
-    ? links.filter((made) =>
-        invitations.some((inv) => inv.email === made.email && !inv.acceptedAt && inv.expiresAt >= Date.now()),
-      )
+    ? links.filter((made) => {
+        const inv = invitations.find((i) => i._id === made.invitationId)
+        return inv ? !inv.acceptedAt && inv.expiresAt >= Date.now() : invitations.length >= 100
+      })
     : links
 
   return (
@@ -607,12 +610,12 @@ function Members() {
                 e.preventDefault()
                 setBusy(true)
                 try {
-                  const { token } = await invite({ email, role, sessionId: session.sessionId })
+                  const { invitationId, token } = await invite({ email, role, sessionId: session.sessionId })
                   // The token goes in the fragment, which never reaches a server or a proxy's logs.
                   const invited = email.trim().toLowerCase()
                   const query = new URLSearchParams({ email: invited })
                   const link = `${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`
-                  addMadeLink({ email: invited, link })
+                  addMadeLink({ invitationId, email: invited, link })
                   setJustMade(link)
                   setEmail('')
                   setInviting(false)
