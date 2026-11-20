@@ -93,15 +93,16 @@ export interface ChatList {
 
 /**
  * One view of the chat list, a page at a time: the pinned chats, then the rest, each newest
- * first, paged as one list, so pins can carry on past the first page and the server never
+ * first (or newest first alone, with `order: 'recent'`), paged as one list, so pins can carry on past the first page and the server never
  * repeats one (client-api.md, The list). The rows are shown as they come, in order.
  */
-export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true): ChatList {
+export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true, order?: 'recent'): ChatList {
   const session = useSession()
   const args = {
     view,
     ...(filter.network ? { network: filter.network } : {}),
     ...(filter.labelId ? { labelId: filter.labelId } : {}),
+    ...(order ? { order } : {}),
   }
   const { results, status, loadMore } = usePaginatedQuery(api.chats.list, enabled ? args : 'skip', {
     initialNumItems: 50,

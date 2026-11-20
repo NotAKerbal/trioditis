@@ -1,11 +1,12 @@
 import type { Id } from '@trioditis/backend/dataModel'
 import { Button } from '@trioditis/ui/button'
 import { cn } from '@trioditis/ui/lib/utils'
-import { AlertCircle, Check, CheckCheck, Clock, Reply } from 'lucide-react'
+import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { formatWhen } from '~/data/snooze.ts'
+import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
@@ -19,7 +20,6 @@ interface MessageListProps {
   loading: boolean
   reactions: Map<string, Reaction[]>
   scheduled: ScheduledItem[]
-  group: boolean
   typing: number
   canLoadMore: boolean
   /** An earlier page is on its way. */
@@ -42,11 +42,18 @@ function dayLabel(ms: number) {
   return dayFormat.format(d)
 }
 
+const fromBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight
+
+const fullFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+const fullTime = (ms: number) => fullFormat.format(new Date(ms))
+
 export function MessageList(props: MessageListProps) {
   const { messages, reactions, scheduled } = props
   const scroller = useRef<HTMLDivElement>(null)
   const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
+  // Far enough up that getting back to the newest message takes a button.
+  const [away, setAway] = useState(false)
   // Whether this chat opened with nothing to show yet. The list is remade for each chat.
   const [openedLoading] = useState(props.loading)
   // Set while earlier messages load: the top-most message in view and how far down it sat, to
@@ -91,9 +98,9 @@ export function MessageList(props: MessageListProps) {
         if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
         before.current = null
       }
-      return
-    }
-    if (atBottom.current) el.scrollTop = el.scrollHeight
+    } else if (atBottom.current) el.scrollTop = el.scrollHeight
+    // New messages below grow the distance to the newest without a scroll: measure it again.
+    setAway(fromBottom(el) > 300)
   }, [messages, scheduled.length, props.typing, props.loadingMore])
 
   // Earlier messages load as the top of the list scrolls near; the button stays as a fallback.
@@ -112,160 +119,263 @@ export function MessageList(props: MessageListProps) {
     const el = scroller.current
     if (!el) return
     const onScroll = () => {
-      atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+      atBottom.current = fromBottom(el) < 40
+      setAway(fromBottom(el) > 300)
     }
     el.addEventListener('scroll', onScroll)
-    return () => el.removeEventListener('scroll', onScroll)
+    // The composer growing (a reply, a long draft) shrinks the list: keep the newest in view.
+    const resized = new ResizeObserver(() => {
+      if (atBottom.current) el.scrollTop = el.scrollHeight
+      setAway(fromBottom(el) > 300)
+    })
+    resized.observe(el)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      resized.disconnect()
+    }
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
   let lastDay = ''
 
   return (
-    <div
-      ref={scroller}
-      className={cn(
-        'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-2',
-        // Messages that had to be fetched ease in; a chat shown from the cache is just there.
-        openedLoading && !props.loading && 'animate-fade-in motion-reduce:animate-none',
-      )}
-      aria-live="polite"
-    >
-      {props.canLoadMore ? (
-        <div ref={top} className="mb-3 flex justify-center">
-          <Button size="sm" onClick={loadEarlier}>
-            Load earlier messages
-          </Button>
-        </div>
-      ) : null}
-      {props.loading ? (
-        <p className="animate-fade-in-late py-16 text-center text-sm text-subtle-foreground" aria-busy="true">
-          Opening messages…
-        </p>
-      ) : messages.length === 0 && scheduled.length === 0 ? (
-        <p className="py-16 text-center text-sm text-subtle-foreground">No messages here yet.</p>
-      ) : null}
-      {messages.map((m, i) => {
-        const day = dayLabel(m.at)
-        const showDay = day !== lastDay
-        lastDay = day
-        const prev = messages[i - 1]
-        const showWho = props.group && !m.self && (!prev || prev.ghostId !== m.ghostId || showDay)
-        const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
-        return (
-          <div key={m.id} data-message-id={m.id}>
-            {showDay ? (
-              <div className="my-3 flex justify-center">
-                <span className="rounded-[10px] bg-surface px-2.5 py-0.5 text-xs text-subtle-foreground shadow-[0_0_0_1px_var(--border)]">
-                  {day}
-                </span>
-              </div>
-            ) : null}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scroller}
+        className={cn(
+          'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
+          // Messages that had to be fetched ease in; a chat shown from the cache is just there.
+          openedLoading && !props.loading && 'animate-fade-in motion-reduce:animate-none',
+        )}
+        aria-live="polite"
+      >
+        {props.canLoadMore ? (
+          <div ref={top} className="mb-3 flex justify-center">
+            <Button size="sm" variant="ghost" onClick={loadEarlier}>
+              Load earlier messages
+            </Button>
+          </div>
+        ) : null}
+        {props.loading ? (
+          <p className="animate-fade-in-late py-16 text-center text-sm text-subtle-foreground" aria-busy="true">
+            Opening messages…
+          </p>
+        ) : messages.length === 0 && scheduled.length === 0 ? (
+          <p className="py-16 text-center text-sm text-subtle-foreground">No messages here yet.</p>
+        ) : null}
+        {messages.map((m, i) => {
+          const day = dayLabel(m.at)
+          const showDay = day !== lastDay
+          lastDay = day
+          const prev = messages[i - 1]
+          const next = messages[i + 1]
+          // Messages around the same time share one time label above them, the day with it
+          // when the day changes, as iMessage and Signal do. Each bubble's own is its tooltip.
+          const showTime = !sameTime(prev, m)
+          const first = !sameRun(prev, m)
+          const last = !sameRun(m, next)
+          const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
+          const text = m.body?.body ?? ''
+          const big = !m.deleted && !quoted && !m.replyTo && isBigEmoji(text)
+          const settled = m.delivery === undefined || SETTLED.has(m.delivery)
+          // Delivery once per run of the person's own, at its end; a message still going, edited or
+          // in trouble shows its own.
+          const meta = (m.self && (last || !settled)) || m.edited ? <Meta m={m} /> : null
+          const reacted = reactions.get(m.id)
+          return (
             <div
+              key={m.id}
               className={cn(
-                'group relative mb-0.5 flex max-w-[78%] flex-col',
-                m.self ? 'ml-auto items-end' : 'items-start',
+                // Joined bubbles sit close; another sender on the same side a little further off.
+                !showTime && (!first ? 'mt-0.5' : prev?.self === m.self ? 'mt-1.5' : 'mt-3'),
               )}
             >
-              {showWho ? (
-                <span className="mt-2.5 mb-0.5 ml-3 text-sm font-semibold text-muted-foreground">Someone</span>
-              ) : null}
-              <div
-                className={cn(
-                  'rounded-[18px] px-3 py-2 leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
-                  m.self ? 'bg-primary text-primary-foreground' : 'bg-surface shadow-[0_0_0_1px_var(--border)]',
-                  m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
-                )}
-              >
-                {quoted || m.replyTo ? (
-                  <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
-                    {quoted?.body?.body ?? 'An earlier message'}
-                  </span>
-                ) : null}
-                {m.deleted
-                  ? 'Message deleted'
-                  : m.body
-                    ? m.body.body || attachmentLabel(m)
-                    : 'This message can’t be opened on this device.'}
-              </div>
-              {reactions.get(m.id)?.length ? (
-                <div className="z-[1] -mt-1.5 mx-2 flex gap-1">
-                  {reactions.get(m.id)!.map((r) => (
-                    <span
-                      key={r.key}
-                      className={cn(
-                        'rounded-[11px] bg-surface px-1.5 text-sm shadow-[0_0_0_1px_var(--border)]',
-                        r.mine && 'bg-primary-soft text-primary-ink shadow-[0_0_0_1px_var(--accent-ring)]',
-                      )}
-                    >
-                      {r.key} {r.count}
-                      {r.more ? '+' : ''}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-              <div className="mx-2.5 mt-0.5 mb-2 flex items-center gap-1.5 text-xs text-subtle-foreground">
-                {m.edited ? <span>Edited ·</span> : null}
-                {messageTime(m.at)}
-                {m.self ? <Delivery m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} /> : null}
-              </div>
-              {!m.pending && !m.deleted ? (
-                <Button
-                  variant="bare"
-                  type="button"
-                  aria-label="Reply"
-                  title="Reply"
-                  onClick={() => props.onReply(m)}
-                  // In the tab order always, shown on hover or when it has keyboard focus.
+              {showTime ? (
+                <p
                   className={cn(
-                    'absolute top-1 flex size-7 items-center justify-center rounded-md bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100',
-                    m.self ? '-left-9' : '-right-9',
+                    'mb-2 text-center text-xs font-medium text-subtle-foreground',
+                    i === 0 ? 'mt-1' : 'mt-5',
                   )}
                 >
-                  <Reply className="size-[15px]" />
-                </Button>
+                  {showDay ? `${day} ` : null}
+                  {messageTime(m.at)}
+                </p>
               ) : null}
+              {/* The anchor for loading earlier messages is the message itself, not its time label:
+                  the label can go when the page above brings messages from around the same time. */}
+              <div
+                data-message-id={m.id}
+                className={cn(
+                  'group relative flex w-fit max-w-[min(78%,38rem)] flex-col',
+                  m.self ? 'ml-auto items-end' : 'items-start',
+                )}
+              >
+                <div
+                  title={fullTime(m.at)}
+                  className={cn(
+                    'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
+                    m.self ? 'bg-primary text-primary-foreground' : 'bg-surface shadow-[0_0_0_1px_var(--border)]',
+                    // Joined bubbles meet with tighter corners on the sender's side.
+                    m.self
+                      ? [!first && 'rounded-tr-[5px]', !last && 'rounded-br-[5px]']
+                      : [!first && 'rounded-tl-[5px]', !last && 'rounded-bl-[5px]'],
+                    m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
+                    big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
+                  )}
+                >
+                  {quoted || m.replyTo ? (
+                    <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
+                      {quoted?.body?.body ?? 'An earlier message'}
+                    </span>
+                  ) : null}
+                  {m.deleted ? (
+                    'Message deleted'
+                  ) : m.body ? (
+                    text ? (
+                      <Linked text={text} />
+                    ) : (
+                      attachmentLabel(m)
+                    )
+                  ) : (
+                    'This message can’t be opened on this device.'
+                  )}
+                  {/* The exact time is the tooltip for a mouse; said here for assistive tech. */}
+                  <span className="sr-only">, {fullTime(m.at)}</span>
+                  {meta ? (
+                    <>
+                      {/* Room at the end of the last line, so the time sits beside the text when it fits. */}
+                      <span aria-hidden className="invisible ml-2 inline-flex">
+                        {meta}
+                      </span>
+                      <span
+                        className={cn(
+                          'absolute right-3 bottom-[5px] inline-flex',
+                          m.self && !big && !m.deleted ? 'text-primary-foreground/75' : 'text-subtle-foreground',
+                        )}
+                      >
+                        {meta}
+                      </span>
+                    </>
+                  ) : null}
+                </div>
+                {reacted?.length ? (
+                  <div className="z-[1] mx-2 -mt-1.5 flex gap-1">
+                    {reacted.map((r) => (
+                      <span
+                        key={r.key}
+                        className={cn(
+                          'rounded-[11px] bg-surface px-1.5 text-sm shadow-[0_0_0_1px_var(--border)]',
+                          r.mine && 'bg-primary-soft text-primary-ink shadow-[0_0_0_1px_var(--accent-ring)]',
+                        )}
+                      >
+                        {r.key} {r.count}
+                        {r.more ? '+' : ''}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {m.self ? <DeliveryProblem m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} /> : null}
+                {!m.pending && !m.deleted ? (
+                  <Button
+                    variant="bare"
+                    type="button"
+                    aria-label="Reply"
+                    title="Reply"
+                    onClick={() => props.onReply(m)}
+                    // In the tab order always, shown on hover or when it has keyboard focus.
+                    className={cn(
+                      'absolute top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-full bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100',
+                      m.self ? '-left-9' : '-right-9',
+                    )}
+                  >
+                    <Reply className="size-[15px]" />
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          )
+        })}
+        {scheduled.map((s) => (
+          <div key={s.id} className="mt-3 ml-auto flex w-fit max-w-[min(78%,38rem)] flex-col items-end">
+            <div className="rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
+              {s.body === undefined ? (
+                <span className="text-subtle-foreground">Opening…</span>
+              ) : s.body === null ? (
+                <span className="text-subtle-foreground italic">
+                  This scheduled message can’t be shown here. You can still cancel it.
+                </span>
+              ) : (
+                s.body
+              )}
+            </div>
+            <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-primary-ink">
+              <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto text-xs"
+                onClick={() => props.onSendScheduledNow(s.id)}
+              >
+                Send now
+              </Button>
+              {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
+                  composer when it's here, and the person is told when it isn't. */}
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto text-xs"
+                onClick={() => props.onCancelScheduled(s.id, s.body)}
+              >
+                {s.body === null ? 'Cancel send' : 'Cancel'}
+              </Button>
             </div>
           </div>
-        )
-      })}
-      {scheduled.map((s) => (
-        <div key={s.id} className="mb-2 ml-auto flex max-w-[78%] flex-col items-end">
-          <div className="rounded-[18px] px-3 py-2 leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
-            {s.body === undefined ? (
-              <span className="text-subtle-foreground">Opening…</span>
-            ) : s.body === null ? (
-              <span className="text-subtle-foreground italic">
-                This scheduled message can’t be shown here. You can still cancel it.
-              </span>
-            ) : (
-              s.body
-            )}
+        ))}
+        {props.typing > 0 ? (
+          <div
+            role="status"
+            className="mt-3 flex w-fit items-center gap-1 rounded-[18px] bg-surface px-3.5 py-3 shadow-[0_0_0_1px_var(--border)]"
+          >
+            <span className="sr-only">
+              {props.typing === 1 ? 'Someone is typing…' : `${props.typing} people are typing…`}
+            </span>
+            {[0, 150, 300].map((delay) => (
+              <span
+                key={delay}
+                aria-hidden
+                style={{ animationDelay: `${delay}ms` }}
+                className="size-1.5 animate-bounce rounded-full bg-subtle-foreground motion-reduce:animate-none"
+              />
+            ))}
           </div>
-          <div className="mx-2.5 mt-0.5 flex items-center gap-2 text-xs text-primary-ink">
-            <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
-            <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onSendScheduledNow(s.id)}>
-              Send now
-            </Button>
-            {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
-                composer when it's here, and the person is told when it isn't. */}
-            <Button
-              variant="link"
-              size="sm"
-              className="h-auto text-xs"
-              onClick={() => props.onCancelScheduled(s.id, s.body)}
-            >
-              {s.body === null ? 'Cancel send' : 'Cancel'}
-            </Button>
-          </div>
-        </div>
-      ))}
-      {props.typing > 0 ? (
-        <p className="mx-2 mb-2 text-sm text-subtle-foreground">
-          {props.typing === 1 ? 'Someone is typing…' : `${props.typing} people are typing…`}
-        </p>
+        ) : null}
+      </div>
+      {away ? (
+        <Button
+          variant="bare"
+          type="button"
+          aria-label="Jump to latest"
+          title="Jump to latest"
+          onClick={() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })}
+          className="absolute right-5 bottom-3 flex size-9 items-center justify-center rounded-full bg-surface text-muted-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-md)] hover:text-foreground"
+        >
+          <ArrowDown className="size-[18px]" />
+        </Button>
       ) : null}
     </div>
+  )
+}
+
+/** Links in a message's text open in a new tab, or the system's browser in the desktop app. */
+function Linked({ text }: { text: string }) {
+  return linkParts(text).map((part, i) =>
+    part.kind === 'link' ? (
+      <a key={i} href={part.href} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+        {part.text}
+      </a>
+    ) : (
+      part.text
+    ),
   )
 }
 
@@ -276,8 +386,40 @@ function attachmentLabel(m: Message) {
   return n === 1 ? `📎 ${m.body!.attachments![0]!.name ?? 'An attachment'}` : `📎 ${n} attachments`
 }
 
-/** The delivery states of docs/architecture/client-api.md, Sending. */
-function Delivery({
+const SETTLED = new Set<Message['delivery']>(['sent', 'delivered', 'read'])
+
+/** Edited and, for the person's own, its delivery state (client-api.md, Sending). */
+function Meta({ m }: { m: Message }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] leading-none whitespace-nowrap not-italic">
+      {m.edited ? 'edited' : null}
+      {m.self ? <DeliveryIcon delivery={m.delivery} /> : null}
+    </span>
+  )
+}
+
+function DeliveryIcon({ delivery }: { delivery: Message['delivery'] }) {
+  switch (delivery) {
+    case undefined:
+      return null
+    case 'queued':
+    case 'claimed':
+    case 'submitted':
+      return <Clock className="size-3" aria-label="Sending" />
+    case 'sent':
+      return <Check className="size-3.5" aria-label="Sent" />
+    case 'delivered':
+      return <CheckCheck className="size-3.5 opacity-70" aria-label="Delivered" />
+    case 'read':
+      return <CheckCheck className="size-3.5 stroke-[2.75]" aria-label="Read" />
+    case 'failed':
+    case 'unknown':
+      return <AlertCircle className="size-3" aria-hidden />
+  }
+}
+
+/** A send that failed or may not have gone, with what the person can do about it. */
+function DeliveryProblem({
   m,
   onSendAgain,
   onDiscard,
@@ -286,61 +428,32 @@ function Delivery({
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
 }) {
-  switch (m.delivery) {
-    case undefined:
-      return null
-    case 'queued':
-    case 'claimed':
-    case 'submitted':
-      return (
-        <span className="inline-flex items-center gap-1" title="Sending">
-          <Clock className="size-3" /> Sending
-        </span>
-      )
-    case 'sent':
-      return (
-        <span title="Sent">
-          <Check className="size-3.5" aria-label="Sent" />
-        </span>
-      )
-    case 'delivered':
-      return (
-        <span title="Delivered">
-          <CheckCheck className="size-3.5" aria-label="Delivered" />
-        </span>
-      )
-    case 'read':
-      return (
-        <span title="Read" className="text-primary">
-          <CheckCheck className="size-3.5" aria-label="Read" />
-        </span>
-      )
-    case 'failed':
-      return (
-        <span className="inline-flex items-center gap-1.5 font-semibold text-danger">
-          <AlertCircle className="size-3" /> Not sent
-          <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-            Retry
-          </Button>
-          <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onDiscard(m)}>
-            Delete
-          </Button>
-        </span>
-      )
-    case 'unknown':
-      return (
-        <span
-          className="inline-flex items-center gap-1.5 font-semibold text-warning"
-          title="The network didn’t confirm this message. Trioditis never resends on its own."
-        >
-          <AlertCircle className="size-3" /> May not have sent
-          <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-            Send again
-          </Button>
-          <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onDiscard(m)}>
-            Discard
-          </Button>
-        </span>
-      )
-  }
+  if (m.delivery === 'failed')
+    return (
+      <span className="mx-2.5 mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-danger">
+        <AlertCircle className="size-3" /> Not sent
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
+          Retry
+        </Button>
+        <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onDiscard(m)}>
+          Delete
+        </Button>
+      </span>
+    )
+  if (m.delivery === 'unknown')
+    return (
+      <span
+        className="mx-2.5 mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-warning"
+        title="The network didn’t confirm this message. Trioditis never resends on its own."
+      >
+        <AlertCircle className="size-3" /> May not have sent
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
+          Send again
+        </Button>
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onDiscard(m)}>
+          Discard
+        </Button>
+      </span>
+    )
+  return null
 }

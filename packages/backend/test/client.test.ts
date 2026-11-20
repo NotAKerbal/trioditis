@@ -109,6 +109,29 @@ describe('chat views', () => {
     expect(signal.page.map((row) => row.portalId)).toEqual(['signal-pin', 'signal-plain'])
   })
 
+  it('lists by recency alone, pinned or not, when asked', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    for (let n = 1; n <= 4; n++) await aChat(t, 'user_a', `c${n}`, { lastMessageAt: n * 10 })
+    await aChat(t, 'user_a', 'old-pin', { lastMessageAt: 5, pinned: true })
+    await aChat(t, 'user_a', 'new-pin', { lastMessageAt: 35, pinned: true })
+    await aChat(t, 'user_a', 'signal', { lastMessageAt: 99, network: 'signal' })
+    const page1 = await a.query(api.chats.list, {
+      order: 'recent',
+      network: 'whatsapp',
+      paginationOpts: { numItems: 3, cursor: null },
+    })
+    expect(page1.page.map((row) => row.portalId)).toEqual(['c4', 'new-pin', 'c3'])
+    const page2 = await a.query(api.chats.list, {
+      order: 'recent',
+      network: 'whatsapp',
+      paginationOpts: { numItems: 3, cursor: page1.continueCursor },
+    })
+    expect(page2.page.map((row) => row.portalId)).toEqual(['c2', 'c1', 'old-pin'])
+    const all = await a.query(api.chats.list, { order: 'recent', paginationOpts: first })
+    expect(all.page.map((row) => row.portalId)).toEqual(['signal', 'c4', 'new-pin', 'c3', 'c2', 'c1', 'old-pin'])
+  })
+
   it('moves a chat between views as its flags change, including combined ones', async () => {
     vi.useFakeTimers()
     const t = setup()
