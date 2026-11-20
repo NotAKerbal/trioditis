@@ -54,7 +54,7 @@ void test('the check looks at every file in the directory, and their names', () 
   }
 })
 
-void test('a change counts as having a note only when it adds one', () => {
+void test('a change counts as having a note only when it adds a line no note had', () => {
   const dir = mkdtempSync(join(tmpdir(), 'release-notes-git-'))
   const git = (...args) => {
     const result = spawnSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args], {
@@ -75,24 +75,35 @@ void test('a change counts as having a note only when it adds one', () => {
     git('add', '-A')
     git('commit', '-qm', 'code only')
     assert.deepEqual(addedNotes(base, dir), [])
-    // An edit to a note a server may already have isn't one: the updater shows only new files.
+    // A blank line added to a note says nothing new.
     writeFileSync(join(dir, 'release-notes', 'first.md'), 'New: One.\n\n')
     git('commit', '-qam', 'edit a note')
     assert.deepEqual(addedNotes(base, dir), [])
     writeFileSync(join(dir, 'release-notes', 'second.md'), 'Fixed: Two.\n')
     git('add', '-A')
     git('commit', '-qm', 'add a note')
-    assert.deepEqual(addedNotes(base, dir), ['release-notes/second.md'])
+    assert.deepEqual(addedNotes(base, dir), ['Fixed: Two.'])
     const added = git('rev-parse', 'HEAD')
-    // Nor is renaming one that's there already.
+    // Nor does renaming a note, or moving its line into another.
     git('mv', 'release-notes/first.md', 'release-notes/renamed.md')
     git('commit', '-qm', 'rename a note')
     assert.deepEqual(addedNotes(added, dir), [])
+    writeFileSync(join(dir, 'release-notes', 'second.md'), 'Fixed: Two.\nNew: One.\n')
+    git('rm', '-q', 'release-notes/renamed.md')
+    git('commit', '-qam', 'merge two notes')
+    assert.deepEqual(addedNotes(added, dir), [])
+    // A new line beside a rewritten one counts.
+    writeFileSync(join(dir, 'release-notes', 'third.md'), 'Improved: Three.\n')
+    writeFileSync(join(dir, 'release-notes', 'second.md'), 'Fixed: Two, again.\n')
+    git('add', '-A')
+    git('commit', '-qm', 'add and rewrite')
+    assert.deepEqual(addedNotes(added, dir), ['Fixed: Two, again.', 'Improved: Three.'])
+    const rewritten = git('rev-parse', 'HEAD')
     git('rm', '-q', 'release-notes/second.md')
     git('commit', '-qm', 'remove it')
     // Removing a note isn't writing one.
-    assert.deepEqual(addedNotes(added, dir), [])
-    assert.throws(() => addedNotes('no-such-ref', dir), /git diff from no-such-ref failed/)
+    assert.deepEqual(addedNotes(rewritten, dir), [])
+    assert.throws(() => addedNotes('no-such-ref', dir), /git grep at no-such-ref failed/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

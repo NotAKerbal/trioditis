@@ -366,8 +366,8 @@ updater hasn't reported for 25 minutes (it reports every ten), since it may be s
 **Release notes** lists, by label, the notes of the changes an available update brings, and
 once the updater has installed one, **What's new** lists that update's notes until the server
 moves on. Each change writes its own note in `release-notes/` (docs/CONTRIBUTING.md, Release
-notes); the updater collects those the new commit adds, so an update made by hand, with the
-installer, shows none.
+notes); the updater collects the note lines the new commit adds, so an update made by hand,
+with the installer, shows none.
 
 What the updater does:
 

@@ -134,30 +134,46 @@ MAX_NOTES=100
 MAX_NOTE_BYTES=800
 
 # release_notes FROM TO: the release notes TO has that FROM doesn't, as `<Label><tab><text>`
-# lines: each line of every file in release-notes/ that TO adds, the newest file first. A note
-# renamed (or moved with small edits) isn't new, as in scripts/release-notes.mjs, which checks
-# the format (docs/CONTRIBUTING.md, Release notes); a line that doesn't fit it is left out here.
+# lines. A line is new unless one of FROM's notes has it word for word, so a note renamed,
+# moved or split isn't shown again, and an edited line is. Files go newest first: the order the
+# commits in between last touched them, then any left in name order. scripts/release-notes.mjs
+# checks the format (docs/CONTRIBUTING.md, Release notes) and finds new lines the same way; a
+# line that doesn't fit the format is left out here.
+NOTE_LINE='^(New|Improved|Fixed|Security|Internal): .+'
+note_lines() {
+  # `<commit>:<path>:<line>` for each note line in a commit, control characters dropped.
+  git -C "$root" -c core.quotePath=true grep -I -E "$NOTE_LINE" "$1" -- release-notes/ 2>/dev/null |
+    LC_ALL=C tr -d '\000-\011\013-\037\177'
+}
 release_notes() {
-  local from=$1 to=$2 path line count=0
-  local -A added=() seen=()
+  local from=$1 to=$2 path line text count=0
+  local -A old=() lines=() seen=()
   local ordered=()
-  while IFS= read -r path; do added[$path]=1; done < <(
-    git -C "$root" -c core.quotePath=true diff --name-only --find-renames --diff-filter=A "$from" "$to" -- release-notes/)
-  # Newest first: the order the commits in between added them, then any left in name order.
+  while IFS= read -r line; do
+    line=${line#"$from:"}
+    old[${line#*:}]=1
+  done < <(note_lines "$from")
+  while IFS= read -r line; do
+    line=${line#"$to:"}
+    path=${line%%:*} text=${line#*:}
+    [[ "$path" =~ ^release-notes/[a-z0-9][a-z0-9-]*\.md$ ]] && [ -z "${old[$text]:-}" ] || continue
+    lines[$path]+="$text"$'\n'
+  done < <(note_lines "$to")
   while IFS= read -r path; do
-    [ -n "$path" ] && [ -n "${added[$path]:-}" ] && [ -z "${seen[$path]:-}" ] || continue
+    [ -n "$path" ] && [ -n "${lines[$path]:-}" ] && [ -z "${seen[$path]:-}" ] || continue
     seen[$path]=1
     ordered+=("$path")
-  done < <(git -C "$root" -c core.quotePath=true log --format= --name-only --find-renames --diff-filter=A \
-    "$from..$to" -- release-notes/; printf '%s\n' "${!added[@]}" | LC_ALL=C sort)
+  done < <(git -C "$root" -c core.quotePath=true log --format= --name-only "$from..$to" -- release-notes/
+    printf '%s\n' "${!lines[@]}" | LC_ALL=C sort)
   for path in "${ordered[@]}"; do
-    [[ "$path" =~ ^release-notes/[a-z0-9][a-z0-9-]*\.md$ ]] || continue
-    while IFS= read -r line || [ -n "$line" ]; do
+    while IFS= read -r line; do
       [[ "$line" =~ ^(New|Improved|Fixed|Security|Internal):\ (.+)$ ]] || continue
+      [ -z "${seen[$line]:-}" ] || continue
+      seen[$line]=1
       [ "$count" -lt "$MAX_NOTES" ] || return 0
       printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$(printf '%s' "${BASH_REMATCH[2]}" | head -c "$MAX_NOTE_BYTES")"
       count=$((count + 1))
-    done < <(git -C "$root" show "$to:$path" | LC_ALL=C tr -d '\000-\011\013-\037\177')
+    done <<<"${lines[$path]%$'\n'}"
   done
 }
 

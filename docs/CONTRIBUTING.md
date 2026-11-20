@@ -519,11 +519,11 @@ Fixed: Signing in to Google no longer freezes when the page asks for a passkey.
 - Write for the people using the server: what they can now do, or what no longer goes wrong.
   `Internal:` is for changes they won't notice (CI, refactors, docs), so every pull request
   still has a note.
-- Add a new file every time. The updater shows the notes an update adds, so an edit to a note
-  a server already has never reaches it.
+- Add a new file every time. The updater shows the lines an update adds, word for word, so a
+  note renamed or moved isn't shown again, and an edited line shows as new.
 
 `node scripts/release-notes.mjs check` checks the format (it's part of `pnpm check`), and CI
-fails a pull request that adds no note.
+fails a pull request that adds no new line. Review judges whether the note says what changed.
 
 ## Worktrees
 

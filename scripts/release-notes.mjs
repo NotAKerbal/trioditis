@@ -5,8 +5,9 @@
 //   node scripts/release-notes.mjs check
 //     Checks every file in release-notes/ against the format.
 //   node scripts/release-notes.mjs added <base>
-//     Fails unless the changes from <base> to HEAD add a release note. A new file, since the
-//     updater shows only the notes an update adds, not edits to ones a server already has.
+//     Fails unless the changes from <base> to HEAD add a release note: a line no note at <base>
+//     has word for word, which is what the updater shows as new. Whether it says something is
+//     for review.
 //
 // The updater reads the same format in deploy/updater/updater.sh (release_notes); keep the two
 // in step.
@@ -77,19 +78,27 @@ export function checkNotes(dir) {
   return problems
 }
 
+/** Every note line in release-notes/ at `commit`, in `cwd`'s repository, as the updater reads them. */
+function noteLines(commit, cwd) {
+  const pattern = `^(${LABELS.join('|')}): .+`
+  const result = spawnSync('git', ['grep', '-h', '-I', '-E', pattern, commit, '--', `${NOTES_DIR}/`], {
+    cwd,
+    encoding: 'utf8',
+  })
+  // git grep exits 1 when nothing matches.
+  if (result.status === 1 && !result.stderr) return []
+  if (result.status !== 0) throw new Error(`git grep at ${commit} failed: ${result.stderr.trim()}`)
+  return result.stdout.split('\n').filter(Boolean)
+}
+
 /**
- * The release notes the changes from `base` to HEAD add, in `cwd`'s repository. A note renamed,
- * or moved with small edits, isn't a new one: git's rename detection finds it, as the updater's
- * does (release_notes in deploy/updater/updater.sh).
+ * The note lines HEAD has that no note at `base` has word for word, in `cwd`'s repository: what
+ * the updater shows as new (release_notes in deploy/updater/updater.sh). A note renamed, moved or
+ * split adds none.
  */
 export function addedNotes(base, cwd) {
-  const result = spawnSync(
-    'git',
-    ['diff', '--name-only', '--find-renames', '--diff-filter=A', base, 'HEAD', '--', `${NOTES_DIR}/`],
-    { cwd, encoding: 'utf8' },
-  )
-  if (result.status !== 0) throw new Error(`git diff from ${base} failed: ${result.stderr.trim()}`)
-  return result.stdout.split('\n').filter(Boolean)
+  const old = new Set(noteLines(base, cwd))
+  return [...new Set(noteLines('HEAD', cwd))].filter((line) => !old.has(line))
 }
 
 function main() {
