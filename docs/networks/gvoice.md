@@ -15,11 +15,20 @@ bridged.
 
 ## Logging in
 
-The connector offers one flow, **`cookies`** ("Paste cookies"). The account must already
-have a Google Voice number; finish setting it up at voice.google.com first, or the login ends
-with "no Google Voice number".
+The connector offers one flow, **`cookies`** ("Sign in with Google"). The account must
+already have a Google Voice number; finish setting it up at voice.google.com first, or the
+login ends with "no Google Voice number".
 
-1. In Trioditis, Settings → Accounts → Google Voice → Paste cookies.
+In Trioditis, Settings → Accounts → Google Voice → **Sign in with Google**. The stepper shows
+Google's sign-in page for voice.google.com, running in the server's sign-in browser
+(docs/architecture/signin-browser.md). Sign in there with the account that has the number;
+once Google has set the required cookies, the bridge host takes them and the login carries
+on by itself. Google may refuse to sign in from that browser ("This browser or app may not be
+secure"), judging it automated. Then, or on a server without the sign-in browser, choose
+**Paste cookies instead** and copy them by hand:
+
+1. In Trioditis, Settings → Accounts → Google Voice → Sign in with Google → Paste cookies
+   instead.
 2. In a desktop browser, open a **private window**, go to `https://voice.google.com` and
    sign in with the Google account that has the number. Wait until your messages load.
 3. Open the developer tools: Chrome, Application → Storage → Cookies →

@@ -145,6 +145,21 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_network_state', ['network', 'state']),
 
+  /**
+   * Tickets to a login step's sign-in browser (docs/architecture/signin-browser.md). Only the
+   * ticket's SHA-256 is kept; the gateway redeems a ticket once, within a minute.
+   */
+  signinTickets: defineTable({
+    tokenHash: v.string(),
+    loginSessionId: v.id('loginSessions'),
+    userId: v.string(),
+    hostId: v.string(),
+    stepId: v.string(),
+    expiresAt: v.number(),
+  })
+    .index('by_token', ['tokenHash'])
+    .index('by_user', ['userId']),
+
   chats: defineTable({
     userId: v.string(),
     network: storedNetwork,

@@ -96,6 +96,8 @@ export const loginStep = v.object({
       url: v.string(),
       userAgent: v.optional(v.string()),
       fields: v.array(v.object({ id: v.string(), required: v.boolean() })),
+      browser: v.optional(v.boolean()),
+      hidden: v.optional(v.boolean()),
     }),
   ),
   loginId: v.optional(v.string()),

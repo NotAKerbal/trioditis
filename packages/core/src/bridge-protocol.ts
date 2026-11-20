@@ -142,7 +142,15 @@ export interface LoginStep {
   instructions?: string
   display?: { type: 'qr' | 'code' | 'emoji' | 'nothing'; data?: string }
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
-  cookies?: { url: string; userAgent?: string; fields: { id: string; required: boolean }[] }
+  cookies?: {
+    url: string
+    userAgent?: string
+    fields: { id: string; required: boolean }[]
+    /** The bridge host can run this step in the sign-in browser (signin-browser.md). */
+    browser?: boolean
+    /** The page needs nobody to look at it: with `browser`, the bridge host runs it by itself. */
+    hidden?: boolean
+  }
   loginId?: string
   error?: ErrorCode
 }

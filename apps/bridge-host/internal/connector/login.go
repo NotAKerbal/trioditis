@@ -18,6 +18,7 @@ import (
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 )
 
 // loginSession is one run of a network's login flow, driven by loginStart, loginSubmit and
@@ -39,6 +40,8 @@ type loginSession struct {
 	// even with a different command ID, is refused.
 	submitted string
 	done      bool
+	// browser is the current cookie step's sign-in browser, once someone opens it.
+	browser *signin.Browser
 }
 
 func randomStepID() string {
@@ -97,8 +100,23 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command,
 }
 
 func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command, check bool) error {
+	// The sign-in browser may have submitted this step while the person was pasting it: the
+	// browser's submission goes on, and the pasted one is taken and dropped, unopened, even
+	// once the login has moved past the step or ended. Refusing it would end the login with an
+	// error if the backend hasn't heard of the browser's outcome yet. The browser claims a
+	// step under the login's lock, so it is asked again wherever this could still refuse.
+	browserWon := func() bool {
+		_, won := c.browserSteps.Load(cmd.LoginSessionID + "/" + cmd.StepID)
+		return won
+	}
+	if browserWon() {
+		return nil
+	}
 	raw, ok := c.logins.Load(cmd.LoginSessionID)
 	if !ok {
+		if browserWon() {
+			return nil
+		}
 		// A login recorded as in progress but not running here was lost (a restart): the
 		// person is waiting on it, so it ends with an error they see. One that has simply
 		// ended (a second submit after it completed) is only refused.
@@ -127,10 +145,17 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 		return err
 	}
 	s.lock.Lock()
+	if browserWon() {
+		s.lock.Unlock()
+		clear(plain.Input)
+		return nil
+	}
 	step, stepID := s.step, s.stepID
 	current := step != nil && stepID == cmd.StepID && s.submitted != stepID
 	if current && !check {
 		s.submitted = stepID
+		// Pasted first: the browser has nothing more to do.
+		s.closeBrowser()
 	}
 	s.lock.Unlock()
 	if !current {
@@ -140,36 +165,43 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 		clear(plain.Input)
 		return nil
 	}
-	go func() {
-		var next *bridgev2.LoginStep
-		var err error
-		switch step.Type {
-		case bridgev2.LoginStepTypeUserInput:
-			proc, ok := s.process.(bridgev2.LoginProcessUserInput)
-			if !ok {
-				err = errors.New("login process doesn't accept input")
-				break
-			}
-			next, err = proc.SubmitUserInput(s.ctx, plain.Input)
-		case bridgev2.LoginStepTypeCookies:
-			proc, ok := s.process.(bridgev2.LoginProcessCookies)
-			if !ok {
-				err = errors.New("login process doesn't accept cookies")
-				break
-			}
-			// A cookie left blank is an optional one the person doesn't have. Connectors put
-			// every cookie they are given into their requests, so it isn't passed on empty.
-			maps.DeleteFunc(plain.Input, func(_, value string) bool { return value == "" })
-			decodeCookies(step.CookiesParams, plain.Input)
-			next, err = proc.SubmitCookies(s.ctx, plain.Input)
-		default:
-			err = errors.New("the current login step doesn't take input")
-		}
-		// The input is a credential; drop the only copy as soon as it's used.
-		clear(plain.Input)
-		s.advance(next, err)
-	}()
+	go s.submitInput(step, plain.Input, false)
 	return nil
+}
+
+// submitInput hands a step's input to the network and moves the login on with what it
+// answers. The input is a credential: it is cleared once used. decoded says its cookies are
+// already percent-decoded, as the sign-in browser's are.
+func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]string, decoded bool) {
+	var next *bridgev2.LoginStep
+	var err error
+	switch step.Type {
+	case bridgev2.LoginStepTypeUserInput:
+		proc, ok := s.process.(bridgev2.LoginProcessUserInput)
+		if !ok {
+			err = errors.New("login process doesn't accept input")
+			break
+		}
+		next, err = proc.SubmitUserInput(s.ctx, input)
+	case bridgev2.LoginStepTypeCookies:
+		proc, ok := s.process.(bridgev2.LoginProcessCookies)
+		if !ok {
+			err = errors.New("login process doesn't accept cookies")
+			break
+		}
+		// A cookie left blank is an optional one the person doesn't have. Connectors put
+		// every cookie they are given into their requests, so it isn't passed on empty.
+		maps.DeleteFunc(input, func(_, value string) bool { return value == "" })
+		if !decoded {
+			decodeCookies(step.CookiesParams, input)
+		}
+		next, err = proc.SubmitCookies(s.ctx, input)
+	default:
+		err = errors.New("the current login step doesn't take input")
+	}
+	// The input is a credential; drop the only copy as soon as it's used.
+	clear(input)
+	s.advance(next, err)
 }
 
 func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command, check bool) error {
@@ -199,6 +231,7 @@ func (s *loginSession) finish() {
 	s.done = true
 	s.cancel()
 	s.process.Cancel()
+	s.closeBrowser()
 }
 
 // maxLoginStepBytes is the most a login step may hold, as the backend requires.
@@ -274,6 +307,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	}
 	s.lock.Lock()
 	s.step, s.stepID = step, stepID
+	// The last step's browser has nothing more to do.
+	s.closeBrowser()
 	s.lock.Unlock()
 	out := &protocol.LoginStep{StepID: stepID, Instructions: step.Instructions}
 	switch step.Type {
@@ -294,7 +329,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	case bridgev2.LoginStepTypeCookies:
 		out.Type = protocol.StepCookies
 		if p := step.CookiesParams; p != nil {
-			out.Cookies = &protocol.LoginCookies{URL: p.URL, UserAgent: p.UserAgent}
+			out.Cookies = &protocol.LoginCookies{URL: p.URL, UserAgent: p.UserAgent, Browser: s.c.Signin != nil, Hidden: p.Hidden}
 			for _, f := range p.Fields {
 				out.Cookies.Fields = append(out.Cookies.Fields, protocol.LoginCookieField{ID: f.ID, Required: f.Required})
 			}
@@ -327,6 +362,9 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	}
 	if err := report(out); err != nil {
 		log.Err(err).Msg("Failed to report login step")
+	}
+	if p := step.CookiesParams; step.Type == bridgev2.LoginStepTypeCookies && p != nil && p.Hidden && s.c.Signin != nil {
+		s.runHidden(stepID)
 	}
 	if step.Type == bridgev2.LoginStepTypeDisplayAndWait {
 		proc, ok := s.process.(bridgev2.LoginProcessDisplayAndWait)

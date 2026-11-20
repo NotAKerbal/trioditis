@@ -29,6 +29,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/server"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
@@ -55,6 +56,8 @@ type Config struct {
 	// AdjustBridgeConfig lets callers change bridgev2's settings, for tests.
 	AdjustBridgeConfig func(*bridgeconfig.BridgeConfig)
 	SendTimeout        time.Duration
+	// Signin, if set, runs cookie login steps in the sign-in browser.
+	Signin *signin.Launcher
 
 	Log zerolog.Logger
 }
@@ -166,7 +169,7 @@ func New(cfg Config) (*Host, error) {
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
 		BridgeKey: cfg.BridgeKey,
-		Notify:    notify, SendTimeout: cfg.SendTimeout,
+		Notify:    notify, SendTimeout: cfg.SendTimeout, Signin: cfg.Signin,
 	})
 	bridgeCfg := BridgeConfig()
 	if cfg.AdjustBridgeConfig != nil {
@@ -230,7 +233,10 @@ func (h *Host) Start(ctx context.Context) error {
 			return fmt.Errorf("host: failed to listen: %w", err)
 		}
 		h.listener = listener
-		srv := &server.Server{Token: h.Config.InternalToken, Handler: h.Connector, Log: h.Config.Log.With().Str("component", "server").Logger()}
+		srv := &server.Server{Token: h.Config.InternalToken, Handler: h.Connector, Browsers: h.Connector, Log: h.Config.Log.With().Str("component", "server").Logger()}
+		if h.Config.Signin != nil {
+			srv.Refuse = signin.FromBrowser(h.Config.Signin.URL)
+		}
 		h.httpServer = &http.Server{Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := h.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

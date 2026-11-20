@@ -111,6 +111,14 @@ local_flags_given="${port+--port }${host+--host }${bind+--bind }"
 command -v docker >/dev/null || die "Docker isn't installed. Install Docker Engine and the Compose plugin, then run this again."
 docker compose version >/dev/null 2>&1 || die "The Docker Compose plugin isn't installed (docker compose)."
 docker info >/dev/null 2>&1 || die "Can't talk to Docker. Add yourself to the docker group (and log in again), or run this as a user who can."
+# The sign-in browser's network gives the server no address only from Docker 28 on
+# (compose.yml, signin); an older Docker would leave the server's own services reachable from
+# the browser.
+docker_major=$(docker info --format '{{.ServerVersion}}' 2>/dev/null | cut -d. -f1)
+case "$docker_major" in
+  '' | *[!0-9]*) die "Can't tell which Docker Engine this is (docker info)." ;;
+esac
+[ "$docker_major" -ge 28 ] || die "Trioditis needs Docker Engine 28 or later; this is $(docker info --format '{{.ServerVersion}}'). Upgrade Docker, then run this again."
 
 case "$(uname -m)" in
   x86_64 | amd64 | aarch64 | arm64) ;;
@@ -540,6 +548,8 @@ keep_or CONVEX_INSTANCE_SECRET "$(hex_secret 32)"
 keep_or BETTER_AUTH_SECRET "$(secret 32)"
 keep_or GATEWAY_SECRET "$(secret 32)"
 keep_or TRIODITIS_INTERNAL_TOKEN "$(secret 32)"
+# Lets a bridge host start sign-in browsers, and nothing else: the browser's container holds it.
+keep_or LOGIN_BROWSER_TOKEN "$(secret 32)"
 keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 keep_or UPDATER_SECRET "$(secret 32)"
 

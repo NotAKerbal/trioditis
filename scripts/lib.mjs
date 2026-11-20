@@ -195,6 +195,10 @@ export const portsFor = (slot) => ({
   convexCloud: 4210 + 2 * slot,
   convexSite: 4211 + 2 * slot,
   gateway: 8700 + 10 * slot,
+  // The gateway's public listener (the sign-in browser's viewers) and the login-browser
+  // launcher, in the gaps the 8700s left.
+  gatewayPublic: 8701 + 10 * slot,
+  loginBrowser: 8703 + 10 * slot,
   bridge: {
     whatsapp: 8702 + 10 * slot,
     // The networks added later, above every slot's ports in the 8700s and 9000s (slots go
@@ -218,6 +222,8 @@ const allPorts = (ports) => [
   ports.convexCloud,
   ports.convexSite,
   ports.gateway,
+  ports.gatewayPublic,
+  ports.loginBrowser,
   ...Object.values(ports.bridge),
 ]
 
@@ -741,6 +747,7 @@ export function devSecrets() {
     GATEWAY_SECRET: secret,
     TRIODITIS_INTERNAL_TOKEN: secret,
     TRIODITIS_SETUP_TOKEN: secret,
+    LOGIN_BROWSER_TOKEN: secret,
   }
   for (const [name, make] of Object.entries(defaults)) if (!values.has(name)) values.set(name, make())
   for (const name of ['BRIDGE', 'AGENT_ACCESS']) {
@@ -961,6 +968,8 @@ export function goEnv() {
  */
 export function buildBridgeHost({ signal = false } = {}) {
   const goEnvironment = goEnv()
+  // The sign-in browser's launcher, from the same module.
+  run('go', ['build', '-o', 'bin/login-browser', './cmd/login-browser'], { cwd: bridgeDir, env: goEnvironment })
   if (!signal) {
     run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnvironment })
     return resolve(bridgeDir, 'bin/bridge-host')
@@ -995,6 +1004,21 @@ export function libsignalDir(module = resolve(bridgeDir, 'third_party/mautrix-si
     throw new Error(`${library} isn't libsignal v${version}, the version mautrix-signal needs. ${how}`)
   }
   return dir
+}
+
+/**
+ * The Chromium the sign-in browser runs: CHROMIUM_PATH, or the first Chromium or Chrome on
+ * PATH. Without one, `pnpm dev` runs no sign-in browser and cookie logins are pasted by hand.
+ */
+export function findChromium() {
+  const names = process.env.CHROMIUM_PATH
+    ? [process.env.CHROMIUM_PATH]
+    : ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome']
+  for (const name of names) {
+    const found = spawnSync('sh', ['-c', 'command -v "$1"', 'sh', name], { encoding: 'utf8' })
+    if (found.status === 0 && found.stdout.trim()) return found.stdout.trim()
+  }
+  return null
 }
 
 /** The desktop and web app's package, if this checkout has it. */

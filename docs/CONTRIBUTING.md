@@ -47,10 +47,11 @@ This one command:
    by you), and sets the ones the backend needs on it: `SITE_URL`, `BETTER_AUTH_SECRET`,
    `GATEWAY_SECRET`, `TRIODITIS_SETUP_TOKEN`, `TRIODITIS_NETWORKS`, `BRIDGE_PUBLIC_KEY` and
    `AGENT_ACCESS_PUBLIC_KEY`.
-3. Builds the bridge host.
+3. Builds the bridge host and the sign-in browser's launcher.
 4. Starts the backend in watch mode and creates the test account, as the server's admin.
-5. Starts the gateway, a bridge host for each network (WhatsApp unless you pass `--network`),
-   and the web app from `apps/desktop` once that exists.
+5. Starts the gateway, the sign-in browser if it finds a Chromium, a bridge host for each
+   network (WhatsApp unless you pass `--network`), and the web app from `apps/desktop` once
+   that exists.
 
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
@@ -72,6 +73,14 @@ the network there, then connect your account to it. `pnpm dev` bridges WhatsApp,
 with your phone; `--network` picks others, comma-separated. A network's data stays on this
 machine, in this checkout's `.data/`. Signal's bridge host links libsignal, so the first run
 with Signal builds it (Rust, several minutes).
+
+The networks that log in on their website (Messenger, Instagram, Google Messages, Google
+Voice, Slack, LinkedIn, X) sign in through the sign-in browser
+(docs/architecture/signin-browser.md). `pnpm dev` runs it with `CHROMIUM_PATH`, or the first
+of `chromium`, `chromium-browser`, `google-chrome-stable` and `google-chrome` on your `PATH`,
+keeping each browser's profile in `/dev/shm`. Without one it says so, and those logins ask
+for their cookies to be pasted instead. Its launcher and the gateway's public listener, which
+the web app's dev server forwards `/login-browser` to, take two more of the checkout's ports.
 
 ### Demo data
 

@@ -803,11 +803,18 @@ network with `termsRisk` (cookie or token logins can get an account banned).
    - `displayAndWait`: with `display.type` `qr`, draw `display.data` as a QR code; with
      `code`, show it big, for typing on the phone; with `emoji`, show it to compare
    - `userInput`: a form from `fields` (`id`, `type`, `name`, `description?`, `pattern?`)
-   - `cookies`: ask for the listed cookies from `cookies.url`
+   - `cookies`: with `cookies.browser`, show the sign-in browser: get a ticket and an
+     admission from `api.logins.openBrowser({ loginSessionId, stepId, sessionId })` and open
+     the `/login-browser` websocket with them (signin-browser.md, Tickets). The person signs in on the site
+     and the bridge host submits what it needs itself, so there is nothing to submit here.
+     Offer pasting the listed cookies from `cookies.url` as the fallback, and only that when
+     `browser` is absent. With `cookies.hidden` (and `browser`), say it's working: the step
+     runs by itself
    - `complete`: done, the account is connected
    - `error`: show the message for `step.error` (an error code; see bridge-protocol.md,
      Errors) and offer to start again
-3. Submit what the person entered, sealed to the bridge key, since it's a credential:
+3. Submit what the person entered (a form, or pasted cookies), sealed to the bridge key,
+   since it's a credential:
 
    ```ts
    await convex.mutation(api.logins.submit, {
@@ -841,8 +848,9 @@ Errors: `That network isn’t installed on this server.` · `Finish setting up y
 its password and recovery key, before connecting a network.` · `That isn’t a login method
 this network offers.` · `That step of the login is over. Start again if it didn’t finish.` ·
 `That input isn’t sealed, or is too long.` · `That’s already been sent. Wait for the next
-step.` (a second submission for the same step) · `That login doesn’t exist.` · `That
-account doesn’t exist.`
+step.` (a second submission for the same step) · `That step of the login can’t be opened in
+a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login doesn’t exist.` ·
+`That account doesn’t exist.`
 
 ### Health
 

@@ -14,14 +14,21 @@ settings: nothing to put in `.env`, and the compose service (`bridge-linkedin`, 
 
 ## Connecting an account
 
-One flow is offered: **Paste cookies** (flow ID `cookies`). The connector also has an
+One flow is offered: **Sign in on linkedin.com** (flow ID `cookies`). The connector also has an
 email-and-password flow (`password`), which isn't offered: when LinkedIn wants extra
 verification it asks the person to choose between options ("Approve in LinkedIn app", "Try
 another way", "Continue in browser"), and login steps can't carry a field's options to the
 app yet. Offering it needs `options` added to login fields (bridge host, backend validator,
 stepper) and nothing else.
 
-To connect:
+In Trioditis, Settings → Accounts → LinkedIn → **Sign in on linkedin.com**. The stepper
+shows LinkedIn's login page, running in the server's sign-in browser
+(docs/architecture/signin-browser.md). Sign in there, finishing any verification, until the
+feed loads: the bridge host reads the headers below from the feed's own requests and the
+login carries on by itself.
+
+On a server without the sign-in browser, or with **Paste cookies instead**, the headers are
+copied by hand:
 
 1. Open a **private window** in your browser and sign in at <https://www.linkedin.com/login>,
    finishing any verification it asks for, until the feed loads.

@@ -29,6 +29,7 @@ import {
   bridgeDir,
   buildBridgeHost,
   capture,
+  findChromium,
   claimSlot,
   convex,
   dataDir,
@@ -183,6 +184,7 @@ const instance = {
   SITE_URL: siteUrl,
   GATEWAY_URL: `http://127.0.0.1:${ports.gateway}`,
   GATEWAY_INTERNAL_ADDR: `127.0.0.1:${ports.gateway}`,
+  GATEWAY_PUBLIC_ADDR: `127.0.0.1:${ports.gatewayPublic}`,
   BRIDGE_HOSTS: networks.map((network) => `${hostId(network)}=http://${bridgeAddr(network)}`).join(','),
   TRIODITIS_NETWORKS: networks.join(','),
 }
@@ -364,6 +366,7 @@ function superviseGateway() {
     GATEWAY_SECRET: secrets.GATEWAY_SECRET,
     TRIODITIS_INTERNAL_TOKEN: secrets.TRIODITIS_INTERNAL_TOKEN,
     GATEWAY_INTERNAL_ADDR: instance.GATEWAY_INTERNAL_ADDR,
+    GATEWAY_PUBLIC_ADDR: instance.GATEWAY_PUBLIC_ADDR,
     AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
     BRIDGE_HOSTS: instance.BRIDGE_HOSTS,
   }
@@ -427,6 +430,31 @@ async function startServices() {
   if (demo) {
     // Nothing to bridge, so no bridge host.
   } else if (hasBridgeHost) {
+    // The sign-in browser, for networks that log in on their website, when there's a Chromium
+    // and somewhere in memory for its profiles (/dev/shm, or LOGIN_BROWSER_TMP if you name a
+    // memory-backed directory): a signed-in profile never goes to disk.
+    const profiles = process.env.LOGIN_BROWSER_TMP || (existsSync('/dev/shm') ? '/dev/shm' : null)
+    const chromium = profiles ? findChromium() : null
+    const loginBrowserUrl = `http://127.0.0.1:${ports.loginBrowser}`
+    if (chromium) {
+      step('Starting the sign-in browser')
+      launch('login-browser', resolve(bridgeDir, 'bin/login-browser'), [], {
+        cwd: root,
+        env: {
+          LOGIN_BROWSER_TOKEN: secrets.LOGIN_BROWSER_TOKEN,
+          LOGIN_BROWSER_ADDR: `127.0.0.1:${ports.loginBrowser}`,
+          LOGIN_BROWSER_TMP: profiles,
+          CHROMIUM_PATH: chromium,
+        },
+      })
+      if (!(await ready('The sign-in browser', `${loginBrowserUrl}/v1/health`, 30))) return
+    } else {
+      console.log(
+        profiles
+          ? '\nNo Chromium found (set CHROMIUM_PATH): cookie logins are pasted by hand.'
+          : '\nNo /dev/shm for the sign-in browser’s profiles (set LOGIN_BROWSER_TMP to a memory-backed directory): cookie logins are pasted by hand.',
+      )
+    }
     for (const network of networks) {
       step(`Starting the ${network} bridge host`)
       launch(`bridge:${network}`, resolve(bridgeDir, 'bin/bridge-host'), ['--network', network, 'run'], {
@@ -439,6 +467,7 @@ async function startServices() {
           BRIDGE_HOST_ID: hostId(network),
           BRIDGE_HOST_ADDR: bridgeAddr(network),
           BRIDGE_DATA_DIR: resolve(dataDir, `bridge-${network}`),
+          ...(chromium ? { LOGIN_BROWSER_URL: loginBrowserUrl, LOGIN_BROWSER_TOKEN: secrets.LOGIN_BROWSER_TOKEN } : {}),
         },
       })
     }
@@ -457,6 +486,7 @@ async function startServices() {
         PORT: String(ports.web),
         VITE_CONVEX_URL: convexUrl,
         VITE_CONVEX_SITE_URL: convexSiteUrl,
+        VITE_GATEWAY_PUBLIC_URL: `http://${instance.GATEWAY_PUBLIC_ADDR}`,
         VITE_TRIODITIS_ENVIRONMENT: 'development',
       },
     })

@@ -43,7 +43,17 @@ The connector's three flows, in the order the app lists them:
 | `email` | `form`       | email address, then a code Slack emails                  | from the submit on    |
 | `app`   | `form`       | bot token (xoxb-) and app-level token (xapp-)            | from the submit on    |
 
-### Token and cookie (recommended)
+### Sign in on slack.com (recommended)
+
+In Trioditis: Settings, Accounts, Slack, **Sign in on slack.com**. The stepper shows Slack's
+sign-in page, running in the server's sign-in browser (docs/architecture/signin-browser.md).
+Sign in to the workspace there; if Slack offers to open the desktop app, the step's script
+picks "use Slack in your browser" for you. Once the web client has loaded, the bridge host
+reads the xoxc token from its local storage (or a request's `token` field) and the `d`
+cookie, and the login carries on by itself.
+
+On a server without the sign-in browser, or with **Paste cookies instead**, the two values
+are copied by hand:
 
 1. In a desktop browser (a private window is fine), open `https://app.slack.com/client`
    and sign in to the workspace. Use the browser, not the Slack desktop app.
@@ -54,8 +64,8 @@ The connector's three flows, in the order the app lists them:
 3. Developer tools, **Application** (Chrome) or **Storage** (Firefox), **Cookies**,
    `https://app.slack.com`: copy the value of the cookie named `d` (domain `.slack.com`,
    starts `xoxd-`). Either form is fine: as shown (percent-encoded, `%2F`…) or decoded.
-4. In Trioditis: Settings, Accounts, Slack, **Token and cookie**. Paste the xoxc token
-   into `auth_token` and the xoxd cookie into `cookie_token`. Ignore the instruction about
+4. In Trioditis: Settings, Accounts, Slack, **Sign in on slack.com**, **Paste cookies
+   instead**. Paste the xoxc token into `auth_token` and the xoxd cookie into `cookie_token`. Ignore the instruction about
    a JSON object or a cURL command: that's for Matrix bot commands; here each value has
    its own field.
 5. Close the browser window **without signing out**. Signing out of that browser session
@@ -72,14 +82,16 @@ today:
 
 - **CAPTCHA.** If Slack wants a CAPTCHA first (it decides per request; likely from a
   server's address), the step is a `cookies` step whose only field, `captcha_token`, is
-  filled by running a reCAPTCHA in an embedded browser (`extract_js`). The stepper can't
-  run it, so this is a dead end: cancel and use the token flow.
+  filled by running a reCAPTCHA in an embedded browser (`extract_js`). Without the sign-in
+  browser this is a dead end: cancel and use the token flow. With it, the step opens there
+  and its script runs, which should let the person solve the CAPTCHA; that hasn't been
+  tried yet.
 - **Several workspaces.** The workspace choice is a `select` field, but the bridge
   protocol's `LoginField` carries no options, so the stepper shows an empty text box. Typing
   the exact label (`Workspace Name (domain.slack.com)`) works; there's no way to see it.
 - **SSO or no email sign-in.** The connector asks for the browser token and cookie for
   that workspace instead (the same fields as the token flow, with the workspace's URL), so
-  follow the token flow steps.
+  follow the token flow steps (in the sign-in browser, it opens the workspace's page).
 
 ### Slack app (bot)
 
@@ -91,10 +103,10 @@ the bot, so it is not a way to read your own DMs.
 
 ### What the bridge host and stepper do with these steps
 
-- `cookies` steps reach the app with only `url`, `userAgent` and each field's `id` and
-  `required`. The field sources (`special` `fi.mau.slack.auth_token`, the request-body
-  `token`, the `d` cookie), patterns and `extract_js` are not carried, so the person
-  copies values by hand. For the token flow that's enough (this page says where to look).
+- `cookies` steps reach the app with only `url`, `userAgent`, each field's `id` and
+  `required`, and `browser`/`hidden`. The field sources (`special` `fi.mau.slack.auth_token`,
+  the request-body `token`, the `d` cookie), patterns and `extract_js` stay in the bridge
+  host, which uses them in the sign-in browser; pasting by hand needs this page's directions.
 - The bridge host percent-decodes values for fields whose source is a browser cookie
   before handing them to the connector, as bridgev2's own cookie login does. Without it,
   a `d` cookie copied as developer tools show it failed: slack-go percent-encodes the
@@ -106,9 +118,9 @@ the bot, so it is not a way to read your own DMs.
   sign-in to it fails or it needs SSO ("<workspace> uses single sign-on…"), and they reach
   the backend's login session like any step.
 
-Generic fixes that would close the email flow's gaps (and help Meta, LinkedIn and X):
-carry a field's `options` for `select` fields, and a cookie step's `extractJs` and field
-sources, through the protocol, with the stepper rendering them.
+A generic fix that would close the email flow's remaining gap (and help Meta and LinkedIn):
+carry a field's `options` for `select` fields through the protocol, with the stepper
+rendering them.
 
 ## Operator settings
 

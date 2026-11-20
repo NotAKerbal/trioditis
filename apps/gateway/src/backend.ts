@@ -15,6 +15,7 @@ export interface Backend {
   recipientKeys(args: Args<'recipientKeys'>): Promise<Result<'recipientKeys'>>
   claimCommands(args: Args<'claimCommands'>): Promise<Result<'claimCommands'>>
   commandResult(args: Args<'commandResult'>): Promise<Result<'commandResult'>>
+  redeemSigninTicket(args: Args<'redeemSigninTicket'>): Promise<Result<'redeemSigninTicket'>>
   /**
    * Calls `onChange` whenever the set of queued commands changes, and `onError` if the
    * subscription fails (it keeps retrying). Returns an unsubscribe.
@@ -34,6 +35,7 @@ export function convexBackend(url: string, secret: string): Backend {
     recipientKeys: (args) => http.query(api.gateway.recipientKeys, { secret, ...args }),
     claimCommands: (args) => http.mutation(api.gateway.claimCommands, { secret, ...args }),
     commandResult: (args) => http.mutation(api.gateway.commandResult, { secret, ...args }),
+    redeemSigninTicket: (args) => http.mutation(api.gateway.redeemSigninTicket, { secret, ...args }),
     watchPendingCommands: (onChange, onError) =>
       live.onUpdate(api.gateway.pendingCommands, { secret }, onChange, onError),
     close: () => live.close(),

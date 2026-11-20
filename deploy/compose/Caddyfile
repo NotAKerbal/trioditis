@@ -47,6 +47,12 @@ http://127.0.0.1:8090 {
 		reverse_proxy backend:3211
 	}
 
+	# The sign-in browser's viewer, a websocket the gateway checks the ticket of and relays to
+	# the bridge host running the login (docs/architecture/signin-browser.md).
+	handle /login-browser {
+		reverse_proxy gateway:8602
+	}
+
 	# Where the web app finds its backend, written by install.sh. Never cached, so a changed
 	# address takes effect on the next load.
 	handle /config.json {

@@ -13,6 +13,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/networks"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 )
 
 func env(name, fallback string) string {
@@ -116,6 +119,13 @@ func main() {
 		Log:              log,
 	}
 	cfg.CommandAddr = "http://" + cfg.ListenAddr
+	if command == "run" && os.Getenv("LOGIN_BROWSER_URL") != "" {
+		launcher, err := signinLauncher(spec, log)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to set up the sign-in browser")
+		}
+		cfg.Signin = launcher
+	}
 	keyStore := &devkeys.Keys{Dir: filepath.Join(*dataDir, "dev-keys")}
 	// Dev identity keys are generated and kept on this machine, so whoever runs it could
 	// read everything sealed to them. They are only ever used when asked for by name.
@@ -166,6 +176,43 @@ func main() {
 		log.Info().Msg("Logged in. Messages are being bridged into the journal; run `inspect` in another terminal to read them. Ctrl+C to stop.")
 	}
 	<-ctx.Done()
+}
+
+// signinLauncher sets up the sign-in browser (docs/architecture/signin-browser.md): the
+// login-browser service at LOGIN_BROWSER_URL, each browser reaching the web through an egress
+// proxy of its own on this host, listening on BRIDGE_EGRESS_BIND (loopback by default) and
+// reached at BRIDGE_EGRESS_HOST (by default, that address).
+func signinLauncher(spec networks.Network, log zerolog.Logger) (*signin.Launcher, error) {
+	if os.Getenv("LOGIN_BROWSER_TOKEN") == "" {
+		return nil, errors.New("LOGIN_BROWSER_TOKEN is required with LOGIN_BROWSER_URL")
+	}
+	plan := &signin.EgressPlan{
+		Bind: env("BRIDGE_EGRESS_BIND", "127.0.0.1"), Host: os.Getenv("BRIDGE_EGRESS_HOST"),
+		Log: log.With().Str("component", "egress").Logger(),
+	}
+	if ip, err := netip.ParseAddr(plan.Bind); err != nil {
+		return nil, errors.New("BRIDGE_EGRESS_BIND must be an IP address")
+	} else if ip.IsUnspecified() && plan.Host == "" {
+		return nil, errors.New("BRIDGE_EGRESS_HOST is required when BRIDGE_EGRESS_BIND is every address")
+	}
+	deny, err := signin.ParseDeny(os.Getenv("BRIDGE_EGRESS_DENY"))
+	if err != nil {
+		return nil, err
+	}
+	plan.Deny = deny
+	if spec.ProxyEnv != "" {
+		if value := os.Getenv(spec.ProxyEnv); value != "" {
+			upstream, err := url.Parse(value)
+			if err != nil {
+				return nil, fmt.Errorf("%s isn't a proxy URL", spec.ProxyEnv)
+			}
+			plan.Upstream = upstream
+		}
+	}
+	return &signin.Launcher{
+		URL: os.Getenv("LOGIN_BROWSER_URL"), Token: os.Getenv("LOGIN_BROWSER_TOKEN"), Egress: plan,
+		Log: log.With().Str("component", "signin").Logger(),
+	}, nil
 }
 
 // logOutput is where the process logs: w, through the network's filter if it has one. A

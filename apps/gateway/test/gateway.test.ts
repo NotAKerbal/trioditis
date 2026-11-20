@@ -26,6 +26,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend & { ingested: un
     recipientKeys: vi.fn(async () => null),
     claimCommands: vi.fn(async () => []),
     commandResult: vi.fn(async () => null),
+    redeemSigninTicket: vi.fn(async () => null),
     watchPendingCommands: () => () => {},
     close: async () => {},
     ...overrides,

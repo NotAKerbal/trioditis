@@ -6,7 +6,7 @@ command upgrades it.
 
 ## Install
 
-You need Docker Engine with the Compose plugin, git, and at least 8 GiB free where Docker
+You need Docker Engine 28 or later with the Compose plugin, git, and at least 8 GiB free where Docker
 keeps its data.
 
 ```sh
@@ -176,6 +176,34 @@ deploy/install/install.sh --telegram-api-id <api_id> --telegram-api-hash <api_ha
 
 Naming `telegram` in `--networks` without them stops the install.
 
+#### The sign-in browser
+
+Messenger, Instagram, Google Messages, Google Voice, Slack, LinkedIn and X log in on their own
+website. The `login-browser` service shows that page to the person inside the app, and their
+bridge host collects what the network needs once they have signed in
+(docs/architecture/signin-browser.md). Its image is Debian's Chromium with a small launcher,
+built by the installer like the others.
+
+Each login gets its own Chromium, about 0.5 GiB of memory while it's open, and none when no
+one is signing in. At most `LOGIN_BROWSER_MAX` (default 4) run at once;
+the rest are told to try again. Chromium runs in a container with no secret but its own
+`LOGIN_BROWSER_TOKEN` (the installer makes it; it only starts browsers), read-only, with its
+profiles in `/dev/shm`. Each login's Chromium runs as a user of its own, so one person's
+browser can't read another's; for that the launcher keeps four capabilities (setting a
+user and group, giving the profile to that user, and ending its processes) and every other
+one is dropped. It is only on the `signin` network, which is internal and holds just it and
+the bridge hosts of the networks that sign in on a website: it can't reach the internet or
+the server's other services, and those bridge hosts refuse its address everything but the
+egress proxies of the one whose login it runs (one per browser), which only connect to public
+addresses on ports 80 and 443. If this server's network routes some public-looking range somewhere local (a provider's
+host service), add it to `BRIDGE_EGRESS_DENY` in `deploy/.env` (comma-separated ranges) and
+run the installer again. With `META_PROXY` or
+`INSTAGRAM_PROXY` set, that proxy goes out through it too, so the sign-in comes from the
+bridge's address.
+
+Without the sign-in browser (a server that doesn't run it), the app asks for the cookies to
+be pasted, as before.
+
 An install from before networks were chosen in the app kept the networks it offered in
 `TRIODITIS_NETWORKS`. The installer no longer reads that as its choice, so the first rerun
 moves it to every network (pass `--networks` to limit it again), and admins install the ones
@@ -185,16 +213,17 @@ endpoint that `--e2e` added.
 
 ## What's running
 
-| Service            | What it is                                                                         | Exposed                      |
-| ------------------ | ---------------------------------------------------------------------------------- | ---------------------------- |
-| `caddy`            | The web app, and the proxy to everything below                                     | Yes: the only published port |
-| `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode                       | On Docker's host address     |
-| `loopback`         | Only on a loopback address: see Local mode                                         | No: in the backend's network |
-| `backend`          | The Convex backend, on Postgres                                                    | No                           |
-| `postgres`         | Postgres 17: Convex's data and each bridge host's                                  | No                           |
-| `functions`        | One-shot: sets Convex's environment, deploys the functions and runs the migrations | No                           |
-| `gateway`          | Moves events between bridge hosts and Convex                                       | No                           |
-| `bridge-<network>` | A bridge host: runs that network's connector                                       | No                           |
+| Service            | What it is                                                                         | Exposed                       |
+| ------------------ | ---------------------------------------------------------------------------------- | ----------------------------- |
+| `caddy`            | The web app, and the proxy to everything below                                     | Yes: the only published port  |
+| `hairpin`          | Only behind a proxy on this machine: see HTTPS in local mode                       | On Docker's host address      |
+| `loopback`         | Only on a loopback address: see Local mode                                         | No: in the backend's network  |
+| `backend`          | The Convex backend, on Postgres                                                    | No                            |
+| `postgres`         | Postgres 17: Convex's data and each bridge host's                                  | No                            |
+| `functions`        | One-shot: sets Convex's environment, deploys the functions and runs the migrations | No                            |
+| `gateway`          | Moves events between bridge hosts and Convex                                       | No                            |
+| `bridge-<network>` | A bridge host: runs that network's connector                                       | No                            |
+| `login-browser`    | The sign-in browser: a Chromium for each website login (see Networks)              | No: only the `signin` network |
 
 `deploy/trioditis` is `docker compose` for this install, with its settings:
 `deploy/trioditis <command> [the command's own options]`. It sets the project, the compose
@@ -220,6 +249,7 @@ Everything is on one origin, so the web app's auth cookies are first-party:
 | `/convex/*`                              | The Convex client API and its websocket (port 3210), prefix stripped. The client is given `<origin>/convex` and keeps the prefix (`ws://<origin>/convex/api/<version>/sync`) |
 | `/api/auth/*`                            | Better Auth, in Convex's HTTP actions (port 3211)                                                                                                                            |
 | `/mcp`, `/mcp/*`, `/.well-known/oauth-*` | The MCP server and its OAuth discovery, in Convex's HTTP actions                                                                                                             |
+| `/login-browser`                         | The sign-in browser's websocket, to the gateway's public listener (port 8602), which checks the ticket and relays it to the bridge host running the login                    |
 | `/config.json`                           | The web app's runtime config, written by the installer: `{ "convexUrl": "<origin>/convex", "convexSiteUrl": "<origin>", "environment": "selfhosted" }`. Never cached         |
 | Everything else                          | The web app's static files, falling back to `index.html`                                                                                                                     |
 
