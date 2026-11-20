@@ -50,6 +50,9 @@ git_ -C "$work/source" push -q "$work/origin.git" main dev
 
 git_ clone -q "$work/origin.git" "$work/checkout"
 git_ -C "$work/checkout" checkout -q --detach "$c1"
+# An operator's settings that change git grep's output don't change the notes read.
+git -C "$work/checkout" config grep.lineNumber true
+git -C "$work/checkout" config grep.column true
 mkdir -p "$work/checkout/deploy/updater" "$work/checkout/deploy/scripts"
 cp "$repo/deploy/updater/updater.sh" "$work/checkout/deploy/updater/"
 cp "$repo/deploy/scripts/env.sh" "$work/checkout/deploy/scripts/"

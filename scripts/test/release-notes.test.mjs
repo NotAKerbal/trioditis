@@ -66,6 +66,9 @@ void test('a change counts as having a note only when it adds a line no note had
   }
   try {
     git('init', '-q')
+    // Settings that change git grep's output don't change what's read.
+    git('config', 'grep.lineNumber', 'true')
+    git('config', 'grep.column', 'true')
     mkdirSync(join(dir, 'release-notes'))
     writeFileSync(join(dir, 'release-notes', 'first.md'), 'New: One.\n')
     git('add', '-A')
@@ -104,6 +107,36 @@ void test('a change counts as having a note only when it adds a line no note had
     // Removing a note isn't writing one.
     assert.deepEqual(addedNotes(rewritten, dir), [])
     assert.throws(() => addedNotes('no-such-ref', dir), /git grep at no-such-ref failed/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+void test('a note archive of many megabytes is read whole', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'release-notes-big-'))
+  const git = (...args) => {
+    const result = spawnSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args], {
+      cwd: dir,
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    return result.stdout.trim()
+  }
+  try {
+    git('init', '-q')
+    mkdirSync(join(dir, 'release-notes'))
+    // About 2 MiB of notes, past spawnSync's default buffer.
+    for (let i = 0; i < 1300; i++) {
+      const lines = Array.from({ length: 8 }, (_, j) => `Fixed: ${`${i}-${j} `.padEnd(190, 'x')}`)
+      writeFileSync(join(dir, 'release-notes', `note-${i}.md`), lines.join('\n') + '\n')
+    }
+    git('add', '-A')
+    git('commit', '-qm', 'many notes')
+    const base = git('rev-parse', 'HEAD')
+    writeFileSync(join(dir, 'release-notes', 'new.md'), 'New: The one new line.\n')
+    git('add', '-A')
+    git('commit', '-qm', 'one more')
+    assert.deepEqual(addedNotes(base, dir), ['New: The one new line.'])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

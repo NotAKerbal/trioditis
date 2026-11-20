@@ -30,6 +30,8 @@ const LINE = new RegExp(`^(${LABELS.join('|')}): (.+)$`)
 // Control characters, tabs included: the updater passes notes on as tab-separated lines.
 // oxlint-disable-next-line no-control-regex -- control characters are what it looks for
 const CONTROL = /[\u0000-\u001f\u007f]/
+// oxlint-disable-next-line no-control-regex -- the same, to drop them
+const CONTROL_ALL = /[\u0000-\u001f\u007f]/g
 
 /**
  * A note's lines as `{ label, text }`, or the problems that keep it from being one. Every
@@ -78,17 +80,29 @@ export function checkNotes(dir) {
   return problems
 }
 
-/** Every note line in release-notes/ at `commit`, in `cwd`'s repository, as the updater reads them. */
+/**
+ * Every note line in release-notes/ at `commit`, in `cwd`'s repository, as the updater reads them
+ * (note_lines in deploy/updater/updater.sh): with control characters dropped, and whatever the
+ * person's git settings for grep.
+ */
 function noteLines(commit, cwd) {
   const pattern = `^(${LABELS.join('|')}): .+`
-  const result = spawnSync('git', ['grep', '-h', '-I', '-E', pattern, commit, '--', `${NOTES_DIR}/`], {
-    cwd,
-    encoding: 'utf8',
-  })
+  const result = spawnSync(
+    'git',
+    // prettier-ignore
+    ['-c', 'grep.lineNumber=false', '-c', 'grep.column=false', '-c', 'color.grep=never',
+      'grep', '-h', '-I', '-E', pattern, commit, '--', `${NOTES_DIR}/`],
+    // Room for every note there will ever be: the default, 1 MiB, would fill in time.
+    { cwd, encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 },
+  )
+  if (result.error) throw new Error(`git grep at ${commit} failed: ${result.error.message}`)
   // git grep exits 1 when nothing matches.
   if (result.status === 1 && !result.stderr) return []
   if (result.status !== 0) throw new Error(`git grep at ${commit} failed: ${result.stderr.trim()}`)
-  return result.stdout.split('\n').filter(Boolean)
+  return result.stdout
+    .split('\n')
+    .map((line) => line.replace(CONTROL_ALL, ''))
+    .filter(Boolean)
 }
 
 /**

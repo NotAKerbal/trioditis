@@ -141,8 +141,10 @@ MAX_NOTE_BYTES=800
 # line that doesn't fit the format is left out here.
 NOTE_LINE='^(New|Improved|Fixed|Security|Internal): .+'
 note_lines() {
-  # `<commit>:<path>:<line>` for each note line in a commit, control characters dropped.
-  git -C "$root" -c core.quotePath=true grep -I -E "$NOTE_LINE" "$1" -- release-notes/ 2>/dev/null |
+  # `<commit>:<path>:<line>` for each note line in a commit, control characters dropped, and
+  # whatever the operator's git settings for grep.
+  git -C "$root" -c core.quotePath=true -c grep.lineNumber=false -c grep.column=false -c color.grep=never \
+    grep -I -E "$NOTE_LINE" "$1" -- release-notes/ 2>/dev/null |
     LC_ALL=C tr -d '\000-\011\013-\037\177'
 }
 release_notes() {
