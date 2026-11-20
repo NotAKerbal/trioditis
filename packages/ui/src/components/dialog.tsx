@@ -1,6 +1,7 @@
 import { Dialog as Primitive } from 'radix-ui'
 import { X } from 'lucide-react'
 import type * as React from 'react'
+import { imeEscape } from '../lib/ime.ts'
 import { cn } from '../lib/utils.ts'
 
 // Radix makes the rest of the page inert while a dialog is open, traps focus inside it and
@@ -25,10 +26,8 @@ function DialogContent({
           'fixed top-1/2 left-1/2 z-50 max-h-[calc(100vh-48px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl bg-surface text-foreground shadow-dialog outline-none',
           className,
         )}
-        // An Escape that cancels an IME's candidate is the IME's, not the dialog's (key code 229
-        // is how Safari marks it).
         onEscapeKeyDown={(e) => {
-          if (e.isComposing || e.keyCode === 229) e.preventDefault()
+          if (imeEscape(e)) e.preventDefault()
           else onEscapeKeyDown?.(e)
         }}
         {...props}

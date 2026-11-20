@@ -1,3 +1,4 @@
+import { imeEscape } from '@trioditis/ui/lib/ime'
 import { describe, expect, it } from 'vitest'
 import {
   buttonName,
@@ -100,6 +101,15 @@ describe('keys', () => {
     // A press whose release never came doesn't take the next one's.
     expect(ime.down(enter(false))).toBe(false)
     expect(ime.up(enter(false))).toBe(false)
+  })
+
+  it('keep an Escape held through a composition from closing the dialog', () => {
+    const escape = (isComposing: boolean, repeat = false, keyCode = 27) => ({ isComposing, keyCode, repeat })
+    expect(imeEscape(escape(true))).toBe(true)
+    expect(imeEscape(escape(false, false, 229))).toBe(true)
+    // The composition ended under the held key: its repeats still aren't a press of its own.
+    expect(imeEscape(escape(false, true))).toBe(true)
+    expect(imeEscape(escape(false))).toBe(false)
   })
 
   it('leave text to the input it’s typed into', () => {
