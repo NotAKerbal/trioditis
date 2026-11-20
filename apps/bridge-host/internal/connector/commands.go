@@ -212,6 +212,8 @@ func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check boo
 		return c.handleLogout(ctx, cmd, check)
 	case protocol.CommandBackfill:
 		return c.handleBackfill(ctx, cmd, check)
+	case protocol.CommandSyncContacts:
+		return c.handleSyncContacts(ctx, cmd, check)
 	default:
 		return badRequest("unknown command type %q", cmd.Type)
 	}
@@ -603,6 +605,40 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 		return err
 	}
 	go t.login.Logout(c.Bridge.BackgroundCtx)
+	return nil
+}
+
+// handleSyncContacts fetches a login's contact list from its network (the address book a
+// phone shares with WhatsApp or Signal, say) and sends each contact, with what this login
+// knows them by, to the login's owner only. It runs in the background: a long list can take
+// a while, and the contacts arrive as events.
+func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Command, check bool) error {
+	t, err := c.resolve(ctx, cmd, false)
+	if err != nil {
+		return err
+	}
+	api, ok := t.login.Client.(bridgev2.ContactListingNetworkAPI)
+	if !ok {
+		return conflict(protocol.ErrUnsupported, "the network can't list contacts")
+	}
+	if check {
+		return nil
+	}
+	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
+	go func() {
+		bgCtx := c.Bridge.BackgroundCtx
+		list, err := api.GetContactList(bgCtx)
+		if err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Listing a login's contacts failed")
+			return
+		}
+		for _, resp := range list {
+			if err := c.syncContact(bgCtx, o, resp); err != nil {
+				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Sending a listed contact failed")
+				return
+			}
+		}
+	}()
 	return nil
 }
 

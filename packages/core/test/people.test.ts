@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   cardFromContacts,
   groupUnlinked,
-  mergeCards,
   moveLinks,
   parseIdentifier,
+  planImport,
   samePhone,
   suggestLinks,
   type NetworkContact,
@@ -14,7 +14,8 @@ import {
 const contact = (network: NetworkContact['network'], ghostId: string, name: string, identifiers: string[]) => ({
   network,
   ghostId,
-  profile: { name, identifiers },
+  profile: { name },
+  identifiers,
 })
 
 describe('phone numbers', () => {
@@ -132,16 +133,46 @@ describe('grouping and linking', () => {
     ])
   })
 
-  it('merges duplicate cards without repeating numbers', () => {
-    const merged = mergeCards(
-      { name: 'Ann', phones: [{ value: '+15551234567', label: 'mobile' }], note: 'a' },
-      { name: 'Ann Lee', org: 'Acme', phones: [{ value: '555 123 4567' }, { value: '+15550000000' }], note: 'b' },
-    )
-    expect(merged).toEqual({
+  it('never groups two different full numbers through one saved without its country code', () => {
+    const us = contact('whatsapp', 'g1', 'A', ['tel:+12025550123'])
+    const local = contact('signal', 'g2', 'B', ['tel:5550123'])
+    const uk = contact('telegram', 'g3', 'C', ['tel:+44205550123'])
+    expect(groupUnlinked([], [us, local, uk]).map((g) => g.map((c) => c.ghostId))).toEqual([['g1'], ['g2'], ['g3']])
+  })
+})
+
+describe('importing again', () => {
+  const existing: Person = {
+    personKey: 'person-ann-000001',
+    card: {
       name: 'Ann',
-      org: 'Acme',
-      phones: [{ value: '+15551234567', label: 'mobile' }, { value: '+15550000000' }],
-      note: 'a\n\nb',
-    })
+      uid: 'u1',
+      note: 'old',
+      photo: 'data:image/jpeg;base64,AAAA',
+      addresses: [{ street: '1 Main St' }],
+      links: [{ network: 'signal', ghostId: 'g1' }],
+    },
+  }
+  let n = 0
+  const newKey = () => `person-new-${String(++n).padStart(6, '0')}`
+
+  it('replaces a known card’s fields with the file’s, keeping its links and photo', () => {
+    const file = { name: 'Ann Lee', uid: 'u1', note: 'new', addresses: [{ street: '1 Main St' }] }
+    const plan = planImport([existing], [file, file], newKey)
+    expect(plan).toEqual([
+      {
+        personKey: existing.personKey,
+        card: { ...file, links: existing.card.links, photo: existing.card.photo },
+      },
+    ])
+    // Importing the same file twice changes nothing more.
+    const again = planImport([{ personKey: existing.personKey, card: plan[0]!.card }], [file], newKey)
+    expect(again).toEqual(plan)
+  })
+
+  it('makes one card for a UID the file repeats, and new cards for the rest', () => {
+    const plan = planImport([], [{ name: 'X', uid: 'u2' }, { name: 'X2', uid: 'u2' }, { name: 'Y' }], newKey)
+    expect(plan.map((p) => p.card.name)).toEqual(['X2', 'Y'])
+    expect(new Set(plan.map((p) => p.personKey)).size).toBe(2)
   })
 })

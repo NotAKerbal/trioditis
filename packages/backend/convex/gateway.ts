@@ -56,6 +56,7 @@ const EVENT_TYPES = new Set([
   'typing',
   'chat',
   'contact',
+  'contactIdentifiers',
   'loginState',
   'loginStep',
   'sendStatus',

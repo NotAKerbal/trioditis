@@ -151,19 +151,20 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 // for each event type, its required and optional fields beyond the ones every event has.
 // The backend refuses an event with a missing or unknown field.
 var eventFields = map[string][2][]string{
-	protocol.EventMessage:        {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
-	protocol.EventEdit:           {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
-	protocol.EventReaction:       {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	protocol.EventReactionRemove: {{"portalId", "targetEventId", "sender", "key"}, nil},
-	protocol.EventRedaction:      {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	protocol.EventReceipt:        {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	protocol.EventTyping:         {{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	protocol.EventChat:           {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
-	protocol.EventContact:        {{"ghostId", "sealed"}, nil},
-	protocol.EventLoginState:     {{"state"}, {"error"}},
-	protocol.EventLoginStep:      {{"loginSessionId", "step"}, nil},
-	protocol.EventSendStatus:     {{"clientMessageId", "status"}, {"eventId", "error"}},
-	protocol.EventBackfillDone:   {{"portalId", "direction", "more"}, nil},
+	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
+	protocol.EventEdit:               {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
+	protocol.EventReaction:           {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	protocol.EventReactionRemove:     {{"portalId", "targetEventId", "sender", "key"}, nil},
+	protocol.EventRedaction:          {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	protocol.EventReceipt:            {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	protocol.EventTyping:             {{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
+	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
+	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventLoginState:         {{"state"}, {"error"}},
+	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
+	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
+	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
 }
 
 func validateEvent(evt map[string]json.RawMessage) string {
@@ -355,6 +356,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindChat, evt.PortalID
 	case protocol.EventContact:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
+	case protocol.EventContactIdentifiers:
+		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers"
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -441,10 +444,6 @@ func TestConformance(t *testing.T) {
 		if contactPlain.Name != "Peer-family" {
 			t.Fatalf("contact name %q", contactPlain.Name)
 		}
-		// Every identifier goes along, for matching to the person's address book.
-		if contactPlain.Handle != "testnet:peer-family" || !slices.Equal(contactPlain.Identifiers, []string{"testnet:peer-family"}) {
-			t.Fatalf("contact identifiers %q, handle %q", contactPlain.Identifiers, contactPlain.Handle)
-		}
 		// Chat and contact names never appear in the journal. (bridgev2's own portal and
 		// ghost tables do hold them; see the README's spike findings.)
 		journal, err := h.host.Store.After(context.Background(), 0, 100000)
@@ -456,6 +455,43 @@ func TestConformance(t *testing.T) {
 			if bytes.Contains(raw, []byte("Chat family")) || bytes.Contains(raw, []byte("Peer-family")) {
 				t.Fatalf("journal event %d holds a plaintext name", evt.Seq)
 			}
+		}
+	})
+
+	t.Run("a contact list reaches its login's owner, with what the login knows each contact by", func(t *testing.T) {
+		h.net.SetContacts(aliceNet, []testconnector.Contact{
+			{ID: "peer-family", Name: "Fam", Identifiers: []string{"tel:+15550000001"}},
+			{ID: "dana", Name: "Dana From Contacts", Identifiers: []string{"tel:+15550000002", "mailto:dana@example.com", "tel:+15550000002"}},
+		})
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
+		idents := map[string][]string{}
+		for _, ghost := range []string{"peer-family", "dana"} {
+			evt := gw.waitFor(t, "identifiers for "+ghost, func(e *protocol.Event) bool {
+				if e.Type != protocol.EventContactIdentifiers || e.UserID != "alice" {
+					return false
+				}
+				var plain protocol.ContactIdentifiersPlaintext
+				h.open("alice", e, &plain)
+				idents[e.GhostID] = plain.Identifiers
+				return len(plain.Identifiers) > 0 && strings.HasSuffix(plain.Identifiers[0], map[string]string{"peer-family": "1", "dana": "2"}[ghost])
+			})
+			if ghost == "dana" && !slices.Equal(idents[evt.GhostID], []string{"tel:+15550000002", "mailto:dana@example.com"}) {
+				t.Fatalf("dana's identifiers %q", idents[evt.GhostID])
+			}
+			if ghost == "dana" {
+				// A contact with no chat yet is named from the list.
+				contact := gw.waitFor(t, "dana's contact", func(e *protocol.Event) bool {
+					return e.Type == protocol.EventContact && e.GhostID == evt.GhostID && e.UserID == "alice"
+				})
+				var plain protocol.ContactPlaintext
+				h.open("alice", contact, &plain)
+				if plain.Name != "Dana From Contacts" {
+					t.Fatalf("dana's contact name %q", plain.Name)
+				}
+			}
+		}
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
+			t.Fatalf("%d identifier events went to someone else", n)
 		}
 	})
 

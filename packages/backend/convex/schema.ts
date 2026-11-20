@@ -38,6 +38,11 @@ export default defineSchema({
     backupRevision: v.optional(v.number()),
     /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
     peopleCount: v.optional(v.number()),
+    /**
+     * Goes up with every change to the address book. Each write names the one it was made
+     * from, so two devices can't both link one contact to different cards.
+     */
+    peopleRevision: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -122,6 +127,8 @@ export default defineSchema({
     logoutCommandId: v.optional(v.id('outbox')),
     /** Why the last logout didn't happen. */
     logoutError: v.optional(errorCode),
+    /** When the person last asked for this login's contact list (contacts.sync). */
+    contactsSyncedAt: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
     .index('by_login', ['network', 'loginId']),
@@ -318,6 +325,8 @@ export default defineSchema({
     network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
+    /** What the person's own logins know them by (contactIdentifiers events), sealed to the person. */
+    sealedIdentifiers: v.optional(envelope),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
 
   messages: defineTable({

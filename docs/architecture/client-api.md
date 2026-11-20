@@ -921,15 +921,26 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 
 ## Contacts
 
-Contact profiles are sealed with kind `contact`, object ID `ghostId`; the plaintext is
-`ContactPlaintext`: name, handle, avatar, and `identifiers`, everything the network knows the
-contact by, as URIs (`tel:+15551234567`, `mailto:a@b.c`, `telegram:alice`). A contact sent
-before the bridge host sent identifiers has only its handle, until its profile changes.
+Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID `ghostId`;
+the plaintext is `ContactPlaintext`. A profile is shared: every member who has the contact gets
+the same one. What the person's own logins know a contact by is sealed apart, to the person only
+(object ID `<ghostId>/identifiers`, plaintext `ContactIdentifiersPlaintext`: URIs such as
+`tel:+15551234567`, `mailto:a@b.c`, `telegram:alice`), since what each login can see differs (a
+number in one person's phone book, say). It comes from a login's contact list, so a contact has
+it only once the person has synced that login.
 
-`api.contacts.list({ paginationOpts })` returns every contact the person has on every network,
-`{ network, ghostId, sealedProfile }`, up to 500 a page, in no meaningful order. The address
-book reads them all to match them to its cards (People). A page can come back short, or empty,
-before the end; keep going while `isDone` is false.
+| Function        | Arguments                           | Returns                                                                                                |
+| --------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `contacts.list` | `paginationOpts` (up to 500 a page) | `{ network, ghostId, sealedProfile, sealedIdentifiers? }` pages, every network, in no meaningful order |
+| `contacts.sync` | `networkAccountId`                  | `{ queued }`. Asks a connected account for its contact list; again within ten minutes does nothing     |
+
+The address book reads every page of `contacts.list` to match contacts to its cards (People). A
+page can come back short, or empty, before the end; keep going while `isDone` is false.
+`contacts.sync` works on the networks in `CONTACT_LIST_NETWORKS` (WhatsApp, Signal, Google
+Messages, Telegram, GroupMe); the contacts arrive as they're listed, including people the person
+has no chat with yet.
+
+Errors: `That account doesn’t exist.` · `That account isn’t connected.`
 
 ## People
 
@@ -952,23 +963,33 @@ A sealed card is at most 64 KiB, and a person can have at most 10,000. `people.p
 page's `sessionId`, like the other sealed writes, and refuses it once the browser has signed in
 to another account.
 
+Every write names the revision it was worked out from, and is refused with code
+`people_changed` if the address book has moved on (another device wrote to it). The server
+can't check links itself, since they're sealed; this is what keeps two devices from linking one
+contact to two cards. The client waits for the new revision and its cards, and works the change
+out again: a link is moved again, an import carries on from the call that was refused, and an
+edit to a card that changed meanwhile is given up, for the person to look at first.
+
 Matching happens on the device, since only it can open both sides (packages/core):
 
 - **Import and export.** `parseContactsFile` reads a vCard file (2.1, 3.0 and 4.0: what iPhone,
   iCloud, Android, Google Contacts, Outlook and macOS export) or a Google Contacts or Outlook
-  CSV. Importing a card whose UID matches one already here updates it and keeps its links.
+  CSV. Importing a card whose UID matches one already here replaces its fields with the file's,
+  keeping its links (and its photo, if the file has none); a UID the file repeats is one card.
   `toVCards` writes vCard 3.0. The desktop app makes imported photos 128 pixels at most.
 - **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
   phone number, email or username with it, or failing that has exactly the same name as one
   card. Numbers match with or without their country code (the shorter must end the longer;
   two with country codes must be equal). The person confirms every link; the app can link all
   the matches that aren't by name and point at one card only, in one go.
-- **Not in People.** `groupUnlinked` groups the contacts on no card that share an identifier,
-  so one person on several networks becomes one card (`cardFromContacts`).
+- **Not in People.** `groupUnlinked` groups the contacts on no card that share an identifier
+  exactly, so one person on several networks becomes one card (`cardFromContacts`). A number
+  saved without its country code can end two different full numbers, so it never joins them.
 - A contact is on one card at most: linking it to a card takes it off any other
   (`moveLinks`).
 
-Errors: `That person ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
+Errors: `Your people changed on another device. Try again.` (`people_changed`) · `That person
+ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
 person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
 people at once.` · `You can have at most 10,000 people.`
 

@@ -317,7 +317,12 @@ export function parseVCards(text: string): PersonPlaintext[] {
 // Writing vCard 3.0: the version every address book still imports.
 
 function escapeText(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;')
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\\/g, '\\\\')
+    .replace(/\n/g, '\\n')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;')
 }
 
 /** Folds a line at 75 bytes, never inside a character, as RFC 6350 asks. */
@@ -523,6 +528,25 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
         else urls.push({ value: cell(i) })
       }
     })
+    // Outlook: an address in parts, as "Home Street", "Home Street 2", "Home City", "Home State",
+    // "Home Postal Code", "Home Country/Region", and the same for Business and Other.
+    for (const [where, label] of [
+      ['home', 'home'],
+      ['business', 'work'],
+      ['other', 'other'],
+    ] as const) {
+      const part = (...names: string[]) => cell(col(...names.map((n) => `${where} ${n}`)))
+      const street = [part('street'), part('street 2'), part('street 3'), part('address po box')]
+        .filter(Boolean)
+        .join('\n')
+      const address: PersonAddress = { label }
+      if (street) address.street = street
+      if (part('city')) address.locality = part('city')
+      if (part('state')) address.region = part('state')
+      if (part('postal code')) address.postcode = part('postal code')
+      if (part('country/region', 'country')) address.country = part('country/region', 'country')
+      if (Object.keys(address).length > 1) addresses.push(address)
+    }
     if (phones.length) card.phones = phones
     if (emails.length) card.emails = emails
     if (handles.length) card.handles = handles

@@ -72,6 +72,7 @@ for each:
 | The person's pending copy of a send | `message`  | its `clientMessageId`       |
 | Chat metadata                       | `chat`     | `portalId`                  |
 | A contact                           | `contact`  | `ghostId`                   |
+| What a login knows a contact by     | `contact`  | `<ghostId>/identifiers`     |
 | A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
 | Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
 | A file                              | `media`    | its `mediaId`               |

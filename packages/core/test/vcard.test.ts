@@ -152,6 +152,29 @@ describe('CSV', () => {
     ])
   })
 
+  it('keeps a note’s Windows line breaks through a vCard export', () => {
+    const [card] = parseContactsCsv('Name,Notes\r\nAnn,"one\r\ntwo\rthree"\r\n')
+    expect(parseVCards(toVCards([card!]))[0]!.note).toBe('one\ntwo\nthree')
+  })
+
+  it('reads an Outlook export’s postal addresses', () => {
+    const csv = [
+      'First Name,Home Street,Home Street 2,Home City,Home State,Home Postal Code,Home Country/Region,Business City',
+      'Ann,1 Main St,Apt 2,Springfield,IL,62701,USA,Chicago',
+    ].join('\r\n')
+    expect(parseContactsCsv(csv)[0]!.addresses).toEqual([
+      {
+        label: 'home',
+        street: '1 Main St\nApt 2',
+        locality: 'Springfield',
+        region: 'IL',
+        postcode: '62701',
+        country: 'USA',
+      },
+      { label: 'work', locality: 'Chicago' },
+    ])
+  })
+
   it('reads an Outlook export', () => {
     const csv =
       'First Name,Last Name,Company,E-mail Address,E-mail 2 Address,Mobile Phone,Business Phone,Home Fax\r\nBob,Ray,,bob@example.com,,555-0100-222,555-0100-333,\r\n'

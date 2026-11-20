@@ -224,7 +224,9 @@ async function hasChat(ctx: MutationCtx, userId: string, name: Network, portalId
 export const writeContacts = internalMutation({
   args: {
     userId: v.string(),
-    contacts: v.array(v.object({ network, ghostId: v.string(), sealed: envelope })),
+    contacts: v.array(
+      v.object({ network, ghostId: v.string(), sealed: envelope, sealedIdentifiers: v.optional(envelope) }),
+    ),
     sessionId: v.optional(v.string()),
   },
   returns: v.null(),
@@ -239,6 +241,7 @@ export const writeContacts = internalMutation({
         network: contact.network,
         ghostId: contact.ghostId,
         sealedProfile: contact.sealed,
+        ...(contact.sealedIdentifiers ? { sealedIdentifiers: contact.sealedIdentifiers } : {}),
       })
     }
     return null
@@ -348,17 +351,17 @@ export const seedForMe = action({
         contacts: DEMO_CONTACTS.map(({ network, ghostId, name, handle }) => ({
           network,
           ghostId,
-          // What a bridge host sends: the identifiers as URIs, so the address book can match them.
-          sealed: seal(
+          sealed: seal({ name, handle }, 'contact', ghostId),
+          // What a login's contact list sends (contacts.sync): the identifiers as URIs, so the
+          // address book can match them.
+          sealedIdentifiers: seal(
             {
-              name,
-              handle,
               identifiers: [
                 handle.startsWith('+') ? `tel:${handle.replaceAll(' ', '')}` : `${network}:${handle.slice(1)}`,
               ],
             },
             'contact',
-            ghostId,
+            `${ghostId}/identifiers`,
           ),
         })),
       })

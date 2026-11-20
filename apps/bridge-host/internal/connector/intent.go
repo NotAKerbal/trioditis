@@ -480,16 +480,8 @@ func (in *Intent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStrin
 	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, &avatarURL)
 }
 
-// SetExtraProfileMeta is how bridgev2 reports a ghost's new identifiers (phone numbers,
-// emails, usernames). They're already on the ghost by now, so its contact is sent again.
-func (in *Intent) SetExtraProfileMeta(ctx context.Context, data any) error {
-	if in.kind != intentGhost {
-		return nil
-	}
-	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, nil)
-}
-
-func (in *Intent) SetProfile(ctx context.Context, data any) error { return nil }
+func (in *Intent) SetExtraProfileMeta(ctx context.Context, data any) error { return nil }
+func (in *Intent) SetProfile(ctx context.Context, data any) error          { return nil }
 
 // CreateRoom records a portal and its members. The room ID is the deterministic one
 // bridgev2 asked for, which encodes the portal key.
@@ -664,7 +656,8 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
-// one of their chats. Profiles go only to people who share a chat with the ghost.
+// one of their chats. Profiles go only to people who share a chat with the ghost, or have
+// them in a login's contact list (syncContact).
 func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid.UserID) error {
 	added, err := c.Store.AddMember(ctx, contactRoom(o.userID), string(ids.GhostMXID(ghost)))
 	if err != nil || !added {
@@ -678,18 +671,14 @@ func contactRoom(userID string) string { return "contacts:" + userID }
 func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.UserID, name *string, avatar *id.ContentURIString) error {
 	var plain protocol.ContactPlaintext
 	var avatarURL id.ContentURIString
-	// The cached ghost, not its database row: bridgev2 changes the cached one first and
-	// saves it only after telling the intent, so during a profile update the row still has
-	// the old name, avatar or identifiers.
-	cached, err := c.Bridge.GetExistingGhostByID(ctx, ghost)
+	dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghost)
 	if err != nil {
 		return err
 	}
-	if cached != nil {
-		plain.Name, avatarURL = cached.Name, cached.AvatarMXC
-		if len(cached.Identifiers) > 0 {
-			plain.Handle = cached.Identifiers[0]
-			plain.Identifiers = slices.Clone(cached.Identifiers)
+	if dbGhost != nil {
+		plain.Name, avatarURL = dbGhost.Name, dbGhost.AvatarMXC
+		if len(dbGhost.Identifiers) > 0 {
+			plain.Handle = dbGhost.Identifiers[0]
 		}
 	}
 	if name != nil {
@@ -720,6 +709,62 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	}
 	return c.emit(ctx, &protocol.Event{
 		Type: protocol.EventContact, UserID: o.userID, LoginID: o.loginID, GhostID: ghostID, Sealed: sealed,
+	})
+}
+
+// syncContact sends one entry of a login's contact list to the login's owner: the contact,
+// the first time, and what the login knows them by. A contact the person has no chat with is
+// named from the list, since the ghost may have no name yet; it is the person's own list.
+func (c *Connector) syncContact(ctx context.Context, o *owner, resp *bridgev2.ResolveIdentifierResponse) error {
+	ghost := resp.UserID
+	if ghost == "" && resp.Ghost != nil {
+		ghost = resp.Ghost.ID
+	}
+	if ghost == "" {
+		return nil
+	}
+	added, err := c.Store.AddMember(ctx, contactRoom(o.userID), string(ids.GhostMXID(ghost)))
+	if err != nil {
+		return err
+	}
+	if added {
+		var name *string
+		if resp.UserInfo != nil && resp.UserInfo.Name != nil {
+			if dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghost); err != nil {
+				return err
+			} else if dbGhost == nil || dbGhost.Name == "" {
+				name = resp.UserInfo.Name
+			}
+		}
+		if err = c.emitContact(ctx, o, ghost, name, nil); err != nil {
+			return err
+		}
+	}
+	if resp.UserInfo == nil || len(resp.UserInfo.Identifiers) == 0 {
+		return nil
+	}
+	return c.emitContactIdentifiers(ctx, o, ghost, resp.UserInfo.Identifiers)
+}
+
+// emitContactIdentifiers sends what one of the person's logins knows a contact by, sealed to
+// that person only and apart from the shared profile (see ContactIdentifiersPlaintext).
+func (c *Connector) emitContactIdentifiers(ctx context.Context, o *owner, ghost networkid.UserID, identifiers []string) error {
+	ghostID, err := c.ghostOpaque(ctx, ghost)
+	if err != nil {
+		return err
+	}
+	plain := protocol.ContactIdentifiersPlaintext{Identifiers: fitIdentifiers(identifiers)}
+	if len(plain.Identifiers) == 0 {
+		return nil
+	}
+	contactOwner := *o
+	contactOwner.portalID = ""
+	sealed, err := c.seal(ctx, &contactOwner, seal.KindContact, ghostID+"/identifiers", plain)
+	if err != nil {
+		return err
+	}
+	return c.emit(ctx, &protocol.Event{
+		Type: protocol.EventContactIdentifiers, UserID: o.userID, LoginID: o.loginID, GhostID: ghostID, Sealed: sealed,
 	})
 }
 
@@ -865,25 +910,29 @@ func fitChat(plain *protocol.ChatPlaintext) {
 // anyone has, but a bound on what one network can make the host seal.
 const maxIdentifiers = 32
 
-// fitContact cuts a contact's profile until it seals within 8 KiB: identifiers from the
-// last, then the handle, then the name. An identifier is kept whole or not at all, since a
-// cut phone number or username names someone else.
+// fitIdentifiers keeps the identifiers that seal within 8 KiB, dropping the last ones first.
+// Each is kept whole or not at all, since a cut phone number or username names someone else.
+func fitIdentifiers(identifiers []string) []string {
+	out := make([]string, 0, min(len(identifiers), maxIdentifiers))
+	for _, ident := range identifiers {
+		if ident != "" && len(ident) <= maxNameBytes && !slices.Contains(out, ident) && len(out) < maxIdentifiers {
+			out = append(out, ident)
+		}
+	}
+	for len(out) > 0 && sealedSize(protocol.ContactIdentifiersPlaintext{Identifiers: out}) > protocol.MaxMetadataSealedBytes {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+// fitContact cuts a contact's profile until it seals within 8 KiB: the handle first, then
+// the name.
 func fitContact(plain *protocol.ContactPlaintext) {
 	plain.Name, plain.Handle = truncateUTF8(plain.Name, maxNameBytes), truncateUTF8(plain.Handle, maxNameBytes)
 	if plain.Avatar != nil {
 		plain.Avatar.Name = truncateUTF8(plain.Avatar.Name, maxNameBytes)
 	}
-	plain.Identifiers = slices.DeleteFunc(plain.Identifiers, func(ident string) bool { return len(ident) > maxNameBytes })
-	if len(plain.Identifiers) > maxIdentifiers {
-		plain.Identifiers = plain.Identifiers[:maxIdentifiers]
-	}
 	fits := func() bool { return sealedSize(plain) <= protocol.MaxMetadataSealedBytes }
-	for len(plain.Identifiers) > 0 && !fits() {
-		plain.Identifiers = plain.Identifiers[:len(plain.Identifiers)-1]
-	}
-	if len(plain.Identifiers) == 0 {
-		plain.Identifiers = nil
-	}
 	if !fits() {
 		plain.Handle = longestFitting(plain.Handle, func(handle string) bool { plain.Handle = handle; return fits() })
 	}

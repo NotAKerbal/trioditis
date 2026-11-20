@@ -81,12 +81,6 @@ export interface ChatPlaintext {
 export interface ContactPlaintext {
   name?: string
   handle?: string
-  /**
-   * Everything the network knows them by, as URIs: `tel:+15551234567`, `mailto:a@b.c`,
-   * `telegram:alice`. Missing from a contact sent before the bridge host sent them; `handle` is
-   * then the first.
-   */
-  identifiers?: string[]
   /** The avatar file, with its key and nonce. */
   avatar?: Attachment
   /**
@@ -95,6 +89,15 @@ export interface ContactPlaintext {
    */
   avatarUnchanged?: boolean
   [extra: string]: unknown
+}
+
+/**
+ * What one of the person's own logins knows a contact by, as URIs: `tel:+15551234567`,
+ * `mailto:a@b.c`, `telegram:alice`. Sealed apart from the profile, since what each login can
+ * see of a contact differs.
+ */
+export interface ContactIdentifiersPlaintext {
+  identifiers: string[]
 }
 
 export * from './client.ts'

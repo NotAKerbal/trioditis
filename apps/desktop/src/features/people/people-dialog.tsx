@@ -3,6 +3,7 @@ import {
   cardTitle,
   contactKey,
   groupUnlinked,
+  linkIndex,
   moveLinks,
   parseContactsFile,
   parseIdentifier,
@@ -25,7 +26,19 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
 import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
-import { Download, Link2, MoreHorizontal, Pencil, Plus, Search, Trash2, Upload, Users, X } from 'lucide-react'
+import {
+  Download,
+  Link2,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  Upload,
+  Users,
+  X,
+} from 'lucide-react'
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { networkName } from '~/data/chats.ts'
 import {
@@ -36,6 +49,10 @@ import {
   useNetworkContacts,
   usePeople,
   usePeopleActions,
+  useSyncContacts,
+  Stale,
+  type Change,
+  type StoredPerson,
 } from '~/data/people.ts'
 import { Group, Loading } from '~/features/settings/layout.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -90,7 +107,8 @@ function matches(card: PersonPlaintext, query: string) {
 function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view: PeopleView | undefined) => void }) {
   const people = usePeople()
   const contacts = useNetworkContacts()
-  const actions = usePeopleActions()
+  const actions = usePeopleActions(people)
+  const syncContacts = useSyncContacts()
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -116,16 +134,27 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
   const byContact = useMemo(() => contactsByKey(contacts), [contacts])
   const selected = view.startsWith('p:') ? sorted.find((p) => `p:${p.personKey}` === view) : undefined
 
-  /** Saves cards, saying so if it fails. True once they're saved. */
-  async function save(changed: Person[], failure: string) {
+  /** Runs a write, saying so if it fails. True once it's saved. */
+  async function attempt(write: () => Promise<unknown>, failure: string) {
     try {
-      await actions.save(changed)
+      await write()
       return true
     } catch (err) {
       if (sessionChanged(err)) window.location.reload()
-      else toast(errorMessage(err, failure))
+      else toast(err instanceof Stale ? err.message : errorMessage(err, failure))
       return false
     }
+  }
+  const run = (change: Change, failure: string) => attempt(() => actions.apply(change), failure)
+  const link = (personKey: string, linked: NetworkContact[]) =>
+    run((fresh) => moveLinks(fresh, personKey, linked), 'That couldn’t be linked.')
+
+  async function sync() {
+    const asked = await attempt(async () => {
+      const n = await syncContacts.run()
+      toast(n ? 'Contacts are on their way.' : 'Contacts were asked for a moment ago.')
+    }, 'Contacts couldn’t be asked for.')
+    return asked
   }
 
   async function importFile(file: File) {
@@ -140,8 +169,7 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
           else delete card.photo
         }
       }
-      const plan = importPlan(people ?? [], cards)
-      await actions.save(plan)
+      const plan = await actions.saveMany((fresh) => importPlan(fresh, cards))
       toast(`Imported ${plan.length.toLocaleString()} ${plan.length === 1 ? 'person' : 'people'}`)
       onViewChange('suggested')
     } catch (err) {
@@ -152,13 +180,13 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
     }
   }
 
-  async function remove(person: Person) {
+  async function remove(person: StoredPerson) {
     try {
       await actions.remove([person.personKey])
       onViewChange('all')
       toast(`Deleted ${cardTitle(person.card)}`, {
         label: 'Undo',
-        onClick: () => void save([person], 'It couldn’t be put back.'),
+        onClick: () => void run(() => [person], 'It couldn’t be put back.'),
       })
     } catch (err) {
       toast(errorMessage(err, 'That person couldn’t be deleted.'))
@@ -191,6 +219,11 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
               <DropdownMenuItem onSelect={() => fileRef.current?.click()}>
                 <Upload /> Import contacts…
               </DropdownMenuItem>
+              {syncContacts.available ? (
+                <DropdownMenuItem onSelect={() => void sync()}>
+                  <RefreshCw /> Sync from networks
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem
                 disabled={!people?.length}
                 onSelect={() => download(toVCards(sorted.map((p) => p.card)), 'people.vcf', 'text/vcard')}
@@ -265,26 +298,31 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
             onCancel={() => onViewChange('all')}
             onSave={async (card) => {
               const personKey = newClientId()
-              if (await save([{ personKey, card }], 'That person couldn’t be saved.')) onViewChange(`p:${personKey}`)
+              if (await run(() => [{ personKey, card }], 'That person couldn’t be saved.'))
+                onViewChange(`p:${personKey}`)
             }}
           />
         ) : view === 'suggested' ? (
-          <Suggestions
-            suggestions={suggestions}
-            people={people ?? []}
-            onLink={(personKey, linked) => save(moveLinks(people ?? [], personKey, linked), 'That couldn’t be linked.')}
-          />
+          <Suggestions suggestions={suggestions} people={people ?? []} onLink={link} />
         ) : view === 'unsorted' ? (
           <Unsorted
             groups={unsorted}
             people={sorted}
             onCreate={(groups) =>
-              save(
-                groups.map((g) => ({ personKey: newClientId(), card: cardFromContacts(g) })),
+              attempt(
+                () =>
+                  // Worked out again from the latest cards: a contact linked elsewhere meanwhile stays there.
+                  actions.saveMany((fresh) => {
+                    const linked = linkIndex(fresh)
+                    return groups.flatMap((g) => {
+                      const free = g.filter((c) => !linked.has(contactKey(c)))
+                      return free.length ? [{ personKey: newClientId(), card: cardFromContacts(free) }] : []
+                    })
+                  }),
                 'Those people couldn’t be added.',
               )
             }
-            onLink={(personKey, linked) => save(moveLinks(people ?? [], personKey, linked), 'That couldn’t be linked.')}
+            onLink={link}
           />
         ) : selected ? (
           <PersonDetail
@@ -293,8 +331,8 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
             byContact={byContact}
             contacts={contacts ?? []}
             suggestions={suggestions.filter((s) => s.personKey === selected.personKey)}
-            onSave={(card) => save([{ personKey: selected.personKey, card }], 'That person couldn’t be saved.')}
-            onLink={(linked) => save(moveLinks(people ?? [], selected.personKey, linked), 'That couldn’t be linked.')}
+            onChange={run}
+            onLink={(linked) => link(selected.personKey, linked)}
             onDelete={() => void remove(selected)}
           />
         ) : view.startsWith('p:') && people ? (
@@ -366,28 +404,37 @@ function PersonDetail({
   byContact,
   contacts,
   suggestions,
-  onSave,
+  onChange,
   onLink,
   onDelete,
 }: {
-  person: Person
+  person: StoredPerson
   byContact: Map<string, NetworkContact>
   contacts: readonly NetworkContact[]
   suggestions: LinkSuggestion[]
-  onSave: (card: PersonPlaintext) => Promise<boolean>
+  onChange: (change: Change, failure: string) => Promise<boolean>
   onLink: (contacts: NetworkContact[]) => Promise<boolean>
   onDelete: () => void
 }) {
-  const [editing, setEditing] = useState(false)
+  // The card as it was when editing began: saving checks nothing has changed it since.
+  const [editing, setEditing] = useState<StoredPerson | null>(null)
   const [choosing, setChoosing] = useState(false)
-  const { card } = person
+  const { card, personKey } = person
   if (editing) {
     return (
       <PersonForm
-        card={card}
-        onCancel={() => setEditing(false)}
+        card={editing.card}
+        onCancel={() => setEditing(null)}
         onSave={async (next) => {
-          if (await onSave(next)) setEditing(false)
+          const saved = await onChange((fresh) => {
+            const now = fresh.find((p) => p.personKey === personKey)
+            if (!now) throw new Stale('This person was deleted on another device.')
+            if (now.updatedAt !== editing.updatedAt) {
+              throw new Stale('This person changed on another device. Cancel to see the change, then edit again.')
+            }
+            return [{ personKey, card: next }]
+          }, 'That person couldn’t be saved.')
+          if (saved) setEditing(null)
         }}
       />
     )
@@ -402,7 +449,7 @@ function PersonDetail({
           <h2 className="truncate text-lg font-bold tracking-[-0.015em]">{cardTitle(card)}</h2>
           {subtitle ? <div className="truncate text-sm text-muted-foreground">{subtitle}</div> : null}
         </div>
-        <Button size="sm" onClick={() => setEditing(true)}>
+        <Button size="sm" onClick={() => setEditing(person)}>
           <Pencil className="size-3.5" /> Edit
         </Button>
         <DropdownMenu>
@@ -437,7 +484,12 @@ function PersonDetail({
                 variant="ghost"
                 size="icon-sm"
                 aria-label={`Unlink ${networkName(link.network)}`}
-                onClick={() => void onSave(withoutLinks(card, [link]))}
+                onClick={() =>
+                  void onChange((fresh) => {
+                    const now = fresh.find((p) => p.personKey === personKey)
+                    return now ? [{ personKey, card: withoutLinks(now.card, [link]) }] : []
+                  }, 'That couldn’t be unlinked.')
+                }
               >
                 <X className="size-4" />
               </Button>
@@ -530,7 +582,7 @@ function ChooseContact({
     .filter(
       (c) =>
         !q ||
-        [c.profile.name, c.profile.handle, ...(c.profile.identifiers ?? []), networkName(c.network)].some((t) =>
+        [c.profile.name, c.profile.handle, ...(c.identifiers ?? []), networkName(c.network)].some((t) =>
           t?.toLowerCase().includes(q),
         ),
     )
@@ -720,7 +772,7 @@ function Unsorted({
               <div className="truncate text-sm text-muted-foreground">
                 {[
                   ...new Set(
-                    group.flatMap((c) => (c.profile.identifiers ?? [c.profile.handle ?? '']).map(shownIdentifier)),
+                    group.flatMap((c) => [...(c.identifiers ?? []), c.profile.handle ?? ''].map(shownIdentifier)),
                   ),
                 ]
                   .filter(Boolean)

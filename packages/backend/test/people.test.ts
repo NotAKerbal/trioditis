@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../convex/_generated/api'
 import { MAX_PEOPLE } from '../convex/people'
-import { sealed, setup, signIn, type T } from './setup'
+import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
 
 const first = { numItems: 100, cursor: null }
 const key = (n: number) => `person-key-${String(n).padStart(6, '0')}`
@@ -16,18 +16,36 @@ async function count(t: T, userId: string) {
   })
 }
 
+// A fresh backend expects a host's events from the first sequence number.
+let seq = 0
+beforeEach(() => {
+  seq = 0
+})
+async function ingest(t: T, events: Record<string, unknown>[]) {
+  return await t.mutation(api.gateway.ingest, {
+    secret: GATEWAY_SECRET,
+    hostId: 'whatsapp-1',
+    network: 'whatsapp',
+    events: events.map((e) => ({ userId: 'user_a', loginId: 'login_a', at: 1_000, seq: ++seq, ...e })) as never,
+  })
+}
+
 describe('people', () => {
   it('stores sealed cards, replaces them by key, and keeps each person’s apart', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const b = await signIn(t, 'user_b')
-    await a.mutation(api.people.put, {
+    expect(await a.query(api.people.revision, {})).toBe(0)
+    let revision = await a.mutation(api.people.put, {
       people: [
         { personKey: key(1), sealed: sealed('ann') },
         { personKey: key(2), sealed: sealed('bob') },
       ],
+      revision: 0,
     })
-    await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed('ann2') }] })
+    revision = await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed('ann2') }], revision })
+    expect(revision).toBe(2)
+    expect(await a.query(api.people.revision, {})).toBe(2)
     const page = await a.query(api.people.list, { paginationOpts: first })
     expect(page.page.map((p) => [p.personKey, p.sealed.nonce])).toEqual([
       [key(1), sealed('ann2').nonce],
@@ -38,35 +56,49 @@ describe('people', () => {
     expect((await b.query(api.people.list, { paginationOpts: first })).page).toEqual([])
 
     // Another person's delete with the same key doesn't touch these.
-    await b.mutation(api.people.remove, { personKeys: [key(1)] })
+    await b.mutation(api.people.remove, { personKeys: [key(1)], revision: 0 })
     expect((await a.query(api.people.list, { paginationOpts: first })).page).toHaveLength(2)
-    await a.mutation(api.people.remove, { personKeys: [key(1), key(1), key(9)] })
+    revision = await a.mutation(api.people.remove, { personKeys: [key(1), key(1), key(9)], revision })
     expect((await a.query(api.people.list, { paginationOpts: first })).page.map((p) => p.personKey)).toEqual([key(2)])
     expect(await count(t, 'user_a')).toBe(1)
+    expect(revision).toBe(3)
+  })
+
+  it('refuses a write made from an older address book', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed('ann') }], revision: 0 })
+    // A second device still at revision 0 links the same contact to another card.
+    await expect(
+      a.mutation(api.people.put, { people: [{ personKey: key(2), sealed: sealed('bob') }], revision: 0 }),
+    ).rejects.toThrow(/changed on another device/)
+    await expect(a.mutation(api.people.remove, { personKeys: [key(1)], revision: 0 })).rejects.toThrow(
+      /changed on another device/,
+    )
+    expect((await a.query(api.people.list, { paginationOpts: first })).page.map((p) => p.personKey)).toEqual([key(1)])
   })
 
   it('refuses keys, envelopes and batches it shouldn’t store', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
-    await expect(a.mutation(api.people.put, { people: [{ personKey: 'short', sealed: sealed() }] })).rejects.toThrow(
-      /person ID/,
-    )
-    const plaintext = { ...sealed(), ct: 'not base64url!' }
-    await expect(a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: plaintext }] })).rejects.toThrow(
+    const put = (people: { personKey: string; sealed: ReturnType<typeof sealed> }[]) =>
+      a.mutation(api.people.put, { people, revision: 0 })
+    await expect(put([{ personKey: 'short', sealed: sealed() }])).rejects.toThrow(/person ID/)
+    await expect(put([{ personKey: key(1), sealed: { ...sealed(), ct: 'not base64url!' } }])).rejects.toThrow(
       /isn’t sealed/,
     )
     await expect(
-      a.mutation(api.people.put, {
-        people: [
-          { personKey: key(1), sealed: sealed() },
-          { personKey: key(1), sealed: sealed() },
-        ],
-      }),
+      put([
+        { personKey: key(1), sealed: sealed() },
+        { personKey: key(1), sealed: sealed() },
+      ]),
     ).rejects.toThrow(/once per call/)
-    const many = Array.from({ length: 101 }, (_, i) => ({ personKey: key(i), sealed: sealed() }))
-    await expect(a.mutation(api.people.put, { people: many })).rejects.toThrow(/at most 100/)
+    await expect(put(Array.from({ length: 101 }, (_, i) => ({ personKey: key(i), sealed: sealed() })))).rejects.toThrow(
+      /at most 100/,
+    )
     // A batch that fails stores nothing.
     expect((await a.query(api.people.list, { paginationOpts: first })).page).toEqual([])
+    expect(await a.query(api.people.revision, {})).toBe(0)
   })
 
   it('stops at the cap, counting only new cards', async () => {
@@ -79,12 +111,12 @@ describe('people', () => {
         .unique()
       await ctx.db.patch(member!._id, { peopleCount: MAX_PEOPLE - 1 })
     })
-    await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed() }] })
+    let revision = await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed() }], revision: 0 })
     // Replacing a card adds none.
-    await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed('again') }] })
-    await expect(a.mutation(api.people.put, { people: [{ personKey: key(2), sealed: sealed() }] })).rejects.toThrow(
-      /at most 10,000 people/,
-    )
+    revision = await a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed('again') }], revision })
+    await expect(
+      a.mutation(api.people.put, { people: [{ personKey: key(2), sealed: sealed() }], revision }),
+    ).rejects.toThrow(/at most 10,000 people/)
     expect(await count(t, 'user_a')).toBe(MAX_PEOPLE)
   })
 
@@ -92,7 +124,11 @@ describe('people', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     await expect(
-      a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed() }], sessionId: 'another-session' }),
+      a.mutation(api.people.put, {
+        people: [{ personKey: key(1), sealed: sealed() }],
+        revision: 0,
+        sessionId: 'another-session',
+      }),
     ).rejects.toThrow()
   })
 })
@@ -117,9 +153,9 @@ describe('contacts', () => {
       }
     })
     const page = await a.query(api.contacts.list, { paginationOpts: { numItems: 10, cursor: null } })
-    expect(page.page.map((c) => [c.network, c.ghostId]).sort((x, y) => x.join().localeCompare(y.join()))).toEqual([
-      ['signal', 'g_2'],
-      ['whatsapp', 'g_1'],
+    expect(page.page.map((c) => `${c.network}/${c.ghostId}`).sort((x, y) => x.localeCompare(y))).toEqual([
+      'signal/g_2',
+      'whatsapp/g_1',
     ])
     // A page can come back empty (a retired network's contacts are left out) before the end.
     const seen: string[] = []
@@ -134,5 +170,40 @@ describe('contacts', () => {
       cursor = small.continueCursor
     }
     expect(seen.sort((x, y) => x.localeCompare(y))).toEqual(['g_1', 'g_2'])
+  })
+
+  it('keeps what a login knows a contact by apart from the profile every member gets', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await ingest(t, [{ type: 'loginState', state: 'CONNECTED' }])
+    await ingest(t, [
+      { type: 'contact', ghostId: 'g_1', sealed: sealed('profile') },
+      { type: 'contactIdentifiers', ghostId: 'g_1', sealed: sealed('idents') },
+    ])
+    // A later profile update leaves the identifiers alone.
+    await ingest(t, [{ type: 'contact', ghostId: 'g_1', sealed: sealed('profile2') }])
+    const [row] = (await a.query(api.contacts.list, { paginationOpts: first })).page
+    expect(row).toMatchObject({ ghostId: 'g_1', sealedProfile: sealed('profile2'), sealedIdentifiers: sealed('idents') })
+    // Identifiers for a contact the person doesn't have are quarantined, never stored alone.
+    await ingest(t, [{ type: 'contactIdentifiers', ghostId: 'g_2', sealed: sealed('x') }])
+    const quarantine = await t.run(async (ctx) => await ctx.db.query('quarantine').collect())
+    expect(quarantine.map((q) => q.reason)).toEqual(['unknown_contact'])
+  })
+
+  it('asks a connected login for its contact list, at most every ten minutes', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const b = await signIn(t, 'user_b')
+    await heartbeat(t)
+    await ingest(t, [{ type: 'loginState', state: 'CONNECTED' }])
+    const account = await t.run(async (ctx) => (await ctx.db.query('networkAccounts').first())!)
+    await expect(b.mutation(api.contacts.sync, { networkAccountId: account._id })).rejects.toThrow(/doesn’t exist/)
+    expect(await a.mutation(api.contacts.sync, { networkAccountId: account._id })).toEqual({ queued: true })
+    expect(await a.mutation(api.contacts.sync, { networkAccountId: account._id })).toEqual({ queued: false })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((c) => [c.loginId, c.payload.type])).toEqual([['login_a', 'syncContacts']])
+    await ingest(t, [{ type: 'loginState', state: 'LOGGED_OUT' }])
+    await t.run(async (ctx) => await ctx.db.patch(account._id, { contactsSyncedAt: 0 }))
+    await expect(a.mutation(api.contacts.sync, { networkAccountId: account._id })).rejects.toThrow(/isn’t connected/)
   })
 })

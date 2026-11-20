@@ -31,6 +31,7 @@ export type UnmappableReason =
   | 'unknown_send'
   | 'malformed_envelope'
   | 'too_large'
+  | 'unknown_contact'
 
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
 export class Unmappable extends Error {
@@ -465,6 +466,25 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     })
 }
 
+/**
+ * What one of the person's logins knows a contact by, sealed to them apart from the profile
+ * (kind `contact`, object ID `<ghostId>/identifiers`), so a profile update, which every
+ * member with the contact gets, leaves it as it is. The bridge host sends the contact first.
+ */
+async function applyContactIdentifiers(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'contactIdentifiers' }>,
+  network: Network,
+) {
+  const existing = await ctx.db
+    .query('contacts')
+    .withIndex('by_ghost', (q) => q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId))
+    .unique()
+  charge(ctx, existing)
+  if (!existing) throw new Unmappable('unknown_contact')
+  await ctx.db.patch(existing._id, { sealedIdentifiers: event.sealed })
+}
+
 async function applyLoginState(
   ctx: MutationCtx,
   event: Extract<BridgeEventDoc, { type: 'loginState' }>,
@@ -631,7 +651,9 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
   if ('sealed' in event) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     const limit =
-      event.type === 'chat' || event.type === 'contact' ? MAX_METADATA_SEALED_BYTES : MAX_INCOMING_SEALED_BYTES
+      event.type === 'chat' || event.type === 'contact' || event.type === 'contactIdentifiers'
+        ? MAX_METADATA_SEALED_BYTES
+        : MAX_INCOMING_SEALED_BYTES
     if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')
   }
   await assertLoginOwner(ctx, event, origin)
@@ -654,6 +676,8 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
       return await applyChat(ctx, event, network)
     case 'contact':
       return await applyContact(ctx, event, network)
+    case 'contactIdentifiers':
+      return await applyContactIdentifiers(ctx, event, network)
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':

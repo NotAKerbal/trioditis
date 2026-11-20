@@ -74,6 +74,8 @@ export interface NetworkContact {
   network: Network
   ghostId: string
   profile: ContactPlaintext
+  /** What the person's own logins know them by (`ContactIdentifiersPlaintext`), if any has said. */
+  identifiers?: string[]
 }
 
 export const contactKey = (c: { network: Network; ghostId: string }) => `${c.network}/${c.ghostId}`
@@ -190,9 +192,9 @@ export function cardIdentifiers(card: PersonPlaintext): Identifier[] {
   return out
 }
 
-/** Every identifier a network reports for a contact, or its handle where it reports none. */
+/** Every identifier the person's logins know a contact by, and its handle. */
 export function contactIdentifiers(contact: NetworkContact): Identifier[] {
-  const raw = contact.profile.identifiers?.length ? contact.profile.identifiers : [contact.profile.handle ?? '']
+  const raw = [...(contact.identifiers ?? []), contact.profile.handle ?? '']
   return raw.map((r) => parseIdentifier(r, contact.network)).filter((id): id is Identifier => id !== null)
 }
 
@@ -205,6 +207,20 @@ function bucket(id: Identifier): string {
 
 function same(a: Identifier, b: Identifier): boolean {
   if (a.kind === 'phone' && b.kind === 'phone') return samePhone(a.value, b.value)
+  return bucket(a) === bucket(b)
+}
+
+/**
+ * Whether two identifiers are certainly the same: numbers with the same digits, not just the
+ * same ending. A number without its country code can end two different full numbers, so it
+ * can't join them into one person.
+ */
+function exactlySame(a: Identifier, b: Identifier): boolean {
+  if (a.kind === 'phone' && b.kind === 'phone') {
+    const x = phoneDigits(a.value)!
+    const y = phoneDigits(b.value)!
+    return x.digits === y.digits && x.international === y.international
+  }
   return bucket(a) === bucket(b)
 }
 
@@ -271,9 +287,9 @@ export function suggestLinks(people: readonly Person[], contacts: readonly Netwo
 }
 
 /**
- * Contacts on no card, in groups that share a phone number, email or username: the same
- * person on several networks, ready to become one card. A contact sharing nothing is a group
- * of its own.
+ * Contacts on no card, in groups that share a phone number, email or username exactly: the
+ * same person on several networks, ready to become one card. A contact sharing nothing is a
+ * group of its own.
  */
 export function groupUnlinked(people: readonly Person[], contacts: readonly NetworkContact[]): NetworkContact[][] {
   const linked = linkIndex(people)
@@ -285,7 +301,7 @@ export function groupUnlinked(people: readonly Person[], contacts: readonly Netw
     for (const id of contactIdentifiers(contact)) {
       const key = bucket(id)
       const list = seen.get(key) ?? []
-      for (const other of list) if (same(id, other.id)) parent[root(index)] = root(other.index)
+      for (const other of list) if (exactlySame(id, other.id)) parent[root(index)] = root(other.index)
       list.push({ index, id })
       seen.set(key, list)
     }
@@ -368,32 +384,28 @@ export function moveLinks(people: readonly Person[], personKey: string, contacts
 }
 
 /**
- * Two cards as one, for duplicates: the first card's fields win, the second's fill in what it
- * lacks, and lists are combined without repeats.
+ * The cards an import makes or changes. A card whose UID is already here replaces that card's
+ * fields with the file's, keeping its links (and its photo, if the file has none); a UID the
+ * file repeats updates one card. The rest are new cards, keyed with `newKey`.
  */
-export function mergeCards(a: PersonPlaintext, b: PersonPlaintext): PersonPlaintext {
-  const merged: PersonPlaintext = { ...b, ...stripEmpty(a) }
-  const fields = (x?: PersonField[], y?: PersonField[], equal = (p: string, q: string) => p === q) => {
-    const out = [...(x ?? [])]
-    for (const f of y ?? []) if (!out.some((o) => equal(o.value, f.value))) out.push(f)
-    return out.length ? out : undefined
+export function planImport(
+  existing: readonly Person[],
+  imported: readonly PersonPlaintext[],
+  newKey: () => string,
+): Person[] {
+  const byUid = new Map(existing.filter((p) => p.card.uid).map((p) => [p.card.uid!, p]))
+  const keyForUid = new Map<string, string>()
+  const out = new Map<string, Person>()
+  for (const card of imported) {
+    const same = card.uid ? byUid.get(card.uid) : undefined
+    const personKey = same?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined) ?? newKey()
+    if (card.uid) keyForUid.set(card.uid, personKey)
+    const next: PersonPlaintext = { ...card }
+    if (same?.card.links?.length) next.links = same.card.links
+    if (!next.photo && same?.card.photo) next.photo = same.card.photo
+    out.set(personKey, { personKey, card: next })
   }
-  merged.phones = fields(a.phones, b.phones, samePhone)
-  merged.emails = fields(a.emails, b.emails, (p, q) => normalEmail(p) === normalEmail(q))
-  merged.handles = fields(a.handles, b.handles)
-  merged.urls = fields(a.urls, b.urls)
-  const addresses = [...(a.addresses ?? []), ...(b.addresses ?? [])]
-  merged.addresses = addresses.length ? addresses : undefined
-  const links = [...(a.links ?? [])]
-  for (const l of b.links ?? []) if (!links.some((x) => contactKey(x) === contactKey(l))) links.push(l)
-  merged.links = links.length ? links : undefined
-  if (a.note && b.note && a.note !== b.note) merged.note = `${a.note}\n\n${b.note}`
-  for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key]
-  return merged
-}
-
-function stripEmpty(card: PersonPlaintext): Partial<PersonPlaintext> {
-  return Object.fromEntries(Object.entries(card).filter(([, v]) => v !== undefined && v !== '')) as PersonPlaintext
+  return [...out.values()]
 }
 
 /** What a card is listed as: its name, else its organization, first email or number. */

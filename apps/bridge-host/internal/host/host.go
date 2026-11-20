@@ -90,9 +90,6 @@ func BridgeConfig() *bridgeconfig.BridgeConfig {
 		// Each person gets their own copy of a shared chat. Irreversible once portals exist.
 		SplitPortals:          true,
 		PrivateChatPortalMeta: true,
-		// Keep contacts' phone numbers among their identifiers: they go only into the
-		// contact's profile, sealed to the person, who matches them to their address book.
-		PhoneNumbersInProfile: true,
 		// A chat's events are handled synchronously, in the goroutine that queues them. A send
 		// is then handed to the connector the moment the bridge host lets it go, right after
 		// its deadline is checked, and a chat stuck inside a connector holds only that chat's

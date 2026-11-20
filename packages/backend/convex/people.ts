@@ -25,6 +25,19 @@ const MAX_PAGE_BYTES = 8 * 1024 * 1024
 
 const personRow = v.object({ personKey: v.string(), sealed: envelope, updatedAt: v.number() })
 
+/**
+ * A write made from an older address book than the server's. The client loads the new one
+ * and works the change out again: links can't be checked here, since they're sealed.
+ */
+const CHANGED = { code: 'people_changed', message: 'Your people changed on another device. Try again.' }
+
+/** The address book's revision: every write names it, and gets the next one back. */
+export const revision = query({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => (await requireMember(ctx)).peopleRevision ?? 0,
+})
+
 /** The person's cards, a page at a time, in `personKey` order (which says nothing about who's on them). */
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
@@ -49,19 +62,22 @@ export const list = query({
 
 /**
  * Adds cards, or replaces the ones with these `personKey`s: a new card, an edit, a link to a
- * network contact, or a page of an import. All of them are stored, or none.
+ * network contact, or a page of an import. All of them are stored, or none, and only if the
+ * address book is still at `revision`. Returns the new revision.
  */
 export const put = mutation({
   args: {
     people: v.array(v.object({ personKey: v.string(), sealed: envelope })),
+    revision: v.number(),
     sessionId: v.optional(v.string()),
   },
-  returns: v.null(),
-  handler: async (ctx, { people, sessionId }) => {
+  returns: v.number(),
+  handler: async (ctx, { people, revision, sessionId }) => {
     // A card sealed on a page another tab's sign-in has switched would be stored for the
     // other account, which can't open it.
     await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
+    if ((member.peopleRevision ?? 0) !== revision) throw new ConvexError(CHANGED)
     if (people.length > MAX_PEOPLE_PER_CALL)
       throw new ConvexError(`Save at most ${MAX_PEOPLE_PER_CALL} people at once.`)
     if (new Set(people.map((p) => p.personKey)).size !== people.length) {
@@ -85,21 +101,23 @@ export const put = mutation({
         added++
       }
     }
-    if (added) {
-      const count = (member.peopleCount ?? 0) + added
-      if (count > MAX_PEOPLE) throw new ConvexError(`You can have at most ${MAX_PEOPLE.toLocaleString('en')} people.`)
-      await ctx.db.patch(member._id, { peopleCount: count })
-    }
-    return null
+    const count = (member.peopleCount ?? 0) + added
+    if (count > MAX_PEOPLE) throw new ConvexError(`You can have at most ${MAX_PEOPLE.toLocaleString('en')} people.`)
+    await ctx.db.patch(member._id, { peopleCount: count, peopleRevision: revision + 1 })
+    return revision + 1
   },
 })
 
-/** Deletes cards. A key with no card is skipped, so deleting twice is harmless. */
+/**
+ * Deletes cards, if the address book is still at `revision`. A key with no card is skipped,
+ * so deleting twice is harmless. Returns the new revision.
+ */
 export const remove = mutation({
-  args: { personKeys: v.array(v.string()) },
-  returns: v.null(),
-  handler: async (ctx, { personKeys }) => {
+  args: { personKeys: v.array(v.string()), revision: v.number() },
+  returns: v.number(),
+  handler: async (ctx, { personKeys, revision }) => {
     const member = await requireMember(ctx)
+    if ((member.peopleRevision ?? 0) !== revision) throw new ConvexError(CHANGED)
     if (personKeys.length > MAX_PEOPLE_PER_CALL) {
       throw new ConvexError(`Delete at most ${MAX_PEOPLE_PER_CALL} people at once.`)
     }
@@ -114,7 +132,10 @@ export const remove = mutation({
         removed++
       }
     }
-    if (removed) await ctx.db.patch(member._id, { peopleCount: Math.max(0, (member.peopleCount ?? 0) - removed) })
-    return null
+    await ctx.db.patch(member._id, {
+      peopleCount: Math.max(0, (member.peopleCount ?? 0) - removed),
+      peopleRevision: revision + 1,
+    })
+    return revision + 1
   },
 })
