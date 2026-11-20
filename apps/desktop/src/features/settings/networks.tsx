@@ -1,5 +1,4 @@
 import { api } from '@trioditis/backend/api'
-import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { toast } from '@trioditis/ui/toast'
@@ -8,10 +7,11 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import type { FunctionReturnType } from 'convex/server'
 import { useMutation } from 'convex/react'
+import { ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading } from './layout.tsx'
+import { Heading, Subheading } from './layout.tsx'
 
 type Entry = FunctionReturnType<typeof api.networks.catalog>[number]
 
@@ -71,27 +71,27 @@ export function Networks() {
   const elsewhere = (catalog ?? []).filter((entry) => !entry.installed && !entry.bridged)
 
   function row(entry: Entry) {
-    const status = entry.installed
-      ? [
-          entry.bridgeOnline ? 'Running' : 'The server’s bridge for it isn’t running',
-          entry.accounts ? accounts(entry.accounts) : 'No accounts connected',
-        ].join(' · ')
-      : entry.bridged
-        ? entry.accounts
-          ? `Not installed · ${accounts(entry.accounts)}, disconnecting`
-          : 'Ready to install'
-        : unavailable(entry)
+    // Only what's worth knowing before installing or removing it: a bridge that's down, the
+    // accounts a removal would disconnect, and a network that isn't stable yet.
+    const status = [
+      entry.maturity === 'stable' ? null : entry.maturity === 'experimental' ? 'Experimental' : 'Beta',
+      ...(entry.installed
+        ? [
+            entry.bridgeOnline ? null : 'The server’s bridge for it isn’t running',
+            entry.accounts ? accounts(entry.accounts) : null,
+          ]
+        : entry.bridged
+          ? [entry.accounts ? `Not installed · ${accounts(entry.accounts)}, disconnecting` : null]
+          : [unavailable(entry)]),
+    ]
+      .filter(Boolean)
+      .join(' · ')
     return (
-      <div key={entry.network} className="border-t border-border py-[11px]">
-        <div className="flex items-center gap-3">
+      <div key={entry.network} className="py-2">
+        <div className="flex min-h-9 items-center gap-3">
           <NetworkBadge network={entry.network} label={entry.name} size={26} />
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 font-semibold">
-              {entry.name}
-              {entry.maturity !== 'stable' ? (
-                <Badge variant="outline">{entry.maturity === 'experimental' ? 'exp' : 'beta'}</Badge>
-              ) : null}
-            </div>
+            <div className="font-semibold">{entry.name}</div>
             {status ? (
               <div
                 className={cn(
@@ -157,43 +157,33 @@ export function Networks() {
 
   return (
     <>
-      <Heading
-        title="Networks"
-        lead="The networks people on this server can connect. Install one and everyone can connect their own account on it."
-      />
+      <Heading title="Networks" />
       {catalog ? (
         <>
-          <h3 className="mt-2 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-            Installed
-          </h3>
+          <Subheading className="mt-0">Installed</Subheading>
           {installed.length ? (
             installed.map(row)
           ) : (
-            <p className="border-t border-border py-3 text-sm text-muted-foreground">
-              No networks installed yet, so nobody can connect one. Install one below.
-            </p>
+            <p className="py-2 text-sm text-muted-foreground">None yet, so nobody can connect a network.</p>
           )}
-          <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-            Available
-          </h3>
           {available.length ? (
-            available.map(row)
-          ) : (
-            <p className="border-t border-border py-3 text-sm text-muted-foreground">
-              Every network this server runs is installed.
-            </p>
-          )}
-          {elsewhere.length ? (
             <>
-              <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-                Not on this server
-              </h3>
-              <p className="mb-2 text-sm text-muted-foreground">
-                This server doesn’t run a bridge for these. Whoever runs it adds them by running the installer again:{' '}
-                <code className="font-mono">deploy/install/install.sh --networks all</code>.
+              <Subheading>Available</Subheading>
+              {available.map(row)}
+            </>
+          ) : null}
+          {elsewhere.length ? (
+            // Networks this server can't install: collapsed, since there's nothing to do with them here.
+            <details className="mt-6 [&[open]>summary_svg]:rotate-90">
+              <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase [&::-webkit-details-marker]:hidden">
+                <ChevronRight className="size-3.5 transition-transform" /> Not on this server ({elsewhere.length})
+              </summary>
+              <p className="mt-2 mb-1 text-sm text-muted-foreground">
+                To add these, rerun the installer:{' '}
+                <code className="font-mono">deploy/install/install.sh --networks all</code>
               </p>
               {elsewhere.map(row)}
-            </>
+            </details>
           ) : null}
         </>
       ) : null}

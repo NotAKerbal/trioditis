@@ -13,7 +13,6 @@ import {
   wrapIdentityKey,
   type RecoveryKey,
 } from '@trioditis/crypto'
-import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { Checkbox } from '@trioditis/ui/checkbox'
 import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
@@ -34,7 +33,6 @@ import {
   KeyRound,
   Network as NetworkIcon,
   Plug,
-  Plus,
   RefreshCw,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -65,7 +63,7 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Setting } from './layout.tsx'
+import { Heading, Setting, Subheading } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
@@ -137,7 +135,7 @@ export function SettingsDialog({
             </Button>
           ) : null}
         </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
+        <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7">
           {current.id === 'appearance' ? (
             <Appearance />
           ) : current.id === 'notifications' ? (
@@ -163,26 +161,13 @@ function Appearance() {
   const prefs = usePrefs()
   const [layout, setLayout] = useSidebarLayout()
   const options = [
-    {
-      id: 'simple' as const,
-      name: 'Simple',
-      about: 'Every chat in one list, newest first. Nothing else in the way.',
-      drawing: <MiniSimple />,
-    },
-    {
-      id: 'focused' as const,
-      name: 'Focused',
-      about: 'Unread on top. Read, snoozed, scheduled and archived chats fold away until you open them.',
-      drawing: <MiniFocused />,
-    },
+    { id: 'simple' as const, name: 'Simple', drawing: <MiniSimple /> },
+    { id: 'focused' as const, name: 'Focused', drawing: <MiniFocused /> },
   ]
   return (
     <>
-      <Heading
-        title="Appearance"
-        lead="How Trioditis looks. The sidebar layout follows you to your other devices; the rest is for this device."
-      />
-      <Setting title="Sidebar layout" about="How the chat list is organized. You can switch at any time." column>
+      <Heading title="Appearance" />
+      <Setting title="Sidebar layout" column>
         <div className="mt-3 grid grid-cols-2 gap-3" role="radiogroup" aria-label="Sidebar layout">
           {options.map((o) => (
             <Button
@@ -198,17 +183,12 @@ function Appearance() {
               )}
             >
               {o.drawing}
-              <span
-                className={cn('flex items-center justify-between font-bold', layout === o.id && 'text-primary-ink')}
-              >
-                {o.name} {layout === o.id ? <Check className="size-4" /> : null}
-              </span>
-              <span className="text-sm text-muted-foreground">{o.about}</span>
+              <span className={cn('font-bold', layout === o.id && 'text-primary-ink')}>{o.name}</span>
             </Button>
           ))}
         </div>
       </Setting>
-      <Setting title="Theme" about="Follow this device, or always use light or dark.">
+      <Setting title="Theme">
         <Segmented
           value={prefs.theme}
           onValueChange={(v) => setPref('theme', v as 'system' | 'light' | 'dark')}
@@ -220,14 +200,14 @@ function Appearance() {
           <SegmentedItem value="dark">Dark</SegmentedItem>
         </Segmented>
       </Setting>
-      <Setting title="Message previews" about="Show a second line under each chat in the list.">
+      <Setting title="Message previews">
         <Switch
           checked={prefs.previews}
           onCheckedChange={(v) => setPref('previews', v)}
           aria-label="Message previews"
         />
       </Setting>
-      <Setting title="Network badges" about="Show which network each chat is on, on its picture.">
+      <Setting title="Network badges">
         <Switch
           checked={prefs.networkBadges}
           onCheckedChange={(v) => setPref('networkBadges', v)}
@@ -252,18 +232,8 @@ function Notifications() {
   }
   return (
     <>
-      <Heading
-        title="Notifications"
-        lead="A notification when a message arrives in a chat that isn’t muted. These settings are for this device."
-      />
-      <Setting
-        title="Desktop notifications"
-        about={
-          supported
-            ? 'Show each new message and who sent it (in a group, the group’s name), while Trioditis is open.'
-            : 'This browser can’t show notifications.'
-        }
-      >
+      <Heading title="Notifications" />
+      <Setting title="Desktop notifications" about={supported ? undefined : 'This browser can’t show notifications.'}>
         <Switch
           checked={prefs.notifications && allowed}
           disabled={!supported}
@@ -355,71 +325,67 @@ function Accounts() {
 
   return (
     <>
-      <Heading
-        title="Accounts"
-        lead="The network accounts this server bridges for you. Each one you connect brings its chats into your list."
-      />
-      {accounts?.length ? (
-        accounts.map((a) => {
-          const state = ACCOUNT_STATE[a.state] ?? { text: a.state }
-          const bridgeDown = health?.find((h) => h.network === a.network)?.bridgeOnline === false
-          return (
-            <div key={a._id} className="flex items-center gap-3 border-t border-border py-[11px]">
-              <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold">{networkName(a.network)}</div>
+      <Heading title="Accounts" />
+      {(accounts ?? []).map((a) => {
+        const state = ACCOUNT_STATE[a.state] ?? { text: a.state }
+        const bridgeDown = health?.find((h) => h.network === a.network)?.bridgeOnline === false
+        // A connected account needs no line under it; anything else does.
+        const note = a.logoutPending
+          ? 'Disconnecting…'
+          : a.logoutError
+            ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
+            : bridgeDown
+              ? 'The server’s bridge for this network isn’t running.'
+              : a.state === 'CONNECTED'
+                ? null
+                : state.text
+        return (
+          <div key={a._id} className="flex min-h-[52px] items-center gap-3 py-2">
+            <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">{networkName(a.network)}</div>
+              {note ? (
                 <div
                   className={cn(
                     'text-sm',
                     state.warn || bridgeDown || a.logoutError ? 'text-warning' : 'text-muted-foreground',
                   )}
                 >
-                  {a.logoutPending
-                    ? 'Disconnecting…'
-                    : a.logoutError
-                      ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
-                      : bridgeDown
-                        ? 'The server’s bridge for this network isn’t running.'
-                        : state.text}
+                  {note}
                 </div>
-              </div>
-              {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    setConnecting({
-                      network: a.network,
-                      flowId: networks?.find((n) => n.network === a.network)?.flows[0]?.id ?? '',
-                    })
-                  }
-                >
-                  Reconnect
-                </Button>
               ) : null}
+            </div>
+            {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
               <Button
                 size="sm"
-                variant="ghost"
-                disabled={a.logoutPending}
                 onClick={() =>
-                  void logout({ networkAccountId: a._id }).then(
-                    () => toast(`Disconnecting ${networkName(a.network)}…`),
-                    (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
-                  )
+                  setConnecting({
+                    network: a.network,
+                    flowId: networks?.find((n) => n.network === a.network)?.flows[0]?.id ?? '',
+                  })
                 }
               >
-                Disconnect
+                Reconnect
               </Button>
-            </div>
-          )
-        })
-      ) : (
-        <p className="border-t border-border py-4 text-sm text-muted-foreground">No accounts connected yet.</p>
-      )}
+            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={a.logoutPending}
+              onClick={() =>
+                void logout({ networkAccountId: a._id }).then(
+                  () => toast(`Disconnecting ${networkName(a.network)}…`),
+                  (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
+                )
+              }
+            >
+              Disconnect
+            </Button>
+          </div>
+        )
+      })}
 
-      <h3 className="mt-6 mb-2 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-        Connect a network
-      </h3>
-      {server?.demo ? <DemoSeed /> : null}
+      <Subheading className={accounts?.length ? undefined : 'mt-0'}>Connect a network</Subheading>
       {confirmRisk ? (
         <div className="mb-3 rounded-lg bg-warning-soft p-3.5 text-sm text-warning-ink">
           <b className="font-semibold">
@@ -459,15 +425,12 @@ function Accounts() {
             >
               <NetworkBadge network={n.network} label={n.name} size={24} />
               <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-1.5 font-semibold">
-                  {n.name}{' '}
-                  {n.maturity !== 'stable' ? (
-                    <Badge variant="outline">{n.maturity === 'experimental' ? 'exp' : 'beta'}</Badge>
-                  ) : null}
+                <span className="block font-semibold">{n.name}</span>
+                <span className="block truncate text-sm text-muted-foreground">
+                  {f.name}
+                  {n.maturity === 'stable' ? '' : n.maturity === 'experimental' ? ' · Experimental' : ' · Beta'}
                 </span>
-                <span className="block truncate text-sm text-muted-foreground">{f.name}</span>
               </span>
-              <Plus className="size-4 text-subtle-foreground" />
             </Button>
           )),
         )}
@@ -475,9 +438,14 @@ function Accounts() {
       {networks && networks.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           {session.role === 'admin'
-            ? 'No networks are installed on this server yet. Install them in Admin settings → Networks.'
-            : 'No networks are installed on this server yet. Its admins install them.'}
+            ? 'No networks are installed yet. Install them in Admin settings → Networks.'
+            : 'No networks are installed yet. An admin installs them.'}
         </p>
+      ) : null}
+      {server?.demo ? (
+        <div className="mt-3">
+          <DemoSeed />
+        </div>
       ) : null}
     </>
   )
@@ -492,28 +460,22 @@ function DemoSeed() {
   const seed = useAction(api.demo.seedForMe)
   const [busy, setBusy] = useState(false)
   return (
-    <div className="mb-3 flex items-center gap-3 rounded-lg bg-surface-2 p-3 text-sm shadow-[inset_0_0_0_1px_var(--border)]">
-      <span className="flex-1 text-muted-foreground">
-        This is a demo server. You can fill your account with made-up chats.
-      </span>
-      <Button
-        size="sm"
-        loading={busy}
-        onClick={async () => {
-          setBusy(true)
-          try {
-            const { seeded } = await seed({ sessionId: session.sessionId })
-            toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
-          } catch (e) {
-            if (sessionChanged(e)) return window.location.reload()
-            toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
-          }
-          setBusy(false)
-        }}
-      >
-        Load demo chats
-      </Button>
-    </div>
+    <Button
+      loading={busy}
+      onClick={async () => {
+        setBusy(true)
+        try {
+          const { seeded } = await seed({ sessionId: session.sessionId })
+          toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
+        } catch (e) {
+          if (sessionChanged(e)) return window.location.reload()
+          toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
+        }
+        setBusy(false)
+      }}
+    >
+      Load demo chats
+    </Button>
   )
 }
 
@@ -533,23 +495,16 @@ function Members() {
 
   return (
     <>
-      <Heading
-        title="Members"
-        lead={
-          closed
-            ? 'Who can use this server.'
-            : 'Who can use this server. Everyone signs up from an invitation link you share; they connect their own networks.'
-        }
-      />
+      <Heading title="Members" />
       {server && closed ? (
-        <p className="border-t border-border pt-4 text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {server.demo
             ? 'This is a demo server, so it doesn’t take invitations.'
             : 'This server doesn’t take invitations.'}
         </p>
       ) : server ? (
         <form
-          className="flex items-end gap-2 border-t border-border pt-4"
+          className="flex items-end gap-2"
           onSubmit={async (e) => {
             e.preventDefault()
             setBusy(true)
@@ -586,7 +541,7 @@ function Members() {
         </form>
       ) : null}
       {link ? (
-        <div className="mt-3 rounded-lg bg-surface-2 p-3 shadow-[inset_0_0_0_1px_var(--border)]">
+        <div className="mt-4">
           <p className="mb-2 text-sm text-muted-foreground">
             Send them this link. It works once, for a week, and won’t be shown again.
           </p>
@@ -611,13 +566,9 @@ function Members() {
           </div>
         </div>
       ) : null}
-      {!closed || invitations?.length ? (
-        <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-          Invitations
-        </h3>
-      ) : null}
+      {invitations?.length ? <Subheading>Invitations</Subheading> : null}
       {(invitations ?? []).map((inv) => (
-        <div key={inv._id} className="flex items-center gap-3 border-t border-border py-2.5">
+        <div key={inv._id} className="flex min-h-[52px] items-center gap-3 py-2">
           <div className="min-w-0 flex-1">
             <div className="truncate font-semibold">{inv.email}</div>
             <div className="text-sm text-muted-foreground">
@@ -640,9 +591,6 @@ function Members() {
           ) : null}
         </div>
       ))}
-      {!closed && invitations?.length === 0 ? (
-        <p className="border-t border-border py-3 text-sm text-muted-foreground">No invitations yet.</p>
-      ) : null}
     </>
   )
 }
@@ -743,18 +691,19 @@ function Keys() {
 
   return (
     <>
-      <Heading
-        title="Keys and devices"
-        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password, your recovery key and any passkey that unlocks it, and can’t open it."
-      />
-      <Setting title="Your key" about={`Key ID ${session.kid}. Unlocked on this device.`}>
-        <span />
-      </Setting>
+      <Heading title="Keys and devices" />
       <Setting
-        title="Recovery key"
-        about="The way back in if you forget your password. Making a new one replaces the old."
-        column
+        title="Your key"
+        about={
+          <>
+            Key ID <span className="font-mono">{session.kid}</span> · Public key{' '}
+            <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
+          </>
+        }
       >
+        {null}
+      </Setting>
+      <Setting title="Recovery key" about="A new one replaces the old." column>
         {recovery ? (
           <div className="mt-3">
             <div className="mb-2 rounded-md bg-surface-2 p-3 text-center font-mono text-base tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]">
@@ -785,11 +734,7 @@ function Keys() {
           </Button>
         )}
       </Setting>
-      <Setting
-        title="Password"
-        about="Changes how you sign in and re-wraps your key backup with the new password."
-        column
-      >
+      <Setting title="Password" column>
         <form className="mt-3 grid max-w-[360px] gap-2" onSubmit={changePassword}>
           <Input
             type="password"
@@ -816,9 +761,6 @@ function Keys() {
         </form>
       </Setting>
       <Passkeys backups={identity?.backups} />
-      <p className="mt-2 text-sm text-subtle-foreground">
-        Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
-      </p>
     </>
   )
 }
@@ -931,14 +873,13 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
   const row = (credentialId: string, title: string, detail: string, registeredHere: boolean) => {
     const unlocks = backupOf.has(credentialId)
     return (
-      <div key={credentialId} className="flex items-center gap-3 border-t border-border py-2.5">
-        <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+      <div key={credentialId} className="flex min-h-[52px] items-center gap-3 py-2">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 truncate font-semibold">
-            {title}
-            {unlocks ? <Badge variant="tag">Unlocks your key</Badge> : null}
+          <div className="truncate font-semibold">{title}</div>
+          <div className="text-sm text-muted-foreground">
+            {detail}
+            {unlocks && registeredHere ? ' · Unlocks your key' : ''}
           </div>
-          <div className="text-sm text-muted-foreground">{detail}</div>
         </div>
         {confirming === credentialId ? (
           <>
@@ -955,7 +896,7 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
               <Button
                 size="sm"
                 loading={busy === credentialId}
-                disabled={busy !== null}
+                disabled={busy !== null || !!passkeysUnavailable}
                 onClick={() => void useToUnlock(credentialId)}
               >
                 Use to unlock
@@ -971,12 +912,8 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
   }
 
   return (
-    <Setting
-      title="Passkeys"
-      about="Sign in without a password. A passkey that unlocks your key also opens your messages on a new device."
-      column
-    >
-      <div className="mt-3">
+    <Setting title="Passkeys" column>
+      <div className="mt-1">
         {(passkeys.data ?? []).map((p) =>
           row(
             p.credentialId,
@@ -987,13 +924,16 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
         )}
         {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', false))}
         {passkeys.isError ? (
-          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">
+          <p className="py-2 text-sm text-muted-foreground">
             Your passkeys couldn’t be listed. Reload the page to try again.
           </p>
-        ) : passkeys.data?.length === 0 && unlockOnly.length === 0 ? (
-          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">No passkeys yet.</p>
         ) : null}
-        <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
+        <Button
+          className="mt-2"
+          loading={busy === 'add'}
+          disabled={busy !== null || !!passkeysUnavailable}
+          onClick={() => void add()}
+        >
           Add a passkey
         </Button>
         {passkeysUnavailable ? (
