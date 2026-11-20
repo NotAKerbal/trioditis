@@ -168,6 +168,15 @@ export function keyMessage(
   return { type: 'key', event: 'rawKeyDown', key, code, keyCode, modifiers }
 }
 
+/**
+ * Whether a key belongs to an IME's composition: Enter there picks a candidate and the arrows
+ * move through them, so the key stays with the person's own browser. Browsers mark such keys
+ * composing, or (Safari, for the key that ends one) with the key code 229.
+ */
+export function composing(e: { isComposing: boolean; keyCode: number }): boolean {
+  return e.isComposing || e.keyCode === 229
+}
+
 /** A `page` message's address, as the person reads it: the host, without `www.`. */
 export function pageHost(url: string): string {
   try {

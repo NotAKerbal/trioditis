@@ -10,6 +10,7 @@ import { useSession } from '~/lib/session.tsx'
 import {
   buttonName,
   clickCounter,
+  composing,
   keyMessage,
   MAX_TEXT,
   modifierBits,
@@ -65,6 +66,8 @@ export function SigninBrowser({
   // The generation of the page in the frame shown: input names it, so it only reaches the page
   // the person saw, not one that has replaced it since.
   const shownGen = useRef(0)
+  // Keys that went down to the IME, by code: their key-ups stay there too.
+  const composed = useRef(new Set<string>())
 
   const send = <T extends { type: string }>(message: T) => {
     const ws = socket.current
@@ -389,12 +392,18 @@ export function SigninBrowser({
             spellCheck={false}
             className="pointer-events-none absolute top-0 left-0 size-px min-w-0 opacity-0"
             onKeyDown={(e) => {
+              if (composing(e.nativeEvent)) {
+                composed.current.add(e.code)
+                return
+              }
               const message = keyMessage(e, 'down', mac)
               if (!message) return
               e.preventDefault()
               send(message)
             }}
             onKeyUp={(e) => {
+              // A key that went down to the IME comes up there too, even once composition ends.
+              if (composed.current.delete(e.code) || composing(e.nativeEvent)) return
               const message = keyMessage(e, 'up', mac)
               if (message) send(message)
             }}

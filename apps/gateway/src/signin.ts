@@ -50,10 +50,14 @@ function refuse(socket: Duplex, status: number) {
   socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status] ?? ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
-/** Closes an upgraded socket with a websocket close frame (unmasked, as a server's are). */
+/**
+ * Closes an upgraded socket with a websocket close frame (unmasked, as a server's are), then
+ * destroys it once the frame is written. A socket paused for the handshake never reads the
+ * client's own close, so ending it alone would leave it open, holding its place.
+ */
 function closeWith(socket: Duplex, code: number) {
   if (socket.destroyed) return
-  socket.end(Buffer.from([0x88, 2, code >> 8, code & 0xff]))
+  socket.end(Buffer.from([0x88, 2, code >> 8, code & 0xff]), () => socket.destroy())
 }
 
 /**
@@ -190,6 +194,7 @@ export function createSigninServer(backend: Pick<Backend, 'redeemSigninTicket'>,
     const timer = setTimeout(() => fail(CLOSE.unavailable), handshakeTimeoutMs)
     function fail(code: number) {
       doneWaiting()
+      leave()
       clearTimeout(timer)
       socket.off('data', onData)
       upstream?.destroy()

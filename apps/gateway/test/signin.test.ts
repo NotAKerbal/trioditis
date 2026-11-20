@@ -87,8 +87,8 @@ function clientFrame(text: string) {
 const ticket = (value: string) => clientFrame(JSON.stringify({ type: 'ticket', ticket: value }))
 
 /** Opens a raw upgrade to the gateway, and lets a test wait for what it answers. */
-function upgrade(port: number, path: string, extra = '') {
-  const socket = connect(port, '127.0.0.1')
+function upgrade(port: number, path: string, extra = '', { halfOpen = false } = {}) {
+  const socket = connect({ port, host: '127.0.0.1', allowHalfOpen: halfOpen })
   sockets.push(socket)
   socket.write(
     `GET ${path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: ${KEY}\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`,
@@ -106,6 +106,16 @@ function upgrade(port: number, path: string, extra = '') {
       )
       check()
     })
+  /** The code of the gateway's close frame, as soon as it arrives. */
+  const closeFrame = () =>
+    new Promise<number>((resolve) => {
+      const check = () => {
+        const at = received.indexOf(Buffer.from([0x88, 2]))
+        if (at >= 0 && received.length >= at + 4) resolve(received.readUInt16BE(at + 2))
+      }
+      socket.on('data', check)
+      check()
+    })
   /** The code of the close frame the gateway ends with. */
   const closed = () =>
     new Promise<number>((resolve) => {
@@ -114,7 +124,7 @@ function upgrade(port: number, path: string, extra = '') {
         resolve(at < 0 ? 0 : received.readUInt16BE(at + 2))
       })
     })
-  return { socket, until, closed }
+  return { socket, until, closed, closeFrame }
 }
 
 describe('sign-in browser proxy', () => {
@@ -184,6 +194,33 @@ describe('sign-in browser proxy', () => {
     await client.until('\r\n\r\n')
     client.socket.write(ticket('abc'))
     expect(await client.closed()).toBe(4409)
+  })
+
+  it('gives up a turned-away socket’s place, so the next one gets in', async () => {
+    const host = await fakeHost(409)
+    const server = createSigninServer(
+      { redeemSigninTicket: vi.fn(async () => REDEEMED) },
+      {
+        internalToken: TOKEN,
+        gatewaySecret: SECRET,
+        bridgeHosts: new Map([['meta-1', host.url]]),
+        log: () => {},
+        maxConnections: 1,
+      },
+    )
+    const port = await listen(server)
+    for (let i = 0; i < 3; i++) {
+      // As a browser does: it answers the close frame with its own, then closes once the
+      // server has. A gateway that never reads that answer never sees the close.
+      const client = upgrade(port, BROWSER(), '', { halfOpen: true })
+      const ended = new Promise<void>((resolve) => client.socket.on('end', () => resolve()))
+      await client.until('\r\n\r\n')
+      client.socket.write(ticket(`t${i}`))
+      expect(await client.closeFrame()).toBe(4409)
+      client.socket.write(Buffer.from([0x88, 0x82, 1, 2, 3, 4, 0x0f ^ 1, 0xa1 ^ 2]))
+      await ended
+      client.socket.end()
+    }
   })
 
   it('takes no socket without an admission, so nobody can keep a viewer out', async () => {

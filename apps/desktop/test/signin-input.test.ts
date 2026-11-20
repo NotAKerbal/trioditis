@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buttonName,
   clickCounter,
+  composing,
   frameBox,
   keyMessage,
   modifierBits,
@@ -80,6 +81,12 @@ describe('pointer coordinates', () => {
 })
 
 describe('keys', () => {
+  it('leave an IME’s keys with it until its composition ends', () => {
+    expect(composing({ isComposing: true, keyCode: 13 })).toBe(true)
+    expect(composing({ isComposing: false, keyCode: 229 })).toBe(true)
+    expect(composing({ isComposing: false, keyCode: 13 })).toBe(false)
+  })
+
   it('leave text to the input it’s typed into', () => {
     expect(keyMessage(key('a', 'KeyA'), 'down', false)).toBeNull()
     expect(keyMessage(key('A', 'KeyA', { shiftKey: true }), 'down', false)).toBeNull()
