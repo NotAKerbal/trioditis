@@ -39,7 +39,7 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import {
   networkName,
   useAccounts,
@@ -68,6 +68,9 @@ import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
+
+/** Puts focus back on a control once it's rendered again: an opener a form or reveal replaced. */
+const refocus = (ref: RefObject<HTMLElement | null>) => requestAnimationFrame(() => ref.current?.focus())
 
 // Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
 // admins only (Admin settings).
@@ -116,7 +119,8 @@ export function SettingsDialog({
               key={s.id}
               type="button"
               aria-current={s.id === current.id ? 'page' : undefined}
-              onClick={() => onSectionChange(s.id)}
+              // Choosing the open section again changes nothing, so a list it opened stays as it is.
+              onClick={() => s.id !== current.id && onSectionChange(s.id)}
               className={cn(
                 'flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4',
                 s.id === current.id &&
@@ -356,6 +360,8 @@ function Accounts({ connect }: { connect: boolean }) {
   // The networks to connect stay folded away until asked for, unless there's no account yet or
   // the person came here to connect one ("Connect a network" in the menus).
   const [browsing, setBrowsing] = useState<boolean | null>(connect || null)
+  // Back and forward can bring `connect` in or take it away while Accounts stays open.
+  useEffect(() => setBrowsing(connect || null), [connect])
   const open = browsing ?? accounts?.length === 0
 
   if (connecting)
@@ -510,6 +516,7 @@ function DemoSeed() {
   return (
     <Button
       size="sm"
+      aria-label="Load demo chats"
       loading={busy}
       onClick={async () => {
         setBusy(true)
@@ -542,6 +549,7 @@ function Members() {
   const [busy, setBusy] = useState(false)
   // The form opens from Invite and closes once the link is made, which then shows in its place.
   const [inviting, setInviting] = useState(false)
+  const inviteOpener = useRef<HTMLButtonElement>(null)
   // A server that takes no invitations (a demo) has nothing to invite with or list.
   const closed = server?.invitations === false
 
@@ -555,13 +563,7 @@ function Members() {
           title="Invitations"
           action={
             !closed && !inviting ? (
-              <Button
-                size="sm"
-                onClick={() => {
-                  setInviting(true)
-                  setLink(null)
-                }}
-              >
+              <Button ref={inviteOpener} size="sm" disabled={busy} onClick={() => setInviting(true)}>
                 <Plus className="size-4" /> Invite
               </Button>
             ) : null
@@ -576,7 +578,7 @@ function Members() {
           ) : null}
           {inviting ? (
             <form
-              className="flex items-end gap-2 px-4 py-3"
+              className="grid gap-2 px-4 py-3"
               onSubmit={async (e) => {
                 e.preventDefault()
                 setBusy(true)
@@ -595,35 +597,50 @@ function Members() {
                 setBusy(false)
               }}
             >
-              <label className="flex-1">
+              <label>
                 <span className="mb-1.5 block text-sm font-semibold">Email</span>
                 <Input type="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
               </label>
-              <Segmented
-                value={role}
-                onValueChange={(v) => setRole(v as 'member' | 'admin')}
-                className="mb-[3px] w-[160px]"
-                aria-label="Role"
-              >
-                <SegmentedItem value="member">Member</SegmentedItem>
-                <SegmentedItem value="admin">Admin</SegmentedItem>
-              </Segmented>
-              <Button type="submit" variant="primary" loading={busy}>
-                Invite
-              </Button>
-              <Button type="button" variant="ghost" onClick={() => setInviting(false)}>
-                Cancel
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Segmented
+                  value={role}
+                  onValueChange={(v) => setRole(v as 'member' | 'admin')}
+                  className="w-[160px]"
+                  aria-label="Role"
+                >
+                  <SegmentedItem value="member">Member</SegmentedItem>
+                  <SegmentedItem value="admin">Admin</SegmentedItem>
+                </Segmented>
+                <Button type="submit" variant="primary" loading={busy}>
+                  Invite
+                </Button>
+                {/* Not while the invitation is being made: it would be made anyway. */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setInviting(false)
+                    refocus(inviteOpener)
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
             </form>
           ) : null}
+          {/* Kept while the next invitation is drafted: the server gives each link only once. */}
           {link ? (
-            <div className="px-4 py-3">
+            // Keyed by the link, so a second invitation's link takes focus too.
+            <div key={link} className="px-4 py-3">
               <p className="mb-2 text-sm text-muted-foreground">
                 Send them this link. It works once, for a week, and won’t be shown again.
               </p>
               <div className="flex gap-2">
                 <Input
                   readOnly
+                  // A new link is where the admin goes next: to copy it.
+                  autoFocus
                   value={link}
                   className="font-mono text-sm"
                   onFocus={(e) => e.target.select()}
@@ -686,6 +703,8 @@ function Keys() {
   // The key's details and the password form stay closed until asked for.
   const [showKey, setShowKey] = useState(false)
   const [changing, setChanging] = useState(false)
+  const recoveryOpener = useRef<HTMLButtonElement>(null)
+  const passwordOpener = useRef<HTMLButtonElement>(null)
   // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
   const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
@@ -708,6 +727,7 @@ function Keys() {
       toast('Your new recovery key is saved. The old one no longer works.')
       setRecovery(null)
       setSaved(false)
+      refocus(recoveryOpener)
     } catch (e) {
       // This page's session isn't the browser's any more: start again as whoever's signed in.
       if (sessionChanged(e)) return window.location.reload()
@@ -757,6 +777,7 @@ function Keys() {
       setCurrent('')
       setNext('')
       setChanging(false)
+      refocus(passwordOpener)
     } catch (err) {
       if (sessionChanged(err)) return window.location.reload()
       // The backend's sentence says exactly what state things are in (another device changed
@@ -801,14 +822,21 @@ function Keys() {
                   {recovery.text}
                 </div>
                 <label className="mb-3 flex items-center gap-2.5 text-sm">
-                  <Checkbox checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
+                  {/* Focus lands here when the key opens: saving it is the next step. */}
+                  <Checkbox autoFocus checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
                   I’ve saved this recovery key somewhere safe.
                 </label>
                 <div className="flex gap-2">
                   <Button variant="primary" disabled={!saved} loading={busy === 'recovery'} onClick={saveRecovery}>
                     Use this recovery key
                   </Button>
-                  <Button variant="ghost" onClick={() => setRecovery(null)}>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setRecovery(null)
+                      refocus(recoveryOpener)
+                    }}
+                  >
                     Cancel
                   </Button>
                 </div>
@@ -818,6 +846,7 @@ function Keys() {
         >
           {recovery ? null : (
             <Button
+              ref={recoveryOpener}
               size="sm"
               onClick={() => {
                 setRecovery(generateRecoveryKey())
@@ -867,6 +896,7 @@ function Keys() {
                       setChanging(false)
                       setCurrent('')
                       setNext('')
+                      refocus(passwordOpener)
                     }}
                   >
                     Cancel
@@ -877,7 +907,7 @@ function Keys() {
           }
         >
           {changing ? null : (
-            <Button size="sm" onClick={() => setChanging(true)}>
+            <Button ref={passwordOpener} size="sm" onClick={() => setChanging(true)}>
               Change
             </Button>
           )}
@@ -1040,15 +1070,21 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
       <Setting
         title="Passkeys"
         about={
-          passkeys.isError
-            ? 'Your passkeys couldn’t be listed. Reload the page to try again.'
-            : passkeysUnavailable
-              ? `${passkeysUnavailable} Add them, and set them to unlock, in a browser.`
-              : undefined
+          passkeys.isError || passkeysUnavailable ? (
+            <>
+              {passkeys.isError ? (
+                <span className="block">Your passkeys couldn’t be listed. Reload the page to try again.</span>
+              ) : null}
+              {passkeysUnavailable ? (
+                <span className="block">{passkeysUnavailable} Add them, and set them to unlock, in a browser.</span>
+              ) : null}
+            </>
+          ) : undefined
         }
       >
         <Button
           size="sm"
+          aria-label="Add a passkey"
           loading={busy === 'add'}
           disabled={busy !== null || !!passkeysUnavailable}
           onClick={() => void add()}

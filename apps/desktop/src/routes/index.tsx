@@ -11,7 +11,10 @@ export const Route = createFileRoute('/')({
     ...(SETTINGS_SECTIONS.some((s) => s.id === search.settings)
       ? { settings: search.settings as SettingsSection }
       : {}),
-    ...(search.connect === true || search.connect === 'true' ? { connect: true as const } : {}),
+    // Only Accounts reads it, so it goes nowhere else (a chat opened later doesn't carry it along).
+    ...(search.settings === 'accounts' && (search.connect === true || search.connect === 'true')
+      ? { connect: true as const }
+      : {}),
   }),
   component: () => (
     <AppGate>
