@@ -1,3 +1,4 @@
+import { NETWORK_INFO } from '@trioditis/core'
 import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
 import {
@@ -330,6 +331,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           loading={loading}
           reactions={reactions}
           group={group}
+          canReact={NETWORK_INFO[chat.network]?.reactions === true}
           senders={senders}
           scheduled={scheduled}
           typing={typing.length}

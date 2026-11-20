@@ -30,6 +30,8 @@ interface MessageListProps {
   reactions: Map<string, Reaction[]>
   /** A group's messages from others carry their sender's name and avatar. */
   group: boolean
+  /** The network has reactions; without them there's nothing to pick, and chips only show. */
+  canReact: boolean
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
   scheduled: ScheduledItem[]
@@ -238,7 +240,12 @@ export function MessageList(props: MessageListProps) {
                 <div
                   data-message-id={m.id}
                   className={cn(
-                    'group relative flex w-fit max-w-[min(78%,38rem)] flex-col',
+                    // Always leaving room beside it for its actions (4.5rem), however narrow the pane,
+                    // and in a group for the avatar's gutter (2.25rem) too.
+                    'group relative flex w-fit flex-col',
+                    fromOther
+                      ? 'max-w-[min(78%,38rem,calc(100%-6.75rem))]'
+                      : 'max-w-[min(78%,38rem,calc(100%-4.5rem))]',
                     m.self ? 'ml-auto items-end' : 'items-start',
                   )}
                 >
@@ -298,10 +305,11 @@ export function MessageList(props: MessageListProps) {
                           type="button"
                           key={r.key}
                           aria-pressed={r.mine}
-                          title={r.mine ? 'Remove your reaction' : 'React with this too'}
+                          disabled={!props.canReact}
+                          title={props.canReact ? (r.mine ? 'Remove your reaction' : 'React with this too') : undefined}
                           onClick={() => props.onReact(m, r.key)}
                           className={cn(
-                            'h-[18px] rounded-[11px] bg-surface px-1.5 text-sm leading-[18px] shadow-[0_0_0_1px_var(--border)] hover:shadow-[0_0_0_1px_var(--border-strong)]',
+                            'h-[18px] rounded-[11px] disabled:opacity-100 bg-surface px-1.5 text-sm leading-[18px] shadow-[0_0_0_1px_var(--border)] hover:shadow-[0_0_0_1px_var(--border-strong)]',
                             r.mine &&
                               'bg-primary-soft text-primary-ink shadow-[0_0_0_1px_var(--accent-ring)] hover:shadow-[0_0_0_1px_var(--accent-ring)]',
                           )}
@@ -333,10 +341,12 @@ export function MessageList(props: MessageListProps) {
                       >
                         <Reply className="size-[15px]" />
                       </Button>
-                      <ReactionPicker
-                        mine={(reacted ?? []).filter((r) => r.mine).map((r) => r.key)}
-                        onPick={(key) => props.onReact(m, key)}
-                      />
+                      {props.canReact ? (
+                        <ReactionPicker
+                          mine={(reacted ?? []).filter((r) => r.mine).map((r) => r.key)}
+                          onPick={(key) => props.onReact(m, key)}
+                        />
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

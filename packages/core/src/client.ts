@@ -24,6 +24,8 @@ export interface NetworkInfo {
   flows: LoginFlow[]
   /** Connecting it can get the account banned under the network's terms (cookie or token logins). */
   termsRisk: boolean
+  /** It has reactions, so the person can react (`messages.react`). See docs/networks. */
+  reactions: boolean
 }
 
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
@@ -37,6 +39,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
       { id: 'phone', kind: 'phone', name: 'Pairing code' },
     ],
     termsRisk: false,
+    reactions: true,
   },
   signal: {
     network: 'signal',
@@ -46,6 +49,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     maturity: 'experimental',
     flows: [{ id: 'qr', kind: 'qr', name: 'Link a device' }],
     termsRisk: false,
+    reactions: true,
   },
   gmessages: {
     network: 'gmessages',
@@ -57,6 +61,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // Its QR flow is switched off upstream.
     flows: [{ id: 'google', kind: 'cookies', name: 'Sign in with Google' }],
     termsRisk: false,
+    reactions: true,
   },
   telegram: {
     network: 'telegram',
@@ -67,6 +72,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
       { id: 'phone', kind: 'form', name: 'Phone number' },
     ],
     termsRisk: false,
+    reactions: true,
   },
   meta: {
     network: 'meta',
@@ -79,6 +85,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
       { id: 'messenger', kind: 'cookies', name: 'Sign in on messenger.com' },
     ],
     termsRisk: true,
+    reactions: true,
   },
   instagram: {
     network: 'instagram',
@@ -87,6 +94,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // Cookies only, as for Messenger (docs/networks/instagram.md).
     flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
+    reactions: true,
   },
   discord: {
     network: 'discord',
@@ -97,6 +105,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
       { id: 'token', kind: 'form', name: 'Token' },
     ],
     termsRisk: true,
+    reactions: true,
   },
   slack: {
     network: 'slack',
@@ -113,6 +122,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // A browser session's token used by an unofficial client, against Slack's acceptable
     // use policy, and against many workspaces' own rules.
     termsRisk: true,
+    reactions: true,
   },
   groupme: {
     network: 'groupme',
@@ -126,6 +136,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     // GroupMe has a public API for third-party apps using a person's own access token.
     termsRisk: false,
+    reactions: true,
   },
   gvoice: {
     network: 'gvoice',
@@ -135,6 +146,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // Google account cookies driving voice.google.com's own API as an unofficial client, which
     // Google checks for. See docs/networks/gvoice.md.
     termsRisk: true,
+    reactions: false,
   },
   linkedin: {
     network: 'linkedin',
@@ -144,6 +156,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // person to pick from options, which the stepper can't show yet. See docs/networks/linkedin.md.
     flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on linkedin.com' }],
     termsRisk: true,
+    reactions: true,
   },
   twitter: {
     network: 'twitter',
@@ -153,6 +166,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // the stepper can't run. See docs/networks/twitter.md.
     flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on x.com' }],
     termsRisk: true,
+    reactions: true,
   },
   bluesky: {
     network: 'bluesky',
@@ -161,6 +175,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // An app password with direct messages allowed; see docs/networks/bluesky.md.
     flows: [{ id: 'password', kind: 'form', name: 'App password' }],
     termsRisk: false,
+    reactions: false,
   },
 }
 

@@ -474,8 +474,15 @@ func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command, chec
 	if err != nil {
 		return err
 	}
-	if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil || check {
+	if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil {
 		return err
+	}
+	// A reaction that waited past its deadline (behind a send in the chat, say) isn't sent:
+	// it would turn up long after the person chose it.
+	if pastDeadline(cmd.NotAfter) {
+		return conflict(protocol.ErrExpired, "the reaction is past its deadline")
+	} else if check {
+		return nil
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)
 	pending := &pendingCommand{kind: pendingReact, owner: t.owner, targetEventID: cmd.TargetEventID, key: reactionKey(cmd.Key)}
@@ -514,7 +521,9 @@ func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command, che
 		}
 		pending.key = reactionKey(cmd.Key)
 	}
-	if check {
+	if cmd.Type == protocol.CommandUnreact && pastDeadline(cmd.NotAfter) {
+		return conflict(protocol.ErrExpired, "the reaction is past its deadline")
+	} else if check {
 		return nil
 	}
 	eventID := ids.CommandEventID(cmd.UserID, cmd.CommandID)

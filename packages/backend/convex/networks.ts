@@ -36,6 +36,7 @@ export const list = query({
       maturity,
       flows: v.array(flow),
       termsRisk: v.boolean(),
+      reactions: v.boolean(),
     }),
   ),
   handler: async (ctx) => {

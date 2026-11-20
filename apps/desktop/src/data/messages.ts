@@ -177,6 +177,9 @@ export function useReactionToggle(
   const shown = useMemo(() => withPending(server, live), [server, live])
   const toggle = useCallback(
     (messageId: Id<'messages'>, key: string) => {
+      // A change still on its way can't be undone yet: the bridge host may not have the
+      // reaction to take away until it has added it. The choice shows as made meanwhile.
+      if (live.some((q) => q.messageId === messageId && sameKey(q.key, key))) return
       const remove = !!shown.get(messageId)?.some((r) => r.mine && sameKey(r.key, key))
       const p: PendingReaction = { messageId, key, remove, at: Date.now() }
       const others = (q: PendingReaction) => q.messageId !== messageId || !sameKey(q.key, key)
@@ -186,7 +189,7 @@ export function useReactionToggle(
         onError(e)
       })
     },
-    [shown, react, chatId, onError],
+    [live, shown, react, chatId, onError],
   )
   return { reactions: shown, toggle }
 }

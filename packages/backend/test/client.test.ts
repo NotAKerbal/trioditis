@@ -289,7 +289,11 @@ describe('messages alongside the page', () => {
 describe('reacting', () => {
   const messageIdOf = async (t: T, eventId: string) =>
     await t.run(
-      async (ctx) => (await ctx.db.query('messages').filter((q) => q.eq(q.field('eventId'), eventId)).first())!._id,
+      async (ctx) =>
+        (await ctx.db
+          .query('messages')
+          .filter((q) => q.eq(q.field('eventId'), eventId))
+          .first())!._id,
     )
 
   it('asks the bridge host to add or take away a reaction, with a deadline', async () => {
@@ -328,7 +332,7 @@ describe('reacting', () => {
     expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
   })
 
-  it('refuses a key that isn’t one reaction, and someone else’s chat', async () => {
+  it('refuses a key that isn’t one reaction, a network without reactions, and someone else’s chat', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const b = await signIn(t, 'user_b')
@@ -339,8 +343,42 @@ describe('reacting', () => {
       await expect(a.mutation(api.messages.react, { chatId, messageId, key })).rejects.toThrow(/can’t be sent/)
     }
     await expect(b.mutation(api.messages.react, { chatId, messageId, key: '👍' })).rejects.toThrow(/doesn’t exist/)
+    const voice = await aChat(t, 'user_a', 'v', { network: 'gvoice' })
+    await aMessage(t, voice, 'net_v', 1, { network: 'gvoice' })
+    const voiceMessage = await messageIdOf(t, 'net_v')
+    await expect(a.mutation(api.messages.react, { chatId: voice, messageId: voiceMessage, key: '👍' })).rejects.toThrow(
+      /Google Voice doesn’t have reactions/,
+    )
     // A long joined emoji is one reaction.
     await a.mutation(api.messages.react, { chatId, messageId, key: '👨‍👩‍👧‍👦' })
+  })
+})
+
+describe('the person’s own reaction on a busy message', () => {
+  it('comes back past the first 100, so it can be taken away', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await t.run(async (ctx) => (await ctx.db.query('messages').first())!._id)
+    const row = (senderKey: string, key: string, eventId: string) => ({
+      userId: 'user_a',
+      chatId,
+      messageId,
+      senderKey,
+      key,
+      eventId,
+      addedAt: 1,
+      networkTs: 1,
+    })
+    await t.run(async (ctx) => {
+      for (let r = 0; r < 100; r++) await ctx.db.insert('reactions', row(`ghost:g${r}`, '👍', `r${r}`))
+      await ctx.db.insert('reactions', row('self', '🎉', 'mine'))
+      await ctx.db.insert('reactions', { ...row('self', '😮', 'gone'), removedAt: 2 })
+    })
+    const list = (await a.query(api.messages.reactions, { chatId, messageIds: [messageId] }))[messageId]!
+    expect(list).toHaveLength(101)
+    expect(list.filter((r) => r.senderKey === 'self')).toEqual([{ key: '🎉', senderKey: 'self' }])
   })
 })
 
@@ -349,9 +387,24 @@ describe('contacts', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     await t.run(async (ctx) => {
-      await ctx.db.insert('contacts', { userId: 'user_a', network: 'whatsapp', ghostId: 'g1', sealedProfile: sealed('a1') })
-      await ctx.db.insert('contacts', { userId: 'user_a', network: 'signal', ghostId: 'g2', sealedProfile: sealed('a2') })
-      await ctx.db.insert('contacts', { userId: 'user_b', network: 'whatsapp', ghostId: 'g2', sealedProfile: sealed('b2') })
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        ghostId: 'g1',
+        sealedProfile: sealed('a1'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'signal',
+        ghostId: 'g2',
+        sealedProfile: sealed('a2'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_b',
+        network: 'whatsapp',
+        ghostId: 'g2',
+        sealedProfile: sealed('b2'),
+      })
     })
     expect(await a.query(api.contacts.get, { network: 'whatsapp', ghostIds: ['g1', 'g2', 'g1'] })).toEqual([
       { ghostId: 'g1', sealedProfile: sealed('a1') },

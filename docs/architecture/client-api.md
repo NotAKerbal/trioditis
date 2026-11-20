@@ -638,11 +638,12 @@ Alongside the page:
 
 - `api.messages.reactions({ chatId, messageIds })`, at most 100 IDs, returns
   `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message
-  (a message with more shows its first 100). `senderKey` is `self` or `ghost:<ghostId>`.
+  (a message with more shows its first 100, plus up to 20 of the person's own that those
+  left out, so they can always take theirs away). `senderKey` is `self` or `ghost:<ghostId>`.
   It never reads the messages themselves, and reads at most 8 MiB of reactions, going
   through the IDs in order, so it answers a prefix of `messageIds`:
   - **The first ID is always answered** unless it is a deleted message: one message's
-    reactions (at most 100 rows of at most 4 KiB) always fit. So a first ID missing from
+    reactions (at most 120 rows of at most 4 KiB) always fit. So a first ID missing from
     the answer is a deleted message, and the client can move past it.
   - A later ID is missing either because it is a deleted message or because the 8 MiB ran
     out before it. To tell which, ask again starting from that ID: then it's first.
@@ -750,8 +751,11 @@ a 10-minute deadline: one that hasn't reached the bridge host by then isn't sent
 never sent again. The desktop app shows the person's choice at once and goes back to what the
 server says if no echo comes within 30 seconds (`apps/desktop/src/data/reaction-toggle.ts`).
 
-Errors: `That chat doesn’t exist.` · `That reaction can’t be sent.` · `That message can’t be
-reacted to.`
+A network without reactions (`NETWORK_INFO[network].reactions` is false: Google Voice,
+Bluesky) refuses it, and the client offers none there.
+
+Errors: `That chat doesn’t exist.` · `<Network> doesn’t have reactions.` · `That reaction
+can’t be sent.` · `That message can’t be reacted to.`
 
 ### Scheduled sends
 
@@ -805,11 +809,12 @@ have at most 100 labels.` · `That label doesn’t exist.`
 
 ```ts
 { network, name, maturity: 'stable' | 'beta' | 'experimental',
-  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk }
+  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk, reactions }
 ```
 
 The same table is `NETWORK_INFO` in `@trioditis/core`. Show a warning before connecting a
-network with `termsRisk` (cookie or token logins can get an account banned).
+network with `termsRisk` (cookie or token logins can get an account banned). `reactions` is
+whether the network has them (Reacting).
 
 ### The login stepper
 

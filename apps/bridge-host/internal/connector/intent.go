@@ -116,6 +116,16 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		eventID = ids.LocalEventID(string(roomID), string(in.mxid), eventType.Type, strconv.FormatInt(ts.UnixNano(), 10), digest(content))
 	}
 	s, ok := in.sender()
+	if !ok && eventType == event.EventRedaction {
+		// bridgev2's bot takes away a person's older reaction when the network allows only
+		// one (WhatsApp, Signal): that removal is the person's, so it is said as theirs.
+		s, ok, err := in.c.reactionSender(ctx, content)
+		if err != nil {
+			return nil, err
+		} else if ok {
+			return in.c.botRedaction(ctx, roomID, s, eventType, content, eventID, ts)
+		}
+	}
 	if !ok {
 		return &mautrix.RespSendEvent{EventID: eventID}, nil
 	}
@@ -126,6 +136,42 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		return nil, err
 	}
 	if err = in.c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
+		return nil, err
+	}
+	return &mautrix.RespSendEvent{EventID: eventID}, nil
+}
+
+// reactionSender is who gave the reaction a redaction takes away, if it takes away one the
+// bridge host has indexed.
+func (c *Connector) reactionSender(ctx context.Context, content *event.Content) (sender, bool, error) {
+	redaction, ok := content.Parsed.(*event.RedactionEventContent)
+	if !ok {
+		return sender{}, false, nil
+	}
+	if _, _, err := c.Store.GetReaction(ctx, string(redaction.Redacts)); errors.Is(err, store.ErrNotFound) {
+		return sender{}, false, nil
+	} else if err != nil {
+		return sender{}, false, err
+	}
+	reaction, err := c.Bridge.DB.Reaction.GetByMXID(ctx, redaction.Redacts)
+	if err != nil || reaction == nil {
+		return sender{}, false, err
+	}
+	if s, ok := c.senderForMXID(reaction.SenderMXID); ok {
+		return s, true, nil
+	}
+	return sender{ghostID: reaction.SenderID}, true, nil
+}
+
+// botRedaction emits a redaction the bot sent on someone's behalf (reactionSender).
+func (c *Connector) botRedaction(ctx context.Context, roomID id.RoomID, s sender, eventType event.Type, content *event.Content, eventID id.EventID, ts time.Time) (*mautrix.RespSendEvent, error) {
+	o, err := c.owner(ctx, roomID)
+	if errors.Is(err, errNotPortal) {
+		return &mautrix.RespSendEvent{EventID: eventID}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if err = c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
 		return nil, err
 	}
 	return &mautrix.RespSendEvent{EventID: eventID}, nil
