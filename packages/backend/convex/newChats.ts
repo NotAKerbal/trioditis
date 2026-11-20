@@ -1,4 +1,5 @@
 import { ConvexError, v } from 'convex/values'
+import { internal } from './_generated/api'
 import { internalMutation, mutation, query } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
@@ -18,6 +19,7 @@ const MAX_IDENTIFIER_SEALED_BYTES = 4 * 1024
 const STARTS_PER_MINUTE = 20
 /** Requests are kept a day, for a page that was closed while one was on its way. */
 const KEEP_MS = 24 * 60 * 60 * 1000
+const PRUNE_BATCH = 500
 
 /**
  * Asks a connected account's network for a direct chat, by `ghostId` (a contact the person has
@@ -120,7 +122,7 @@ export const status = query({
   },
 })
 
-/** Deletes requests over a day old, a batch at a time. */
+/** Deletes requests over a day old, a batch at a time, until none are left. */
 export const prune = internalMutation({
   args: {},
   returns: v.null(),
@@ -128,8 +130,10 @@ export const prune = internalMutation({
     const old = await ctx.db
       .query('chatStarts')
       .withIndex('by_createdAt', (q) => q.lt('createdAt', Date.now() - KEEP_MS))
-      .take(500)
+      .take(PRUNE_BATCH)
     for (const row of old) await ctx.db.delete(row._id)
+    // People can start more an hour than one batch holds; the rest go straight after.
+    if (old.length === PRUNE_BATCH) await ctx.scheduler.runAfter(0, internal.newChats.prune, {})
     return null
   },
 })

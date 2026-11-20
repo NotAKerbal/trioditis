@@ -16,31 +16,35 @@ interface Property {
   decode: (text: string) => string
 }
 
-/** A structured value's parts (N, ADR, ORG), each decoded: an encoded `;` is text, not a separator. */
-const components = (p: Property) => splitEscaped(p.raw, ';').map(p.decode)
+/**
+ * A structured value's parts (N, ADR, ORG), each decoded. Only a `;` written as one separates
+ * parts (an encoded `=3B` is text), and it's escaped when an odd number of backslashes come
+ * just before it, however they were written (`\\`, or `=5C` in quoted-printable). Counted as
+ * it goes, so a long value is read once.
+ */
+function components(p: Property): string[] {
+  const qp = p.params.get('ENCODING')?.[0]?.toUpperCase() === 'QUOTED-PRINTABLE'
+  const parts: string[] = []
+  let start = 0
+  let backslashes = 0
+  for (let i = 0; i < p.raw.length; i++) {
+    const ch = p.raw[i]!
+    if (ch === '\\') backslashes++
+    else if (qp && ch === '=' && p.raw.slice(i + 1, i + 3).toUpperCase() === '5C') {
+      backslashes++
+      i += 2
+    } else if (ch === ';' && backslashes % 2 === 0) {
+      parts.push(p.raw.slice(start, i))
+      start = i + 1
+      backslashes = 0
+    } else backslashes = 0
+  }
+  parts.push(p.raw.slice(start))
+  return parts.map(p.decode)
+}
 
 /** The most cards one file gives, as many as an address book can hold (people.ts, MAX_PEOPLE). */
 export const MAX_IMPORT_CARDS = 10_000
-
-/** Splits `text` on `separator`, except where it's escaped with a backslash. */
-function splitEscaped(text: string, separator: string): string[] {
-  const out: string[] = []
-  let current = ''
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!
-    if (ch === '\\' && i + 1 < text.length) {
-      current += ch + text[i + 1]
-      i++
-    } else if (ch === separator) {
-      out.push(current)
-      current = ''
-    } else {
-      current += ch
-    }
-  }
-  out.push(current)
-  return out
-}
 
 function unescapeText(text: string): string {
   return text.replace(/\\([nN,;:\\])/g, (_, ch: string) => (ch === 'n' || ch === 'N' ? '\n' : ch))
@@ -518,28 +522,8 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
         }
         return
       }
-      // Google: "Address 1 - Formatted", or its parts ("Address 1 - Street", "- City", …).
-      const formatted = /^address \d+ - formatted$/.exec(c)
-      const part = /^address (\d+) - street$/.exec(c)
-      if (part && !cell(col(`address ${part[1]} - formatted`))) {
-        const at = (name: string) => cell(col(`address ${part[1]} - ${name}`))
-        const address: PersonAddress = {}
-        const street = [at('po box'), at('street'), at('extended address')].filter(Boolean).join('\n')
-        if (street) address.street = street
-        if (at('city')) address.locality = at('city')
-        if (at('region')) address.region = at('region')
-        if (at('postal code')) address.postcode = at('postal code')
-        if (at('country')) address.country = at('country')
-        const label = csvLabel(at('label') || at('type'))
-        if (label) address.label = label
-        if (Object.keys(address).some((k) => k !== 'label')) addresses.push(address)
-        return
-      }
-      if (formatted && cell(i)) {
-        const label = csvLabel(cell(col(c.replace('formatted', 'label'), c.replace('formatted', 'type'))))
-        addresses.push(label ? { street: cell(i), label } : { street: cell(i) })
-        return
-      }
+      // Google addresses are read whole, after the columns (see below).
+      if (/^address \d+ - /.test(c)) return
       // Outlook: "Mobile Phone", "Home Phone 2", "E-mail Address", "E-mail 2 Address", "Web Page".
       const outlookPhone = /^(.*?)\s*(phone|fax)( \d+)?$/.exec(c)
       if (outlookPhone && !c.includes('phonetic') && cell(i)) {
@@ -554,6 +538,24 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
         else urls.push({ value: cell(i) })
       }
     })
+    // Google: "Address 1 - Formatted", or its parts ("Address 1 - Street", "- City", …), any of
+    // which the file can leave out.
+    const googleAddresses = new Set(columns.flatMap((c) => /^address (\d+) - /.exec(c)?.[1] ?? []))
+    for (const n of googleAddresses) {
+      const at = (name: string) => cell(col(`address ${n} - ${name}`))
+      const address: PersonAddress = {}
+      const street = at('formatted') || [at('po box'), at('street'), at('extended address')].filter(Boolean).join('\n')
+      if (street) address.street = street
+      if (!at('formatted')) {
+        if (at('city')) address.locality = at('city')
+        if (at('region')) address.region = at('region')
+        if (at('postal code')) address.postcode = at('postal code')
+        if (at('country')) address.country = at('country')
+      }
+      const label = csvLabel(at('label') || at('type'))
+      if (label) address.label = label
+      if (Object.keys(address).some((k) => k !== 'label')) addresses.push(address)
+    }
     // Outlook: an address in parts, as "Home Street", "Home Street 2", "Home City", "Home State",
     // "Home Postal Code", "Home Country/Region", and the same for Business and Other.
     for (const [where, label] of [

@@ -72,7 +72,10 @@ type Connector struct {
 	// lanes holds chats (by opaque portal ID) whose command is running on its own goroutine.
 	lanes        sync.Map // portal ID → struct{}
 	lanesRunning sync.WaitGroup
-	wake         chan struct{}
+	// starting holds a lock per login (networkid.UserLoginID → *sync.Mutex), so one login's
+	// startChat commands run one at a time.
+	starting sync.Map
+	wake     chan struct{}
 }
 
 var (

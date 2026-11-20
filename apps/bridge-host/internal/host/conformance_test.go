@@ -506,6 +506,16 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("starting a chat with nobody gave %+v", miss)
 		}
 
+		// One past its deadline isn't started late, after the person was told it timed out.
+		late := "request-late-000001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: late, GhostID: erin.GhostID, NotAfter: time.Now().Add(-time.Minute).UnixMilli(),
+		})
+		if expired := started(late); expired.PortalID != "" || expired.Error != protocol.ErrExpired {
+			t.Fatalf("a late start gave %+v", expired)
+		}
+
 		status, body := h.command(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin, RequestID: "short", GhostID: erin.GhostID,
 		})
@@ -547,17 +557,26 @@ func TestConformance(t *testing.T) {
 		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
 			t.Fatalf("identifiers %q", plain.Identifiers)
 		}
-		// The profile came first, so the backend has the contact to put them on.
-		profileAt := gw.waitFor(t, "the number's profile", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContact && e.GhostID == first.GhostID && e.UserID == "alice"
-		}).Seq
-		if profileAt > first.Seq {
-			t.Fatalf("identifiers (%d) went before the profile (%d)", first.Seq, profileAt)
+		// Another of alice's logins that sees them sends its own, under its own login.
+		aliceTwo := h.login("alice", "alice-two")
+		if err := h.net.Incoming("alice-two", "dm-15550001234", number, "n2", "hi again", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		second := gw.waitFor(t, "the number from alice's second login", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.LoginID == aliceTwo
+		})
+		if second.GhostID != first.GhostID || second.LoginID == first.LoginID {
+			t.Fatalf("second login's identifiers %+v, first %+v", second, first)
+		}
+		h.open("alice", second, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("second login's identifiers %q", plain.Identifiers)
 		}
 		// A sync sends them again; another login without a chat with them gets nothing.
 		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
 		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID && e.Seq > first.Seq
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID &&
+				e.LoginID == aliceLogin && e.Seq > second.Seq
 		})
 		bobLogin := h.login("bob", "bob-contacts")
 		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})

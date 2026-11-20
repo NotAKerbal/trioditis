@@ -174,6 +174,14 @@ describe('CSV', () => {
     ])
   })
 
+  it('reads a Google address with only some of its parts, and an encoded backslash before a semicolon', () => {
+    expect(
+      parseContactsCsv('First Name,Address 1 - City,Address 1 - Country\nAnn,Springfield,USA')[0]!.addresses,
+    ).toEqual([{ locality: 'Springfield', country: 'USA' }])
+    const vcf = 'BEGIN:VCARD\nVERSION:2.1\nFN:Ann\nADR;ENCODING=QUOTED-PRINTABLE:;;Test=5C; Suite;City;;;\nEND:VCARD\n'
+    expect(parseVCards(vcf)[0]!.addresses).toEqual([{ street: 'Test; Suite', locality: 'City' }])
+  })
+
   it('keeps a note’s Windows line breaks through a vCard export', () => {
     const [card] = parseContactsCsv('Name,Notes\r\nAnn,"one\r\ntwo\rthree"\r\n')
     expect(parseVCards(toVCards([card!]))[0]!.note).toBe('one\ntwo\nthree')

@@ -1045,12 +1045,21 @@ never sees it.
 The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
 already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
 on the network has that identifier), `unsupported`, `not_connected`, `rate_limited`,
-`network_rejected`, or `expired`/`timeout` when no bridge host took it in ten minutes. The
-networks in `START_CHAT_NETWORKS` (packages/core) can start chats; the desktop app offers a card's
-linked contacts first, then its numbers on networks that find people by number
-(`PHONE_NETWORKS`), then its usernames on their own network. A `ghostId` must be one of the
-person's contacts on that account's network. A person can start 20 chats a minute; requests
-are kept a day.
+`network_rejected`, `timeout` (the network took over two minutes, or no host reported back), or
+`expired` (no bridge host took it in ten minutes; one that does later doesn't start it). Only
+the host the command went to can answer it.
+
+What a chat can start from depends on the network's connector (`START_TARGETS` in
+packages/core, mirroring the bridge host's `startTargets`): WhatsApp, Signal and Google Messages
+take a contact or an identifier; Telegram, Messenger, Instagram, Slack and LinkedIn a contact;
+X a username. Telegram's identifier lookup reads a phone table the whole host shares, Google
+Voice's chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only
+numeric IDs and X's only screen names, so those are left out. The desktop app offers a card's
+linked contacts first, then its numbers on networks that find people by number, then its
+usernames on their own network. A `ghostId` must be one of the person's contacts on that
+account's network. A person can start 20 chats a minute; requests are kept a day. The bridge
+host silences connector logging while it resolves an identifier, since what connectors log can
+include it.
 
 Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
 `That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t

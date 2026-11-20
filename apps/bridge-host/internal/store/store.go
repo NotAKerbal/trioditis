@@ -720,6 +720,13 @@ func (s *Store) RemoveMember(ctx context.Context, roomID, mxid string) error {
 	return err
 }
 
+// IsMember reports whether mxid is in roomID.
+func (s *Store) IsMember(ctx context.Context, roomID, mxid string) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_member WHERE room_id=$1 AND mxid=$2`, roomID, mxid).Scan(&n)
+	return n > 0, err
+}
+
 // Members lists a room's members.
 func (s *Store) Members(ctx context.Context, roomID string) ([]string, error) {
 	return s.strings(ctx, `SELECT mxid FROM trioditis_member WHERE room_id=$1`, roomID)

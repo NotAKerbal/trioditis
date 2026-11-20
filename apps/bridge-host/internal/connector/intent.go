@@ -746,27 +746,35 @@ func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid
 
 // ensureNumber sends the phone number a contact's ID is to the person, the first time one of
 // their logins sees the contact: each login's is its own (numbersRoom), since the number is
-// what that login's chats gave it.
+// what that login's chats gave it. It's journaled before it's marked sent, so a failure or a
+// stop in between sends it again with the contact's next message, never not at all; sending it
+// twice is harmless, since a login's identifiers replace its own.
 func (c *Connector) ensureNumber(ctx context.Context, o *owner, ghost networkid.UserID) error {
 	number := numberID(ghost)
 	if !numberIDNetworks[c.Network] || number == "" {
 		return nil
 	}
-	room, mxid := numbersRoom(o.userID, o.loginID), string(ids.GhostMXID(ghost))
-	added, err := c.Store.AddMember(ctx, room, mxid)
-	if err != nil || !added {
+	// The marker names the contact by its opaque ID: their Matrix ID would be their number.
+	ghostID, err := c.ghostOpaque(ctx, ghost)
+	if err != nil {
+		return err
+	}
+	room, mxid := numbersRoom(o.userID, o.loginID), ghostID
+	sent, err := c.Store.IsMember(ctx, room, mxid)
+	if err != nil || sent {
 		return err
 	}
 	if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
-		c.unclaim(ctx, room, mxid)
 		return err
 	}
-	return nil
+	_, err = c.Store.AddMember(ctx, room, mxid)
+	return err
 }
 
 // unclaim takes back a membership recorded for something that then couldn't be sent.
 func (c *Connector) unclaim(ctx context.Context, room, mxid string) {
-	if err := c.Store.RemoveMember(ctx, room, mxid); err != nil {
+	// Even when ctx was what ended the send: the claim must go, or nothing sends it again.
+	if err := c.Store.RemoveMember(context.WithoutCancel(ctx), room, mxid); err != nil {
 		c.Log.Err(err).Msg("Taking back a contact's claim failed; it won't be sent again until it changes")
 	}
 }

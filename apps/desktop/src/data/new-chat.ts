@@ -4,7 +4,7 @@ import {
   contactKey,
   parseIdentifier,
   PHONE_NETWORKS,
-  START_CHAT_NETWORKS,
+  START_TARGETS,
   type Network,
   type NetworkContact,
   type PersonPlaintext,
@@ -26,14 +26,14 @@ import { useSession } from '~/lib/session.tsx'
 
 export type ChatTarget = { ghostId: string } | { identifier: string }
 
-/** The person's connected accounts that can start chats, first one per network. */
-export function useStartableAccounts() {
+/** The person's connected accounts that can start a chat from `from`, first one per network. */
+export function useStartableAccounts(from: 'contact' | 'identifier' | 'either' = 'either') {
   const accounts = useAccounts()
   const out = new Map<Network, Id<'networkAccounts'>>()
   for (const a of accounts ?? []) {
-    if (a.state === 'CONNECTED' && START_CHAT_NETWORKS.includes(a.network) && !out.has(a.network)) {
-      out.set(a.network, a._id)
-    }
+    const targets = START_TARGETS[a.network]
+    const can = from === 'either' ? targets?.contact || targets?.identifier : targets?.[from]
+    if (a.state === 'CONNECTED' && can && !out.has(a.network)) out.set(a.network, a._id)
   }
   return out
 }
@@ -65,10 +65,11 @@ export function useStartChat(onStarted: (chatId: Id<'chats'>) => void) {
   })
 
   useEffect(() => {
-    if (!request || !status || status.state === 'pending') return
+    if (!request || status === undefined || status?.state === 'pending') return
     setRequest(null)
-    if (status.state === 'started' && status.chatId) onStarted(status.chatId)
-    else setError(startError(status.error, request.network))
+    // Null: the request is gone (kept only a day), so there's no answer to wait for.
+    if (status?.state === 'started' && status.chatId) onStarted(status.chatId)
+    else setError(startError(status?.error, request.network))
   }, [status, request, onStarted])
 
   async function begin(network: Network, networkAccountId: Id<'networkAccounts'>, target: ChatTarget) {
@@ -107,18 +108,16 @@ export interface ChatOption {
   target: ChatTarget
 }
 
-// The username services that are networks, by the name a card's username is saved under.
+// The username services that are networks a chat can start on from a username.
 const USERNAME_NETWORKS: Record<string, Network> = {
   signal: 'signal',
-  telegram: 'telegram',
-  instagram: 'instagram',
   twitter: 'twitter',
 }
 
 /**
- * The ways a card offers to start a chat on these networks: its linked contacts there first
- * (the chat they already have, or a new one), then its numbers on networks that find people
- * by number, and its usernames on their own network.
+ * The ways a card offers to start a chat on these networks, as each network's connector can
+ * (START_TARGETS): its linked contacts first (the chat they already have, or a new one), then
+ * its numbers on networks that find people by number, and its usernames on their own network.
  */
 export function chatOptions(
   card: PersonPlaintext,
@@ -126,21 +125,23 @@ export function chatOptions(
   byContact: ReadonlyMap<string, NetworkContact>,
 ): ChatOption[] {
   const out: ChatOption[] = []
+  const can = (network: Network, from: 'contact' | 'identifier') =>
+    networks.has(network) && !!START_TARGETS[network]?.[from]
   for (const link of card.links ?? []) {
-    if (!networks.has(link.network)) continue
+    if (!can(link.network, 'contact')) continue
     const contact = byContact.get(contactKey(link))
     out.push({ network: link.network, label: contact?.profile.name || 'Contact', target: { ghostId: link.ghostId } })
   }
   const linked = new Set(out.map((o) => o.network))
   for (const network of PHONE_NETWORKS) {
-    if (!networks.has(network) || linked.has(network)) continue
+    if (!can(network, 'identifier') || linked.has(network)) continue
     for (const phone of card.phones ?? [])
       out.push({ network, label: phone.value, target: { identifier: phone.value } })
   }
   for (const handle of card.handles ?? []) {
     const id = parseIdentifier(handle.value)
     const network = id?.kind === 'username' ? USERNAME_NETWORKS[id.service] : undefined
-    if (id?.kind === 'username' && network && networks.has(network) && !linked.has(network)) {
+    if (id?.kind === 'username' && network && can(network, 'identifier') && !linked.has(network)) {
       out.push({ network, label: `@${id.value}`, target: { identifier: id.value } })
     }
   }

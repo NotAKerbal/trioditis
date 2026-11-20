@@ -29,7 +29,7 @@ export function NewChatDialog({
 }
 
 function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
-  const accounts = useStartableAccounts()
+  const accounts = useStartableAccounts('identifier')
   const networks = [...accounts.keys()]
   const [chosen, setChosen] = useState<Network | undefined>()
   const network = chosen && accounts.has(chosen) ? chosen : networks[0]

@@ -473,8 +473,9 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 async function applyChatStarted(
   ctx: MutationCtx,
   event: Extract<BridgeEventDoc, { type: 'chatStarted' }>,
-  network: Network,
+  origin: Origin,
 ) {
+  const { network } = origin
   const request = await ctx.db
     .query('chatStarts')
     .withIndex('by_request', (q) => q.eq('userId', event.userId).eq('requestId', event.requestId))
@@ -483,6 +484,9 @@ async function applyChatStarted(
   if (!request || request.network !== network || request.loginId !== event.loginId) {
     throw new Unmappable('unknown_chat_start')
   }
+  // Only the host the command was handed to ran it, even if the login has moved since.
+  const command = await ctx.db.get(request.commandId)
+  if (command?.hostId !== origin.hostId) throw new Unmappable('foreign_host')
   if (request.state !== 'pending') return
   if (event.portalId) {
     const chat = await chatFor(ctx, { userId: event.userId, loginId: event.loginId, portalId: event.portalId }, network)
@@ -670,6 +674,8 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
   // The outcome or echo of a send is checked against the host that send was handed to,
   // which may differ from the login's owner after the login moved hosts.
   if (event.type === 'sendStatus') return
+  // So is a new chat's: applyChatStarted checks it against the host its command went to.
+  if (event.type === 'chatStarted') return
   if (event.type === 'message' && 'self' in event.sender && event.clientMessageId) {
     const send = await findOutboxSend(ctx, event.userId, event.clientMessageId)
     if (send) return
@@ -716,7 +722,7 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
     case 'contactIdentifiers':
       return await applyContactIdentifiers(ctx, event, network)
     case 'chatStarted':
-      return await applyChatStarted(ctx, event, network)
+      return await applyChatStarted(ctx, event, origin)
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':

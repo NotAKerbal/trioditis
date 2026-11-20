@@ -34,6 +34,34 @@ async function claim(t: T) {
 }
 
 describe('new chats', () => {
+  it('takes an answer only from the host the command went to, even after the login moved', async () => {
+    const t = setup()
+    const { a, networkAccountId } = await connected(t)
+    await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(9), ghostId: 'g_erin' })
+    await claim(t)
+    // The login moves to another host; the first host's answer still counts, and the second's doesn't.
+    await t.run(async (ctx) => await ctx.db.patch(networkAccountId, { hostId: 'whatsapp-2' }))
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-2',
+      network: 'whatsapp',
+      events: [
+        {
+          userId: 'user_a',
+          loginId: 'login_a',
+          at: 1_000,
+          seq: 1,
+          type: 'chatStarted',
+          requestId: requestId(9),
+          portalId: 'p_x',
+        },
+      ] as never,
+    })
+    expect(await a.query(api.newChats.status, { requestId: requestId(9) })).toEqual({ state: 'pending' })
+    await ingest(t, [{ type: 'chatStarted', requestId: requestId(9), portalId: 'p_erin' }])
+    expect((await a.query(api.newChats.status, { requestId: requestId(9) }))?.state).toBe('started')
+  })
+
   it('starts a chat from a sealed identifier and finds it from the bridge host’s answer', async () => {
     const t = setup()
     const { a, networkAccountId } = await connected(t)

@@ -87,9 +87,9 @@ describe('link suggestions', () => {
     expect(suggestLinks([linked, twin], contacts)).toEqual([])
   })
 
-  it('falls back to the handle of a contact sent before identifiers were', () => {
-    const old = { network: 'whatsapp' as const, ghostId: 'g_old', profile: { name: 'A', handle: '+15551234567' } }
-    expect(suggestLinks([ann], [old]).map((s) => s.reason)).toEqual(['phone'])
+  it('never matches on a shared profile’s handle, only on what the person’s logins know', () => {
+    const shared = { network: 'whatsapp' as const, ghostId: 'g_old', profile: { name: 'A', handle: '+15551234567' } }
+    expect(suggestLinks([ann], [shared])).toEqual([])
   })
 })
 
