@@ -458,65 +458,6 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("a contact list reaches its login's owner, with what the login knows each contact by", func(t *testing.T) {
-		h.net.SetContacts(aliceNet, []testconnector.Contact{
-			{ID: "peer-family", Name: "Fam", Identifiers: []string{"tel:+15550000001"}},
-			{ID: "dana", Name: "Dana From Contacts", Identifiers: []string{"tel:+15550000002", "mailto:dana@example.com", "tel:+15550000002"}},
-		})
-		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
-		idents := map[string][]string{}
-		for _, ghost := range []string{"peer-family", "dana"} {
-			evt := gw.waitFor(t, "identifiers for "+ghost, func(e *protocol.Event) bool {
-				if e.Type != protocol.EventContactIdentifiers || e.UserID != "alice" {
-					return false
-				}
-				var plain protocol.ContactIdentifiersPlaintext
-				h.open("alice", e, &plain)
-				idents[e.GhostID] = plain.Identifiers
-				return len(plain.Identifiers) > 0 && strings.HasSuffix(plain.Identifiers[0], map[string]string{"peer-family": "1", "dana": "2"}[ghost])
-			})
-			if ghost == "dana" && !slices.Equal(idents[evt.GhostID], []string{"tel:+15550000002", "mailto:dana@example.com"}) {
-				t.Fatalf("dana's identifiers %q", idents[evt.GhostID])
-			}
-			if ghost == "dana" {
-				// A contact with no chat yet is named from the list.
-				contact := gw.waitFor(t, "dana's contact", func(e *protocol.Event) bool {
-					return e.Type == protocol.EventContact && e.GhostID == evt.GhostID && e.UserID == "alice"
-				})
-				var plain protocol.ContactPlaintext
-				h.open("alice", contact, &plain)
-				if plain.Name != "Dana From Contacts" {
-					t.Fatalf("dana's contact name %q", plain.Name)
-				}
-			}
-		}
-		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
-			t.Fatalf("%d identifier events went to someone else", n)
-		}
-
-		// Bob has dana in his own list, under another name and number: he gets only his.
-		// A login of its own, since a later test logs bob in as bob-testnet.
-		bobLogin := h.login("bob", "bob-contacts")
-		h.net.SetContacts("bob-contacts", []testconnector.Contact{{ID: "dana", Name: "D (Bob's)", Identifiers: []string{"tel:+15550009999"}}})
-		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})
-		bobIdents := gw.waitFor(t, "bob's identifiers for dana", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContactIdentifiers && e.UserID == "bob"
-		})
-		var bobPlain protocol.ContactIdentifiersPlaintext
-		h.open("bob", bobIdents, &bobPlain)
-		if !slices.Equal(bobPlain.Identifiers, []string{"tel:+15550009999"}) {
-			t.Fatalf("bob's identifiers for dana %q", bobPlain.Identifiers)
-		}
-		bobContact := gw.waitFor(t, "bob's contact dana", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContact && e.UserID == "bob" && e.GhostID == bobIdents.GhostID
-		})
-		var bobProfile protocol.ContactPlaintext
-		h.open("bob", bobContact, &bobProfile)
-		if bobProfile.Name != "D (Bob's)" {
-			t.Fatalf("bob got dana as %q", bobProfile.Name)
-		}
-	})
-
 	t.Run("a dm- chat is a direct chat named after the other person", func(t *testing.T) {
 		if err := h.net.Incoming(aliceNet, "dm-carol", "carol", "d1", "hi, it's carol", time.Now()); err != nil {
 			t.Fatal(err)
@@ -534,6 +475,39 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+	})
+
+	t.Run("a contact whose ID is a phone number comes with it, to the login that saw it", func(t *testing.T) {
+		const number = networkid.UserID("15550001234")
+		if err := h.net.Incoming(aliceNet, "dm-15550001234", number, "n1", "hi from a number", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		first := gw.waitFor(t, "the number's identifiers", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice"
+		})
+		var plain protocol.ContactIdentifiersPlaintext
+		h.open("alice", first, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("identifiers %q", plain.Identifiers)
+		}
+		// The profile came first, so the backend has the contact to put them on.
+		profileAt := gw.waitFor(t, "the number's profile", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContact && e.GhostID == first.GhostID && e.UserID == "alice"
+		}).Seq
+		if profileAt > first.Seq {
+			t.Fatalf("identifiers (%d) went before the profile (%d)", first.Seq, profileAt)
+		}
+		// A sync sends them again; another login without a chat with them gets nothing.
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
+		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID && e.Seq > first.Seq
+		})
+		bobLogin := h.login("bob", "bob-contacts")
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})
+		time.Sleep(300 * time.Millisecond)
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
+			t.Fatalf("%d identifier events went to someone without a chat with the contact", n)
 		}
 	})
 

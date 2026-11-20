@@ -67,17 +67,9 @@ type Network struct {
 	counter       atomic.Int64
 	reactions     atomic.Int64
 
-	lock     sync.Mutex
-	sent     []Sent
-	history  map[networkid.PortalID][]HistoryMessage
-	contacts map[networkid.UserLoginID][]Contact
-}
-
-// Contact is an entry in a login's contact list: who, and what the login knows them by.
-type Contact struct {
-	ID          networkid.UserID
-	Name        string
-	Identifiers []string
+	lock    sync.Mutex
+	sent    []Sent
+	history map[networkid.PortalID][]HistoryMessage
 }
 
 var (
@@ -95,16 +87,6 @@ func (n *Network) Sent() []Sent {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	return slices.Clone(n.sent)
-}
-
-// SetContacts sets what a login's contact list holds.
-func (n *Network) SetContacts(login networkid.UserLoginID, contacts []Contact) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-	if n.contacts == nil {
-		n.contacts = make(map[networkid.UserLoginID][]Contact)
-	}
-	n.contacts[login] = contacts
 }
 
 // SetHistory sets what backfill returns for a chat, oldest first.
@@ -193,23 +175,7 @@ var (
 	_ bridgev2.ReadReceiptHandlingNetworkAPI = (*Client)(nil)
 	_ bridgev2.TypingHandlingNetworkAPI      = (*Client)(nil)
 	_ bridgev2.BackfillingNetworkAPI         = (*Client)(nil)
-	_ bridgev2.ContactListingNetworkAPI      = (*Client)(nil)
 )
-
-// GetContactList returns the login's contacts, as SetContacts gave them.
-func (c *Client) GetContactList(ctx context.Context) ([]*bridgev2.ResolveIdentifierResponse, error) {
-	c.n.lock.Lock()
-	defer c.n.lock.Unlock()
-	var out []*bridgev2.ResolveIdentifierResponse
-	for _, contact := range c.n.contacts[c.login.ID] {
-		name := contact.Name
-		out = append(out, &bridgev2.ResolveIdentifierResponse{
-			UserID:   contact.ID,
-			UserInfo: &bridgev2.UserInfo{Name: &name, Identifiers: contact.Identifiers},
-		})
-	}
-	return out, nil
-}
 
 func (c *Client) Connect(ctx context.Context) {
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})

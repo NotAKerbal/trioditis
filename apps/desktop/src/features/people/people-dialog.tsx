@@ -231,7 +231,7 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
               </DropdownMenuItem>
               {syncContacts.available ? (
                 <DropdownMenuItem onSelect={() => void sync()}>
-                  <RefreshCw /> Sync from networks
+                  <RefreshCw /> Sync phone numbers
                 </DropdownMenuItem>
               ) : null}
               <DropdownMenuItem

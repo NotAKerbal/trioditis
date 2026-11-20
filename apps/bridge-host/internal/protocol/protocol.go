@@ -487,8 +487,8 @@ type ContactPlaintext struct {
 
 // ContactIdentifiersPlaintext is what one of the person's own logins knows a contact by, as
 // URIs (tel:+1555…, mailto:…, telegram:alice), for matching contacts to their address book.
-// It's sealed apart from the profile (kind contact, object ID <ghostId>/identifiers) and sent
-// only to that login's owner: a ghost's profile is shared by everyone on the network who
+// It's sealed apart from the profile (kind contact, object ID <ghostId>/identifiers/<loginId>)
+// and sent only to that login's owner: a ghost's profile is shared by everyone on the network who
 // has them as a contact, and what each login can see of a contact differs (a phone number
 // in one person's address book, say).
 type ContactIdentifiersPlaintext struct {

@@ -936,13 +936,13 @@ say). Each login's replaces only its own, and the client uses them all.
 
 The address book reads every page of `contacts.list` to match contacts to its cards (People). A
 page can come back short, or empty, before the end; keep going while `isDone` is false.
-`contacts.sync` works on the networks in `CONTACT_LIST_NETWORKS`, those whose connector lists a
-login's contacts from that login's own data: Signal, Google Messages and GroupMe send the
-login's contact list, including people the person has no chat with yet; WhatsApp sends, for the
-contacts the person has, the phone number their WhatsApp ID is (which the person's own chats
-with them carry), as it does for each new contact anyway. Telegram is left out: its connector's
-contact list changes the profile every member sees, and stores phone numbers in a shared table.
-A listed contact the person didn't have arrives with the login's own name for them only.
+`contacts.sync` works on the networks in `CONTACT_LIST_NETWORKS`, where a contact's ID can be
+their phone number (WhatsApp, for a contact not hidden behind a LID): it sends that number for
+each contact the account has a chat with, as each new contact on it gets anyway. Networks' own
+contact lists aren't used yet: each connector's reaches past the login that asks (Telegram's
+changes the profile every member sees, WhatsApp's fills numbers in from a map the whole host
+shares, Signal's adds a username from the shared profile, Google Messages's logs numbers), so
+they wait for those connectors to be patched.
 
 Errors: `That account doesn’t exist.` · `That account isn’t connected.`
 

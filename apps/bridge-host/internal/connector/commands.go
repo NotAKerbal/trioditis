@@ -608,54 +608,32 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 	return nil
 }
 
-// privateContactLists are the networks whose connector lists a login's contacts from that
-// login's own data, without changing what other members see: Signal reads the login's own
-// recipient store, Google Messages keeps contacts per login, and GroupMe asks for the
-// login's own relations. Others are left out on purpose: mautrix-telegram's list updates the
-// shared ghost with the login's own name for the contact (and stores their phone number in
-// its shared table), and mautrix-whatsapp's fills in phone numbers from a map every login on
-// the host shares. testnet is the conformance tests' connector.
-var privateContactLists = map[string]bool{"signal": true, "gmessages": true, "groupme": true, "testnet": true}
+// numberIDNetworks are the networks where a contact's ID can be their phone number (on
+// WhatsApp, a contact who isn't hidden behind a LID), which the person's own chats with them
+// carry. testnet is the conformance tests' connector.
+//
+// Networks' own contact lists aren't used: each connector's reaches past the login that asks.
+// mautrix-telegram's changes the ghost every member shares and stores numbers in a shared
+// table, mautrix-whatsapp's fills numbers in from a map every login on the host shares,
+// mautrix-signal's adds a username from the shared ghost, and mautrix-gmessages's logs
+// numbers. Using them needs those connectors patched first.
+var numberIDNetworks = map[string]bool{"whatsapp": true, "testnet": true}
 
-// handleSyncContacts sends a login's contacts to its owner only, with what the login knows
-// each one by. Where the network can list contacts privately (privateContactLists), that's
-// the list, including people the person has no chat with yet. On WhatsApp, it's the
-// contacts the person already has whose WhatsApp ID is their phone number, which the
-// person's own chats with them carry. It runs in the background: a long list takes a while,
-// and the contacts arrive as events.
+// handleSyncContacts sends, for each contact the login has a chat with whose ID is their
+// phone number, that number, to the login's owner only. It runs in the background, and the
+// numbers arrive as contactIdentifiers events.
 func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Command, check bool) error {
-	if c.Network != "whatsapp" && !privateContactLists[c.Network] {
-		return conflict(protocol.ErrUnsupported, "the network can't list contacts privately")
+	if !numberIDNetworks[c.Network] {
+		return conflict(protocol.ErrUnsupported, "the network's contact IDs aren't phone numbers")
 	}
 	t, err := c.resolve(ctx, cmd, false)
-	if err != nil {
+	if err != nil || check {
 		return err
-	}
-	api, lists := t.login.Client.(bridgev2.ContactListingNetworkAPI)
-	if c.Network != "whatsapp" && !lists {
-		return conflict(protocol.ErrUnsupported, "the network can't list contacts")
-	}
-	if check {
-		return nil
 	}
 	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
 	go func() {
-		bgCtx := c.Bridge.BackgroundCtx
-		var err error
-		if c.Network == "whatsapp" {
-			err = c.syncWhatsAppNumbers(bgCtx, o)
-		} else {
-			var list []*bridgev2.ResolveIdentifierResponse
-			if list, err = api.GetContactList(bgCtx); err == nil {
-				for _, resp := range list {
-					if err = c.syncContact(bgCtx, o, resp); err != nil {
-						break
-					}
-				}
-			}
-		}
-		if err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Syncing a login's contacts failed")
+		if err := c.syncNumbers(c.Bridge.BackgroundCtx, o); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Syncing a login's contact numbers failed")
 		}
 	}()
 	return nil

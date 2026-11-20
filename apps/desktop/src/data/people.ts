@@ -184,14 +184,14 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
 
   /**
    * Saves many cards in calls of 100, as an import does. When a call is refused as stale, the
-   * whole change is worked out again from the new cards, which have the calls before it: so
-   * `cards` must leave out what's already done (an import plan does) and work out links again.
+   * rest of the change is worked out again from the new cards, so their links are current; the
+   * cards already written are left out, so a change made to one since (or its deletion) stands.
    * Returns how many cards were written.
    */
   async function saveMany(cards: (people: readonly StoredPerson[]) => Person[], onProgress?: (done: number) => void) {
     const written = new Set<string>()
     await withRevision(async (people, revision) => {
-      const planned = cards(people)
+      const planned = cards(people).filter((p) => !written.has(p.personKey))
       let at = revision
       for (let i = 0; i < planned.length; i += PER_CALL) {
         const batch = planned.slice(i, i + PER_CALL)

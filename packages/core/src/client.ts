@@ -27,11 +27,10 @@ export interface NetworkInfo {
 }
 
 /**
- * The networks `contacts.sync` works on: the ones whose connector lists a login's contacts from
- * that login's own data (on WhatsApp, the numbers the person's chats give), so one member never
- * gets what another's login knows. Mirrors the bridge host's privateContactLists.
+ * The networks `contacts.sync` works on: those where a contact's ID can be their phone number,
+ * which the person's own chats with them carry. Mirrors the bridge host's numberIDNetworks.
  */
-export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp', 'signal', 'gmessages', 'groupme']
+export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp']
 
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {

@@ -657,18 +657,23 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
-// one of their chats. Profiles go only to people who share a chat with the ghost, or have
-// them in a login's contact list (syncContact).
+// one of their chats. Profiles go only to people who share a chat with the ghost. The profile
+// is sent before the membership is recorded, so a failure in between sends it again next time
+// rather than never (sending it twice is harmless). Then, where the ghost's ID is their phone
+// number, that number, which this chat gave the person's login.
 func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid.UserID) error {
-	added, err := c.Store.AddMember(ctx, contactRoom(o.userID), string(ids.GhostMXID(ghost)))
-	if err != nil || !added {
+	room, mxid := contactRoom(o.userID), string(ids.GhostMXID(ghost))
+	known, err := c.Store.IsMember(ctx, room, mxid)
+	if err != nil || known {
 		return err
 	}
 	if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
 		return err
 	}
-	// On WhatsApp the ghost's ID can be their phone number, which this chat gave the person.
-	if number := whatsAppNumber(ghost); c.Network == "whatsapp" && number != "" {
+	if _, err = c.Store.AddMember(ctx, room, mxid); err != nil {
+		return err
+	}
+	if number := numberID(ghost); numberIDNetworks[c.Network] && number != "" {
 		return c.emitContactIdentifiers(ctx, o, ghost, []string{number})
 	}
 	return nil
@@ -725,46 +730,9 @@ func (c *Connector) emitContactProfile(ctx context.Context, o *owner, ghost netw
 	})
 }
 
-// syncContact sends one entry of a login's contact list to the login's owner: what the login
-// knows them by, and, the first time, a profile with the login's own name for them. Only the
-// login's own data goes in: the shared ghost's name could be another member's name for them.
-// The profile is sent before the membership is recorded, so a crash in between sends it again
-// next time rather than never.
-func (c *Connector) syncContact(ctx context.Context, o *owner, resp *bridgev2.ResolveIdentifierResponse) error {
-	ghost := resp.UserID
-	if ghost == "" && resp.Ghost != nil {
-		ghost = resp.Ghost.ID
-	}
-	if ghost == "" {
-		return nil
-	}
-	room, mxid := contactRoom(o.userID), string(ids.GhostMXID(ghost))
-	known, err := c.Store.IsMember(ctx, room, mxid)
-	if err != nil {
-		return err
-	}
-	if !known {
-		var plain protocol.ContactPlaintext
-		if resp.UserInfo != nil && resp.UserInfo.Name != nil {
-			plain.Name = *resp.UserInfo.Name
-		}
-		if err = c.emitContactProfile(ctx, o, ghost, plain); err != nil {
-			return err
-		}
-		if _, err = c.Store.AddMember(ctx, room, mxid); err != nil {
-			return err
-		}
-	}
-	var identifiers []string
-	if resp.UserInfo != nil {
-		identifiers = resp.UserInfo.Identifiers
-	}
-	return c.emitContactIdentifiers(ctx, o, ghost, identifiers)
-}
-
-// whatsAppNumber is the phone number a WhatsApp ghost's ID is, as a tel: URI, or "" for one
-// that isn't a number (a LID, a bot).
-func whatsAppNumber(ghost networkid.UserID) string {
+// numberID is the phone number a contact's ID is, as a tel: URI, or "" for one that isn't a
+// number (a WhatsApp LID or bot, which mautrix-whatsapp prefixes).
+func numberID(ghost networkid.UserID) string {
 	digits := string(ghost)
 	if len(digits) < 7 || len(digits) > 15 || strings.Trim(digits, "0123456789") != "" {
 		return ""
@@ -772,9 +740,10 @@ func whatsAppNumber(ghost networkid.UserID) string {
 	return "tel:+" + digits
 }
 
-// syncWhatsAppNumbers sends, for each of the person's WhatsApp contacts whose ID is their phone
-// number, that number: WhatsApp gave the person's own login that ID in their chats.
-func (c *Connector) syncWhatsAppNumbers(ctx context.Context, o *owner) error {
+// syncNumbers sends, for each of the person's contacts whose ID is a phone number and who is in
+// a chat of this login's, that number: the login's own chats gave it the ID. A contact the
+// person knows only through another login is left to that login.
+func (c *Connector) syncNumbers(ctx context.Context, o *owner) error {
 	members, err := c.Store.Members(ctx, contactRoom(o.userID))
 	if err != nil {
 		return err
@@ -784,13 +753,35 @@ func (c *Connector) syncWhatsAppNumbers(ctx context.Context, o *owner) error {
 		if !ok {
 			continue
 		}
-		if number := whatsAppNumber(ghost); number != "" {
-			if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
-				return err
-			}
+		number := numberID(ghost)
+		if number == "" {
+			continue
+		}
+		seen, err := c.inChatOf(ctx, o.login, mxid)
+		if err != nil {
+			return err
+		} else if !seen {
+			continue
+		}
+		if err = c.emitContactIdentifiers(ctx, o, ghost, []string{number}); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// inChatOf reports whether a ghost is in one of a login's chats.
+func (c *Connector) inChatOf(ctx context.Context, login networkid.UserLoginID, ghostMXID string) (bool, error) {
+	rooms, err := c.Store.RoomsOf(ctx, ghostMXID)
+	if err != nil {
+		return false, err
+	}
+	for _, room := range rooms {
+		if key, ok := ids.ParseRoomID(id.RoomID(room)); ok && key.Receiver == login {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // emitContactIdentifiers sends what one of the person's logins knows a contact by, sealed to
