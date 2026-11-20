@@ -7,11 +7,10 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import type { FunctionReturnType } from 'convex/server'
 import { useMutation } from 'convex/react'
-import { ChevronRight } from 'lucide-react'
 import { useState } from 'react'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Loading, Subheading } from './layout.tsx'
+import { Disclosure, Group, Heading, Loading } from './layout.tsx'
 
 type Entry = FunctionReturnType<typeof api.networks.catalog>[number]
 
@@ -38,6 +37,10 @@ export function Networks() {
   const remove = useMutation(api.networks.remove)
   const [busy, setBusy] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<Entry | null>(null)
+  // The networks to install fold away once some are installed; the ones this server can't run
+  // stay folded until asked for.
+  const [browsing, setBrowsing] = useState<boolean | null>(null)
+  const [showElsewhere, setShowElsewhere] = useState(false)
 
   async function run(network: string, action: () => Promise<unknown>, failure: string) {
     setBusy(network)
@@ -69,6 +72,7 @@ export function Networks() {
   const installed = (catalog ?? []).filter((entry) => entry.installed)
   const available = (catalog ?? []).filter((entry) => !entry.installed && entry.bridged)
   const elsewhere = (catalog ?? []).filter((entry) => !entry.installed && !entry.bridged)
+  const openAvailable = browsing ?? installed.length === 0
 
   function row(entry: Entry) {
     // Only what's worth knowing before installing or removing it: a bridge that's down, the
@@ -87,7 +91,7 @@ export function Networks() {
       .filter(Boolean)
       .join(' · ')
     return (
-      <div key={entry.network} className="py-2">
+      <div key={entry.network} className="px-4 py-3">
         <div className="flex min-h-9 items-center gap-3">
           <NetworkBadge network={entry.network} label={entry.name} size={26} />
           <div className="min-w-0 flex-1">
@@ -160,30 +164,34 @@ export function Networks() {
       <Heading title="Networks" />
       {catalog ? (
         <>
-          <Subheading className="mt-0">Installed</Subheading>
-          {installed.length ? (
-            installed.map(row)
-          ) : (
-            <p className="py-2 text-sm text-muted-foreground">None yet, so nobody can connect a network.</p>
-          )}
+          <Group title="Installed">
+            {installed.length ? (
+              installed.map(row)
+            ) : (
+              <p className="px-4 py-3 text-sm text-muted-foreground">None yet, so nobody can connect a network.</p>
+            )}
+          </Group>
           {available.length ? (
-            <>
-              <Subheading>Available</Subheading>
-              {available.map(row)}
-            </>
+            <Group>
+              <Disclosure open={openAvailable} onOpenChange={setBrowsing}>
+                Install a network ({available.length})
+              </Disclosure>
+              {openAvailable ? available.map(row) : null}
+            </Group>
           ) : null}
           {elsewhere.length ? (
-            // Networks this server can't install: collapsed, since there's nothing to do with them here.
-            <details className="mt-6 [&[open]>summary_svg]:rotate-90">
-              <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase [&::-webkit-details-marker]:hidden">
-                <ChevronRight className="size-3.5 transition-transform" /> Not on this server ({elsewhere.length})
-              </summary>
-              <p className="mt-2 mb-1 text-sm text-muted-foreground">
-                To add these, rerun the installer:{' '}
-                <code className="font-mono">deploy/install/install.sh --networks all</code>
-              </p>
-              {elsewhere.map(row)}
-            </details>
+            <Group>
+              <Disclosure open={showElsewhere} onOpenChange={setShowElsewhere}>
+                Not on this server ({elsewhere.length})
+              </Disclosure>
+              {showElsewhere ? (
+                <p className="px-4 py-3 text-sm text-muted-foreground">
+                  To add these, rerun the installer:{' '}
+                  <code className="font-mono">deploy/install/install.sh --networks all</code>
+                </p>
+              ) : null}
+              {showElsewhere ? elsewhere.map(row) : null}
+            </Group>
           ) : null}
         </>
       ) : (
