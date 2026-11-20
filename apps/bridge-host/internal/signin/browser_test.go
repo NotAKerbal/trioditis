@@ -73,10 +73,19 @@ func startLauncher(t *testing.T, chromium string) string {
 	if os.Getuid() == 0 {
 		cmd.Env = append(cmd.Env, "LOGIN_BROWSER_NO_SANDBOX=1")
 	}
+	// The launcher's log says why a browser stopped, which the viewer only sees as "internal".
+	var logs bytes.Buffer
+	cmd.Stderr = &logs
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("login-browser log:\n%s", logs.String())
+		}
+	})
 	for range 100 {
 		if resp, err := http.Get("http://" + addr + "/v1/health"); err == nil {
 			resp.Body.Close()

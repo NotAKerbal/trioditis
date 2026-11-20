@@ -62,10 +62,12 @@ interface SidebarProps {
   onOpen: (chat: Chat) => void
   onClose: () => void
   onAction: (action: SidebarAction) => void
-  /** Kept up to date with the on-screen order, for actions taken outside the sidebar. */
-  shownRef: { current: string[] }
+  /**
+   * Kept up to date with the on-screen order, for actions taken outside the sidebar; null
+   * while the list is still loading, when there's nothing to compare against.
+   */
+  shownRef: { current: string[] | null }
   chatsRef: { current: Map<string, Chat> }
-  bottomBar: ReactNode
 }
 
 const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
@@ -76,16 +78,7 @@ const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
   { view: 'blocked', label: 'Blocked', icon: <Ban /> },
 ]
 
-export function Sidebar({
-  selectedId,
-  openedUnreadId,
-  onOpen,
-  onClose,
-  onAction,
-  shownRef,
-  chatsRef,
-  bottomBar,
-}: SidebarProps) {
+export function Sidebar({ selectedId, openedUnreadId, onOpen, onClose, onAction, shownRef, chatsRef }: SidebarProps) {
   const [layout] = useSidebarLayout()
   const prefs = usePrefs()
   const [query, setQuery] = useState('')
@@ -195,14 +188,14 @@ export function Sidebar({
         ]
       : (inbox ?? [])
   const shownIds = shown.map((c) => c.id as string)
-  shownRef.current = shownIds
+  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
+  shownRef.current = loaded ? shownIds : null
   chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
 
   // A view or filter change that hides the open chat closes it rather than opening another:
   // opening a chat marks it read, and nobody asked to read it.
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
-  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
   useEffect(() => {
     if (!loaded || lastFilterKey.current === filterKey) return
     lastFilterKey.current = filterKey
@@ -242,7 +235,7 @@ export function Sidebar({
   const showLabel = SIMPLE_SHOWS.find((s) => s.view === simpleShow)!
 
   return (
-    <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
+    <>
       <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-b border-border px-2.5">
         <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
           <Input
@@ -478,7 +471,18 @@ export function Sidebar({
           </>
         )}
       </div>
+    </>
+  )
+}
 
+/**
+ * The sidebar's column, with the bottom bar outside the list, so its menus stay open and
+ * Settings stays in reach while SidebarBoundary retries a list that couldn't load.
+ */
+export function SidebarFrame({ bottomBar, children }: { bottomBar: ReactNode; children: ReactNode }) {
+  return (
+    <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
+      {children}
       <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
     </aside>
   )
