@@ -236,7 +236,7 @@ export function Sidebar({ selectedId, openedUnreadId, onOpen, onClose, onAction,
 
   return (
     <>
-      <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-b border-border px-2.5">
         <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
           <Input
             ref={searchRef}
@@ -483,7 +483,7 @@ export function SidebarFrame({ bottomBar, children }: { bottomBar: ReactNode; ch
   return (
     <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
       {children}
-      <div className="flex h-[52px] shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
     </aside>
   )
 }

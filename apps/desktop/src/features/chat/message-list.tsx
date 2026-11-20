@@ -1,10 +1,19 @@
 import type { Id } from '@trioditis/backend/dataModel'
+import type { ContactPlaintext } from '@trioditis/core'
+import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@trioditis/ui/dropdown-menu'
 import { cn } from '@trioditis/ui/lib/utils'
-import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply } from 'lucide-react'
+import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply, SmilePlus } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
+import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 
@@ -19,6 +28,12 @@ interface MessageListProps {
   messages: Message[]
   loading: boolean
   reactions: Map<string, Reaction[]>
+  /** A group's messages from others carry their sender's name and avatar. */
+  group: boolean
+  /** The network has reactions; without them there's nothing to pick, and chips only show. */
+  canReact: boolean
+  /** Senders' opened profiles, by ghost ID (contacts.ts). */
+  senders: Map<string, ContactPlaintext>
   scheduled: ScheduledItem[]
   typing: number
   canLoadMore: boolean
@@ -26,6 +41,8 @@ interface MessageListProps {
   loadingMore: boolean
   onLoadMore: () => void
   onReply: (m: Message) => void
+  /** Adds the person's reaction with this key, or takes it away if it's theirs already. */
+  onReact: (m: Message, key: string) => void
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
@@ -182,6 +199,10 @@ export function MessageList(props: MessageListProps) {
           // in trouble shows its own.
           const meta = (m.self && (last || !settled)) || m.edited ? <Meta m={m} /> : null
           const reacted = reactions.get(m.id)
+          // In a group, someone else's run starts with their name and ends beside their avatar.
+          const fromOther = props.group && !m.self
+          const profile = m.ghostId ? props.senders.get(m.ghostId) : undefined
+          const sender = profile?.name || profile?.handle
           return (
             <div
               key={m.id}
@@ -201,96 +222,134 @@ export function MessageList(props: MessageListProps) {
                   {messageTime(m.at)}
                 </p>
               ) : null}
-              {/* The anchor for loading earlier messages is the message itself, not its time label:
-                  the label can go when the page above brings messages from around the same time. */}
-              <div
-                data-message-id={m.id}
-                className={cn(
-                  'group relative flex w-fit max-w-[min(78%,38rem)] flex-col',
-                  m.self ? 'ml-auto items-end' : 'items-start',
-                )}
-              >
+              {fromOther && first && sender ? (
+                <p className="mb-0.5 ml-12 truncate text-xs font-medium text-subtle-foreground">{sender}</p>
+              ) : null}
+              <div className={cn(fromOther && 'flex items-end gap-2')}>
+                {fromOther ? (
+                  last ? (
+                    // Level with the bubble's bottom, above any reactions under it (18px chips, 6px of
+                    // them overlapping the bubble).
+                    <Avatar name={sender ?? ''} size={28} className={reacted?.length ? 'mb-[13px]' : 'mb-px'} />
+                  ) : (
+                    <span aria-hidden className="w-7 shrink-0" />
+                  )
+                ) : null}
+                {/* The anchor for loading earlier messages is the message itself, not its time or
+                  sender label: those can go when the page above brings more of the same run. */}
                 <div
-                  title={fullTime(m.at)}
+                  data-message-id={m.id}
                   className={cn(
-                    'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
-                    m.self ? 'bg-primary text-primary-foreground' : 'bg-surface shadow-[0_0_0_1px_var(--border)]',
-                    // Joined bubbles meet with tighter corners on the sender's side.
-                    m.self
-                      ? [!first && 'rounded-tr-[5px]', !last && 'rounded-br-[5px]']
-                      : [!first && 'rounded-tl-[5px]', !last && 'rounded-bl-[5px]'],
-                    m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
-                    big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
+                    // Always leaving room beside it for its actions (4.5rem), however narrow the pane,
+                    // and in a group for the avatar's gutter (2.25rem) too.
+                    'group relative flex w-fit flex-col',
+                    fromOther
+                      ? 'max-w-[min(78%,38rem,calc(100%-6.75rem))]'
+                      : 'max-w-[min(78%,38rem,calc(100%-4.5rem))]',
+                    m.self ? 'ml-auto items-end' : 'items-start',
                   )}
                 >
-                  {quoted || m.replyTo ? (
-                    <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
-                      {quoted?.body?.body ?? 'An earlier message'}
-                    </span>
-                  ) : null}
-                  {m.deleted ? (
-                    'Message deleted'
-                  ) : m.body ? (
-                    text ? (
-                      <Linked text={text} />
-                    ) : (
-                      attachmentLabel(m)
-                    )
-                  ) : (
-                    'This message can’t be opened on this device.'
-                  )}
-                  {/* The exact time is the tooltip for a mouse; said here for assistive tech. */}
-                  <span className="sr-only">, {fullTime(m.at)}</span>
-                  {meta ? (
-                    <>
-                      {/* Room at the end of the last line, so the time sits beside the text when it fits. */}
-                      <span aria-hidden className="invisible ml-2 inline-flex">
-                        {meta}
-                      </span>
-                      <span
-                        className={cn(
-                          'absolute right-3 bottom-[5px] inline-flex',
-                          m.self && !big && !m.deleted ? 'text-primary-foreground/75' : 'text-subtle-foreground',
-                        )}
-                      >
-                        {meta}
-                      </span>
-                    </>
-                  ) : null}
-                </div>
-                {reacted?.length ? (
-                  <div className="z-[1] mx-2 -mt-1.5 flex gap-1">
-                    {reacted.map((r) => (
-                      <span
-                        key={r.key}
-                        className={cn(
-                          'rounded-[11px] bg-surface px-1.5 text-sm shadow-[0_0_0_1px_var(--border)]',
-                          r.mine && 'bg-primary-soft text-primary-ink shadow-[0_0_0_1px_var(--accent-ring)]',
-                        )}
-                      >
-                        {r.key} {r.count}
-                        {r.more ? '+' : ''}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
-                {m.self ? <DeliveryProblem m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} /> : null}
-                {!m.pending && !m.deleted ? (
-                  <Button
-                    variant="bare"
-                    type="button"
-                    aria-label="Reply"
-                    title="Reply"
-                    onClick={() => props.onReply(m)}
-                    // In the tab order always, shown on hover or when it has keyboard focus.
+                  <div
+                    title={fullTime(m.at)}
                     className={cn(
-                      'absolute top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-full bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100',
-                      m.self ? '-left-9' : '-right-9',
+                      'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
+                      m.self ? 'bg-primary text-primary-foreground' : 'bg-surface shadow-[0_0_0_1px_var(--border)]',
+                      // Joined bubbles meet with tighter corners on the sender's side.
+                      m.self
+                        ? [!first && 'rounded-tr-[5px]', !last && 'rounded-br-[5px]']
+                        : [!first && 'rounded-tl-[5px]', !last && 'rounded-bl-[5px]'],
+                      m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
+                      big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
                     )}
                   >
-                    <Reply className="size-[15px]" />
-                  </Button>
-                ) : null}
+                    {quoted || m.replyTo ? (
+                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
+                        {quoted?.body?.body ?? 'An earlier message'}
+                      </span>
+                    ) : null}
+                    {m.deleted ? (
+                      'Message deleted'
+                    ) : m.body ? (
+                      text ? (
+                        <Linked text={text} />
+                      ) : (
+                        attachmentLabel(m)
+                      )
+                    ) : (
+                      'This message can’t be opened on this device.'
+                    )}
+                    {/* The exact time is the tooltip for a mouse; said here for assistive tech. */}
+                    <span className="sr-only">, {fullTime(m.at)}</span>
+                    {meta ? (
+                      <>
+                        {/* Room at the end of the last line, so the time sits beside the text when it fits. */}
+                        <span aria-hidden className="invisible ml-2 inline-flex">
+                          {meta}
+                        </span>
+                        <span
+                          className={cn(
+                            'absolute right-3 bottom-[5px] inline-flex',
+                            m.self && !big && !m.deleted ? 'text-primary-foreground/75' : 'text-subtle-foreground',
+                          )}
+                        >
+                          {meta}
+                        </span>
+                      </>
+                    ) : null}
+                  </div>
+                  {reacted?.length ? (
+                    <div className="z-[1] mx-2 -mt-1.5 flex flex-wrap gap-1">
+                      {reacted.map((r) => (
+                        <Button
+                          variant="bare"
+                          type="button"
+                          key={r.key}
+                          aria-pressed={r.mine}
+                          disabled={!props.canReact}
+                          title={props.canReact ? (r.mine ? 'Remove your reaction' : 'React with this too') : undefined}
+                          onClick={() => props.onReact(m, r.key)}
+                          className={cn(
+                            'h-[18px] rounded-[11px] disabled:opacity-100 bg-surface px-1.5 text-sm leading-[18px] shadow-[0_0_0_1px_var(--border)] hover:shadow-[0_0_0_1px_var(--border-strong)]',
+                            r.mine &&
+                              'bg-primary-soft text-primary-ink shadow-[0_0_0_1px_var(--accent-ring)] hover:shadow-[0_0_0_1px_var(--accent-ring)]',
+                          )}
+                        >
+                          {shownKey(r.key)} {r.count}
+                          {r.more ? '+' : ''}
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {m.self ? (
+                    <DeliveryProblem m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} />
+                  ) : null}
+                  {!m.pending && !m.deleted ? (
+                    // Beside the bubble, nearest first, on the side away from its sender.
+                    <div
+                      className={cn(
+                        'absolute top-1/2 flex -translate-y-1/2 gap-1',
+                        m.self ? 'right-full mr-2 flex-row-reverse' : 'left-full ml-2',
+                      )}
+                    >
+                      <Button
+                        variant="bare"
+                        type="button"
+                        aria-label="Reply"
+                        title="Reply"
+                        onClick={() => props.onReply(m)}
+                        className={ACTION}
+                      >
+                        <Reply className="size-[15px]" />
+                      </Button>
+                      {props.canReact ? (
+                        <ReactionPicker
+                          mine={(reacted ?? []).filter((r) => r.mine).map((r) => r.key)}
+                          onPick={(key) => props.onReact(m, key)}
+                        />
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
           )
@@ -363,6 +422,43 @@ export function MessageList(props: MessageListProps) {
         </Button>
       ) : null}
     </div>
+  )
+}
+
+// In the tab order always, shown on hover or when it has keyboard focus.
+const ACTION =
+  'flex size-7 items-center justify-center rounded-full bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100'
+
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
+
+/** A few reactions to pick from; one the person has given already is checked, and takes it away. */
+function ReactionPicker({ mine, onPick }: { mine: string[]; onPick: (key: string) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="bare"
+          type="button"
+          aria-label="React"
+          title="React"
+          className={cn(ACTION, 'data-[state=open]:text-foreground data-[state=open]:opacity-100')}
+        >
+          <SmilePlus className="size-[15px]" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" className="flex min-w-0 gap-0.5 p-1">
+        {QUICK_REACTIONS.map((key) => (
+          <DropdownMenuCheckboxItem
+            key={key}
+            checked={mine.some((k) => sameKey(k, key))}
+            onSelect={() => onPick(key)}
+            className="size-9 justify-center px-0 text-xl"
+          >
+            {key}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

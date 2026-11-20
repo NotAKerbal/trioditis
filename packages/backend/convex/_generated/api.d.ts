@@ -12,6 +12,7 @@ import type * as account from "../account.js";
 import type * as auth from "../auth.js";
 import type * as chats from "../chats.js";
 import type * as cleanup from "../cleanup.js";
+import type * as contacts from "../contacts.js";
 import type * as crons from "../crons.js";
 import type * as demo from "../demo.js";
 import type * as gateway from "../gateway.js";
@@ -55,6 +56,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   chats: typeof chats;
   cleanup: typeof cleanup;
+  contacts: typeof contacts;
   crons: typeof crons;
   demo: typeof demo;
   gateway: typeof gateway;

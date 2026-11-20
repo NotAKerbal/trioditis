@@ -1,3 +1,4 @@
+import { NETWORK_INFO } from '@trioditis/core'
 import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
 import {
@@ -24,7 +25,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   networkName,
   useChat,
@@ -35,7 +36,16 @@ import {
   type ChatId,
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
-import { useBridge, useMessages, useReactions, useSendMutations, useTyping, type Message } from '~/data/messages.ts'
+import { useContacts } from '~/data/contacts.ts'
+import {
+  useBridge,
+  useMessages,
+  useReactions,
+  useReactionToggle,
+  useSendMutations,
+  useTyping,
+  type Message,
+} from '~/data/messages.ts'
 import {
   appendToDraft,
   restoreDraft,
@@ -82,9 +92,22 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for
   // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
-  const reactions = useReactions(
+  const serverReactions = useReactions(
     chat.id,
     messages.filter((m) => !m.deleted && !m.pending),
+  )
+  const network = networkName(chat.network)
+  const { reactions, toggle: toggleReaction } = useReactionToggle(
+    chat.id,
+    serverReactions,
+    useCallback(() => toast(`${network} hasn’t confirmed that reaction yet.`), [network]),
+    useCallback((e: unknown) => toast(errorMessage(e, 'That reaction couldn’t be sent.')), []),
+  )
+  const group = chat.row.kind === 'group'
+  // Only a group's senders are shown, so only a group asks who they are.
+  const senders = useContacts(
+    chat.network,
+    group ? messages.flatMap((m) => (m.ghostId && !m.self ? [m.ghostId] : [])) : [],
   )
   const typing = useTyping(chat.id)
   const scheduledRows = useScheduled(chat.id)
@@ -169,7 +192,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   return (
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
-        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5">
+        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5">
           <Avatar
             name={name}
             size={38}
@@ -307,12 +330,16 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           messages={messages}
           loading={loading}
           reactions={reactions}
+          group={group}
+          canReact={NETWORK_INFO[chat.network]?.reactions === true}
+          senders={senders}
           scheduled={scheduled}
           typing={typing.length}
           canLoadMore={canLoadMore}
           loadingMore={loadingMore}
           onLoadMore={loadMore}
           onReply={setReplyTo}
+          onReact={(m, key) => toggleReaction(m.id, key)}
           onSendAgain={(m) => {
             // A new send with a new client message ID: the person chose to risk a duplicate.
             if (m.body?.body) void sendText(m.body.body, m.replyTo).catch(() => undefined)

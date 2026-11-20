@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -73,6 +74,23 @@ func (in *Intent) sender() (sender, bool) {
 	}
 }
 
+// indexKey is how the reaction index keeps a sender: `self`, or `ghost:` and the network ID.
+func (s sender) indexKey() string {
+	if s.self {
+		return "self"
+	}
+	return "ghost:" + string(s.ghostID)
+}
+
+func senderFromIndex(key string) (sender, bool) {
+	if key == "self" {
+		return sender{self: true}, true
+	} else if ghost, ok := strings.CutPrefix(key, "ghost:"); ok && ghost != "" {
+		return sender{ghostID: networkid.UserID(ghost)}, true
+	}
+	return sender{}, false
+}
+
 func (c *Connector) senderForMXID(mxid id.UserID) (sender, bool) {
 	if ghost, ok := ids.ParseGhostMXID(mxid); ok {
 		return sender{ghostID: ghost}, true
@@ -116,6 +134,16 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		eventID = ids.LocalEventID(string(roomID), string(in.mxid), eventType.Type, strconv.FormatInt(ts.UnixNano(), 10), digest(content))
 	}
 	s, ok := in.sender()
+	if !ok && eventType == event.EventRedaction {
+		// bridgev2's bot takes away a person's older reaction when the network allows only
+		// one (WhatsApp, Signal): that removal is the person's, so it is said as theirs.
+		s, ok, err := in.c.reactionSender(ctx, content)
+		if err != nil {
+			return nil, err
+		} else if ok {
+			return in.c.botRedaction(ctx, roomID, s, eventType, content, eventID, ts)
+		}
+	}
 	if !ok {
 		return &mautrix.RespSendEvent{EventID: eventID}, nil
 	}
@@ -126,6 +154,47 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		return nil, err
 	}
 	if err = in.c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
+		return nil, err
+	}
+	return &mautrix.RespSendEvent{EventID: eventID}, nil
+}
+
+// reactionSender is who gave the reaction a redaction takes away, if it takes away one the
+// bridge host has indexed.
+func (c *Connector) reactionSender(ctx context.Context, content *event.Content) (sender, bool, error) {
+	redaction, ok := content.Parsed.(*event.RedactionEventContent)
+	if !ok {
+		return sender{}, false, nil
+	}
+	indexed, err := c.Store.ReactionSender(ctx, string(redaction.Redacts))
+	if errors.Is(err, store.ErrNotFound) {
+		return sender{}, false, nil
+	} else if err != nil {
+		return sender{}, false, err
+	}
+	// The index says who, since bridgev2 may already have given the person's one reaction
+	// slot to the new reaction. The upgrade that added senders filled them in from bridgev2;
+	// one it couldn't is looked up there now, in case bridgev2 still has it.
+	if s, ok := senderFromIndex(indexed); ok {
+		return s, true, nil
+	}
+	reaction, err := c.Bridge.DB.Reaction.GetByMXID(ctx, redaction.Redacts)
+	if err != nil || reaction == nil {
+		return sender{}, false, err
+	}
+	s, ok := senderFromIndex(store.ReactorKey(string(reaction.SenderMXID), string(reaction.SenderID)))
+	return s, ok, nil
+}
+
+// botRedaction emits a redaction the bot sent on someone's behalf (reactionSender).
+func (c *Connector) botRedaction(ctx context.Context, roomID id.RoomID, s sender, eventType event.Type, content *event.Content, eventID id.EventID, ts time.Time) (*mautrix.RespSendEvent, error) {
+	o, err := c.owner(ctx, roomID)
+	if errors.Is(err, errNotPortal) {
+		return &mautrix.RespSendEvent{EventID: eventID}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if err = c.emitContent(ctx, o, s, eventType, content, eventID, ts, false); err != nil {
 		return nil, err
 	}
 	return &mautrix.RespSendEvent{EventID: eventID}, nil
@@ -201,7 +270,7 @@ func (c *Connector) emitContent(ctx context.Context, o *owner, s sender, eventTy
 			return fmt.Errorf("unexpected %T for reaction", content.Parsed)
 		}
 		base.Type, base.EventID, base.TargetEventID, base.Key = protocol.EventReaction, string(eventID), string(reaction.RelatesTo.EventID), reactionKey(reaction.RelatesTo.Key)
-		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key); err != nil {
+		if err = c.Store.PutReaction(ctx, base.EventID, base.TargetEventID, base.Key, s.indexKey()); err != nil {
 			return err
 		}
 		return c.emit(ctx, &base)

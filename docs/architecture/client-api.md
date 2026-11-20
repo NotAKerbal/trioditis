@@ -638,11 +638,12 @@ Alongside the page:
 
 - `api.messages.reactions({ chatId, messageIds })`, at most 100 IDs, returns
   `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message
-  (a message with more shows its first 100). `senderKey` is `self` or `ghost:<ghostId>`.
+  (a message with more shows its first 100, plus up to 20 of the person's own that those
+  left out, so they can always take theirs away). `senderKey` is `self` or `ghost:<ghostId>`.
   It never reads the messages themselves, and reads at most 8 MiB of reactions, going
   through the IDs in order, so it answers a prefix of `messageIds`:
   - **The first ID is always answered** unless it is a deleted message: one message's
-    reactions (at most 100 rows of at most 4 KiB) always fit. So a first ID missing from
+    reactions (at most 120 rows of at most 4 KiB) always fit. So a first ID missing from
     the answer is a deleted message, and the client can move past it.
   - A later ID is missing either because it is a deleted message or because the 8 MiB ran
     out before it. To tell which, ask again starting from that ID: then it's first.
@@ -734,6 +735,28 @@ replied to.` · `Only a message that failed or may not have sent can be discarde
 message reached the network, so it can’t be discarded here.` · `Ask for at most 100
 messages’ reactions at once.` (`reactions`)
 
+### Reacting
+
+`api.messages.react({ chatId, messageId, key, remove? })` asks the bridge host to add the
+person's reaction `key` to a message, or with `remove: true` to take it away. The message must
+be in that chat, have reached the network and not be deleted. `key` is one emoji (or a
+network's short name for one): 1 to 64 characters, with no spaces or control characters. Send
+the emoji as picked; the bridge host compares keys without variation selectors, so taking
+away a reaction works with the stored key too.
+
+Nothing is stored until the bridge host's echo, a `reaction` or `reactionRemove` event, so
+`messages.reactions` changes only then. A network that allows one reaction per person (most
+do) replaces the old one, and the bridge host reports the old one's removal. The command has
+a 10-minute deadline: one that hasn't reached the bridge host by then isn't sent, and it is
+never sent again. The desktop app shows the person's choice at once and goes back to what the
+server says if no echo comes within 30 seconds (`apps/desktop/src/data/reaction-toggle.ts`).
+
+A network without reactions (`NETWORK_INFO[network].reactions` is false: Google Voice,
+Bluesky) refuses it, and the client offers none there.
+
+Errors: `That chat doesn’t exist.` · `<Network> doesn’t have reactions.` · `That reaction
+can’t be sent.` · `That message can’t be reacted to.`
+
 ### Scheduled sends
 
 | Function            | Arguments                                                              | Returns                                                                                                           |
@@ -786,11 +809,12 @@ have at most 100 labels.` · `That label doesn’t exist.`
 
 ```ts
 { network, name, maturity: 'stable' | 'beta' | 'experimental',
-  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk }
+  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk, reactions }
 ```
 
 The same table is `NETWORK_INFO` in `@trioditis/core`. Show a warning before connecting a
-network with `termsRisk` (cookie or token logins can get an account banned).
+network with `termsRisk` (cookie or token logins can get an account banned). `reactions` is
+whether the network has them (Reacting).
 
 ### The login stepper
 
@@ -922,7 +946,15 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 ## Contacts
 
 Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
-`ghostId`. A query for them comes with the conversation view (see Questions).
+`ghostId`; the plaintext is `ContactPlaintext`.
+
+`api.contacts.get({ network, ghostIds })`, at most 100 IDs, returns `[{ ghostId,
+sealedProfile }]` for the ones the person has a contact for on that network; the others are
+left out. A message's sender is `{ ghostId }` on its chat's network, so the client collects a
+page's ghost IDs and asks once (the desktop app does this in group chats, to name each sender beside
+an avatar; its picture needs Media, see Next). Each profile is at most 8 KiB.
+
+Errors: `Ask for at most 100 contacts at once.`
 
 ## Server updates
 
@@ -955,7 +987,8 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
    recounts unread and mentions after it.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
-3. **A contacts query**: planned, see Next.
+3. **Done:** a contacts query (Contacts). A list of a chat's members still needs a `members`
+   event from the bridge host.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
 5. **Media**: planned, see Next.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
@@ -979,7 +1012,7 @@ here.
    `version` is the commit the installer deployed (`TRIODITIS_VERSION`), or null where none
    was set (`pnpm dev`, previews); an open page compares it with its own build's to pick up
    an update (`docs/deploy.md`, Updating live).
-2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
+2. **Contacts for senders (built).** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members

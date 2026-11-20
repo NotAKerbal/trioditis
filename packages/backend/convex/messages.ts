@@ -1,6 +1,6 @@
 import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v, type Infer } from 'convex/values'
-import type { Arrival, ArrivalFeed } from '@trioditis/core'
+import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
 import type { Id } from './_generated/dataModel'
 import { mutation, query } from './_generated/server'
 import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
@@ -8,6 +8,7 @@ import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
+import { queueCommand } from './lib/outbox'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -161,8 +162,69 @@ export const discardSend = mutation({
   },
 })
 
+/**
+ * A reaction key the client may send: one emoji (a joined sequence can run to a dozen code
+ * units) or a network's short name for one, with no spaces or control characters.
+ */
+const REACTION_KEY = /^[^\s\p{Cc}]{1,64}$/u
+/**
+ * A reaction that hasn't reached the bridge host within this isn't sent: by then the person has
+ * moved on, and it would turn up unexpectedly.
+ */
+const REACTION_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Adds the person's reaction to a message, or with `remove` takes it away. The bridge host does
+ * it on the network, and its echo (a `reaction` or `reactionRemove` event) is what changes
+ * `messages.reactions`; nothing is stored until then. A network that allows one reaction per
+ * person replaces the old one itself, and the bridge host reports that removal too.
+ */
+export const react = mutation({
+  args: {
+    chatId: v.id('chats'),
+    messageId: v.id('messages'),
+    key: v.string(),
+    remove: v.optional(v.boolean()),
+  },
+  returns: v.null(),
+  handler: async (ctx, { chatId, messageId, key, remove }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    const info = NETWORK_INFO[chat.network]
+    if (info && !info.reactions) throw new ConvexError(`${info.name} doesn’t have reactions.`)
+    if (!REACTION_KEY.test(key)) throw new ConvexError('That reaction can’t be sent.')
+    const message = await ctx.db.get(messageId)
+    if (
+      !message ||
+      message.chatId !== chat._id ||
+      message.eventId.startsWith('pending:') ||
+      message.redactedAt !== undefined
+    ) {
+      throw new ConvexError('That message can’t be reacted to.')
+    }
+    const now = Date.now()
+    await queueCommand(ctx, {
+      userId: chat.userId,
+      network: chat.network,
+      loginId: chat.loginId,
+      chatId: chat._id,
+      payload: { type: remove ? 'unreact' : 'react', portalId: chat.portalId, targetEventId: message.eventId, key },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + REACTION_TTL_MS,
+    })
+    return null
+  },
+})
+
 /** The most reactions shown per message. */
 const MAX_REACTIONS_PER_MESSAGE = 100
+/**
+ * The most of the person's own reactions added to a message that has more than the first 100:
+ * theirs could be past those, and they need to see it to take it away.
+ */
+const MAX_OWN_REACTIONS = 20
 /** The most `messages.reactions` reads of reaction rows, well under a query's 16 MiB. */
 const MAX_REACTION_BYTES = 8 * 1024 * 1024
 /**
@@ -172,7 +234,8 @@ const MAX_REACTION_BYTES = 8 * 1024 * 1024
 const MAX_REACTION_ROW_BYTES = 4 * 1024
 
 /**
- * Active reactions on the given messages (at most 100 messages, 100 reactions each). It never
+ * Active reactions on the given messages (at most 100 messages, 100 reactions each, and on a
+ * message with that many, up to 20 more of the person's own that the first 100 left out). It never
  * reads the messages themselves, which can be large: a reaction row says whose it is, and a
  * deleted message's reactions are hidden by its clean-up marker until they're removed.
  *
@@ -190,7 +253,7 @@ export const reactions = query({
     const out: Record<string, { key: string; senderKey: string }[]> = {}
     let bytes = 0
     for (const messageId of messageIds) {
-      if (MAX_REACTION_BYTES - bytes < MAX_REACTIONS_PER_MESSAGE * MAX_REACTION_ROW_BYTES) break
+      if (MAX_REACTION_BYTES - bytes < (MAX_REACTIONS_PER_MESSAGE + MAX_OWN_REACTIONS) * MAX_REACTION_ROW_BYTES) break
       const deleted = await ctx.db
         .query('reactionCleanups')
         .withIndex('by_message', (q) => q.eq('messageId', messageId))
@@ -206,6 +269,17 @@ export const reactions = query({
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
         .take(MAX_REACTIONS_PER_MESSAGE)
       bytes += byteSize(rows)
+      if (rows.length === MAX_REACTIONS_PER_MESSAGE) {
+        const seen = new Set(rows.map((row) => row._id))
+        const own = await ctx.db
+          .query('reactions')
+          .withIndex('by_message_sender_active', (q) =>
+            q.eq('messageId', messageId).eq('senderKey', 'self').eq('removedAt', undefined),
+          )
+          .take(MAX_OWN_REACTIONS)
+        rows.push(...own.filter((row) => !seen.has(row._id)))
+        bytes += byteSize(own)
+      }
       out[messageId] = rows
         .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
         .map(({ key, senderKey }) => ({ key, senderKey }))

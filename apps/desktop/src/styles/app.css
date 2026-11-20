@@ -24,3 +24,10 @@
 #root {
   height: 100%;
 }
+
+/* The top and bottom bars of the sidebar and the chat share one height, so their edges line
+   up across the window: the chat header with the search, and the composer's top with the
+   account bar's (the composer's one line, 50px, sits 14px from the bottom). */
+:root {
+  --bar-h: 64px;
+}

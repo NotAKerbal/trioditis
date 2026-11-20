@@ -91,8 +91,11 @@ a transport (`linkedinSendOnce`) that turns a connection error, any 5xx and a re
 that request into a 500 Internal Server Error, which `DoRaw` doesn't retry. The connector
 reports a 5xx as a server error it isn't sure of, so the send is recorded as `unknown` and
 the person decides whether to send it again. A 4xx is LinkedIn's own refusal and stays a
-failure. Every other request (edits, reactions, sync, media) keeps the connector's retries,
-which can't send a message twice. The client's `http.Client` is private to `linkedingo`, so
+failure. Adding and taking away a reaction (`reactWithEmoji`, `unreactWithEmoji`) go
+through the same transport, since a repeat could undo what the person did meanwhile on
+another device; one that isn't confirmed is never reported as done
+(`TestLinkedInReactionIsNotRepeated`). Every other request (edits, sync, media) keeps the
+connector's retries, which can't send a message twice. The client's `http.Client` is private to `linkedingo`, so
 the bridge host reaches it by reflection in one place (`linkedinHTTPClient`); if an upgrade
 moves or retypes the field, logins fail to load rather than send without the transport, and
 `TestLinkedInSendOnceReachesTheClient` fails. `TestLinkedInSendIsNotRepeated` sends through

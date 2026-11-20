@@ -542,6 +542,60 @@ func TestConformance(t *testing.T) {
 		})
 	})
 
+	t.Run("the person's reactions: a replaced one is taken away, and a late one isn't sent", func(t *testing.T) {
+		if err := h.net.Incoming(aliceNet, "family", "peer-family", "m-react", "react to me", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		target := gw.waitFor(t, "a message to react to", isMessage("react to me", h, "alice")).EventID
+		react := func(key string, notAfter time.Time) protocol.Command {
+			return protocol.Command{
+				CommandID: nextCommandID(), Type: protocol.CommandReact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+				TargetEventID: target, Key: key, NotAfter: notAfter.UnixMilli(),
+			}
+		}
+		isOwn := func(typ, key string) func(*protocol.Event) bool {
+			return func(e *protocol.Event) bool {
+				return e.Type == typ && e.TargetEventID == target && e.Key == key && e.Sender != nil && e.Sender.Self
+			}
+		}
+		// One reaction per person, as on WhatsApp: a new one replaces the old, and the old one's
+		// removal is reported as the person's, so their reactions don't show both.
+		h.net.SetMaxReactions(1)
+		defer h.net.SetMaxReactions(0)
+		h.mustCommand(react("👍", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the first reaction", isOwn(protocol.EventReaction, "👍"))
+		h.mustCommand(react("🎉", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the second reaction", isOwn(protocol.EventReaction, "🎉"))
+		gw.waitFor(t, "the first one taken away", isOwn(protocol.EventReactionRemove, "👍"))
+		// A reaction indexed before the index kept senders gets its sender from bridgev2's
+		// record when the store is upgraded, so replacing it works the same.
+		ctx := context.Background()
+		if _, err := h.host.Store.DB.Exec(ctx, `UPDATE trioditis_reaction SET sender=''`); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.host.Store.BackfillReactionSenders(ctx); err != nil {
+			t.Fatal(err)
+		}
+		h.mustCommand(react("😂", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the third reaction", isOwn(protocol.EventReaction, "😂"))
+		gw.waitFor(t, "the upgraded one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
+		// And the one that replaced it can still be taken away.
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandUnreact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			TargetEventID: target, Key: "😂", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+		})
+		gw.waitFor(t, "the last one taken away", isOwn(protocol.EventReactionRemove, "😂"))
+
+		before := h.net.Reactions()
+		if status, body := h.command(react("😮", time.Now().Add(-time.Second))); status != http.StatusConflict || !strings.Contains(body, protocol.ErrExpired) {
+			t.Fatalf("expected 409 expired for a late reaction, got %d %s", status, body)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if n := h.net.Reactions() - before; n != 0 {
+			t.Fatalf("a late reaction reached the network %d times", n)
+		}
+	})
+
 	sendCommand := func(clientMessageID, body string) protocol.Command {
 		return protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
