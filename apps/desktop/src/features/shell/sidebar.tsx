@@ -116,7 +116,9 @@ export function Sidebar({
 
   const filter: ChatFilter = { network, labelId }
   const focused = layout === 'focused'
-  const main = useChats(focused ? 'inbox' : simpleShow, filter)
+  // Focused pages its inbox by recency alone, so Read is newest first across pages; Unread
+  // puts the pins first among what's loaded.
+  const main = useChats(focused ? 'inbox' : simpleShow, filter, true, focused ? 'recent' : undefined)
   // Focused mode shows every view at once, folded into dividers; Simple loads only the one it shows.
   const snoozedList = useChats('snoozed', filter, focused)
   const requestsList = useChats('requests', filter, focused)
@@ -162,8 +164,11 @@ export function Sidebar({
 
   const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || c.id === openedUnreadId
   const unread = (inbox ?? []).filter(isUnread)
-  // Newest first, pinned or not: the server lists pins first, but here only recency matters.
-  const read = (inbox ?? []).filter((c) => !isUnread(c)).sort((a, b) => lastActivity(b) - lastActivity(a))
+  if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
+  // Newest first. The server pages Focused that way already, except with a label, whose pages
+  // come in the order chats were labelled: then it's the loaded chats that are sorted.
+  const read = (inbox ?? []).filter((c) => !isUnread(c))
+  if (focused) read.sort((a, b) => lastActivity(b) - lastActivity(a))
 
   // Scheduled messages, each with its chat (when one of the loaded views has it) and its opened text.
   const scheduled = useMemo(

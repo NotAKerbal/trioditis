@@ -24,7 +24,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   networkName,
   useChat,
@@ -48,7 +48,6 @@ import {
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText } from '~/lib/sealed.ts'
-import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
@@ -97,7 +96,8 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
   const setDraft = (text: string) => setDraftText(chat.id, text)
   const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
-  const { details } = usePrefs()
+  // Closed whenever a chat opens; the pane is remade for each chat.
+  const [details, setDetails] = useState(false)
 
   // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
@@ -297,7 +297,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               aria-label="Chat details"
               aria-pressed={details}
               className={cn(details && 'bg-primary-soft text-primary')}
-              onClick={() => setPref('details', !details)}
+              onClick={() => setDetails(!details)}
             >
               <Info className="size-[18px]" />
             </Button>
@@ -308,7 +308,6 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           loading={loading}
           reactions={reactions}
           scheduled={scheduled}
-          group={chat.row.kind !== 'dm'}
           typing={typing.length}
           canLoadMore={canLoadMore}
           loadingMore={loadingMore}

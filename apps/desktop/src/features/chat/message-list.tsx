@@ -6,7 +6,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { formatWhen } from '~/data/snooze.ts'
-import { isBigEmoji, linkParts, sameRun } from './message-text.ts'
+import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
@@ -20,7 +20,6 @@ interface MessageListProps {
   loading: boolean
   reactions: Map<string, Reaction[]>
   scheduled: ScheduledItem[]
-  group: boolean
   typing: number
   canLoadMore: boolean
   /** An earlier page is on its way. */
@@ -42,6 +41,8 @@ function dayLabel(ms: number) {
   if (d.toDateString() === new Date(Date.now() - 86_400_000).toDateString()) return 'Yesterday'
   return dayFormat.format(d)
 }
+
+const fromBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight
 
 const fullFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 const fullTime = (ms: number) => fullFormat.format(new Date(ms))
@@ -97,9 +98,9 @@ export function MessageList(props: MessageListProps) {
         if (anchor) el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - was.offset
         before.current = null
       }
-      return
-    }
-    if (atBottom.current) el.scrollTop = el.scrollHeight
+    } else if (atBottom.current) el.scrollTop = el.scrollHeight
+    // New messages below grow the distance to the newest without a scroll: measure it again.
+    setAway(fromBottom(el) > 300)
   }, [messages, scheduled.length, props.typing, props.loadingMore])
 
   // Earlier messages load as the top of the list scrolls near; the button stays as a fallback.
@@ -118,14 +119,14 @@ export function MessageList(props: MessageListProps) {
     const el = scroller.current
     if (!el) return
     const onScroll = () => {
-      const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-      atBottom.current = fromBottom < 40
-      setAway(fromBottom > 300)
+      atBottom.current = fromBottom(el) < 40
+      setAway(fromBottom(el) > 300)
     }
     el.addEventListener('scroll', onScroll)
     // The composer growing (a reply, a long draft) shrinks the list: keep the newest in view.
     const resized = new ResizeObserver(() => {
       if (atBottom.current) el.scrollTop = el.scrollHeight
+      setAway(fromBottom(el) > 300)
     })
     resized.observe(el)
     return () => {
@@ -168,23 +169,39 @@ export function MessageList(props: MessageListProps) {
           lastDay = day
           const prev = messages[i - 1]
           const next = messages[i + 1]
+          // Messages around the same time share one time label above them, the day with it
+          // when the day changes, as iMessage and Signal do. Each bubble's own is its tooltip.
+          const showTime = !sameTime(prev, m)
           const first = !sameRun(prev, m)
           const last = !sameRun(m, next)
-          const showWho = props.group && !m.self && first
           const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
           const text = m.body?.body ?? ''
           const big = !m.deleted && !quoted && !m.replyTo && isBigEmoji(text)
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
-          // The time once per run, at its end, as most messaging apps show it; a message still
-          // going, edited or in trouble shows its own.
-          const meta = last || !settled || m.edited ? <Meta m={m} /> : null
+          // Delivery once per run of the person's own, at its end; a message still going, edited or
+          // in trouble shows its own.
+          const meta = (m.self && (last || !settled)) || m.edited ? <Meta m={m} /> : null
           const reacted = reactions.get(m.id)
           return (
-            <div key={m.id} data-message-id={m.id} className={cn(first && !showDay && 'mt-3', !first && 'mt-0.5')}>
-              {showDay ? (
-                <p className="mt-4 mb-3 text-center text-xs font-medium text-subtle-foreground">{day}</p>
+            <div
+              key={m.id}
+              data-message-id={m.id}
+              className={cn(
+                // Joined bubbles sit close; another sender on the same side a little further off.
+                !showTime && (!first ? 'mt-0.5' : prev?.self === m.self ? 'mt-1.5' : 'mt-3'),
+              )}
+            >
+              {showTime ? (
+                <p
+                  className={cn(
+                    'mb-2 text-center text-xs font-medium text-subtle-foreground',
+                    i === 0 ? 'mt-1' : 'mt-5',
+                  )}
+                >
+                  {showDay ? `${day} ` : null}
+                  {messageTime(m.at)}
+                </p>
               ) : null}
-              {showWho ? <p className="mb-1 ml-3 text-sm font-semibold text-muted-foreground">Someone</p> : null}
               <div
                 className={cn(
                   'group relative flex w-fit max-w-[min(78%,38rem)] flex-col',
@@ -192,7 +209,7 @@ export function MessageList(props: MessageListProps) {
                 )}
               >
                 <div
-                  title={meta ? undefined : fullTime(m.at)}
+                  title={fullTime(m.at)}
                   className={cn(
                     'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
                     m.self ? 'bg-primary text-primary-foreground' : 'bg-surface shadow-[0_0_0_1px_var(--border)]',
@@ -367,15 +384,11 @@ function attachmentLabel(m: Message) {
 
 const SETTLED = new Set<Message['delivery']>(['sent', 'delivered', 'read'])
 
-/** Edited, the time and, for the person's own, its delivery state (client-api.md, Sending). */
+/** Edited and, for the person's own, its delivery state (client-api.md, Sending). */
 function Meta({ m }: { m: Message }) {
   return (
-    <span
-      className="inline-flex items-center gap-1 text-[11px] leading-none whitespace-nowrap not-italic"
-      title={fullTime(m.at)}
-    >
-      {m.edited ? 'edited ' : null}
-      {messageTime(m.at)}
+    <span className="inline-flex items-center gap-1 text-[11px] leading-none whitespace-nowrap not-italic">
+      {m.edited ? 'edited' : null}
       {m.self ? <DeliveryIcon delivery={m.delivery} /> : null}
     </span>
   )
