@@ -243,7 +243,7 @@ export function Sidebar({
 
   return (
     <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
-      <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-b border-border px-2.5">
         <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
           <Input
             ref={searchRef}
@@ -479,7 +479,7 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="flex h-[52px] shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
     </aside>
   )
 }

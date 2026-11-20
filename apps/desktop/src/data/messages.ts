@@ -8,12 +8,13 @@ import { useMutation } from 'convex/react'
 // so going back to a chat shows its latest messages at once, already up to date, instead of
 // loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
 import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
 import type { BridgeStatus } from './bridge-ready.ts'
 import { reactionGroups, reactionRequests, showReactions, type Shown } from './reaction-requests.ts'
+import { CONFIRM_MS, confirmed, sameKey, withPending, type PendingReaction, type Reaction } from './reaction-toggle.ts'
 
 export interface Message {
   id: Id<'messages'>
@@ -74,13 +75,7 @@ export function useMessages(chatId: ChatId) {
 type ReactionAnswer = Record<string, { key: string; senderKey: string }[]>
 const MAX_REACTIONS_PER_MESSAGE = 100
 
-/** One reaction on a message, with how many gave it: `more` when there may be others unseen. */
-export interface Reaction {
-  key: string
-  count: number
-  more: boolean
-  mine: boolean
-}
+export type { Reaction }
 // Outside the hook, so useQueries can keep its result while the answers don't change.
 const resultsOf = (results: { data?: ReactionAnswer | undefined; isPending: boolean; isError: boolean }[]) =>
   results.map((r) => ({ data: r.data, pending: r.isPending, failed: r.isError }))
@@ -144,6 +139,56 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
     }
     return out
   }, [data])
+}
+
+/**
+ * The reactions to show, the person's own choices laid over the server's until its echo says
+ * the same (reaction-toggle.ts), and `toggle`, which adds the person's reaction with that key or
+ * takes it away. One the network hasn't confirmed in CONFIRM_MS goes back to what the server
+ * says, and `onUnconfirmed` is told; one the server refused goes back at once, with its error.
+ */
+export function useReactionToggle(
+  chatId: ChatId,
+  server: Map<string, Reaction[]>,
+  onUnconfirmed: () => void,
+  onError: (e: unknown) => void,
+) {
+  const react = useMutation(api.messages.react)
+  const [pending, setPending] = useState<PendingReaction[]>([])
+  const live = useMemo(() => pending.filter((p) => !confirmed(p, server)), [pending, server])
+  useEffect(() => {
+    if (live.length !== pending.length) setPending(live)
+  }, [live, pending.length])
+  const onUnconfirmedRef = useRef(onUnconfirmed)
+  onUnconfirmedRef.current = onUnconfirmed
+  const oldest = live.length ? Math.min(...live.map((p) => p.at)) : null
+  useEffect(() => {
+    if (oldest === null) return
+    const timer = setTimeout(
+      () => {
+        const now = Date.now()
+        setPending((list) => list.filter((p) => now - p.at < CONFIRM_MS))
+        onUnconfirmedRef.current()
+      },
+      Math.max(0, oldest + CONFIRM_MS - Date.now()),
+    )
+    return () => clearTimeout(timer)
+  }, [oldest])
+  const shown = useMemo(() => withPending(server, live), [server, live])
+  const toggle = useCallback(
+    (messageId: Id<'messages'>, key: string) => {
+      const remove = !!shown.get(messageId)?.some((r) => r.mine && sameKey(r.key, key))
+      const p: PendingReaction = { messageId, key, remove, at: Date.now() }
+      const others = (q: PendingReaction) => q.messageId !== messageId || !sameKey(q.key, key)
+      setPending((list) => [...list.filter(others), p])
+      react({ chatId, messageId, key, ...(remove ? { remove } : {}) }).catch((e: unknown) => {
+        setPending((list) => list.filter((q) => q !== p))
+        onError(e)
+      })
+    },
+    [shown, react, chatId, onError],
+  )
+  return { reactions: shown, toggle }
 }
 
 /** Who is typing now. Queries don't rerun as time passes, so expiry is checked here. */

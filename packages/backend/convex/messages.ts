@@ -8,6 +8,7 @@ import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
+import { queueCommand } from './lib/outbox'
 import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -157,6 +158,60 @@ export const discardSend = mutation({
     await ctx.db.delete(message._id)
     const chat = await ctx.db.get(message.chatId)
     if (chat) await forgetMessage(ctx, chat, message._id)
+    return null
+  },
+})
+
+/**
+ * A reaction key the client may send: one emoji (a joined sequence can run to a dozen code
+ * units) or a network's short name for one, with no spaces or control characters.
+ */
+const REACTION_KEY = /^[^\s\p{Cc}]{1,64}$/u
+/**
+ * A reaction that hasn't reached the bridge host within this isn't sent: by then the person has
+ * moved on, and it would turn up unexpectedly.
+ */
+const REACTION_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Adds the person's reaction to a message, or with `remove` takes it away. The bridge host does
+ * it on the network, and its echo (a `reaction` or `reactionRemove` event) is what changes
+ * `messages.reactions`; nothing is stored until then. A network that allows one reaction per
+ * person replaces the old one itself, and the bridge host reports that removal too.
+ */
+export const react = mutation({
+  args: {
+    chatId: v.id('chats'),
+    messageId: v.id('messages'),
+    key: v.string(),
+    remove: v.optional(v.boolean()),
+  },
+  returns: v.null(),
+  handler: async (ctx, { chatId, messageId, key, remove }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    if (!REACTION_KEY.test(key)) throw new ConvexError('That reaction can’t be sent.')
+    const message = await ctx.db.get(messageId)
+    if (
+      !message ||
+      message.chatId !== chat._id ||
+      message.eventId.startsWith('pending:') ||
+      message.redactedAt !== undefined
+    ) {
+      throw new ConvexError('That message can’t be reacted to.')
+    }
+    const now = Date.now()
+    await queueCommand(ctx, {
+      userId: chat.userId,
+      network: chat.network,
+      loginId: chat.loginId,
+      chatId: chat._id,
+      payload: { type: remove ? 'unreact' : 'react', portalId: chat.portalId, targetEventId: message.eventId, key },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + REACTION_TTL_MS,
+    })
     return null
   },
 })
