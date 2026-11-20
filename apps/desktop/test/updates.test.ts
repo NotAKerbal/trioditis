@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildOutdated,
+  groupNotes,
   runningVersion,
   updaterStale,
   updateView,
   UPDATER_STALE_MS,
+  whatsNew,
   type UpdateStatus,
 } from '../src/data/updates.ts'
 
@@ -85,5 +87,41 @@ describe('the updater’s health and the version', () => {
     expect(buildOutdated(A, null)).toBe(false)
     expect(buildOutdated('unknown', B)).toBe(false)
     expect(buildOutdated(A, 'unknown')).toBe(false)
+  })
+})
+
+describe('release notes', () => {
+  const notes = [
+    { label: 'fixed' as const, text: 'Fix one' },
+    { label: 'internal' as const, text: 'Tidy up' },
+    { label: 'new' as const, text: 'Add one' },
+    { label: 'fixed' as const, text: 'Fix two' },
+  ]
+
+  it('groups them by label in a fixed order, each keeping the order it came in', () => {
+    expect(groupNotes(notes)).toEqual([
+      { label: 'new', name: 'New', texts: ['Add one'] },
+      { label: 'fixed', name: 'Fixed', texts: ['Fix one', 'Fix two'] },
+      { label: 'internal', name: 'Internal', texts: ['Tidy up'] },
+    ])
+    expect(groupNotes([])).toEqual([])
+  })
+
+  it('hands an available update its notes', () => {
+    const updater = { seenAt: 1, state: 'idle' as const, latest: latest({ notes }) }
+    expect(updateView({ ...base, updater })).toMatchObject({ kind: 'available', notes })
+    // From an updater that didn't send any.
+    expect(updateView({ ...base, updater: { ...updater, latest: latest() } })).toMatchObject({ notes: [] })
+  })
+
+  it('says what’s new only while the server runs the update the updater installed', () => {
+    const installed = { from: A, to: B, at: 4, notes }
+    const runs = (commit: string) => ({
+      ...base,
+      updater: { seenAt: 1, state: 'idle' as const, current: { commit, committedAt: 1 }, installed },
+    })
+    expect(whatsNew(runs(B))).toEqual(notes)
+    expect(whatsNew(runs(A))).toEqual([])
+    expect(whatsNew(base)).toEqual([])
   })
 })

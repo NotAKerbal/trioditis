@@ -497,7 +497,33 @@ running from `dev` on a server of your own. See `deploy/` for installing and upd
 - Work that depends on an unmerged branch stacks on it, and its pull request targets that
   branch until it merges.
 - A release is a pull request from `dev` to `main`.
+- Every pull request adds a release note (below).
 - Nothing is merged without passing checks and an independent review.
+
+## Release notes
+
+Every pull request adds a file to `release-notes/` saying what it changes, written by whoever
+makes the change, agent or person. Admins read them in the app before and after an update
+(Admin settings → Updates): the updater collects the notes an update adds, and the app groups
+them by label.
+
+```
+New: React to a message from the button beside Reply.
+Fixed: Signing in to Google no longer freezes when the page asks for a passkey.
+```
+
+- Name the file after the change, in lowercase letters, digits and dashes:
+  `release-notes/message-reactions.md`.
+- Each line is one change, starting with its label: `New:`, `Improved:`, `Fixed:`,
+  `Security:` or `Internal:`. One to eight lines, each at most 200 characters, with no tabs.
+- Write for the people using the server: what they can now do, or what no longer goes wrong.
+  `Internal:` is for changes they won't notice (CI, refactors, docs), so every pull request
+  still has a note.
+- A follow-up to a change that hasn't been released yet may edit that change's note rather
+  than add one.
+
+`node scripts/release-notes.mjs check` checks the format (it's part of `pnpm check`), and CI
+fails a pull request that adds or changes no note.
 
 ## Worktrees
 
@@ -546,10 +572,12 @@ pnpm check
 ```
 
 It runs exactly what CI runs (`.github/workflows/checks.yml`): `pnpm typecheck`, `pnpm lint`,
-`pnpm test`, `pnpm test:scripts`, `go vet ./...`, `go vet -tags libsignal ./...` and `go test ./...` in `apps/bridge-host`,
+`pnpm test`, `pnpm test:scripts`, `node scripts/release-notes.mjs check`, `go vet ./...`, `go vet -tags libsignal ./...` and `go test ./...` in `apps/bridge-host`,
 and `node scripts/signal-fork.mjs check` (the bridge host's patched copy of mautrix-signal is
 upstream plus its patch; `apps/bridge-host/third_party/README.md`), then prints each as Passed
-or Failed. Use it when CI can't run, and report its results.
+or Failed. Use it when CI can't run, and report its results. CI also checks that a pull
+request adds or changes a release note, which `pnpm check` can't do without the pull
+request's base.
 
 `pnpm lint` also checks the design system's rules in `apps/desktop` and `packages/ui`
 (`scripts/lint/design-system.mjs`, after Flux's):

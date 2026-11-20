@@ -11,7 +11,9 @@
 //     Sends the updater's report (updates:report) from UPDATER_* variables: UPDATER_STATE,
 //     UPDATER_MESSAGE, UPDATER_DONE, UPDATER_CLAIM, UPDATER_CLAIM_CHANNEL, UPDATER_CLAIM_AUTO, UPDATER_CURRENT and UPDATER_CURRENT_AT, and
 //     UPDATER_LATEST_CHANNEL, UPDATER_LATEST, UPDATER_LATEST_AT, UPDATER_LATEST_SUBJECT,
-//     UPDATER_BEHIND, UPDATER_AHEAD and UPDATER_CHECKED_AT. Times are Unix seconds.
+//     UPDATER_LATEST_NOTES, UPDATER_BEHIND, UPDATER_AHEAD and UPDATER_CHECKED_AT, and, for the
+//     update just installed, UPDATER_INSTALLED_FROM, UPDATER_INSTALLED_TO and
+//     UPDATER_INSTALLED_NOTES. Times are Unix seconds; notes are `<Label><tab><text>` lines.
 //
 // It exits 0 on success and 1 on any failure, with the reason on stderr.
 
@@ -85,6 +87,21 @@ function seconds(name) {
   return Number(value) * 1000
 }
 
+// The labels a release note may have (scripts/release-notes.mjs), as the backend takes them.
+const LABELS = { New: 'new', Improved: 'improved', Fixed: 'fixed', Security: 'security', Internal: 'internal' }
+
+/** Release notes from the updater's `<Label><tab><text>` lines, leaving out any that don't fit. */
+function notes(name) {
+  const result = []
+  for (const line of (process.env[name] ?? '').split('\n')) {
+    const tab = line.indexOf('\t')
+    const label = Object.hasOwn(LABELS, line.slice(0, tab)) ? LABELS[line.slice(0, tab)] : undefined
+    const text = line.slice(tab + 1).trim()
+    if (tab > 0 && label && text) result.push({ label, text })
+  }
+  return result
+}
+
 function count(name) {
   const value = process.env[name]
   if (!/^[0-9]{1,9}$/.test(value ?? '')) fail(`${name} must be a count`)
@@ -108,9 +125,19 @@ async function report() {
       commit: env.UPDATER_LATEST,
       committedAt: seconds('UPDATER_LATEST_AT'),
       subject: env.UPDATER_LATEST_SUBJECT ?? '',
+      notes: notes('UPDATER_LATEST_NOTES'),
       behind: count('UPDATER_BEHIND'),
       ahead: count('UPDATER_AHEAD'),
       checkedAt: seconds('UPDATER_CHECKED_AT'),
+    }
+  }
+  // Left out unless both ends are commits, so the report that ends an update always goes through.
+  const commit = /^[0-9a-f]{40}$/
+  if (commit.test(env.UPDATER_INSTALLED_FROM ?? '') && commit.test(env.UPDATER_INSTALLED_TO ?? '')) {
+    args.installed = {
+      from: env.UPDATER_INSTALLED_FROM,
+      to: env.UPDATER_INSTALLED_TO,
+      notes: notes('UPDATER_INSTALLED_NOTES'),
     }
   }
   await new ConvexHttpClient(url).mutation(makeFunctionReference('updates:report'), args)

@@ -4,7 +4,8 @@
 # moves the checkout forward to a channel's newest commit and runs that commit's installer;
 # after a failed install it goes back to the commit it was on and installs that again, and
 # says so; it leaves a checkout that's up to date, ahead of the channel, diverged from it, or
-# has local changes where it is; and each step reaches the admins as a report.
+# has local changes where it is; each step reaches the admins as a report; and the release
+# notes an update adds reach them too, before it installs and once it has.
 set -eu
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 test_name="the updater moves a checkout forward, and back after a failed install"
@@ -38,7 +39,11 @@ git_ -C "$work/source" commit -qm one
 c1=$(git -C "$work/source" rev-parse HEAD)
 git_ -C "$work/source" checkout -qb dev
 echo two >"$work/source/file"
-git_ -C "$work/source" commit -qam 'Make it two'
+# Its note: a line that isn't one is left out, and a tab in a line's text is dropped.
+mkdir -p "$work/source/release-notes"
+printf 'New: Make it\ttwo.\nnot a note\nInternal: Count higher.' >"$work/source/release-notes/two.md"
+git_ -C "$work/source" add -A
+git_ -C "$work/source" commit -qm 'Make it two'
 c2=$(git -C "$work/source" rev-parse HEAD)
 git_ init -q --bare "$work/origin.git"
 git_ -C "$work/source" push -q "$work/origin.git" main dev
@@ -67,7 +72,10 @@ case " $* " in
     [ "${UPDATER_CLAIM_AUTO:-0}" != 1 ] || [ ! -e "$REPORT_LOG.manual" ] || exit 1
     # The backend out of reach, for one test.
     [ ! -e "$REPORT_LOG.down" ] || exit 1
-    echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG" ;;
+    echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG"
+    if [ -n "${UPDATER_INSTALLED_TO:-}" ]; then
+      printf '%s %s\n%s\n' "$UPDATER_INSTALLED_FROM" "$UPDATER_INSTALLED_TO" "$UPDATER_INSTALLED_NOTES" >>"$REPORT_LOG.installed"
+    fi ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
 EOF
@@ -80,6 +88,7 @@ run() {
   : >"$work/installs"
   : >"$work/installs.how"
   : >"$work/reports"
+  : >"$work/reports.installed"
   bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
 }
@@ -95,6 +104,9 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
   grep -q "^idle|Updated to ${c2%"${c2#???????}"}.|req1|$c2|$c2|0|0|test-secret" "$work/reports" &&
   check ok "nightly moves it to dev's newest commit, installs it, and reports it done" ||
   check fail "nightly moves it to dev's newest commit, installs it, and reports it done ($(cat "$work/out" "$work/reports"))"
+[ "$(cat "$work/reports.installed")" = "$(printf '%s %s\nNew\tMake ittwo.\nInternal\tCount higher.' "$c1" "$c2")" ] &&
+  check ok "the report that ends an update carries the notes it added" ||
+  check fail "the report that ends an update carries the notes it added ($(cat "$work/reports.installed"))"
 [ "$(cat "$work/installs.how")" = "--no-setup-link lock=held" ] &&
   check ok "the installer runs holding the updater's lock, and prints no setup link" ||
   check fail "the installer runs holding the updater's lock, and prints no setup link ($(cat "$work/installs.how"))"
@@ -102,6 +114,7 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
 # A commit whose installer fails.
 git_ -C "$work/source" checkout -q dev
 touch "$work/source/deploy/install/FAIL"
+echo 'Fixed: Break the build.' >"$work/source/release-notes/three.md"
 git_ -C "$work/source" add -A
 git_ -C "$work/source" commit -qm 'Break the build'
 c3=$(git -C "$work/source" rev-parse HEAD)
@@ -226,6 +239,16 @@ bash -c '. "$1/deploy/updater/updater.sh"; init; agent watch 0' updater "$work/c
 bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; echo "$latest $behind $ahead $latest_channel"' updater "$work/checkout" >"$work/out" 2>&1 || true
 [ "$(cat "$work/out")" = "$c3 2 0 nightly" ] && check ok "it counts the commits the channel has that the server doesn't" ||
   check fail "it counts the commits the channel has that the server doesn't ($(cat "$work/out"))"
+
+# The notes on offer: those the channel's commit adds, the newest first; none once there.
+bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; printf "%s" "$latest_notes"' updater "$work/checkout" >"$work/out" 2>&1 || true
+[ "$(cat "$work/out")" = "$(printf 'Fixed\tBreak the build.\nNew\tMake ittwo.\nInternal\tCount higher.')" ] &&
+  check ok "an update on offer carries the notes it adds, the newest first" ||
+  check fail "an update on offer carries the notes it adds, the newest first ($(cat "$work/out"))"
+git_ -C "$work/checkout" checkout -q --detach "$c3"
+bash -c '. "$1/deploy/updater/updater.sh"; init; check_latest nightly; printf "%s|%s" "$behind" "$latest_notes"' updater "$work/checkout" >"$work/out" 2>&1 || true
+[ "$(cat "$work/out")" = "0|" ] && check ok "and none once the server is there" ||
+  check fail "and none once the server is there ($(cat "$work/out"))"
 
 if [ "$failures" -gt 0 ]; then
   echo "$test_name: $failures failed" >&2

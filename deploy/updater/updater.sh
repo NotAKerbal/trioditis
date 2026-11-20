@@ -53,7 +53,7 @@ load_settings() {
 # The secret and a report's values reach it as UPDATER_* variables, never as arguments (an
 # unset one isn't passed); --init so it stops on a signal.
 AGENT_VARIABLES='SECRET STATE MESSAGE DONE CLAIM CLAIM_CHANNEL CLAIM_AUTO CURRENT CURRENT_AT LATEST LATEST_CHANNEL LATEST_AT
-  LATEST_SUBJECT BEHIND AHEAD CHECKED_AT'
+  LATEST_SUBJECT LATEST_NOTES BEHIND AHEAD CHECKED_AT INSTALLED_FROM INSTALLED_TO INSTALLED_NOTES'
 agent() {
   local passed=() name
   for name in $AGENT_VARIABLES; do passed+=(-e "UPDATER_$name"); done
@@ -63,13 +63,14 @@ agent() {
 }
 
 # report STATE [MESSAGE]: what the admins see. Marks $done_id finished, if set; with
-# UPDATER_CLAIM set to a request's ID, fails unless that request is still waiting.
+# UPDATER_CLAIM set to a request's ID, fails unless that request is still waiting. With
+# UPDATER_INSTALLED_* set, it also says which update was just installed and its notes.
 report() {
   UPDATER_STATE=$1 UPDATER_MESSAGE=${2:-} UPDATER_DONE=$done_id \
     UPDATER_CURRENT=$current UPDATER_CURRENT_AT=$current_at \
     UPDATER_LATEST=$latest UPDATER_LATEST_CHANNEL=$latest_channel UPDATER_LATEST_AT=$latest_at \
-    UPDATER_LATEST_SUBJECT=$latest_subject UPDATER_BEHIND=$behind UPDATER_AHEAD=$ahead \
-    UPDATER_CHECKED_AT=$checked_at \
+    UPDATER_LATEST_SUBJECT=$latest_subject UPDATER_LATEST_NOTES=$latest_notes UPDATER_BEHIND=$behind \
+    UPDATER_AHEAD=$ahead UPDATER_CHECKED_AT=$checked_at \
     agent report || { log "Couldn't report to the backend."; return 1; }
 }
 
@@ -126,6 +127,40 @@ describe_current() {
   current_at=$(git -C "$root" show -s --format=%ct "$current")
 }
 
+# The most release-note lines a report carries, and the most bytes of each line's text: the
+# notes reach the agent in one environment variable, which Linux caps at 128 KiB. The format
+# allows 200 characters, at most 800 bytes of UTF-8; the backend cuts to its own limits.
+MAX_NOTES=100
+MAX_NOTE_BYTES=800
+
+# release_notes FROM TO: the release notes TO has that FROM doesn't, as `<Label><tab><text>`
+# lines: each line of every file in release-notes/ that TO adds, the newest file first. The
+# format is in docs/CONTRIBUTING.md, Release notes, and scripts/release-notes.mjs checks it; a
+# line that doesn't fit it is left out here.
+release_notes() {
+  local from=$1 to=$2 path line count=0
+  local -A added=() seen=()
+  local ordered=()
+  while IFS= read -r path; do added[$path]=1; done < <(
+    git -C "$root" -c core.quotePath=true diff --name-only --no-renames --diff-filter=A "$from" "$to" -- release-notes/)
+  # Newest first: the order the commits in between added them, then any left in name order.
+  while IFS= read -r path; do
+    [ -n "$path" ] && [ -n "${added[$path]:-}" ] && [ -z "${seen[$path]:-}" ] || continue
+    seen[$path]=1
+    ordered+=("$path")
+  done < <(git -C "$root" -c core.quotePath=true log --format= --name-only --no-renames --diff-filter=A \
+    "$from..$to" -- release-notes/; printf '%s\n' "${!added[@]}" | LC_ALL=C sort)
+  for path in "${ordered[@]}"; do
+    [[ "$path" =~ ^release-notes/[a-z0-9][a-z0-9-]*\.md$ ]] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [[ "$line" =~ ^(New|Improved|Fixed|Security|Internal):\ (.+)$ ]] || continue
+      [ "$count" -lt "$MAX_NOTES" ] || return 0
+      printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$(printf '%s' "${BASH_REMATCH[2]}" | head -c "$MAX_NOTE_BYTES")"
+      count=$((count + 1))
+    done < <(git -C "$root" show "$to:$path" | LC_ALL=C tr -d '\000-\011\013-\037\177')
+  done
+}
+
 # check_latest CHANNEL: fetches the channel's branch and compares its newest commit with this
 # one: `behind` counts the commits it has that this doesn't, `ahead` the other way round.
 check_latest() {
@@ -145,6 +180,8 @@ check_latest() {
   latest_subject=$(git -C "$root" show -s --format=%s "$commit")
   behind=$(git -C "$root" rev-list --count "$current..$commit")
   ahead=$(git -C "$root" rev-list --count "$commit..$current")
+  latest_notes=''
+  [ "$behind" = 0 ] || latest_notes=$(release_notes "$current" "$commit")
   checked_at=$(date +%s)
 }
 
@@ -228,7 +265,7 @@ finish_update() {
     if run_install "$target"; then
       conclude updated
       describe_current
-      behind=0 ahead=0
+      behind=0 ahead=0 latest_notes=''
       report_done
       log "Updated to $target."
       exit 0
@@ -262,12 +299,20 @@ report_done() {
   local target=${done_target:0:7} previous=${done_previous:0:7}
   # Each error gets its own share of the 500 characters the backend keeps.
   local detail=${failure_detail:+: ${failure_detail:0:160}} back=${rollback_detail:+: ${rollback_detail:0:160}}
+  # The notes of an update that went in: worked out here rather than kept, so a report sent
+  # again after a restart has them too.
+  local installed_from='' installed_to='' installed_notes=''
   case "$done_result" in
-    updated) outcome idle "Updated to $target." ;;
+    updated)
+      outcome idle "Updated to $target."
+      installed_from=$done_previous installed_to=$done_target
+      installed_notes=$(release_notes "$done_previous" "$done_target")
+      ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
-  if done_id=$done_request report "$outcome_state" "$outcome_message"; then
+  if UPDATER_INSTALLED_FROM=$installed_from UPDATER_INSTALLED_TO=$installed_to \
+    UPDATER_INSTALLED_NOTES=$installed_notes done_id=$done_request report "$outcome_state" "$outcome_message"; then
     done_request='' done_result='' done_target='' done_previous=''
     save_state
   fi
@@ -312,7 +357,7 @@ init() {
   # The checkout's own repository, not one it was unpacked inside (git looks upwards).
   { top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) && [ "$top" -ef "$root" ] && describe_current; } ||
     { log "$root isn't a git checkout of its own."; return 1; }
-  latest='' latest_channel='' latest_at='' latest_subject='' behind='' ahead='' checked_at=''
+  latest='' latest_channel='' latest_at='' latest_subject='' latest_notes='' behind='' ahead='' checked_at=''
   last_fetch=0 done_id='' failure_detail='' rollback_detail=''
   load_state
   outcome idle ''

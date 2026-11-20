@@ -12,6 +12,8 @@ worktrees and checks, and `docs/architecture/` for the contracts between compone
 - Sends are never retried automatically after an ambiguous outcome. Use the `unknown`
   delivery state.
 - Keep the TypeScript and Go sides of a contract in step, in the same pull request.
+- Every pull request adds a release note to `release-notes/`, labelled lines written for the
+  people using the server (`docs/CONTRIBUTING.md`, Release notes).
 - Run the checks in `docs/CONTRIBUTING.md` before opening a pull request, and report
   what you ran and what you didn't.
 - Comments explain why, in plain sentences. Match the surrounding code.
