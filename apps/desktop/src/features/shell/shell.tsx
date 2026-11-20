@@ -28,8 +28,9 @@ export function Shell() {
   selectedRef.current = selectedId
 
   const select = (id: string | undefined) => void navigate({ search: (s) => ({ ...s, chat: id }) })
-  const openSettings = (section: SettingsSection | undefined) =>
-    void navigate({ search: (s) => ({ ...s, settings: section }) })
+  // `connect` opens Accounts with its networks showing; any other way there drops it.
+  const openSettings = (section: SettingsSection | undefined, connect?: boolean) =>
+    void navigate({ search: (s) => ({ ...s, settings: section, connect: connect ? (true as const) : undefined }) })
 
   function open(chat: Chat) {
     if (chat.id !== selectedId) setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
@@ -104,7 +105,11 @@ export function Shell() {
         }
       />
       <ChatPane chatId={selectedId as ChatId | undefined} onGone={() => select(undefined)} act={act} />
-      <SettingsDialog section={search.settings} onSectionChange={openSettings} />
+      <SettingsDialog
+        section={search.settings}
+        connect={!!search.connect}
+        onSectionChange={(section) => openSettings(section)}
+      />
       <UpdateNotice />
     </div>
   )

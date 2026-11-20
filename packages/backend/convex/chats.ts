@@ -139,14 +139,16 @@ function pageOptions(opts: Infer<typeof paginationOptsValidator>) {
 
 /**
  * One list of chats, a page at a time: the pinned chats, most recent first, then the rest,
- * most recent first. With `network`, only that network's chats. With `labelId`, the
- * chats with that label, in the order they were labelled, pinned or not.
+ * most recent first. With `order: 'recent'`, most recent first, pinned or not. With
+ * `network`, only that network's chats. With `labelId`, the chats with that label, in the
+ * order they were labelled, pinned or not.
  */
 export const list = query({
   args: {
     view: v.optional(chatView),
     network: v.optional(network),
     labelId: v.optional(v.id('labels')),
+    order: v.optional(v.literal('recent')),
     paginationOpts: paginationOptsValidator,
   },
   returns: paginationResultValidator(chatRow),
@@ -185,21 +187,23 @@ export const list = query({
     }
 
     // One range, newest first: `pinned: true` sorts after `false`, so descending gives every
-    // pinned chat first and then the rest, and pins past one page carry on to the next.
+    // pinned chat first and then the rest, and pins past one page carry on to the next. By
+    // recency alone, a range of an index without `pinned`.
     const network = args.network
-    const result = network
-      ? await ctx.db
-          .query('chats')
-          .withIndex('by_user_view_network_pinned_last', (q) =>
+    const recent = args.order === 'recent'
+    const chats = ctx.db.query('chats')
+    const range = network
+      ? recent
+        ? chats.withIndex('by_user_view_network_last', (q) =>
             q.eq('userId', userId).eq('view', view).eq('network', network),
           )
-          .order('desc')
-          .paginate(opts)
-      : await ctx.db
-          .query('chats')
-          .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
-          .order('desc')
-          .paginate(opts)
+        : chats.withIndex('by_user_view_network_pinned_last', (q) =>
+            q.eq('userId', userId).eq('view', view).eq('network', network),
+          )
+      : recent
+        ? chats.withIndex('by_user_view_last', (q) => q.eq('userId', userId).eq('view', view))
+        : chats.withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
+    const result = await range.order('desc').paginate(opts)
     const page = []
     for (const chat of result.page) if (!retired(chat)) page.push(await rowFor(ctx, chat, accounts))
     return { ...result, page }

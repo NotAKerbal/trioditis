@@ -53,7 +53,8 @@ type Config struct {
 	NetworkConnector bridgev2.NetworkConnector
 	// KeyFetcher replaces the gateway as the source of recipient keys, for dev and tests.
 	KeyFetcher keys.Fetcher
-	// AdjustBridgeConfig lets callers change bridgev2's settings, for tests.
+	// AdjustBridgeConfig lets callers change bridgev2's settings: tests, and a network's own
+	// backfill pacing.
 	AdjustBridgeConfig func(*bridgeconfig.BridgeConfig)
 	SendTimeout        time.Duration
 	// Signin, if set, runs cookie login steps in the sign-in browser.

@@ -282,7 +282,17 @@ suite. WhatsApp additionally uses:
   and slow fetches (asking the phone) are allowed so it can be followed. It is refused
   (`unsupported`) for WhatsApp: its connector treats an empty result for the requested range
   as the end of history and deletes every cached history row for the chat, including newer
-  ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
+  ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead:
+  pairing asks the phone for a full sync (about a year rather than three months), and once a
+  chat's synced history is imported the backfill queue asks the phone for older messages on
+  demand (50 at a time, one request per chat in flight). Both are mautrix-whatsapp settings
+  the host turns on. The full sync is asked for when a login is paired. The on-demand part
+  is checked at each fetch, but only for a chat whose backfill hasn't finished and whose
+  synced metadata says the phone has more, so a login paired before these were on mostly
+  needs relinking (scanning a new QR) to benefit. Relinking keeps the chats already
+  bridged, and history is only imported before a chat's oldest bridged message or after its
+  newest, so messages the new sync has between those are skipped (the connector's range
+  queries; changing that means patching it).
 - **`notAfter` is best effort for WhatsApp sends in Phase 0.** A send handed to bridgev2 can
   still reach the network after `notAfter`, by any amount (bridge-protocol.md, Delivery
   rules): behind more than two incoming events that each hit bridgev2's 5-minute handler
@@ -324,7 +334,13 @@ suite). But the connectors' own storage, in the same database, does:
 - **WhatsApp's `whatsapp_history_sync_message`** stores raw history-sync message protobufs
   (`data bytea`, plaintext content) until they are backfilled. The connector already deletes
   each batch once imported (its `CompleteCallback`), so rows only remain for history not yet
-  imported. Deleting them earlier would lose that history, so the host doesn't.
+  imported, and the connector prunes a chat's remaining rows when a fetch for it comes back
+  empty, which can drop rows that were never imported (see the `backfill` command above).
+  Deleting them earlier would lose that history, so the host doesn't. Pairing
+  asks for a full sync, so right after pairing up to a year of history waits here while the
+  backfill queue works through it, and longer if an import stalls. The queued sync
+  notifications (`whatsapp_history_sync_notification`) are stored whole until processed,
+  and the first one can carry history inline.
 - whatsmeow's store holds the session keys (expected; it is what makes the bridge work)
   and its contacts table, which has push names and phone numbers.
 - **whatsmeow's `whatsmeow_event_buffer`** holds each incoming message's decrypted protobuf
@@ -361,7 +377,8 @@ plaintext). Options for Phase 1:
 
 - an encrypted volume for the bridge host database (the Phase 0 decision)
 - pruning or minimizing those columns where bridgev2 allows
-- configuring WhatsApp's history sync to keep the window short
+- configuring WhatsApp's history sync to keep the window short (it asks for a full sync
+  now, so people get their history)
 
 ### Known follow-ups
 

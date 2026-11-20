@@ -6,8 +6,8 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import { useMutation } from 'convex/react'
-import { Archive, ArchiveRestore, Ban, Bell, BellOff, Eye, Lock, Pin, Plus } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { Ban, Plus } from 'lucide-react'
+import { useState } from 'react'
 import { networkName, useChatActions, useLabels, type Chat, type ChatId, type LabelId } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -31,7 +31,7 @@ export function DetailsPanel({
 
   return (
     <aside className="w-[292px] shrink-0 overflow-y-auto border-l border-border bg-surface" aria-label="Chat details">
-      <div className="border-b border-border px-5 pt-6 pb-4 text-center">
+      <div className="px-5 pt-6 pb-2 text-center">
         <Avatar name={chat.name} size={68} shape={chat.row.kind === 'dm' ? 'circle' : 'square'} className="mx-auto" />
         <h2 className="mt-2.5 text-lg font-bold">{chat.name}</h2>
         <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-subtle-foreground">
@@ -39,31 +39,12 @@ export function DetailsPanel({
           {chat.row.kind === 'dm' ? networkName(chat.network) : `Group on ${networkName(chat.network)}`}
         </p>
         {chat.topic ? <p className="mt-2 text-sm text-muted-foreground">{chat.topic}</p> : null}
-        <div className="mt-3.5 flex justify-center gap-2">
-          <Quick
-            on={chat.row.pinned}
-            icon={<Pin />}
-            label={chat.row.pinned ? 'Pinned' : 'Pin'}
-            onClick={() => void act(chat.id, () => actions.setPinned(chat.id, !chat.row.pinned))}
-          />
-          <Quick
-            on={chat.muted}
-            icon={chat.muted ? <BellOff /> : <Bell />}
-            label={chat.muted ? 'Muted' : 'Mute'}
-            onClick={() => void act(chat.id, () => actions.setMuted(chat.id, !chat.muted))}
-          />
-          <Quick icon={<Eye />} label="Unread" onClick={() => void act(chat.id, () => actions.markUnread(chat.id))} />
-          <Quick
-            on={chat.row.archived}
-            icon={chat.row.archived ? <ArchiveRestore /> : <Archive />}
-            label={chat.row.archived ? 'Archived' : 'Archive'}
-            onClick={() => void act(chat.id, () => actions.setArchived(chat.id, !chat.row.archived))}
-          />
-        </div>
       </div>
 
-      <section className="border-b border-border px-5 py-4">
-        <h3 className="mb-2.5 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">Labels</h3>
+      <section className="px-5 py-4" aria-labelledby="details-labels">
+        <h3 id="details-labels" className="mb-2.5 text-sm font-semibold text-muted-foreground">
+          Labels
+        </h3>
         <div className="flex flex-wrap gap-1.5">
           {labels?.map((l) => (
             <Button
@@ -88,7 +69,7 @@ export function DetailsPanel({
         </div>
       </section>
 
-      <section className="border-b border-border px-5 py-4">
+      <section className="px-5 py-4">
         <Button
           variant="danger"
           size="sm"
@@ -97,34 +78,11 @@ export function DetailsPanel({
         >
           <Ban className="size-3.5" /> {chat.row.blocked ? 'Unblock' : 'Block'}
         </Button>
-        <p className="mt-2 text-sm text-subtle-foreground">
-          Blocking hides this chat here. The network isn’t told yet, so messages still arrive.
-        </p>
+        {chat.row.blocked ? null : (
+          <p className="mt-2 text-sm text-subtle-foreground">Hides it here only. Its messages still arrive.</p>
+        )}
       </section>
-
-      <p className="flex gap-2 px-5 py-4 text-sm text-subtle-foreground">
-        <Lock className="mt-0.5 size-3.5 shrink-0" /> Sealed. Messages are stored encrypted to your devices; the server
-        can’t read them.
-      </p>
     </aside>
-  )
-}
-
-function Quick({ on, icon, label, onClick }: { on?: boolean; icon: ReactNode; label: string; onClick: () => void }) {
-  return (
-    <Button
-      variant="bare"
-      type="button"
-      aria-pressed={on}
-      onClick={onClick}
-      className={cn(
-        'flex w-[62px] flex-col items-center gap-1 rounded-[10px] bg-surface-2 pt-2 pb-1.5 text-xs font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-[17px]',
-        on && 'bg-primary-soft text-primary-ink',
-      )}
-    >
-      {icon}
-      {label}
-    </Button>
   )
 }
 

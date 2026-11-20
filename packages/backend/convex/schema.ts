@@ -204,6 +204,9 @@ export default defineSchema({
     // Descending, `pinned: true` sorts before `false`: one range gives the pins, then the rest.
     .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
     .index('by_user_view_network_pinned_last', ['userId', 'view', 'network', 'pinned', 'lastMessageAt'])
+    // The same lists by recency alone, pinned or not (chats.list, `order: 'recent'`).
+    .index('by_user_view_last', ['userId', 'view', 'lastMessageAt'])
+    .index('by_user_view_network_last', ['userId', 'view', 'network', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
 
   /**

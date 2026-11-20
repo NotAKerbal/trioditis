@@ -165,24 +165,18 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
 
   return (
     <div>
-      <Button
-        variant="bare"
-        type="button"
-        onClick={close}
-        className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" /> Accounts
-      </Button>
-      <div className="mb-4 flex items-center gap-3">
-        <NetworkBadge network={network} label={networkName(network)} size={32} />
-        <div>
-          <h2 className="text-lg font-bold">Connect {networkName(network)}</h2>
-          {browser || hidden ? null : (
-            <p className="text-sm text-muted-foreground">
-              Your login details are sealed so only the bridge can use them; Trioditis never stores them.
-            </p>
-          )}
-        </div>
+      <div className="mb-5 flex items-center gap-2.5">
+        <Button
+          variant="bare"
+          type="button"
+          onClick={close}
+          aria-label="Back to accounts"
+          className="-ml-2 inline-flex size-(--control-md) items-center justify-center rounded-md text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+        >
+          <ArrowLeft className="size-[18px]" />
+        </Button>
+        <NetworkBadge network={network} label={networkName(network)} size={26} />
+        <h2 className="text-lg font-bold">Connect {networkName(network)}</h2>
       </div>
 
       {startError ? (
@@ -194,10 +188,9 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
           Starting the login with {networkName(network)}…
         </p>
       ) : done ? (
-        <div className="rounded-lg bg-surface-2 p-5 text-center">
+        <div className="py-6 text-center">
           <CheckCircle2 className="mx-auto mb-2 size-8 text-success" />
           <p className="font-semibold">{networkName(network)} is connected.</p>
-          <p className="mt-1 text-sm text-muted-foreground">Your chats will appear in the list as they sync.</p>
           <Button className="mt-4" variant="primary" onClick={onClose}>
             Done
           </Button>
@@ -227,7 +220,7 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
           onPaste={() => setPaste(true)}
         />
       ) : (
-        <div className="rounded-lg p-5 shadow-[0_0_0_1px_var(--border)]">
+        <div>
           {step.instructions ? <p className="mb-4 text-base">{step.instructions}</p> : null}
           {step.type === 'displayAndWait' && step.display ? (
             step.display.type === 'qr' && step.display.data ? (
@@ -247,16 +240,11 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
             )
           ) : null}
           {step.type === 'displayAndWait' ? (
-            <>
-              <p className="mt-3 text-center text-sm text-subtle-foreground">
-                This updates by itself once your phone confirms.
-              </p>
-              <div className="mt-4 flex justify-center">
-                <Button variant="ghost" size="sm" onClick={close}>
-                  Cancel
-                </Button>
-              </div>
-            </>
+            <div className="mt-4 flex justify-center">
+              <Button variant="ghost" size="sm" onClick={close}>
+                Cancel
+              </Button>
+            </div>
           ) : null}
 
           {step.type === 'userInput' || step.type === 'cookies' ? (

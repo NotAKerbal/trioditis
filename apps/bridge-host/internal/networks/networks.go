@@ -30,6 +30,9 @@ type Network struct {
 	// ProxyEnv names the environment variable holding the proxy the connector goes out
 	// through, if it has one; the sign-in browser goes out through it too.
 	ProxyEnv string
+	// BackfillBatchDelay, if set, is how many seconds the backfill queue waits between
+	// batches of older history, in place of the host's default.
+	BackfillBatchDelay int
 }
 
 var registry = map[string]Network{}

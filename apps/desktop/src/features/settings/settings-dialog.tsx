@@ -13,7 +13,6 @@ import {
   wrapIdentityKey,
   type RecoveryKey,
 } from '@trioditis/crypto'
-import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import { Checkbox } from '@trioditis/ui/checkbox'
 import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
@@ -40,7 +39,7 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
 import {
   networkName,
   useAccounts,
@@ -65,10 +64,13 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Heading, Setting } from './layout.tsx'
+import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
+
+/** Puts focus back on a control once it's rendered again: an opener a form or reveal replaced. */
+const refocus = (ref: RefObject<HTMLElement | null>) => requestAnimationFrame(() => ref.current?.focus())
 
 // Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
 // admins only (Admin settings).
@@ -87,9 +89,12 @@ const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
 /** The settings panel. The gear and the account menu open it; its section is in the URL. */
 export function SettingsDialog({
   section,
+  connect,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
+  /** Opened to connect a network: Accounts shows the networks at once. */
+  connect: boolean
   onSectionChange: (s: SettingsSection | undefined) => void
 }) {
   const session = useSession()
@@ -114,7 +119,8 @@ export function SettingsDialog({
               key={s.id}
               type="button"
               aria-current={s.id === current.id ? 'page' : undefined}
-              onClick={() => onSectionChange(s.id)}
+              // Choosing the open section again changes nothing, so a list it opened stays as it is.
+              onClick={() => s.id !== current.id && onSectionChange(s.id)}
               className={cn(
                 'flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4',
                 s.id === current.id &&
@@ -137,13 +143,13 @@ export function SettingsDialog({
             </Button>
           ) : null}
         </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-[22px] pb-7">
+        <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7">
           {current.id === 'appearance' ? (
             <Appearance />
           ) : current.id === 'notifications' ? (
             <Notifications />
           ) : current.id === 'accounts' ? (
-            <Accounts />
+            <Accounts connect={connect} />
           ) : current.id === 'networks' ? (
             <Networks />
           ) : current.id === 'members' ? (
@@ -163,77 +169,78 @@ function Appearance() {
   const prefs = usePrefs()
   const [layout, setLayout] = useSidebarLayout()
   const options = [
+    // The drawings show what each layout does; `about` says it for screen readers, which skip them.
     {
       id: 'simple' as const,
       name: 'Simple',
-      about: 'Every chat in one list, newest first. Nothing else in the way.',
+      about: 'Every chat in one list, newest first.',
       drawing: <MiniSimple />,
     },
     {
       id: 'focused' as const,
       name: 'Focused',
-      about: 'Unread on top. Read, snoozed, scheduled and archived chats fold away until you open them.',
+      about: 'Unread on top; read, snoozed, scheduled and archived chats fold away.',
       drawing: <MiniFocused />,
     },
   ]
   return (
     <>
-      <Heading
-        title="Appearance"
-        lead="How Trioditis looks. The sidebar layout follows you to your other devices; the rest is for this device."
-      />
-      <Setting title="Sidebar layout" about="How the chat list is organized. You can switch at any time." column>
-        <div className="mt-3 grid grid-cols-2 gap-3" role="radiogroup" aria-label="Sidebar layout">
-          {options.map((o) => (
-            <Button
-              variant="bare"
-              key={o.id}
-              type="button"
-              role="radio"
-              aria-checked={layout === o.id}
-              onClick={() => setLayout(o.id)}
-              className={cn(
-                'grid gap-1.5 rounded-xl p-3 text-left shadow-[0_0_0_1px_var(--border)] hover:bg-surface-2',
-                layout === o.id && 'bg-primary-soft shadow-[0_0_0_2px_var(--accent-ring)] hover:bg-primary-soft',
-              )}
-            >
-              {o.drawing}
-              <span
-                className={cn('flex items-center justify-between font-bold', layout === o.id && 'text-primary-ink')}
-              >
-                {o.name} {layout === o.id ? <Check className="size-4" /> : null}
-              </span>
-              <span className="text-sm text-muted-foreground">{o.about}</span>
-            </Button>
-          ))}
-        </div>
-      </Setting>
-      <Setting title="Theme" about="Follow this device, or always use light or dark.">
-        <Segmented
-          value={prefs.theme}
-          onValueChange={(v) => setPref('theme', v as 'system' | 'light' | 'dark')}
-          className="w-[240px]"
-          aria-label="Theme"
-        >
-          <SegmentedItem value="system">System</SegmentedItem>
-          <SegmentedItem value="light">Light</SegmentedItem>
-          <SegmentedItem value="dark">Dark</SegmentedItem>
-        </Segmented>
-      </Setting>
-      <Setting title="Message previews" about="Show a second line under each chat in the list.">
-        <Switch
-          checked={prefs.previews}
-          onCheckedChange={(v) => setPref('previews', v)}
-          aria-label="Message previews"
+      <Heading title="Appearance" />
+      <Group>
+        <Setting title="Theme">
+          <Segmented
+            value={prefs.theme}
+            onValueChange={(v) => setPref('theme', v as 'system' | 'light' | 'dark')}
+            className="w-[240px]"
+            aria-label="Theme"
+          >
+            <SegmentedItem value="system">System</SegmentedItem>
+            <SegmentedItem value="light">Light</SegmentedItem>
+            <SegmentedItem value="dark">Dark</SegmentedItem>
+          </Segmented>
+        </Setting>
+      </Group>
+      <Group title="Chat list">
+        <Setting
+          title="Layout"
+          below={
+            <div className="grid grid-cols-2 gap-3" role="radiogroup" aria-label="Sidebar layout">
+              {options.map((o) => (
+                <Button
+                  variant="bare"
+                  key={o.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={layout === o.id}
+                  onClick={() => setLayout(o.id)}
+                  className={cn(
+                    'grid gap-1.5 rounded-xl p-3 text-left shadow-[0_0_0_1px_var(--border)] hover:bg-surface-2',
+                    layout === o.id && 'bg-primary-soft shadow-[0_0_0_2px_var(--accent-ring)] hover:bg-primary-soft',
+                  )}
+                >
+                  {o.drawing}
+                  <span className={cn('font-bold', layout === o.id && 'text-primary-ink')}>{o.name}</span>
+                  <span className="sr-only">{o.about}</span>
+                </Button>
+              ))}
+            </div>
+          }
         />
-      </Setting>
-      <Setting title="Network badges" about="Show which network each chat is on, on its picture.">
-        <Switch
-          checked={prefs.networkBadges}
-          onCheckedChange={(v) => setPref('networkBadges', v)}
-          aria-label="Network badges"
-        />
-      </Setting>
+        <Setting title="Message previews">
+          <Switch
+            checked={prefs.previews}
+            onCheckedChange={(v) => setPref('previews', v)}
+            aria-label="Message previews"
+          />
+        </Setting>
+        <Setting title="Network badges">
+          <Switch
+            checked={prefs.networkBadges}
+            onCheckedChange={(v) => setPref('networkBadges', v)}
+            aria-label="Network badges"
+          />
+        </Setting>
+      </Group>
     </>
   )
 }
@@ -252,25 +259,26 @@ function Notifications() {
   }
   return (
     <>
-      <Heading
-        title="Notifications"
-        lead="A notification when a message arrives in a chat that isn’t muted. These settings are for this device."
-      />
-      <Setting
-        title="Desktop notifications"
-        about={
-          supported
-            ? 'Show each new message and who sent it (in a group, the group’s name), while Trioditis is open.'
-            : 'This browser can’t show notifications.'
-        }
-      >
-        <Switch
-          checked={prefs.notifications && allowed}
-          disabled={!supported}
-          onCheckedChange={(v) => void turn(v)}
-          aria-label="Desktop notifications"
-        />
-      </Setting>
+      <Heading title="Notifications" />
+      {/* Kept in view: a notification puts the sender and the message's text in the system's own history,
+          outside what Trioditis seals. */}
+      <Group>
+        <Setting
+          title="Desktop notifications"
+          about={
+            supported
+              ? 'Shows the sender and message text, which your system may keep.'
+              : 'This browser can’t show notifications.'
+          }
+        >
+          <Switch
+            checked={prefs.notifications && allowed}
+            disabled={!supported}
+            onCheckedChange={(v) => void turn(v)}
+            aria-label="Desktop notifications"
+          />
+        </Setting>
+      </Group>
     </>
   )
 }
@@ -340,7 +348,7 @@ const LOGOUT_ERROR: Record<string, string> = {
   timeout: 'The server’s bridge never confirmed the disconnect, so it may still be connected. Try again.',
 }
 
-function Accounts() {
+function Accounts({ connect }: { connect: boolean }) {
   const session = useSession()
   const networks = useNetworks()
   const accounts = useAccounts()
@@ -349,135 +357,149 @@ function Accounts() {
   const logout = useMutation(api.logins.logout)
   const [connecting, setConnecting] = useState<{ network: string; flowId: string } | null>(null)
   const [confirmRisk, setConfirmRisk] = useState<{ network: string; flowId: string } | null>(null)
+  // The networks to connect stay folded away until asked for, unless there's no account yet or
+  // the person came here to connect one ("Connect a network" in the menus).
+  const [browsing, setBrowsing] = useState<boolean | null>(connect || null)
+  // Back and forward can bring `connect` in or take it away while Accounts stays open.
+  useEffect(() => setBrowsing(connect || null), [connect])
+  const open = browsing ?? accounts?.length === 0
 
   if (connecting)
     return <LoginStepper network={connecting.network} flowId={connecting.flowId} onClose={() => setConnecting(null)} />
 
   return (
     <>
-      <Heading
-        title="Accounts"
-        lead="The network accounts this server bridges for you. Each one you connect brings its chats into your list."
-      />
+      <Heading title="Accounts" />
       {accounts?.length ? (
-        accounts.map((a) => {
-          const state = ACCOUNT_STATE[a.state] ?? { text: a.state }
-          const bridgeDown = health?.find((h) => h.network === a.network)?.bridgeOnline === false
-          return (
-            <div key={a._id} className="flex items-center gap-3 border-t border-border py-[11px]">
-              <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold">{networkName(a.network)}</div>
-                <div
-                  className={cn(
-                    'text-sm',
-                    state.warn || bridgeDown || a.logoutError ? 'text-warning' : 'text-muted-foreground',
-                  )}
-                >
-                  {a.logoutPending
-                    ? 'Disconnecting…'
-                    : a.logoutError
-                      ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
-                      : bridgeDown
-                        ? 'The server’s bridge for this network isn’t running.'
-                        : state.text}
+        <Group title="Connected">
+          {accounts.map((a) => {
+            const state = ACCOUNT_STATE[a.state] ?? { text: a.state }
+            const bridgeDown = health?.find((h) => h.network === a.network)?.bridgeOnline === false
+            // A connected account needs no line under it; anything else does.
+            const note = a.logoutPending
+              ? 'Disconnecting…'
+              : a.logoutError
+                ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
+                : bridgeDown
+                  ? 'The server’s bridge for this network isn’t running.'
+                  : a.state === 'CONNECTED'
+                    ? null
+                    : state.text
+            return (
+              <div key={a._id} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
+                <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold">{networkName(a.network)}</div>
+                  {note ? (
+                    <div
+                      className={cn(
+                        'text-sm',
+                        state.warn || bridgeDown || a.logoutError ? 'text-warning' : 'text-muted-foreground',
+                      )}
+                    >
+                      {note}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-              {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
+                {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      setConnecting({
+                        network: a.network,
+                        flowId: networks?.find((n) => n.network === a.network)?.flows[0]?.id ?? '',
+                      })
+                    }
+                  >
+                    Reconnect
+                  </Button>
+                ) : null}
                 <Button
                   size="sm"
+                  variant="ghost"
+                  disabled={a.logoutPending}
                   onClick={() =>
-                    setConnecting({
-                      network: a.network,
-                      flowId: networks?.find((n) => n.network === a.network)?.flows[0]?.id ?? '',
-                    })
+                    void logout({ networkAccountId: a._id }).then(
+                      () => toast(`Disconnecting ${networkName(a.network)}…`),
+                      (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
+                    )
                   }
                 >
-                  Reconnect
+                  Disconnect
                 </Button>
-              ) : null}
+              </div>
+            )
+          })}
+        </Group>
+      ) : null}
+
+      <Group>
+        <Disclosure open={open} onOpenChange={setBrowsing}>
+          Connect a network
+        </Disclosure>
+        {open && confirmRisk ? (
+          <div className="bg-warning-soft px-4 py-3.5 text-sm text-warning-ink last:rounded-b-xl">
+            <b className="font-semibold">
+              Connecting {networkName(confirmRisk.network)} uses your browser cookies or a token.
+            </b>{' '}
+            The network’s terms don’t allow that, and it can get the account banned.
+            <div className="mt-2.5 flex gap-2">
               <Button
                 size="sm"
-                variant="ghost"
-                disabled={a.logoutPending}
-                onClick={() =>
-                  void logout({ networkAccountId: a._id }).then(
-                    () => toast(`Disconnecting ${networkName(a.network)}…`),
-                    (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
-                  )
-                }
+                variant="primary"
+                onClick={() => {
+                  setConnecting(confirmRisk)
+                  setConfirmRisk(null)
+                }}
               >
-                Disconnect
+                I understand, connect
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirmRisk(null)}>
+                Cancel
               </Button>
             </div>
-          )
-        })
-      ) : (
-        <p className="border-t border-border py-4 text-sm text-muted-foreground">No accounts connected yet.</p>
-      )}
-
-      <h3 className="mt-6 mb-2 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-        Connect a network
-      </h3>
-      {server?.demo ? <DemoSeed /> : null}
-      {confirmRisk ? (
-        <div className="mb-3 rounded-lg bg-warning-soft p-3.5 text-sm text-warning-ink">
-          <b className="font-semibold">
-            Connecting {networkName(confirmRisk.network)} uses your browser cookies or a token.
-          </b>{' '}
-          The network’s terms don’t allow that, and it can get the account banned.
-          <div className="mt-2.5 flex gap-2">
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => {
-                setConnecting(confirmRisk)
-                setConfirmRisk(null)
-              }}
-            >
-              I understand, connect
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirmRisk(null)}>
-              Cancel
-            </Button>
           </div>
-        </div>
-      ) : null}
-      <div className="grid grid-cols-2 gap-2">
-        {(networks ?? []).flatMap((n) =>
-          n.flows.map((f) => (
-            <Button
-              variant="bare"
-              key={`${n.network}:${f.id}`}
-              type="button"
-              onClick={() =>
-                n.termsRisk
-                  ? setConfirmRisk({ network: n.network, flowId: f.id })
-                  : setConnecting({ network: n.network, flowId: f.id })
-              }
-              className="flex items-center gap-2.5 rounded-lg p-2.5 text-left shadow-[0_0_0_1px_var(--border)] hover:bg-surface-2"
-            >
-              <NetworkBadge network={n.network} label={n.name} size={24} />
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-1.5 font-semibold">
-                  {n.name}{' '}
-                  {n.maturity !== 'stable' ? (
-                    <Badge variant="outline">{n.maturity === 'experimental' ? 'exp' : 'beta'}</Badge>
-                  ) : null}
-                </span>
-                <span className="block truncate text-sm text-muted-foreground">{f.name}</span>
-              </span>
-              <Plus className="size-4 text-subtle-foreground" />
-            </Button>
-          )),
-        )}
-      </div>
-      {networks && networks.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          {session.role === 'admin'
-            ? 'No networks are installed on this server yet. Install them in Admin settings → Networks.'
-            : 'No networks are installed on this server yet. Its admins install them.'}
-        </p>
+        ) : null}
+        {open
+          ? (networks ?? []).flatMap((n) =>
+              n.flows.map((f) => (
+                <Button
+                  variant="bare"
+                  key={`${n.network}:${f.id}`}
+                  type="button"
+                  onClick={() =>
+                    n.termsRisk
+                      ? setConfirmRisk({ network: n.network, flowId: f.id })
+                      : setConnecting({ network: n.network, flowId: f.id })
+                  }
+                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left last:rounded-b-xl hover:bg-surface-2"
+                >
+                  <NetworkBadge network={n.network} label={n.name} size={26} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold">{n.name}</span>
+                    <span className="block text-sm text-muted-foreground">
+                      {f.name}
+                      {n.maturity === 'stable' ? '' : n.maturity === 'experimental' ? ' · Experimental' : ' · Beta'}
+                    </span>
+                  </span>
+                </Button>
+              )),
+            )
+          : null}
+        {open && networks && networks.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-muted-foreground">
+            {session.role === 'admin'
+              ? 'No networks are installed yet. Install them in Admin settings → Networks.'
+              : 'No networks are installed yet. An admin installs them.'}
+          </p>
+        ) : null}
+      </Group>
+      {server?.demo ? (
+        <Group>
+          <Setting title="Demo chats">
+            <DemoSeed />
+          </Setting>
+        </Group>
       ) : null}
     </>
   )
@@ -492,157 +514,218 @@ function DemoSeed() {
   const seed = useAction(api.demo.seedForMe)
   const [busy, setBusy] = useState(false)
   return (
-    <div className="mb-3 flex items-center gap-3 rounded-lg bg-surface-2 p-3 text-sm shadow-[inset_0_0_0_1px_var(--border)]">
-      <span className="flex-1 text-muted-foreground">
-        This is a demo server. You can fill your account with made-up chats.
-      </span>
-      <Button
-        size="sm"
-        loading={busy}
-        onClick={async () => {
-          setBusy(true)
-          try {
-            const { seeded } = await seed({ sessionId: session.sessionId })
-            toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
-          } catch (e) {
-            if (sessionChanged(e)) return window.location.reload()
-            toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
-          }
-          setBusy(false)
-        }}
-      >
-        Load demo chats
-      </Button>
-    </div>
+    <Button
+      size="sm"
+      aria-label="Load demo chats"
+      loading={busy}
+      onClick={async () => {
+        setBusy(true)
+        try {
+          const { seeded } = await seed({ sessionId: session.sessionId })
+          toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
+        } catch (e) {
+          if (sessionChanged(e)) return window.location.reload()
+          toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
+        }
+        setBusy(false)
+      }}
+    >
+      Load
+    </Button>
   )
+}
+
+// Invitation links made on this page, newest first. The server gives each one only once, so they
+// outlive Members (another section, the dialog closing, an answer that comes after either) until
+// the page reloads. They're kept in memory only.
+type MadeLink = { invitationId: string; email: string; link: string }
+let madeLinks: readonly MadeLink[] = []
+const madeLinkListeners = new Set<() => void>()
+function addMadeLink(made: MadeLink) {
+  madeLinks = [made, ...madeLinks]
+  for (const listener of madeLinkListeners) listener()
+}
+function dropMadeLink(invitationId: string) {
+  madeLinks = madeLinks.filter((made) => made.invitationId !== invitationId)
+  for (const listener of madeLinkListeners) listener()
+}
+function subscribeMadeLinks(listener: () => void) {
+  madeLinkListeners.add(listener)
+  return () => void madeLinkListeners.delete(listener)
 }
 
 function Members() {
   const session = useSession()
-  const server = useServerInfo()
+  // The same query as useServerInfo, read whole here to tell a failed load from a slow one.
+  const { data: server, isError: serverFailed } = useQuery(convexQuery(api.server.info, {}))
   const invite = useMutation(api.members.invite)
   const revoke = useMutation(api.members.revokeInvitation)
   const { data: invitations } = useQuery(convexQuery(api.members.invitations, {}))
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'member' | 'admin'>('member')
-  const [link, setLink] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const links = useSyncExternalStore(subscribeMadeLinks, () => madeLinks)
+  // The link just made here, which takes focus; and the links copied so far.
+  const [justMade, setJustMade] = useState<string | null>(null)
+  const [copied, setCopied] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  // The form opens from Invite and closes once the link is made, which then shows in its place.
+  const [inviting, setInviting] = useState(false)
+  const inviteOpener = useRef<HTMLButtonElement>(null)
   // A server that takes no invitations (a demo) has nothing to invite with or list.
   const closed = server?.invitations === false
+  // A link is shown while its invitation is still waiting: once it's joined, revoked (which
+  // deletes it) or expired, the link no longer works. The list holds only the newest 100, so a link
+  // whose invitation isn't in a full list may still work, and stays. Before the list loads, every
+  // link shows.
+  const shownLinks = invitations
+    ? links.filter((made) => {
+        const inv = invitations.find((i) => i._id === made.invitationId)
+        return inv ? !inv.acceptedAt && inv.expiresAt >= Date.now() : invitations.length >= 100
+      })
+    : links
 
   return (
     <>
-      <Heading
-        title="Members"
-        lead={
-          closed
-            ? 'Who can use this server.'
-            : 'Who can use this server. Everyone signs up from an invitation link you share; they connect their own networks.'
-        }
-      />
-      {server && closed ? (
-        <p className="border-t border-border pt-4 text-sm text-muted-foreground">
-          {server.demo
-            ? 'This is a demo server, so it doesn’t take invitations.'
-            : 'This server doesn’t take invitations.'}
-        </p>
-      ) : server ? (
-        <form
-          className="flex items-end gap-2 border-t border-border pt-4"
-          onSubmit={async (e) => {
-            e.preventDefault()
-            setBusy(true)
-            try {
-              const { token } = await invite({ email, role, sessionId: session.sessionId })
-              // The token goes in the fragment, which never reaches a server or a proxy's logs.
-              const query = new URLSearchParams({ email: email.trim().toLowerCase() })
-              setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
-              setCopied(false)
-              setEmail('')
-            } catch (err) {
-              if (sessionChanged(err)) return window.location.reload()
-              toast(errorMessage(err, 'That invitation couldn’t be made.'))
-            }
-            setBusy(false)
-          }}
+      <Heading title="Members" />
+      {!server ? (
+        <Loading failed={serverFailed} />
+      ) : (
+        <Group
+          title="Invitations"
+          action={
+            !closed && !inviting ? (
+              <Button ref={inviteOpener} size="sm" disabled={busy} onClick={() => setInviting(true)}>
+                <Plus className="size-4" /> Invite
+              </Button>
+            ) : null
+          }
         >
-          <label className="flex-1">
-            <span className="mb-1.5 block text-sm font-semibold">Email</span>
-            <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-          </label>
-          <Segmented
-            value={role}
-            onValueChange={(v) => setRole(v as 'member' | 'admin')}
-            className="mb-[3px] w-[160px]"
-            aria-label="Role"
-          >
-            <SegmentedItem value="member">Member</SegmentedItem>
-            <SegmentedItem value="admin">Admin</SegmentedItem>
-          </Segmented>
-          <Button type="submit" variant="primary" loading={busy}>
-            Invite
-          </Button>
-        </form>
-      ) : null}
-      {link ? (
-        <div className="mt-3 rounded-lg bg-surface-2 p-3 shadow-[inset_0_0_0_1px_var(--border)]">
-          <p className="mb-2 text-sm text-muted-foreground">
-            Send them this link. It works once, for a week, and won’t be shown again.
-          </p>
-          <div className="flex gap-2">
-            <Input
-              readOnly
-              value={link}
-              className="font-mono text-sm"
-              onFocus={(e) => e.target.select()}
-              aria-label="Invitation link"
-            />
-            <Button
-              onClick={() =>
-                navigator.clipboard.writeText(link).then(
-                  () => setCopied(true),
-                  () => toast('Copying didn’t work here. Select the link and copy it.'),
-                )
-              }
-            >
-              {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-      {!closed || invitations?.length ? (
-        <h3 className="mt-6 mb-1 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase">
-          Invitations
-        </h3>
-      ) : null}
-      {(invitations ?? []).map((inv) => (
-        <div key={inv._id} className="flex items-center gap-3 border-t border-border py-2.5">
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-semibold">{inv.email}</div>
-            <div className="text-sm text-muted-foreground">
-              {inv.role === 'admin' ? 'Admin' : 'Member'} ·{' '}
-              {inv.acceptedAt ? 'Joined' : inv.expiresAt < Date.now() ? 'Expired' : 'Waiting'}
-            </div>
-          </div>
-          {!inv.acceptedAt ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() =>
-                void revoke({ invitationId: inv._id as Id<'invitations'> }).catch((e: unknown) =>
-                  toast(errorMessage(e, 'That invitation couldn’t be revoked.')),
-                )
-              }
-            >
-              Revoke
-            </Button>
+          {closed ? (
+            <p className="px-4 py-3 text-sm text-muted-foreground">
+              {server.demo
+                ? 'This is a demo server, so it doesn’t take invitations.'
+                : 'This server doesn’t take invitations.'}
+            </p>
           ) : null}
-        </div>
-      ))}
-      {!closed && invitations?.length === 0 ? (
-        <p className="border-t border-border py-3 text-sm text-muted-foreground">No invitations yet.</p>
-      ) : null}
+          {inviting ? (
+            <form
+              className="grid gap-2 px-4 py-3"
+              onSubmit={async (e) => {
+                e.preventDefault()
+                setBusy(true)
+                try {
+                  const { invitationId, token } = await invite({ email, role, sessionId: session.sessionId })
+                  // The token goes in the fragment, which never reaches a server or a proxy's logs.
+                  const invited = email.trim().toLowerCase()
+                  const query = new URLSearchParams({ email: invited })
+                  const link = `${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`
+                  addMadeLink({ invitationId, email: invited, link })
+                  setJustMade(link)
+                  setEmail('')
+                  setInviting(false)
+                } catch (err) {
+                  if (sessionChanged(err)) return window.location.reload()
+                  toast(errorMessage(err, 'That invitation couldn’t be made.'))
+                }
+                setBusy(false)
+              }}
+            >
+              <label>
+                <span className="mb-1.5 block text-sm font-semibold">Email</span>
+                <Input type="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Segmented
+                  value={role}
+                  onValueChange={(v) => setRole(v as 'member' | 'admin')}
+                  className="w-[160px]"
+                  aria-label="Role"
+                >
+                  <SegmentedItem value="member">Member</SegmentedItem>
+                  <SegmentedItem value="admin">Admin</SegmentedItem>
+                </Segmented>
+                <Button type="submit" variant="primary" loading={busy}>
+                  Invite
+                </Button>
+                {/* Not while the invitation is being made: it would be made anyway. */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setInviting(false)
+                    refocus(inviteOpener)
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          ) : null}
+          {shownLinks.length ? (
+            <div className="px-4 py-3">
+              <p className="mb-2 text-sm text-muted-foreground">
+                Send them this link. It works once, for a week, and won’t be shown again.
+              </p>
+              <div className="grid gap-3">
+                {shownLinks.map(({ email: invited, link }) => (
+                  <div key={link}>
+                    {shownLinks.length > 1 ? <div className="mb-1 text-sm font-semibold">{invited}</div> : null}
+                    <div className="flex gap-2">
+                      <Input
+                        readOnly
+                        // A new link is where the admin goes next: to copy it.
+                        autoFocus={link === justMade}
+                        value={link}
+                        className="font-mono text-sm"
+                        onFocus={(e) => e.target.select()}
+                        aria-label={`Invitation link for ${invited}`}
+                      />
+                      <Button
+                        onClick={() =>
+                          navigator.clipboard.writeText(link).then(
+                            () => setCopied((done) => new Set(done).add(link)),
+                            () => toast('Copying didn’t work here. Select the link and copy it.'),
+                          )
+                        }
+                      >
+                        {copied.has(link) ? <Check className="size-4" /> : <Copy className="size-4" />}{' '}
+                        {copied.has(link) ? 'Copied' : 'Copy'}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {(invitations ?? []).map((inv) => (
+            <div key={inv._id} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-semibold">{inv.email}</div>
+                <div className="text-sm text-muted-foreground">
+                  {inv.role === 'admin' ? 'Admin' : 'Member'} ·{' '}
+                  {inv.acceptedAt ? 'Joined' : inv.expiresAt < Date.now() ? 'Expired' : 'Waiting'}
+                </div>
+              </div>
+              {!inv.acceptedAt ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    void revoke({ invitationId: inv._id as Id<'invitations'> }).then(
+                      // Its link goes at once: a list holding its full 100 can't show the invitation is gone.
+                      () => dropMadeLink(inv._id),
+                      (e: unknown) => toast(errorMessage(e, 'That invitation couldn’t be revoked.')),
+                    )
+                  }
+                >
+                  Revoke
+                </Button>
+              ) : null}
+            </div>
+          ))}
+        </Group>
+      )}
     </>
   )
 }
@@ -658,6 +741,11 @@ function Keys() {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [busy, setBusy] = useState<'recovery' | 'password' | null>(null)
+  // The key's details and the password form stay closed until asked for.
+  const [showKey, setShowKey] = useState(false)
+  const [changing, setChanging] = useState(false)
+  const recoveryOpener = useRef<HTMLButtonElement>(null)
+  const passwordOpener = useRef<HTMLButtonElement>(null)
   // Replacing a backup names the revision it replaces, so two devices can't overwrite each other.
   const revisionOf = (kind: 'password' | 'recovery') => identity?.backups.find((b) => b.kind === kind)?.revision ?? 0
 
@@ -680,6 +768,7 @@ function Keys() {
       toast('Your new recovery key is saved. The old one no longer works.')
       setRecovery(null)
       setSaved(false)
+      refocus(recoveryOpener)
     } catch (e) {
       // This page's session isn't the browser's any more: start again as whoever's signed in.
       if (sessionChanged(e)) return window.location.reload()
@@ -728,6 +817,8 @@ function Keys() {
       toast('Password changed.')
       setCurrent('')
       setNext('')
+      setChanging(false)
+      refocus(passwordOpener)
     } catch (err) {
       if (sessionChanged(err)) return window.location.reload()
       // The backend's sentence says exactly what state things are in (another device changed
@@ -743,82 +834,127 @@ function Keys() {
 
   return (
     <>
-      <Heading
-        title="Keys and devices"
-        lead="Your messages are sealed to your key. The server keeps it only wrapped, by your password, your recovery key and any passkey that unlocks it, and can’t open it."
-      />
-      <Setting title="Your key" about={`Key ID ${session.kid}. Unlocked on this device.`}>
-        <span />
-      </Setting>
-      <Setting
-        title="Recovery key"
-        about="The way back in if you forget your password. Making a new one replaces the old."
-        column
-      >
-        {recovery ? (
-          <div className="mt-3">
-            <div className="mb-2 rounded-md bg-surface-2 p-3 text-center font-mono text-base tracking-wide break-all shadow-[inset_0_0_0_1px_var(--border)]">
-              {recovery.text}
-            </div>
-            <label className="mb-3 flex items-center gap-2.5 text-sm">
-              <Checkbox checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
-              I’ve saved this recovery key somewhere safe.
-            </label>
-            <div className="flex gap-2">
-              <Button variant="primary" disabled={!saved} loading={busy === 'recovery'} onClick={saveRecovery}>
-                Use this recovery key
-              </Button>
-              <Button variant="ghost" onClick={() => setRecovery(null)}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <Button
-            className="mt-3"
-            onClick={() => {
-              setRecovery(generateRecoveryKey())
-              setSaved(false)
-            }}
-          >
-            Make a new recovery key
+      <Heading title="Keys and devices" />
+      <Group title="Encryption">
+        <Setting
+          title="Your key"
+          below={
+            showKey ? (
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                <dt className="text-muted-foreground">Key ID</dt>
+                <dd className="font-mono break-all">{session.kid}</dd>
+                <dt className="text-muted-foreground">Public key</dt>
+                <dd className="font-mono break-all">{toBase64Url(session.keyPair.publicKey)}</dd>
+              </dl>
+            ) : null
+          }
+        >
+          <Button size="sm" aria-expanded={showKey} onClick={() => setShowKey(!showKey)}>
+            {showKey ? 'Hide' : 'Show'}
           </Button>
-        )}
-      </Setting>
-      <Setting
-        title="Password"
-        about="Changes how you sign in and re-wraps your key backup with the new password."
-        column
-      >
-        <form className="mt-3 grid max-w-[360px] gap-2" onSubmit={changePassword}>
-          <Input
-            type="password"
-            autoComplete="current-password"
-            placeholder="Current password"
-            required
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            aria-label="Current password"
-          />
-          <Input
-            type="password"
-            autoComplete="new-password"
-            placeholder="New password, at least 12 characters"
-            minLength={12}
-            required
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-            aria-label="New password"
-          />
-          <Button type="submit" className="justify-self-start" loading={busy === 'password'}>
-            {busy === 'password' ? 'Changing…' : 'Change password'}
-          </Button>
-        </form>
-      </Setting>
-      <Passkeys backups={identity?.backups} />
-      <p className="mt-2 text-sm text-subtle-foreground">
-        Public key: <span className="font-mono">{toBase64Url(session.keyPair.publicKey).slice(0, 16)}…</span>
-      </p>
+        </Setting>
+        <Setting
+          title="Recovery key"
+          about="A new one replaces the old."
+          below={
+            recovery ? (
+              <>
+                <div className="mb-2 rounded-md bg-surface-2 p-3 text-center font-mono text-base tracking-wide break-all">
+                  {recovery.text}
+                </div>
+                <label className="mb-3 flex items-center gap-2.5 text-sm">
+                  {/* Focus lands here when the key opens: saving it is the next step. */}
+                  <Checkbox autoFocus checked={saved} onCheckedChange={(checked) => setSaved(checked === true)} />
+                  I’ve saved this recovery key somewhere safe.
+                </label>
+                <div className="flex gap-2">
+                  <Button variant="primary" disabled={!saved} loading={busy === 'recovery'} onClick={saveRecovery}>
+                    Use this recovery key
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setRecovery(null)
+                      refocus(recoveryOpener)
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : null
+          }
+        >
+          {recovery ? null : (
+            <Button
+              ref={recoveryOpener}
+              size="sm"
+              onClick={() => {
+                setRecovery(generateRecoveryKey())
+                setSaved(false)
+              }}
+            >
+              Make a new one
+            </Button>
+          )}
+        </Setting>
+      </Group>
+      <Group title="Sign-in">
+        <Setting
+          title="Password"
+          below={
+            changing ? (
+              <form className="grid max-w-[360px] gap-2" onSubmit={changePassword}>
+                <Input
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="Current password"
+                  required
+                  autoFocus
+                  value={current}
+                  onChange={(e) => setCurrent(e.target.value)}
+                  aria-label="Current password"
+                />
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="New password, at least 12 characters"
+                  minLength={12}
+                  required
+                  value={next}
+                  onChange={(e) => setNext(e.target.value)}
+                  aria-label="New password"
+                />
+                <div className="flex gap-2">
+                  <Button type="submit" variant="primary" loading={busy === 'password'}>
+                    {busy === 'password' ? 'Changing…' : 'Change password'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy === 'password'}
+                    onClick={() => {
+                      setChanging(false)
+                      setCurrent('')
+                      setNext('')
+                      refocus(passwordOpener)
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            ) : null
+          }
+        >
+          {changing ? null : (
+            <Button ref={passwordOpener} size="sm" onClick={() => setChanging(true)}>
+              Change
+            </Button>
+          )}
+        </Setting>
+        <Passkeys backups={identity?.backups} />
+      </Group>
     </>
   )
 }
@@ -931,14 +1067,13 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
   const row = (credentialId: string, title: string, detail: string, registeredHere: boolean) => {
     const unlocks = backupOf.has(credentialId)
     return (
-      <div key={credentialId} className="flex items-center gap-3 border-t border-border py-2.5">
-        <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+      <div key={credentialId} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 truncate font-semibold">
-            {title}
-            {unlocks ? <Badge variant="tag">Unlocks your key</Badge> : null}
+          <div className="truncate font-semibold">{title}</div>
+          <div className="text-sm text-muted-foreground">
+            {detail}
+            {unlocks && registeredHere ? ' · Unlocks your key' : ''}
           </div>
-          <div className="text-sm text-muted-foreground">{detail}</div>
         </div>
         {confirming === credentialId ? (
           <>
@@ -955,7 +1090,7 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
               <Button
                 size="sm"
                 loading={busy === credentialId}
-                disabled={busy !== null}
+                disabled={busy !== null || !!passkeysUnavailable}
                 onClick={() => void useToUnlock(credentialId)}
               >
                 Use to unlock
@@ -970,38 +1105,43 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
     )
   }
 
+  // Rows of the sign-in group: the passkeys heading row with Add, then one row per passkey.
   return (
-    <Setting
-      title="Passkeys"
-      about="Sign in without a password. A passkey that unlocks your key also opens your messages on a new device."
-      column
-    >
-      <div className="mt-3">
-        {(passkeys.data ?? []).map((p) =>
-          row(
-            p.credentialId,
-            p.name || 'Passkey',
-            `${p.createdAt ? `Added ${new Date(p.createdAt).toLocaleDateString()}` : 'Added'}${p.backedUp ? ' · Synced' : ''}`,
-            true,
-          ),
-        )}
-        {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', false))}
-        {passkeys.isError ? (
-          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">
-            Your passkeys couldn’t be listed. Reload the page to try again.
-          </p>
-        ) : passkeys.data?.length === 0 && unlockOnly.length === 0 ? (
-          <p className="border-t border-border py-2.5 text-sm text-muted-foreground">No passkeys yet.</p>
-        ) : null}
-        <Button className="mt-3" loading={busy === 'add'} disabled={busy !== null} onClick={() => void add()}>
-          Add a passkey
+    <>
+      <Setting
+        title="Passkeys"
+        about={
+          passkeys.isError || passkeysUnavailable ? (
+            <>
+              {passkeys.isError ? (
+                <span className="block">Your passkeys couldn’t be listed. Reload the page to try again.</span>
+              ) : null}
+              {passkeysUnavailable ? (
+                <span className="block">{passkeysUnavailable} Add them, and set them to unlock, in a browser.</span>
+              ) : null}
+            </>
+          ) : undefined
+        }
+      >
+        <Button
+          size="sm"
+          aria-label="Add a passkey"
+          loading={busy === 'add'}
+          disabled={busy !== null || !!passkeysUnavailable}
+          onClick={() => void add()}
+        >
+          <Plus className="size-4" /> Add
         </Button>
-        {passkeysUnavailable ? (
-          <p className="mt-2 text-sm text-muted-foreground">
-            {passkeysUnavailable} Add them, and set them to unlock, in a browser.
-          </p>
-        ) : null}
-      </div>
-    </Setting>
+      </Setting>
+      {(passkeys.data ?? []).map((p) =>
+        row(
+          p.credentialId,
+          p.name || 'Passkey',
+          `${p.createdAt ? `Added ${new Date(p.createdAt).toLocaleDateString()}` : 'Added'}${p.backedUp ? ' · Synced' : ''}`,
+          true,
+        ),
+      )}
+      {unlockOnly.map((id) => row(id, 'Passkey', 'Unlocks your key, but no longer signs you in.', false))}
+    </>
   )
 }

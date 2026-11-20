@@ -506,7 +506,7 @@ wakes it.
 
 ### The list
 
-`api.chats.list({ view?, network?, labelId?, paginationOpts })` returns a page
+`api.chats.list({ view?, network?, labelId?, order?, paginationOpts })` returns a page
 `{ page: ChatRow[], isDone, continueCursor }` (use `usePaginatedQuery`; default `inbox`).
 The list is the view's pinned chats, most recent first, then the rest, most recent first,
 paged as one list: pins that don't fit on the first page carry on to the next, and none is
@@ -515,8 +515,10 @@ left out. A page holds at most 50 chats (`numItems` above 50 counts as 50) and r
 `endCursor` range (as `usePaginatedQuery` does) isn't limited by `numItems`; it holds at
 most 51 chats, and when it reaches that it ends early with `pageStatus: 'SplitRequired'`
 and a `splitCursor`, which `usePaginatedQuery` uses to split it. With `network`, only that
-network's chats, in the same order. With `labelId`, the chats with that label in the view,
-in the order they were labelled, pinned or not.
+network's chats, in the same order. With `order: 'recent'`, the view's chats most recent
+first, pinned or not, paged the same way (the Focused sidebar's inbox). With `labelId`, the
+chats with that label in the view, in the order they were labelled, pinned or not, whatever
+`order` says.
 
 A `ChatRow` (type in `@trioditis/core`):
 
@@ -981,8 +983,8 @@ here.
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
-   needs a new `members` event from the bridge host, so it comes later. Fallback: the
-   sender shows as "Someone".
+   needs a new `members` event from the bridge host, so it comes later. Fallback: no sender
+   name; a sender's messages run together as their own bubbles.
 3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
    envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
    replaced the `sealedPreview` planned here, so nothing new is sealed for it.

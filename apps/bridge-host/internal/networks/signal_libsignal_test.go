@@ -54,6 +54,9 @@ func TestSignalConnectorConfig(t *testing.T) {
 	if network.LogFilter == nil {
 		t.Error("Signal's log isn't filtered")
 	}
+	if network.BackfillBatchDelay != 5 {
+		t.Errorf("backfill batch delay: got %d seconds, want 5", network.BackfillBatchDelay)
+	}
 }
 
 // A login started through the bridge host's commands reaches its first step, a QR code of
