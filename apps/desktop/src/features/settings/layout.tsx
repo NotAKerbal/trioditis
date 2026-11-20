@@ -15,9 +15,13 @@ export function Subheading({ children, className }: { children: ReactNode; class
   )
 }
 
-/** What an empty pane shows while its data is on the way. */
-export function Loading() {
-  return (
+/** What an empty pane shows while its data is on the way, or once it has failed to come. */
+export function Loading({ failed }: { failed?: boolean }) {
+  return failed ? (
+    <p role="alert" className="py-2 text-sm text-muted-foreground">
+      This couldn’t be loaded. Reload the page to try again.
+    </p>
+  ) : (
     <p className="py-2 text-sm text-muted-foreground" aria-busy="true">
       Loading…
     </p>

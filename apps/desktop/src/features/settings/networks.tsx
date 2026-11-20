@@ -33,7 +33,7 @@ function accounts(count: number) {
  */
 export function Networks() {
   const session = useSession()
-  const { data: catalog } = useQuery(convexQuery(api.networks.catalog, {}))
+  const { data: catalog, isError } = useQuery(convexQuery(api.networks.catalog, {}))
   const install = useMutation(api.networks.install)
   const remove = useMutation(api.networks.remove)
   const [busy, setBusy] = useState<string | null>(null)
@@ -187,7 +187,7 @@ export function Networks() {
           ) : null}
         </>
       ) : (
-        <Loading />
+        <Loading failed={isError} />
       )}
     </>
   )

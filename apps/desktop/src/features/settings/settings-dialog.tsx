@@ -502,7 +502,8 @@ function DemoSeed() {
 
 function Members() {
   const session = useSession()
-  const server = useServerInfo()
+  // The same query as useServerInfo, read whole here to tell a failed load from a slow one.
+  const { data: server, isError: serverFailed } = useQuery(convexQuery(api.server.info, {}))
   const invite = useMutation(api.members.invite)
   const revoke = useMutation(api.members.revokeInvitation)
   const { data: invitations } = useQuery(convexQuery(api.members.invitations, {}))
@@ -518,7 +519,7 @@ function Members() {
     <>
       <Heading title="Members" />
       {!server ? (
-        <Loading />
+        <Loading failed={serverFailed} />
       ) : closed ? (
         <p className="text-sm text-muted-foreground">
           {server.demo

@@ -28,11 +28,11 @@ const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
 /** Admin settings → Updates: the release channel, automatic updates, and updating now. */
 export function Updates() {
-  const { data: status } = useQuery(convexQuery(api.updates.status, {}))
+  const { data: status, isError } = useQuery(convexQuery(api.updates.status, {}))
   return (
     <>
       <Heading title="Updates" />
-      {status ? <UpdateSettings status={status} /> : <Loading />}
+      {status ? <UpdateSettings status={status} /> : <Loading failed={isError} />}
     </>
   )
 }
