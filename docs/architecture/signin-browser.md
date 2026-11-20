@@ -230,6 +230,9 @@ browser.
 - Passkeys and security keys don't reach the server's browser. A page that asks for one (Google's
   "Verifying it's you") waits, still taking input, so the person chooses another way to sign in.
   The browser has WebAuthn's virtual authenticators on with none added, which is what keeps it
-  from waiting on a prompt it can't show, and means it can never make a passkey.
+  from waiting on a prompt it can't show, and means it can never make a passkey. They're turned
+  on as each page is set up, so a pop-up whose script asks for a passkey before then (from its
+  first, blank document) still stops taking input until that request ends. No sign-in seen so
+  far does this; pasting the cookies still works if one does.
 - What the person's own browser fills in (saved passwords) isn't offered; paste it instead.
 - One page is shown. A sign-in that opens a pop-up window shows the pop-up while it is open.

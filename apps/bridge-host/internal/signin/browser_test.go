@@ -244,15 +244,24 @@ func TestBrowserSignsIn(t *testing.T) {
 	}
 }
 
+// passkeyClicks is how many clicks the passkey page needs, a quarter of a second apart, as
+// its script counts them.
+const passkeyClicks = 12
+
 // A sign-in page that asks for a passkey as it loads, as Google's does, and signs in by
-// another way when its button is clicked, abandoning the request as Google's "Try another
-// way" does.
+// another way once its button has had every click, abandoning the request as Google's "Try
+// another way" does. Without virtual authenticators, headless Chromium stops taking input
+// about half a second into the request, so the clicks are spread over three seconds. The
+// login-browser image's Chromium does this every time (run it with LOGIN_BROWSER_TEST_URL);
+// Google Chrome on a desktop, run as the launcher runs it, may not.
 const passkeyPage = `<!doctype html><title>Verifying it's you</title>
 <button id="other" style="position:fixed;inset:0;width:100%;height:100%">Try another way</button>
 <script>
 const asking = new AbortController()
 navigator.credentials.get({ signal: asking.signal, publicKey: { challenge: new Uint8Array(32), allowCredentials: [], userVerification: 'preferred', timeout: 120000 } }).catch(() => {})
+let clicks = 0
 document.getElementById('other').onclick = () => {
+  if (++clicks < 12) return
   asking.abort()
   location.href = '/login'
 }
@@ -324,7 +333,7 @@ func TestBrowserPasskey(t *testing.T) {
 	}
 	send(map[string]any{"type": "viewport", "width": 800, "height": 600, "scale": 1})
 
-	// Clicked once the page has loaded and drawn, with its passkey request waiting.
+	// Clicked from once the page has loaded and drawn, with its passkey request waiting.
 	var sawFrame, sawPage, clicked, done bool
 	var gen uint32
 	for !done {
@@ -354,9 +363,11 @@ func TestBrowserPasskey(t *testing.T) {
 		}
 		if sawFrame && sawPage && !clicked {
 			clicked = true
-			time.Sleep(500 * time.Millisecond)
-			for _, event := range []string{"mousePressed", "mouseReleased"} {
-				send(map[string]any{"type": "mouse", "event": event, "x": 400, "y": 300, "button": "left", "buttons": 1, "clickCount": 1, "gen": gen})
+			for range passkeyClicks {
+				time.Sleep(250 * time.Millisecond)
+				for _, event := range []string{"mousePressed", "mouseReleased"} {
+					send(map[string]any{"type": "mouse", "event": event, "x": 400, "y": 300, "button": "left", "buttons": 1, "clickCount": 1, "gen": gen})
+				}
 			}
 		}
 	}
