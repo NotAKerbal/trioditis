@@ -124,9 +124,10 @@ export function reportArgs(env, secret) {
   // this agent once it has installed this version, in the report that ends that update, and
   // exits right after; systemd then starts this version's updater. So that report is left: the
   // old updater keeps the update's two commits in its state, and the new one sends the report
-  // again with the notes in between.
+  // again with the notes in between. An automatic update's report names no request, so this
+  // goes by the message alone.
   const legacy = !Object.hasOwn(env, 'UPDATER_LATEST_NOTES')
-  if (legacy && env.UPDATER_DONE && env.UPDATER_STATE === 'idle' && env.UPDATER_MESSAGE?.startsWith('Updated to ')) {
+  if (legacy && env.UPDATER_STATE === 'idle' && env.UPDATER_MESSAGE?.startsWith('Updated to ')) {
     return null
   }
   const args = { secret, state: env.UPDATER_STATE }

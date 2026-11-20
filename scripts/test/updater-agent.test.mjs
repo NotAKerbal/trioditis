@@ -58,8 +58,10 @@ void test('the end of an update reported by an updater from before release notes
     ...latest,
   }
   assert.equal(reportArgs(old, 'secret'), null)
+  // An automatic update's, which names no request, too.
+  assert.equal(reportArgs({ ...old, UPDATER_DONE: '' }, 'secret'), null)
   // Its other reports go through as before.
-  assert.equal(reportArgs({ ...old, UPDATER_DONE: '' }, 'secret').state, 'idle')
+  assert.equal(reportArgs({ ...old, UPDATER_MESSAGE: 'Already up to date.' }, 'secret').state, 'idle')
   assert.equal(
     reportArgs({ ...old, UPDATER_STATE: 'failed', UPDATER_MESSAGE: 'The update failed.' }, 's').state,
     'failed',

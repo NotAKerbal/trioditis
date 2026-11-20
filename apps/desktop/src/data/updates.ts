@@ -68,7 +68,9 @@ export function updateView(status: UpdateStatus): UpdateView {
   const latest = updater?.latest
   if (!latest || latest.channel !== status.channel) return { kind: 'unchecked' }
   if (latest.ahead > 0) return { kind: 'ahead', ahead: latest.ahead, behind: latest.behind }
-  if (latest.behind > 0) {
+  // An offer of the commit the server now runs is one it has just installed, reported before
+  // the updater looked again.
+  if (latest.behind > 0 && latest.commit !== updater?.current?.commit) {
     const { commit, committedAt, subject, behind } = latest
     return { kind: 'available', commit, committedAt, subject, behind, notes: latest.notes ?? [] }
   }

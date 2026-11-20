@@ -112,6 +112,11 @@ describe('release notes', () => {
     expect(updateView({ ...base, updater })).toMatchObject({ kind: 'available', notes })
     // From an updater that didn't send any.
     expect(updateView({ ...base, updater: { ...updater, latest: latest() } })).toMatchObject({ notes: [] })
+    // Once the server runs it, before the updater looks again, it's no longer on offer.
+    expect(updateView({ ...base, updater: { ...updater, current: { commit: B, committedAt: 2 } } })).toEqual({
+      kind: 'current',
+      checkedAt: 3,
+    })
   })
 
   it('says what’s new only while the server runs the update the updater installed', () => {

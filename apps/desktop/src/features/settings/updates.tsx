@@ -247,17 +247,24 @@ function UpdateState({ status }: { status: UpdateStatus }) {
 }
 
 /**
- * The release notes of the update on offer, or, once one is in, of the update that brought the
- * version this server runs, grouped by label behind a row that opens them.
+ * The release notes of the update on offer, and of the update that brought the version this
+ * server runs, each grouped by label behind a row that opens them.
  */
 function ReleaseNotes({ status }: { status: UpdateStatus }) {
   const view = updateView(status)
-  const available = view.kind === 'available'
-  const notes = available ? view.notes : whatsNew(status)
-  if (!notes.length) return null
+  const offered = view.kind === 'available' ? view.notes : []
+  const installed = whatsNew(status)
   // Keyed by whose notes they are, so another update's start closed.
-  const key = available ? `latest:${view.commit}` : `installed:${status.updater?.installed?.to}`
-  return <NotesDisclosure key={key} title={available ? 'Release notes' : 'What’s new'} notes={notes} />
+  return (
+    <>
+      {installed.length ? (
+        <NotesDisclosure key={`installed:${status.updater?.installed?.to}`} title="What’s new" notes={installed} />
+      ) : null}
+      {view.kind === 'available' && offered.length ? (
+        <NotesDisclosure key={`latest:${view.commit}`} title="Release notes" notes={offered} />
+      ) : null}
+    </>
+  )
 }
 
 function NotesDisclosure({ title, notes }: { title: string; notes: ReleaseNote[] }) {
