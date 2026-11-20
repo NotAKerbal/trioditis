@@ -77,12 +77,15 @@ export function updateView(status: UpdateStatus): UpdateView {
 
 /**
  * The release notes of the update that put this server on the version it runs, if the updater
- * installed it: what's new. Empty once the server moves on, or was updated by hand.
+ * installed it: what's new. Empty once the server moves on, or was updated by hand. The deployed
+ * functions' version decides where it's known, since an install by hand with the updater off
+ * leaves the updater's last report behind.
  */
 export function whatsNew(status: UpdateStatus): ReleaseNote[] {
   const installed = status.updater?.installed
-  const running = runningVersion(status)
-  return installed && running && installed.to === running.commit ? installed.notes : []
+  const deployed = status.version && status.version !== 'unknown' ? status.version : undefined
+  const running = deployed ?? runningVersion(status)?.commit
+  return installed && installed.to === running ? installed.notes : []
 }
 
 /** Whether the updater has gone quiet: it may be stopped, or the server down. */

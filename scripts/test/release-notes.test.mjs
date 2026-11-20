@@ -1,12 +1,12 @@
 // Release notes (scripts/release-notes.mjs): the format each pull request's note must follow,
-// and the check that a pull request adds or changes one.
+// and the check that a pull request adds one.
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { changedNotes, checkNotes, parseNote } from '../release-notes.mjs'
+import { addedNotes, checkNotes, parseNote } from '../release-notes.mjs'
 
 void test('a note is labelled lines', () => {
   assert.deepEqual(parseNote('New: Add a thing.\n\nFixed: Mend a thing.\n'), {
@@ -41,8 +41,10 @@ void test('the check looks at every file in the directory, and their names', () 
     writeFileSync(join(dir, 'crlf.md'), 'New: Fine.\r\n')
     writeFileSync(join(dir, 'broken.md'), 'Fine.\n')
     mkdirSync(join(dir, 'nested.md'))
+    symlinkSync('good-one.md', join(dir, 'alias.md'))
     assert.deepEqual(checkNotes(dir), [
       'Bad Name.md: a note is a file named like "my-change.md" (lowercase letters, digits and dashes)',
+      'alias.md: a note is a file named like "my-change.md" (lowercase letters, digits and dashes)',
       'broken.md: line 1 doesn\'t start with one of "New: ", "Improved: ", "Fixed: ", "Security: ", "Internal: "',
       'crlf.md: it has carriage returns',
       'nested.md: a note is a file named like "my-change.md" (lowercase letters, digits and dashes)',
@@ -52,7 +54,7 @@ void test('the check looks at every file in the directory, and their names', () 
   }
 })
 
-void test('a change counts as having a note when it adds or changes one', () => {
+void test('a change counts as having a note only when it adds one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'release-notes-git-'))
   const git = (...args) => {
     const result = spawnSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args], {
@@ -72,16 +74,21 @@ void test('a change counts as having a note when it adds or changes one', () => 
     writeFileSync(join(dir, 'code.txt'), 'code\n')
     git('add', '-A')
     git('commit', '-qm', 'code only')
-    assert.deepEqual(changedNotes(base, dir), [])
-    writeFileSync(join(dir, 'release-notes', 'first.md'), 'New: One, better.\n')
+    assert.deepEqual(addedNotes(base, dir), [])
+    // An edit to a note a server may already have isn't one: the updater shows only new files.
+    writeFileSync(join(dir, 'release-notes', 'first.md'), 'New: One.\n\n')
     git('commit', '-qam', 'edit a note')
-    assert.deepEqual(changedNotes(base, dir), ['release-notes/first.md'])
-    const edited = git('rev-parse', 'HEAD')
-    git('rm', '-q', 'release-notes/first.md')
+    assert.deepEqual(addedNotes(base, dir), [])
+    writeFileSync(join(dir, 'release-notes', 'second.md'), 'Fixed: Two.\n')
+    git('add', '-A')
+    git('commit', '-qm', 'add a note')
+    assert.deepEqual(addedNotes(base, dir), ['release-notes/second.md'])
+    const added = git('rev-parse', 'HEAD')
+    git('rm', '-q', 'release-notes/second.md')
     git('commit', '-qm', 'remove it')
     // Removing a note isn't writing one.
-    assert.deepEqual(changedNotes(edited, dir), [])
-    assert.throws(() => changedNotes('no-such-ref', dir), /git diff from no-such-ref failed/)
+    assert.deepEqual(addedNotes(added, dir), [])
+    assert.throws(() => addedNotes('no-such-ref', dir), /git diff from no-such-ref failed/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

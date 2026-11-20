@@ -251,15 +251,21 @@ function UpdateState({ status }: { status: UpdateStatus }) {
  * version this server runs, grouped by label behind a row that opens them.
  */
 function ReleaseNotes({ status }: { status: UpdateStatus }) {
-  const [open, setOpen] = useState(false)
   const view = updateView(status)
   const available = view.kind === 'available'
   const notes = available ? view.notes : whatsNew(status)
   if (!notes.length) return null
+  // Keyed by whose notes they are, so another update's start closed.
+  const key = available ? `latest:${view.commit}` : `installed:${status.updater?.installed?.to}`
+  return <NotesDisclosure key={key} title={available ? 'Release notes' : 'What’s new'} notes={notes} />
+}
+
+function NotesDisclosure({ title, notes }: { title: string; notes: ReleaseNote[] }) {
+  const [open, setOpen] = useState(false)
   return (
     <>
       <Disclosure open={open} onOpenChange={setOpen}>
-        {available ? 'Release notes' : 'What’s new'}
+        {title}
       </Disclosure>
       {open ? <NoteList notes={notes} /> : null}
     </>

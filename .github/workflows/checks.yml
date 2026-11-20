@@ -43,9 +43,9 @@ jobs:
       - run: node scripts/release-notes.mjs check
       # A pull request's checkout is its merge into the base branch, whose first parent is the
       # base, so the note must be among the changes it brings (docs/CONTRIBUTING.md).
-      - name: The pull request has a release note
+      - name: The pull request adds a release note
         if: github.event_name == 'pull_request'
-        run: node scripts/release-notes.mjs changed HEAD^1
+        run: node scripts/release-notes.mjs added HEAD^1
 
   go:
     name: Bridge host

@@ -116,12 +116,17 @@ describe('release notes', () => {
 
   it('says what’s new only while the server runs the update the updater installed', () => {
     const installed = { from: A, to: B, at: 4, notes }
-    const runs = (commit: string) => ({
+    const runs = (commit: string, version: string | null = commit) => ({
       ...base,
+      version,
       updater: { seenAt: 1, state: 'idle' as const, current: { commit, committedAt: 1 }, installed },
     })
     expect(whatsNew(runs(B))).toEqual(notes)
     expect(whatsNew(runs(A))).toEqual([])
     expect(whatsNew(base)).toEqual([])
+    // Installed by hand since, with the updater off: its last report still says B.
+    expect(whatsNew(runs(B, 'c'.repeat(40)))).toEqual([])
+    // Where the installer didn't say, the updater's report decides.
+    expect(whatsNew(runs(B, null))).toEqual(notes)
   })
 })

@@ -4,13 +4,14 @@
 //
 //   node scripts/release-notes.mjs check
 //     Checks every file in release-notes/ against the format.
-//   node scripts/release-notes.mjs changed <base>
-//     Fails unless the changes from <base> to HEAD add or change a release note.
+//   node scripts/release-notes.mjs added <base>
+//     Fails unless the changes from <base> to HEAD add a release note. A new file, since the
+//     updater shows only the notes an update adds, not edits to ones a server already has.
 //
 // The updater reads the same format in deploy/updater/updater.sh (release_notes); keep the two
 // in step.
 import { spawnSync } from 'node:child_process'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -61,7 +62,8 @@ export function checkNotes(dir) {
   const problems = []
   for (const name of readdirSync(dir).sort()) {
     const path = join(dir, name)
-    if (!FILE_NAME.test(name) || !statSync(path).isFile()) {
+    // A plain file: the updater reads notes from git, where a symlink is only its target's name.
+    if (!FILE_NAME.test(name) || !lstatSync(path).isFile()) {
       problems.push(`${name}: a note is a file named like "my-change.md" (lowercase letters, digits and dashes)`)
       continue
     }
@@ -75,12 +77,13 @@ export function checkNotes(dir) {
   return problems
 }
 
-/** The release notes the changes from `base` to HEAD add or change, in `cwd`'s repository. */
-export function changedNotes(base, cwd) {
-  const result = spawnSync('git', ['diff', '--name-only', '--diff-filter=AM', base, 'HEAD', '--', `${NOTES_DIR}/`], {
-    cwd,
-    encoding: 'utf8',
-  })
+/** The release notes the changes from `base` to HEAD add, in `cwd`'s repository. */
+export function addedNotes(base, cwd) {
+  const result = spawnSync(
+    'git',
+    ['diff', '--name-only', '--no-renames', '--diff-filter=A', base, 'HEAD', '--', `${NOTES_DIR}/`],
+    { cwd, encoding: 'utf8' },
+  )
   if (result.status !== 0) throw new Error(`git diff from ${base} failed: ${result.stderr.trim()}`)
   return result.stdout.split('\n').filter(Boolean)
 }
@@ -93,16 +96,16 @@ function main() {
     for (const problem of problems) console.error(`${NOTES_DIR}/${problem}`)
     if (problems.length) process.exit(1)
     console.log('Release notes: all in order.')
-  } else if (command === 'changed' && base) {
-    if (changedNotes(base, root).length === 0) {
+  } else if (command === 'added' && base) {
+    if (addedNotes(base, root).length === 0) {
       console.error(
-        `This change has no release note. Add a file to ${NOTES_DIR}/ saying what it changes (docs/CONTRIBUTING.md, Release notes).`,
+        `This change adds no release note. Add a file to ${NOTES_DIR}/ saying what it changes (docs/CONTRIBUTING.md, Release notes).`,
       )
       process.exit(1)
     }
     console.log('Release notes: this change has one.')
   } else {
-    console.error('usage: release-notes.mjs check | changed <base>')
+    console.error('usage: release-notes.mjs check | added <base>')
     process.exit(2)
   }
 }

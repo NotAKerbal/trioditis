@@ -519,11 +519,11 @@ Fixed: Signing in to Google no longer freezes when the page asks for a passkey.
 - Write for the people using the server: what they can now do, or what no longer goes wrong.
   `Internal:` is for changes they won't notice (CI, refactors, docs), so every pull request
   still has a note.
-- A follow-up to a change that hasn't been released yet may edit that change's note rather
-  than add one.
+- Add a new file every time. The updater shows the notes an update adds, so an edit to a note
+  a server already has never reaches it.
 
 `node scripts/release-notes.mjs check` checks the format (it's part of `pnpm check`), and CI
-fails a pull request that adds or changes no note.
+fails a pull request that adds no note.
 
 ## Worktrees
 
@@ -576,8 +576,7 @@ It runs exactly what CI runs (`.github/workflows/checks.yml`): `pnpm typecheck`,
 and `node scripts/signal-fork.mjs check` (the bridge host's patched copy of mautrix-signal is
 upstream plus its patch; `apps/bridge-host/third_party/README.md`), then prints each as Passed
 or Failed. Use it when CI can't run, and report its results. CI also checks that a pull
-request adds or changes a release note, which `pnpm check` can't do without the pull
-request's base.
+request adds a release note, which `pnpm check` can't do without the pull request's base.
 
 `pnpm lint` also checks the design system's rules in `apps/desktop` and `packages/ui`
 (`scripts/lint/design-system.mjs`, after Flux's):
