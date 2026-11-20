@@ -39,7 +39,7 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
 import {
   networkName,
   useAccounts,
@@ -535,6 +535,21 @@ function DemoSeed() {
   )
 }
 
+// Invitation links made on this page, newest first. The server gives each one only once, so they
+// outlive Members (another section, the dialog closing, an answer that comes after either) until
+// the page reloads. They're kept in memory only.
+type MadeLink = { email: string; link: string }
+let madeLinks: readonly MadeLink[] = []
+const madeLinkListeners = new Set<() => void>()
+function addMadeLink(made: MadeLink) {
+  madeLinks = [made, ...madeLinks]
+  for (const listener of madeLinkListeners) listener()
+}
+function subscribeMadeLinks(listener: () => void) {
+  madeLinkListeners.add(listener)
+  return () => void madeLinkListeners.delete(listener)
+}
+
 function Members() {
   const session = useSession()
   // The same query as useServerInfo, read whole here to tell a failed load from a slow one.
@@ -544,14 +559,23 @@ function Members() {
   const { data: invitations } = useQuery(convexQuery(api.members.invitations, {}))
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'member' | 'admin'>('member')
-  const [link, setLink] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const links = useSyncExternalStore(subscribeMadeLinks, () => madeLinks)
+  // The link just made here, which takes focus; and the links copied so far.
+  const [justMade, setJustMade] = useState<string | null>(null)
+  const [copied, setCopied] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState(false)
   // The form opens from Invite and closes once the link is made, which then shows in its place.
   const [inviting, setInviting] = useState(false)
   const inviteOpener = useRef<HTMLButtonElement>(null)
   // A server that takes no invitations (a demo) has nothing to invite with or list.
   const closed = server?.invitations === false
+  // A link is shown while its invitation is still waiting: once it's joined, revoked or expired,
+  // the link no longer works. Before the list loads, every link shows.
+  const shownLinks = invitations
+    ? links.filter((made) =>
+        invitations.some((inv) => inv.email === made.email && !inv.acceptedAt && inv.expiresAt >= Date.now()),
+      )
+    : links
 
   return (
     <>
@@ -585,9 +609,11 @@ function Members() {
                 try {
                   const { token } = await invite({ email, role, sessionId: session.sessionId })
                   // The token goes in the fragment, which never reaches a server or a proxy's logs.
-                  const query = new URLSearchParams({ email: email.trim().toLowerCase() })
-                  setLink(`${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`)
-                  setCopied(false)
+                  const invited = email.trim().toLowerCase()
+                  const query = new URLSearchParams({ email: invited })
+                  const link = `${window.location.origin}/invite?${query}#token=${encodeURIComponent(token)}`
+                  addMadeLink({ email: invited, link })
+                  setJustMade(link)
                   setEmail('')
                   setInviting(false)
                 } catch (err) {
@@ -629,33 +655,39 @@ function Members() {
               </div>
             </form>
           ) : null}
-          {/* Kept while the next invitation is drafted: the server gives each link only once. */}
-          {link ? (
-            // Keyed by the link, so a second invitation's link takes focus too.
-            <div key={link} className="px-4 py-3">
+          {shownLinks.length ? (
+            <div className="px-4 py-3">
               <p className="mb-2 text-sm text-muted-foreground">
                 Send them this link. It works once, for a week, and won’t be shown again.
               </p>
-              <div className="flex gap-2">
-                <Input
-                  readOnly
-                  // A new link is where the admin goes next: to copy it.
-                  autoFocus
-                  value={link}
-                  className="font-mono text-sm"
-                  onFocus={(e) => e.target.select()}
-                  aria-label="Invitation link"
-                />
-                <Button
-                  onClick={() =>
-                    navigator.clipboard.writeText(link).then(
-                      () => setCopied(true),
-                      () => toast('Copying didn’t work here. Select the link and copy it.'),
-                    )
-                  }
-                >
-                  {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
-                </Button>
+              <div className="grid gap-3">
+                {shownLinks.map(({ email: invited, link }) => (
+                  <div key={link}>
+                    {shownLinks.length > 1 ? <div className="mb-1 text-sm font-semibold">{invited}</div> : null}
+                    <div className="flex gap-2">
+                      <Input
+                        readOnly
+                        // A new link is where the admin goes next: to copy it.
+                        autoFocus={link === justMade}
+                        value={link}
+                        className="font-mono text-sm"
+                        onFocus={(e) => e.target.select()}
+                        aria-label={`Invitation link for ${invited}`}
+                      />
+                      <Button
+                        onClick={() =>
+                          navigator.clipboard.writeText(link).then(
+                            () => setCopied((done) => new Set(done).add(link)),
+                            () => toast('Copying didn’t work here. Select the link and copy it.'),
+                          )
+                        }
+                      >
+                        {copied.has(link) ? <Check className="size-4" /> : <Copy className="size-4" />}{' '}
+                        {copied.has(link) ? 'Copied' : 'Copy'}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ) : null}
