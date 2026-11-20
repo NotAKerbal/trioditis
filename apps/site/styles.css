@@ -16,10 +16,11 @@
   --border: #e6e8ed;
   --fg: #0f172a;
   --fg-muted: #475569;
-  --accent: #0284c7;
-  --accent-hover: #0369a1;
+  /* One step darker than the app's accent, so text and links on white pass 4.5:1. */
+  --accent: #0369a1;
+  --accent-hover: #075985;
   --accent-fg: #ffffff;
-  --accent-ring: #0ea5e9;
+  --accent-ring: #0284c7;
   --shot-shadow: 0 30px 80px rgb(15 23 42 / 0.18);
 
   --font-sans: 'DM Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -331,9 +332,20 @@ h3 {
   color: var(--fg-muted);
 }
 
-#self-host > p {
+#self-host > p,
+.note {
   margin: 0;
   color: var(--fg-muted);
+}
+
+.note {
+  margin-top: 20px;
+  font-size: 15px;
+}
+
+p code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
 }
 
 .code {
@@ -369,6 +381,25 @@ pre {
 
 .copy:hover {
   color: var(--fg);
+}
+
+/* Where the commands don't fit on one line they scroll, so Copy moves out from over them. */
+@media (max-width: 760px) {
+  .code {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  pre {
+    align-self: stretch;
+    padding-right: 24px;
+  }
+
+  .copy {
+    position: static;
+  }
 }
 
 footer {

@@ -10,7 +10,8 @@ python3 -m http.server --directory apps/site
 ```
 
 It deploys as its own Vercel project with **Root Directory** set to `apps/site`; `vercel.json`
-here holds its headers and skips deploys where nothing in this folder changed. It isn't part of
+here holds its headers, and skips a deploy only when git shows nothing in this folder changed
+since the last one. It isn't part of
 the web app's deployment (the root `vercel.json`).
 
 The screenshots in `screenshots/` are of the real app running `pnpm dev --demo`, at 2x, in light

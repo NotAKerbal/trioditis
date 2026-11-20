@@ -76,6 +76,7 @@
           <li class="x">X</li>
           <li class="bluesky">Bluesky</li>
         </ul>
+        <p class="note">Telegram needs your own app credentials from my.telegram.org.</p>
       </section>
 
       <section aria-labelledby="why">
@@ -84,8 +85,10 @@
           <div>
             <h3>Sealed by default</h3>
             <p>
-              Messages are encrypted to each person's own keys before they're stored. Whoever runs the server can back
-              it up and keep it running without being able to read anyone's history.
+              Your stored inbox is encrypted to keys only your devices hold, so its backups and database dumps are
+              unreadable, even to whoever runs the server. Messages still pass through the server's bridges in the clear
+              on their way in and out.
+              <a href="https://github.com/NotAKerbal/trioditis/blob/dev/docs/architecture/sealing.md">How it works</a>
             </p>
           </div>
           <div>
@@ -98,8 +101,8 @@
           <div>
             <h3>Honest delivery</h3>
             <p>
-              No lost messages and no duplicates. When a send's outcome is uncertain, Trioditis tells you instead of
-              quietly trying again.
+              When Trioditis can't tell whether a network accepted a message, it says so and lets you decide whether to
+              send it again, instead of quietly resending it and risking a duplicate.
             </p>
           </div>
           <div>
@@ -114,7 +117,10 @@
 
       <section id="self-host" aria-labelledby="self-host-heading">
         <h2 id="self-host-heading">Run your own</h2>
-        <p>Any Linux machine, VM or VPS with Docker Engine 28 or later, on x86_64 or arm64.</p>
+        <p>
+          Any Linux machine, VM or VPS, on x86_64 or arm64, with Docker Engine 28 or later and its Compose plugin, Git,
+          and 8 GiB free where Docker keeps its data.
+        </p>
         <div class="code">
           <pre><code id="install">git clone --branch dev https://github.com/NotAKerbal/trioditis.git
 cd trioditis
@@ -122,7 +128,8 @@ deploy/install/install.sh</code></pre>
           <button type="button" class="copy" data-copy="install" hidden>Copy</button>
         </div>
         <p>
-          The installer prints a one-time link to create the admin account. The same command upgrades it later.
+          The installer prints a one-time link to create the admin account. Set up HTTPS before you open it from another
+          device. To upgrade, run <code>git pull</code> and the installer again.
           <a href="https://github.com/NotAKerbal/trioditis/blob/dev/docs/deploy.md">Full guide</a>
         </p>
       </section>
