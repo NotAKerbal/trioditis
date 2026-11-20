@@ -67,6 +67,15 @@ jobs:
       - if: steps.module.outputs.present == 'true'
         name: go vet -tags libsignal ./...
         run: go vet -tags libsignal ./...
+      # TEMPORARY: why Chromium stops on GitHub's runner. Remove before merging.
+      - if: steps.module.outputs.present == 'true'
+        working-directory: .
+        continue-on-error: true
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone || true
+          ls -l "$(dirname "$(readlink -f "$(command -v google-chrome)")")/chrome-sandbox" || true
+          google-chrome --version
+          timeout 60 google-chrome --headless=new --disable-gpu --dump-dom about:blank 2>&1 | tail -30 || true
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
       # The bridge host builds against a patched copy of mautrix-signal
