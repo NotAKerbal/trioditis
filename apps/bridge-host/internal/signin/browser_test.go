@@ -243,3 +243,129 @@ func TestBrowserSignsIn(t *testing.T) {
 		t.Error("the browser is still open after submitting")
 	}
 }
+
+// A sign-in page that asks for a passkey as it loads, as Google's does, and signs in by
+// another way when its button is clicked, abandoning the request as Google's "Try another
+// way" does.
+const passkeyPage = `<!doctype html><title>Verifying it's you</title>
+<button id="other" style="position:fixed;inset:0;width:100%;height:100%">Try another way</button>
+<script>
+const asking = new AbortController()
+navigator.credentials.get({ signal: asking.signal, publicKey: { challenge: new Uint8Array(32), allowCredentials: [], userVerification: 'preferred', timeout: 120000 } }).catch(() => {})
+document.getElementById('other').onclick = () => {
+  asking.abort()
+  location.href = '/login'
+}
+</script>`
+
+func TestBrowserPasskey(t *testing.T) {
+	chromium := ""
+	if os.Getenv("LOGIN_BROWSER_TEST_URL") == "" {
+		chromium = findTestChromium(t)
+	}
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, passkeyPage)
+		case "/login":
+			http.SetCookie(w, &http.Cookie{Name: "sid", Value: "signed-in", Path: "/"})
+			http.Redirect(w, r, "/home", http.StatusFound)
+		case "/home":
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<!doctype html><title>Home</title><p>Signed in`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer site.Close()
+	// A passkey needs a name, not an address, for its site: on 127.0.0.1 the request fails at once.
+	siteURL := strings.Replace(site.URL, "127.0.0.1", "localhost", 1)
+
+	plan := &EgressPlan{Bind: "127.0.0.1", allowed: func(netip.Addr) bool { return true }, allowedPort: func(string) bool { return true }}
+	launcherURL := os.Getenv("LOGIN_BROWSER_TEST_URL")
+	if launcherURL == "" {
+		launcherURL = startLauncher(t, chromium)
+	}
+	launcher := &Launcher{URL: launcherURL, Token: "test-token", Egress: plan, Log: zerolog.Nop()}
+	params := &bridgev2.LoginCookiesParams{
+		URL:               siteURL + "/",
+		WaitForURLPattern: `/home$`,
+		Fields: []bridgev2.LoginCookieField{
+			{ID: "sid", Required: true, Sources: []bridgev2.LoginCookieFieldSource{{Type: bridgev2.LoginCookieTypeCookie, Name: "sid"}}},
+		},
+	}
+	submitted := make(chan map[string]string, 1)
+	b := launcher.New(params, Owner("user_a"), func(values map[string]string) { submitted <- values }, func(err error) { t.Errorf("failed: %v", err) })
+	defer b.Close()
+
+	viewerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		_ = b.Watch(r.Context(), ws)
+	}))
+	defer viewerServer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, strings.Replace(viewerServer.URL, "http", "ws", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	ws.SetReadLimit(maxMessage)
+	send := func(msg any) {
+		data, _ := json.Marshal(msg)
+		if err := ws.Write(ctx, websocket.MessageText, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(map[string]any{"type": "viewport", "width": 800, "height": 600, "scale": 1})
+
+	// Clicked once the page has loaded and drawn, with its passkey request waiting.
+	var sawFrame, sawPage, clicked, done bool
+	var gen uint32
+	for !done {
+		kind, data, err := ws.Read(ctx)
+		if err != nil {
+			t.Fatalf("viewer: %v (frame %v, page %v, clicked %v)", err, sawFrame, sawPage, clicked)
+		}
+		if kind == websocket.MessageBinary {
+			gen = binary.BigEndian.Uint32(data)
+			sawFrame = true
+		} else {
+			var msg struct {
+				Type, URL string
+				Loading   bool
+			}
+			_ = json.Unmarshal(data, &msg)
+			switch msg.Type {
+			case "page":
+				if strings.HasPrefix(msg.URL, siteURL) && !msg.Loading {
+					sawPage = true
+				}
+			case "done":
+				done = true
+			case "error":
+				t.Fatalf("browser error: %s", data)
+			}
+		}
+		if sawFrame && sawPage && !clicked {
+			clicked = true
+			time.Sleep(500 * time.Millisecond)
+			for _, event := range []string{"mousePressed", "mouseReleased"} {
+				send(map[string]any{"type": "mouse", "event": event, "x": 400, "y": 300, "button": "left", "buttons": 1, "clickCount": 1, "gen": gen})
+			}
+		}
+	}
+	select {
+	case values := <-submitted:
+		if values["sid"] != "signed-in" {
+			t.Errorf("sid = %q, want signed-in", values["sid"])
+		}
+	case <-ctx.Done():
+		t.Fatal("nothing was submitted")
+	}
+}

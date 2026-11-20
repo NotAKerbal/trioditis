@@ -227,6 +227,9 @@ browser.
   sign-in can be tried again, or the cookies pasted.
 - Google may refuse to sign in from a browser it judges automated ("This browser or app may
   not be secure"). Pasting cookies by hand still works for Google Messages and Voice.
-- Passkeys and security keys don't reach the server's browser; use another way to sign in.
+- Passkeys and security keys don't reach the server's browser. A page that asks for one (Google's
+  "Verifying it's you") waits, still taking input, so the person chooses another way to sign in.
+  The browser has WebAuthn's virtual authenticators on with none added, which is what keeps it
+  from waiting on a prompt it can't show, and means it can never make a passkey.
 - What the person's own browser fills in (saved passwords) isn't offered; paste it instead.
 - One page is shown. A sign-in that opens a pop-up window shows the pop-up while it is open.
