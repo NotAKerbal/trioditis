@@ -9,7 +9,7 @@ import { authClient } from '~/lib/auth-client.ts'
 import { BottomBar } from './bottom-bar.tsx'
 import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
-import { Sidebar, type SidebarAction } from './sidebar.tsx'
+import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
 import { SidebarBoundary } from './sidebar-boundary.tsx'
 import { UpdateNotice } from './update-notice.tsx'
 
@@ -20,7 +20,7 @@ export function Shell() {
   const actions = useChatActions()
   const { data: auth } = authClient.useSession()
   const [openedUnreadId, setOpenedUnreadId] = useState<string | undefined>()
-  const shownRef = useRef<string[]>([])
+  const shownRef = useRef<string[] | null>(null)
   // The chats the sidebar has loaded, by ID, so auto-advance can open the next one properly.
   const chatsById = useRef(new Map<string, Chat>())
   const selectedId = search.chat
@@ -48,8 +48,9 @@ export function Shell() {
    * Other actions (pin, labels, mute) leave the open chat alone.
    */
   async function act(chatId: ChatId, run: () => Promise<boolean>) {
-    const before = [...shownRef.current]
-    const wasOpenAndShown = chatId === selectedId && before.includes(chatId)
+    // Null while the list is loading or couldn't load: then there's no knowing what it showed.
+    const before = shownRef.current ? [...shownRef.current] : null
+    const wasOpenAndShown = before !== null && chatId === selectedId && before.includes(chatId)
     const ok = await run()
     if (!ok || !wasOpenAndShown) return
     // A Convex mutation resolves once its query results have arrived; give React a frame to
@@ -57,9 +58,10 @@ export function Shell() {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     // If the person opened another chat (or closed it) meanwhile, that choice stands.
     if (selectedRef.current !== chatId) return
-    if (shownRef.current.includes(chatId)) return
+    const shown = shownRef.current
+    if (!shown || shown.includes(chatId)) return
     const i = before.indexOf(chatId)
-    const listed = (id: string) => shownRef.current.includes(id)
+    const listed = (id: string) => shown.includes(id)
     const nextId = before.slice(i + 1).find(listed) ?? before.slice(0, i).reverse().find(listed)
     const next = nextId ? chatsById.current.get(nextId) : undefined
     // Moving on to the next chat opens it, the same as clicking it: it counts as read.
@@ -91,24 +93,25 @@ export function Shell() {
       })
   }
 
-  const bottomBar = (
-    <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
-  )
-
   return (
     <div className="flex h-full bg-background">
-      <SidebarBoundary bottomBar={bottomBar}>
-        <Sidebar
-          selectedId={selectedId}
-          openedUnreadId={openedUnreadId}
-          onOpen={open}
-          onClose={() => select(undefined)}
-          onAction={onSidebarAction}
-          shownRef={shownRef}
-          chatsRef={chatsById}
-          bottomBar={bottomBar}
-        />
-      </SidebarBoundary>
+      <SidebarFrame
+        bottomBar={
+          <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
+        }
+      >
+        <SidebarBoundary onError={() => (shownRef.current = null)}>
+          <Sidebar
+            selectedId={selectedId}
+            openedUnreadId={openedUnreadId}
+            onOpen={open}
+            onClose={() => select(undefined)}
+            onAction={onSidebarAction}
+            shownRef={shownRef}
+            chatsRef={chatsById}
+          />
+        </SidebarBoundary>
+      </SidebarFrame>
       <ChatPane chatId={selectedId as ChatId | undefined} onGone={() => select(undefined)} act={act} />
       <SettingsDialog
         section={search.settings}

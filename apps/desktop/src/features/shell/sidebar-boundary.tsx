@@ -1,11 +1,12 @@
 import { Button } from '@trioditis/ui/button'
+import { ConvexError } from 'convex/values'
 import { Component, Fragment, useEffect, type ReactNode } from 'react'
 import { errorMessage } from '~/lib/errors.ts'
 import { failuresInARow, retryDelay } from './retry-delay.ts'
 
 interface Props {
-  /** Shown under the error too, so Settings stays in reach while the list is down. */
-  bottomBar: ReactNode
+  /** Called when the list goes down, so nothing relies on what it last showed. */
+  onError: () => void
   children: ReactNode
 }
 
@@ -21,7 +22,7 @@ interface State {
 /**
  * Keeps the app up when the chat list can't load. `usePaginatedQuery` throws a page that
  * failed, most often one a busy server timed out, and past this it would reach the router,
- * which shows an error in place of the whole app until a reload. Here only the sidebar does,
+ * which shows an error in place of the whole app until a reload. Here only the list does,
  * and then it mounts again, which asks the server afresh: on Try again, or by itself after a
  * wait that grows while the errors keep coming.
  */
@@ -33,6 +34,7 @@ export class SidebarBoundary extends Component<Props, State> {
   }
 
   override componentDidCatch() {
+    this.props.onError()
     const now = Date.now()
     this.setState((s) => ({ failures: failuresInARow(s.failures, s.lastErrorAt, now), lastErrorAt: now }))
   }
@@ -42,25 +44,24 @@ export class SidebarBoundary extends Component<Props, State> {
   override render() {
     const { error, attempt, failures } = this.state
     if (error === undefined) return <Fragment key={attempt}>{this.props.children}</Fragment>
-    return (
-      <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
-        <ListError error={error} delay={retryDelay(failures)} onRetry={this.retry} />
-        <div className="flex h-[52px] shrink-0 items-center gap-1 border-t border-border px-2.5">
-          {this.props.bottomBar}
-        </div>
-      </aside>
-    )
+    // A ConvexError is the server refusing (signed out, not a member, a label that's gone),
+    // which asking again won't change; only Try again, which also clears the filters, does.
+    const delay = error instanceof ConvexError ? undefined : retryDelay(failures)
+    return <ListError error={error} delay={delay} onRetry={this.retry} />
   }
 }
 
-function ListError({ error, delay, onRetry }: { error: unknown; delay: number; onRetry: () => void }) {
+function ListError({ error, delay, onRetry }: { error: unknown; delay: number | undefined; onRetry: () => void }) {
   useEffect(() => {
+    if (delay === undefined) return
     const timer = setTimeout(onRetry, delay)
     return () => clearTimeout(timer)
   }, [delay, onRetry])
   return (
-    <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 px-3 text-center">
-      <p className="text-sm text-subtle-foreground">{errorMessage(error, 'Couldn’t load your chats.')}</p>
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-3 text-center">
+      <p role="alert" className="text-sm text-subtle-foreground">
+        {errorMessage(error, 'Couldn’t load your chats.')}
+      </p>
       <Button onClick={onRetry}>Try again</Button>
     </div>
   )
