@@ -1,6 +1,6 @@
 # Project site
 
-The page at trioditus.app: plain HTML and CSS, with no build and no dependencies, so it can be
+The page at trioditis.app: plain HTML and CSS, with no build and no dependencies, so it can be
 served from anywhere.
 
 To look at it locally:
