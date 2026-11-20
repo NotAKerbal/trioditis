@@ -139,7 +139,8 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET}
       TRIODITIS_INTERNAL_TOKEN: ${TRIODITIS_INTERNAL_TOKEN}
       GATEWAY_INTERNAL_ADDR: 0.0.0.0:8601
-      # The sign-in browser's viewers, through Caddy (/login-browser).
+      # The sign-in browser's viewers and people's encrypted files, through Caddy (/login-browser,
+      # /media/*).
       GATEWAY_PUBLIC_ADDR: 0.0.0.0:8602
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY}
       BRIDGE_HOSTS: ${BRIDGE_HOSTS:?}

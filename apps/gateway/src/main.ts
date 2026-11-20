@@ -2,6 +2,7 @@ import { ready } from '@trioditis/crypto'
 import { convexBackend } from './backend.ts'
 import { loadConfig } from './config.ts'
 import { Dispatcher } from './dispatcher.ts'
+import { createMediaHandler } from './media.ts'
 import { createGatewayServer } from './server.ts'
 import { createSigninServer } from './signin.ts'
 
@@ -16,6 +17,11 @@ const signin = createSigninServer(backend, {
   internalToken: config.internalToken,
   gatewaySecret: config.gatewaySecret,
   bridgeHosts: config.bridgeHosts,
+  media: createMediaHandler({
+    internalToken: config.internalToken,
+    gatewaySecret: config.gatewaySecret,
+    bridgeHosts: config.bridgeHosts,
+  }),
 })
 const dispatcher = new Dispatcher(backend, { internalToken: config.internalToken, bridgeHosts: config.bridgeHosts })
 
@@ -24,7 +30,9 @@ server.listen(config.listen.port, config.listen.host, () => {
   dispatcher.start()
 })
 signin.listen(config.publicListen.port, config.publicListen.host, () => {
-  console.log(`Gateway serving the sign-in browser on ${config.publicListen.host}:${config.publicListen.port}`)
+  console.log(
+    `Gateway serving the sign-in browser and media on ${config.publicListen.host}:${config.publicListen.port}`,
+  )
 })
 
 async function shutdown() {

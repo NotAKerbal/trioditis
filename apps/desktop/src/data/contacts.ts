@@ -4,6 +4,7 @@ import type { Envelope } from '@trioditis/crypto'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries } from '@tanstack/react-query'
 import { useMemo } from 'react'
+import { avatarOf } from '~/data/chats.ts'
 import { openCached } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 
@@ -45,9 +46,11 @@ export function useContacts(network: Network, ghostIds: readonly string[]): Map<
           session.userId,
           ghostId,
         )
-        if (profile) out.set(ghostId, profile)
+        if (!profile) continue
+        const avatar = avatarOf(`${session.userId}/${network}/${ghostId}`, profile)
+        out.set(ghostId, avatar === profile.avatar ? profile : { ...profile, avatar })
       }
     }
     return out
-  }, [answers, session])
+  }, [answers, session, network])
 }

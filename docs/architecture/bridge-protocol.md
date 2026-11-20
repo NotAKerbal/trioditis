@@ -10,6 +10,7 @@ bridge host ── POST /v1/events ──────────────►
 bridge host ◄── POST /v1/commands ─────────── gateway ◄── Convex outbox
 bridge host ── GET  /v1/keys/:userId ────────► gateway      (recipient public keys)
 bridge host ◄── GET  /v1/logins/:id/browser ── gateway      (sign-in browser viewer, websocket)
+bridge host ◄── GET  /v1/media/:mediaId ─────── gateway      (a person's encrypted file)
 ```
 
 The last is the sign-in browser's: the gateway relays a person's viewer to the bridge host
@@ -257,6 +258,21 @@ step carries no `instructions`: a network's closing words name the account.
 The bridge host's X25519 key pair, `BRIDGE_PRIVATE_KEY` and `BRIDGE_PUBLIC_KEY`
 (base64url). Clients seal outbound sends and login input to the public key, which the
 backend serves to signed-in clients. Every bridge host process on a server shares it.
+
+## Media: gateway → bridge host
+
+`GET /v1/media/:mediaId`, with the person in `X-Trioditis-User-Id`, returns the ciphertext of
+one of their files as `application/octet-stream`, for the gateway to pass to their client
+(client-api.md, Media). The gateway names the person only once it has checked their media
+token. Anything else is a bare `404`: a malformed ID, a file that isn't on this host, or one
+that isn't theirs.
+
+The bridge host writes each sealed copy of a file under its owner's directory in the media
+store (`media/<network>/owners/<hash of the user ID>/<mediaId>`), so it only ever opens a
+person's own. Copies written before owners had directories are directly in
+`media/<network>/`, with no record of whose they are; those are opened for anyone who names
+one. A media ID is 128 random bits that only appear inside its owner's sealed plaintext, and
+the file is ciphertext under a key that does too, so what it gives away is its size.
 
 ## Recipient keys: bridge host → gateway
 

@@ -1,6 +1,5 @@
 import type { Id } from '@trioditis/backend/dataModel'
-import type { ContactPlaintext } from '@trioditis/core'
-import { Avatar } from '@trioditis/ui/avatar'
+import type { ContactPlaintext, Network } from '@trioditis/core'
 import { Button } from '@trioditis/ui/button'
 import {
   DropdownMenu,
@@ -12,9 +11,11 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply, SmilePlus } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
+import { captionOf, summarize } from '~/data/last-message.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
+import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 
 export interface ScheduledItem {
@@ -25,6 +26,7 @@ export interface ScheduledItem {
 }
 
 interface MessageListProps {
+  network: Network
   messages: Message[]
   loading: boolean
   reactions: Map<string, Reaction[]>
@@ -192,8 +194,11 @@ export function MessageList(props: MessageListProps) {
           const first = !sameRun(prev, m)
           const last = !sameRun(m, next)
           const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
-          const text = m.body?.body ?? ''
-          const big = !m.deleted && !quoted && !m.replyTo && isBigEmoji(text)
+          const files = (!m.deleted && m.body?.attachments) || []
+          const text = m.body ? captionOf(m.body) : ''
+          const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
+          // A picture or file on its own is shown without a bubble around it.
+          const bare = !m.deleted && files.length > 0 && !text && !quoted && !m.replyTo
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
           // Delivery once per run of the person's own, at its end; a message still going, edited or
           // in trouble shows its own.
@@ -230,7 +235,13 @@ export function MessageList(props: MessageListProps) {
                   last ? (
                     // Level with the bubble's bottom, above any reactions under it (18px chips, 6px of
                     // them overlapping the bubble).
-                    <Avatar name={sender ?? ''} size={28} className={reacted?.length ? 'mb-[13px]' : 'mb-px'} />
+                    <MediaAvatar
+                      network={props.network}
+                      picture={profile?.avatar}
+                      name={sender ?? ''}
+                      size={28}
+                      className={reacted?.length ? 'mb-[13px]' : 'mb-px'}
+                    />
                   ) : (
                     <span aria-hidden className="w-7 shrink-0" />
                   )
@@ -260,27 +271,38 @@ export function MessageList(props: MessageListProps) {
                         : [!first && 'rounded-tl-[5px]', !last && 'rounded-bl-[5px]'],
                       m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
                       big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
+                      bare && 'bg-transparent p-0 shadow-none',
                     )}
                   >
                     {quoted || m.replyTo ? (
                       <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
-                        {quoted?.body?.body ?? 'An earlier message'}
+                        {(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
                       </span>
                     ) : null}
                     {m.deleted ? (
                       'Message deleted'
                     ) : m.body ? (
-                      text ? (
-                        <Linked text={text} />
-                      ) : (
-                        attachmentLabel(m)
-                      )
+                      <>
+                        {files.length ? (
+                          <Attachments
+                            network={props.network}
+                            attachments={files}
+                            className={bare ? undefined : 'my-1'}
+                          />
+                        ) : null}
+                        {text ? <Linked text={text} /> : null}
+                      </>
                     ) : (
                       'This message can’t be opened on this device.'
                     )}
                     {/* The exact time is the tooltip for a mouse; said here for assistive tech. */}
                     <span className="sr-only">, {fullTime(m.at)}</span>
-                    {meta ? (
+                    {meta && bare ? (
+                      // Over the picture's corner, on a scrim so it reads on any picture.
+                      <span className="absolute right-2 bottom-2 inline-flex rounded-full bg-scrim px-1.5 py-1 text-on-color">
+                        {meta}
+                      </span>
+                    ) : meta ? (
                       <>
                         {/* Room at the end of the last line, so the time sits beside the text when it fits. */}
                         <span aria-hidden className="invisible ml-2 inline-flex">
@@ -473,13 +495,6 @@ function Linked({ text }: { text: string }) {
       part.text
     ),
   )
-}
-
-function attachmentLabel(m: Message) {
-  const n = m.body?.attachments?.length ?? 0
-  if (!n) return ''
-  // Opening files needs the gateway's media proxy, which isn't built yet.
-  return n === 1 ? `📎 ${m.body!.attachments![0]!.name ?? 'An attachment'}` : `📎 ${n} attachments`
 }
 
 const SETTLED = new Set<Message['delivery']>(['sent', 'delivered', 'read'])

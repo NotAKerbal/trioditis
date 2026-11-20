@@ -1,6 +1,6 @@
 import { api } from '@trioditis/backend/api'
 import type { Id } from '@trioditis/backend/dataModel'
-import type { ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
+import type { Attachment, ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
 import { DEFAULT_PREFERENCES, NETWORK_INFO } from '@trioditis/core'
 import { toast } from '@trioditis/ui/toast'
 import { convexQuery } from '@convex-dev/react-query'
@@ -35,6 +35,8 @@ export interface Chat {
   /** Whether `name` is the chat's own. */
   named: boolean
   topic: string | undefined
+  /** Its picture, to decrypt and show (data/media.ts). */
+  avatar: Attachment | undefined
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
   unread: number
@@ -55,6 +57,23 @@ function openMeta(row: ChatRow, session: Session): ChatPlaintext | null {
   return openCached(metaCache, row.sealedMeta, session.keyPair, session.kid, 'chat', session.userId, row.portalId)
 }
 
+// Each chat's last picture, for metadata that says it's unchanged without carrying it
+// (sealing.md, Message plaintext). Only what this page has seen: a fresh page has none until
+// the picture comes again.
+const lastAvatar = new Map<string, Attachment>()
+
+/** The picture metadata carries, or the one it last carried when it says it's unchanged. */
+export function avatarOf(
+  key: string,
+  meta: Pick<ChatPlaintext, 'avatar' | 'avatarUnchanged'> | null,
+  kept = lastAvatar,
+): Attachment | undefined {
+  if (!meta) return undefined
+  if (meta.avatar) kept.set(key, meta.avatar)
+  else if (!meta.avatarUnchanged) kept.delete(key)
+  return kept.get(key)
+}
+
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
   const meta = openMeta(row, session)
   const own = meta?.name?.trim()
@@ -67,6 +86,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     name: own || (row.kind === 'dm' ? `Chat on ${where}` : `Group on ${where}`),
     named: !!own,
     topic: meta?.topic,
+    avatar: avatarOf(`${session.userId}/${row._id}`, meta),
     described: !!meta,
     unread: row.unreadCount,
     hasUnread: row.unreadCount > 0 || row.markedUnread,

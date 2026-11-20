@@ -53,6 +53,13 @@ http://127.0.0.1:8090 {
 		reverse_proxy gateway:8602
 	}
 
+	# People's encrypted pictures and files, which the gateway fetches from the bridge host that
+	# has them once it has checked the request's media token. The app decrypts them
+	# (docs/architecture/client-api.md, Media).
+	handle /media/* {
+		reverse_proxy gateway:8602
+	}
+
 	# Where the web app finds its backend, written by install.sh. Never cached, so a changed
 	# address takes effect on the next load.
 	handle /config.json {

@@ -1,5 +1,6 @@
 // Package server is the bridge host's internal API: its command endpoint, POST /v1/commands,
-// and the sign-in browser's viewer, GET /v1/logins/{id}/browser.
+// the sign-in browser's viewer, GET /v1/logins/{id}/browser, and encrypted media,
+// GET /v1/media/{id}.
 package server
 
 import (
@@ -7,8 +8,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/netip"
+	"os"
+	"strconv"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog"
@@ -31,11 +35,17 @@ type Browsers interface {
 	OpenBrowser(ctx context.Context, loginSessionID, userID, stepID string) (*signin.Browser, error)
 }
 
+// Media opens a person's encrypted files (media.Store).
+type Media interface {
+	Open(mediaID, ownerUserID string) (*os.File, error)
+}
+
 // Server serves the internal command API.
 type Server struct {
 	Token    string
 	Handler  Handler
 	Browsers Browsers
+	Media    Media
 	// Refuse, if set, turns away connections from an address that must not use the API at
 	// all: the sign-in browser's (signin.FromBrowser).
 	Refuse func(netip.Addr) bool
@@ -48,6 +58,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/commands", s.handleCommand)
 	mux.HandleFunc("GET /v1/logins/{id}/browser", s.handleBrowser)
+	mux.HandleFunc("GET /v1/media/{id}", s.handleMedia)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -140,4 +151,38 @@ func (s *Server) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.CloseNow()
 	_ = browser.Watch(r.Context(), ws)
+}
+
+// handleMedia sends the ciphertext of one of a person's files, for the gateway to pass to their
+// client, which has its key (docs/architecture/bridge-protocol.md, Media). The gateway names
+// the person once it has checked their access token.
+func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeError(w, http.StatusUnauthorized, protocol.ErrInvalidCommand)
+		return
+	} else if s.Media == nil {
+		writeError(w, http.StatusConflict, protocol.ErrUnsupported)
+		return
+	}
+	userID := r.Header.Get("X-Trioditis-User-Id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidCommand)
+		return
+	}
+	f, err := s.Media.Open(r.PathValue("id"), userID)
+	if err != nil {
+		// No code: the gateway only needs to know this host doesn't have it for them.
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
 }

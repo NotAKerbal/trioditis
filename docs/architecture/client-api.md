@@ -952,7 +952,7 @@ Contact profiles (name, handle, avatar) are sealed with kind `contact`, object I
 sealedProfile }]` for the ones the person has a contact for on that network; the others are
 left out. A message's sender is `{ ghostId }` on its chat's network, so the client collects a
 page's ghost IDs and asks once (the desktop app does this in group chats, to name each sender beside
-an avatar; its picture needs Media, see Next). Each profile is at most 8 KiB.
+an avatar, with its picture: see Media). Each profile is at most 8 KiB.
 
 Errors: `Ask for at most 100 contacts at once.`
 
@@ -990,7 +990,7 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
 3. **Done:** a contacts query (Contacts). A list of a chat's members still needs a `members`
    event from the bridge host.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
-5. **Media**: planned, see Next.
+5. **Media**: downloads are built (see Next); uploads, for sending a file, are planned.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
 7. **Done:** passkey PRF unlock. Adding a passkey makes its backup when the authenticator
    gives a PRF output, and signing in with one unlocks the key in the same touch (Passkeys).
@@ -1029,14 +1029,29 @@ here.
    Networks that can't resolve identifiers report `unsupported`, and the button stays
    disabled for them (`api.networks.list` gains `canStartChats`). Fallback: "New message"
    disabled.
-5. **Media.** Files go through Convex file storage as ciphertext only (the key and nonce
-   stay in the sealed message, see `sealing.md`, Media):
-   - **Download:** `api.media.url({ chatId, mediaId })` returns a short-lived URL for the
-     encrypted file, which the client decrypts. The bridge host uploads incoming files
-     encrypted through the gateway (`POST /v1/media`), before the `message` event that
-     names them.
-   - **Upload:** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
+5. **Media.** Files only ever leave the bridge host as ciphertext; the key and nonce stay in the
+   sealed message (see `sealing.md`, Media).
+   - **Download (built):** the bridge host keeps each incoming file encrypted in its media
+     store, and the client fetches it from the gateway on the app's own origin: `GET
+/media/<mediaId>` with `Authorization: Bearer <token>`, which Caddy forwards to the
+     gateway's public listener. The token comes from `api.media.access({ network })`
+     (`{ token, expiresAt }`, good for an hour; ask again before it runs out, or after a
+     `401`): it is signed with `GATEWAY_SECRET` and names the person and the network's bridge
+     hosts, and the gateway asks those hosts for the file (bridge-protocol.md, Media), each of
+     which gives a person only their own. The answer is the ciphertext as
+     `application/octet-stream`, `private` and immutable for caching; a `404` means no host has
+     it for this person, `502` a host failed, `503` too many files at once (retry after a
+     second). The client decrypts it with `decryptMedia(ciphertext, key, nonce, userId,
+mediaId)` from `@trioditis/crypto` and keeps it only in memory. It gives a decrypted file
+     its own type only for pictures, video and sound (and SVG is not a picture here); anything
+     else is `application/octet-stream`, so a file never opens as a page on the app's origin.
+     A chat's or a contact's `avatar` is fetched the same way.
+   - The desktop app shows pictures up to 25 MiB in place, plays video and sound when asked,
+     and saves other files. A picture with no caption has its file name as its `body`, which
+     is not shown as a caption.
+   - **Upload (planned):** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
      URL for the encrypted file; the send's attachment names the returned `mediaId`, and
      the bridge host fetches it through the gateway and decrypts it with the key in the
      outbound plaintext. Unsent uploads are deleted after a day.
-   - Fallback: an attachment shows as a "can't open yet" tile with its name and size.
+   - Fallback until uploads land: the composer can't attach a file. A file that can't be
+     fetched shows its name and size, with a way to try again.

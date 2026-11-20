@@ -1,5 +1,4 @@
 import { NETWORK_INFO } from '@trioditis/core'
-import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
 import {
   DropdownMenu,
@@ -61,6 +60,7 @@ import { newClientId, sealText } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
+import { MediaAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
 
 interface ChatPaneProps {
@@ -193,7 +193,9 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
         <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5">
-          <Avatar
+          <MediaAvatar
+            network={chat.network}
+            picture={chat.avatar}
             name={name}
             size={38}
             shape={chat.row.kind === 'dm' ? 'circle' : 'square'}
@@ -327,6 +329,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           </div>
         </header>
         <MessageList
+          network={chat.network}
           messages={messages}
           loading={loading}
           reactions={reactions}
