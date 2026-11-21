@@ -180,5 +180,7 @@ describe('a contact’s account', () => {
       { type: 'contact', ghostId: 'g_erin', sealed: sealed('erin2'), loginId: 'login_other' },
     ])
     await a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(52), ghostId: 'g_erin' })
+    // And still on the first: both stay, the newer doesn't replace the older.
+    await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(53), ghostId: 'g_erin' })
   })
 })
