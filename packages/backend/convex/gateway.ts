@@ -3,7 +3,7 @@ import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual, sha256Hex } from './lib/hash'
-import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
+import { onCommandExpired, onCommandOverdue, onCommandRejected, requeueRemovedLogout } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
 import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
@@ -288,6 +288,7 @@ async function expire(
   ctx: MutationCtx,
   command: Doc<'outbox'>,
   delivery: 'failed' | 'unknown' = command.state === 'queued' ? 'failed' : 'unknown',
+  requeue = true,
 ) {
   await ctx.db.patch(command._id, {
     state: 'expired',
@@ -298,7 +299,7 @@ async function expire(
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
   await expireLogin(ctx, command)
-  await onCommandExpired(ctx, command)
+  await onCommandExpired(ctx, command, requeue)
 }
 
 /** How long after its deadline a command the bridge host accepted may go without an outcome. */
@@ -327,12 +328,12 @@ async function settleOverdue(ctx: MutationCtx, now: number) {
 }
 
 /** Settles one overdue command; it then has no `expiresAt`, so nothing settles it twice. */
-async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
+async function settle(ctx: MutationCtx, command: Doc<'outbox'>, requeue = true) {
   const unsettled = command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
   await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
   if (unsettled) await markCopy(ctx, command, 'unknown')
   await expireLogin(ctx, command)
-  await onCommandOverdue(ctx, command)
+  await onCommandOverdue(ctx, command, requeue)
 }
 
 /**
@@ -675,7 +676,7 @@ export const redeemSigninTicket = mutation({
   },
 })
 
-const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired'] as const
+const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired', 'logouts'] as const
 const restorePhase = v.union(...RESTORE_PHASES.map((phase) => v.literal(phase)))
 /** Rows one call of `settleAfterRestore` handles; each is bounded like an expiry. */
 const RESTORE_BATCH = 20
@@ -690,7 +691,9 @@ const RESTORE_BATCH = 20
  * claimed commands expire as `unknown`; accepted ones are settled as `unknown`, as if overdue;
  * and a send the backend expired as `failed` when it started (its deadline came after
  * `backupAt`, so it may have gone in the meantime) is `unknown` too. Logins, logouts and new
- * chats waiting on a command end as if it expired. Safe to run again.
+ * chats waiting on a command end as if it expired, without a removed member's logout being queued
+ * again while it runs (that would refill the queue it empties); the last phase queues those again,
+ * once. Safe to run again.
  */
 export const settleAfterRestore = internalMutation({
   args: {
@@ -715,7 +718,9 @@ export const settleAfterRestore = internalMutation({
         .query('outbox')
         .withIndex('by_state', (q) => q.eq('state', phase))
         .take(RESTORE_BATCH)
-      for (const command of rows) await expire(ctx, command, 'unknown')
+      // No requeue: a removed member's logout queued again here would refill the queue this
+      // empties, for ever. The last phase queues those again, once.
+      for (const command of rows) await expire(ctx, command, 'unknown', false)
       return next(rows.length === RESTORE_BATCH, null)
     }
     if (phase === 'dispatched') {
@@ -724,8 +729,14 @@ export const settleAfterRestore = internalMutation({
         .query('outbox')
         .withIndex('by_expiry', (q) => q.eq('state', 'dispatched').gte('expiresAt', 0))
         .take(RESTORE_BATCH)
-      for (const command of rows) await settle(ctx, command)
+      for (const command of rows) await settle(ctx, command, false)
       return next(rows.length === RESTORE_BATCH, null)
+    }
+    if (phase === 'logouts') {
+      // Removed members' logouts that settling ended, queued again once, as failLogout would.
+      const page = await ctx.db.query('networkAccounts').paginate({ cursor, numItems: RESTORE_BATCH })
+      for (const account of page.page) await requeueRemovedLogout(ctx, account)
+      return next(!page.isDone, page.continueCursor)
     }
     const page = await ctx.db
       .query('outbox')

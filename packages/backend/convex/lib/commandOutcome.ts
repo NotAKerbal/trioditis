@@ -8,7 +8,7 @@ import { queueLogout } from './outbox'
 // when the bridge host rejects a command, it expires undelivered, or it was taken but never
 // reported on; ingest calls `onLoggedOut` when a logout is confirmed.
 
-async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: ErrorCode) {
+async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: ErrorCode, requeue = true) {
   if (command.payload.type !== 'logout' || !command.loginId) return
   const loginId = command.loginId
   const account = await ctx.db
@@ -23,7 +23,9 @@ async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: Error
   // A removed member's account has nobody to try again: when the logout only ran out of time
   // (no bridge host took it, or one took it and went away), it is queued again. A bridge host
   // refusing it as invalid stays failed, shown to admins in Settings → Members (members.retryCleanup).
-  if ((error === 'expired' || error === 'timeout') && !(await isMember(ctx, account.userId))) {
+  // Settling a restore asks for no requeue (it would refill the queue it is emptying), and queues
+  // them again once, when it's done (requeueRemovedLogouts).
+  if (requeue && (error === 'expired' || error === 'timeout') && !(await isMember(ctx, account.userId))) {
     await queueLogout(ctx, { ...account, logoutPending: false })
   }
 }
@@ -53,8 +55,8 @@ export async function onCommandRejected(ctx: MutationCtx, command: Doc<'outbox'>
 }
 
 /** The command ran out of time before a bridge host took it. */
-export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>) {
-  await failLogout(ctx, command, 'expired')
+export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>, requeue = true) {
+  await failLogout(ctx, command, 'expired', requeue)
   await failChatStart(ctx, command, 'expired')
 }
 
@@ -62,9 +64,18 @@ export async function onCommandExpired(ctx: MutationCtx, command: Doc<'outbox'>)
  * The bridge host took the command but never reported how it ended, well past its deadline
  * (it went away). A logout still pending then didn't visibly happen: the person can try again.
  */
-export async function onCommandOverdue(ctx: MutationCtx, command: Doc<'outbox'>) {
-  await failLogout(ctx, command, 'timeout')
+export async function onCommandOverdue(ctx: MutationCtx, command: Doc<'outbox'>, requeue = true) {
+  await failLogout(ctx, command, 'timeout', requeue)
   await failChatStart(ctx, command, 'timeout')
+}
+
+/**
+ * A removed member's logout that ran out of time, queued again: what failLogout does, for the
+ * accounts a restore's settlement left without one (it doesn't requeue while it settles).
+ */
+export async function requeueRemovedLogout(ctx: MutationCtx, account: Doc<'networkAccounts'>) {
+  if (account.logoutPending || (account.logoutError !== 'expired' && account.logoutError !== 'timeout')) return
+  if (!(await isMember(ctx, account.userId))) await queueLogout(ctx, account)
 }
 
 /** The bridge host reports the account `LOGGED_OUT`: a pending logout is done. */

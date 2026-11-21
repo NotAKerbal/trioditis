@@ -63,6 +63,66 @@ func TestAcknowledgedCommandRunsAfterRestart(t *testing.T) {
 	gw.waitFor(t, "stored send sent", hasStatus("cm-stored", protocol.StatusSent))
 }
 
+// After a restore from a backup (the restore's marker in the data directory), a send the
+// restored queue holds may have gone out from the original server since: it is settled as
+// unknown and never run, queued or started, and the marker goes once that's recorded. The next
+// start, with no marker, runs the queue as usual.
+func TestRestoredQueueIsSettledNotRun(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, dir, gw)
+	loginID, portalID := setUpChat(t, h, "chat", "hello")
+	h.host.Stop()
+
+	h2 := buildHost(t, dir, gw)
+	ctx := context.Background()
+	if err := h2.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	queued := sendCmd(h2, loginID, portalID, "cm-restored-queued", "queued in the backup")
+	started := sendCmd(h2, loginID, portalID, "cm-restored-started", "started in the backup")
+	for _, cmd := range []protocol.Command{started, queued} {
+		if _, err := h2.host.Store.EnqueueCommand(ctx, ptr(cmd)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h2.host.Store.SetCommandState(ctx, started.CommandID, store.CommandStarted); err != nil {
+		t.Fatal(err)
+	}
+	marker := dir + "/" + RestoreMarker
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "restored queued send unknown", hasStatus("cm-restored-queued", protocol.StatusUnknown))
+	gw.waitFor(t, "restored started send unknown", hasStatus("cm-restored-started", protocol.StatusUnknown))
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the restore marker is still there (%v)", err)
+	}
+	h2.host.Stop()
+
+	// No marker: the queue runs again, as after any restart.
+	h3 := buildHost(t, dir, gw)
+	if err := h3.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h3.host.Store.EnqueueCommand(ctx, ptr(sendCmd(h3, loginID, portalID, "cm-after", "after the restore"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := h3.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer h3.host.Stop()
+	gw.waitFor(t, "a send after the restore goes out", hasStatus("cm-after", protocol.StatusSent))
+	for _, id := range []string{"cm-restored-queued", "cm-restored-started"} {
+		if n := gw.count(hasStatus(id, protocol.StatusSent)); n != 0 {
+			t.Fatalf("a send restored from the backup (%s) was sent", id)
+		}
+	}
+}
+
 // A send handed off before a crash may have reached the network, so it is settled as
 // unknown at startup, never retried.
 func TestHandedOffSendIsUnknownAfterRestart(t *testing.T) {
