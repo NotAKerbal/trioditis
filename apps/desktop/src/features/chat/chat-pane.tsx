@@ -316,14 +316,16 @@ function OpenChat({
   // after this pane was left and opened again still changes what's on screen. Each chat of a
   // conversation keeps its own: the composer shows the draft of the chat it sends on, so what's
   // typed for one network only ever goes on that one, and choosing another moves nothing.
-  const { text: draft, reply: replyTo } = useDraft<Message>(lost ? sendId! : sendChat.id)
+  // The chat whose draft is on screen, which every change to it goes to.
+  const draftId = lost ? sendId! : sendChat.id
+  const { text: draft, reply: replyTo } = useDraft<Message>(draftId)
   // Cancelled messages restored to the composer from this pane, to say so. Restore stays.
   const [restored, setRestored] = useState<ReadonlySet<string>>(new Set())
-  const setDraft = (text: string) => setDraftText(sendChat.id, text)
+  const setDraft = (text: string) => setDraftText(draftId, text)
   // A reply goes in the chat of the message it answers, and the composer goes there with it.
   const setReplyTo = (message: Message | null) => {
     if (message) setSendId(message.chatId)
-    setDraftReply(message?.chatId ?? sendChat.id, message)
+    setDraftReply(message?.chatId ?? draftId, message)
   }
   // Closed whenever a chat opens; the pane is remade for each chat.
   const [panel, setPanel] = useState<PanelView | null>(null)

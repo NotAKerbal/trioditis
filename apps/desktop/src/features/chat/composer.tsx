@@ -11,7 +11,7 @@ import {
 } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
-import { Clock, Reply, SendHorizontal, X } from 'lucide-react'
+import { CircleHelp, Clock, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { networkName } from '~/data/chats.ts'
 import type { Message } from '~/data/messages.ts'
@@ -87,10 +87,14 @@ export function Composer({
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label={`Sending on ${networkName(network)}. Change`}
-                title="Send on another network"
+                aria-label={via.current ? `Sending on ${networkName(network)}. Change` : 'Choose where to send'}
+                title={via.current ? 'Send on another network' : 'Choose where to send'}
               >
-                <NetworkBadge network={network} label={networkName(network)} size={18} />
+                {via.current ? (
+                  <NetworkBadge network={network} label={networkName(network)} size={18} />
+                ) : (
+                  <CircleHelp className="size-[18px]" />
+                )}
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top">
