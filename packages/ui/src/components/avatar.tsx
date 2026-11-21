@@ -75,7 +75,18 @@ function Avatar({ name, src, size = 40, shape = 'circle', badge, className }: Av
  * One member's place in an AvatarCollage: their picture, or their initials on their colour. It
  * fills the cell the collage gives it.
  */
-function AvatarTile({ name, src, size }: { name: string; src?: string | undefined; size: number }) {
+function AvatarTile({
+  name,
+  src,
+  size,
+  alone = false,
+}: {
+  name: string
+  src?: string | undefined
+  size: number
+  /** The only tile, filling the whole collage. */
+  alone?: boolean
+}) {
   return (
     <span
       data-slot="avatar-tile"
@@ -83,7 +94,7 @@ function AvatarTile({ name, src, size }: { name: string; src?: string | undefine
         'flex size-full min-h-0 min-w-0 items-center justify-center overflow-hidden',
         !src && colorFor(name),
       )}
-      style={{ fontSize: Math.max(8, Math.round(size * 0.2)) }}
+      style={{ fontSize: Math.max(8, Math.round(size * (alone ? 0.38 : 0.2))) }}
     >
       {src ? <img src={src} alt="" className="size-full object-cover" /> : initials(name)}
     </span>
@@ -91,8 +102,8 @@ function AvatarTile({ name, src, size }: { name: string; src?: string | undefine
 }
 
 /**
- * A group's picture made of its members' (two to four AvatarTiles): side by side for two, one
- * beside a stack of two for three, a square of four for four. It has the shape of a group's
+ * A group's picture made of its members' (one to four AvatarTiles): one alone, two side by side,
+ * one beside a stack of two for three, a square of four for four. It has the shape of a group's
  * Avatar, and its badge.
  */
 function AvatarCollage({
@@ -116,7 +127,8 @@ function AvatarCollage({
       <span
         className={cn(
           // The gaps between tiles are the background the avatar sits on.
-          'grid size-full grid-cols-2 gap-px overflow-hidden rounded-[30%] bg-[var(--avatar-ring,var(--rail))]',
+          'grid size-full gap-px overflow-hidden rounded-[30%] bg-[var(--avatar-ring,var(--rail))]',
+          count > 1 ? 'grid-cols-2' : 'grid-cols-1',
           count > 2 && 'grid-rows-2',
           count === 3 && '[&>*:first-child]:row-span-2',
         )}

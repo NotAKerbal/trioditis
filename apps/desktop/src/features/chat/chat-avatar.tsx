@@ -8,8 +8,8 @@ import { MediaAvatar } from './attachments.tsx'
 
 /**
  * A chat's picture: its own, or for a group with none, a collage of the members its metadata
- * names (Chat.collage), each with their contact's picture or initials. A collage needs two
- * members this device knows; with fewer, the group's initials stand in, as before.
+ * names (Chat.collage), each with their contact's picture or initials. One member it knows shows
+ * alone; with none, the group's initials stand in, as before.
  */
 export function ChatAvatar({
   chat,
@@ -30,11 +30,18 @@ export function ChatAvatar({
     const profile = contacts.get(ghostId)
     return profile ? [{ ghostId, name: profile.name || profile.handle || '', avatar: profile.avatar }] : []
   })
-  if (members.length >= 2) {
+  if (members.length > 0) {
     return (
       <AvatarCollage size={size} badge={badge} className={className}>
         {members.map((m) => (
-          <MemberTile key={m.ghostId} network={chat.network} name={m.name} picture={m.avatar} size={size} />
+          <MemberTile
+            key={m.ghostId}
+            network={chat.network}
+            name={m.name}
+            picture={m.avatar}
+            size={size}
+            alone={members.length === 1}
+          />
         ))}
       </AvatarCollage>
     )
@@ -57,12 +64,14 @@ function MemberTile({
   name,
   picture,
   size,
+  alone,
 }: {
   network: Network
   name: string
   picture: Attachment | undefined
   size: number
+  alone: boolean
 }) {
   const media = useMedia(network, picture, !!picture && isImage(picture))
-  return <AvatarTile name={name} src={media.url} size={size} />
+  return <AvatarTile name={name} src={media.url} size={size} alone={alone} />
 }

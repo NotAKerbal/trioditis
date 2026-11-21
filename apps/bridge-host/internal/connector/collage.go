@@ -126,10 +126,11 @@ func (c *Connector) collage(ctx context.Context, o *owner, change collageChange)
 			ghosts = append(ghosts, ghost)
 		}
 	}
-	login := c.Bridge.GetCachedUserLoginByID(o.login)
-	isSelf := func(ghostID networkid.UserID) bool {
-		return ghostID == networkid.UserID(o.login) || login != nil && login.Client != nil && login.Client.IsThisUser(ctx, ghostID)
-	}
+	// bridgev2 records the person as themselves (their double puppet, a user and not a ghost),
+	// so their own ghost isn't a member. Where a network's login ID is also their ghost ID, it is
+	// left out all the same. The login's network client isn't asked: a relink replaces it, and
+	// what it knows of the person changes as it connects, while this runs on any goroutine.
+	isSelf := func(ghostID networkid.UserID) bool { return ghostID == networkid.UserID(o.login) }
 	hasPicture := func(ghostID networkid.UserID) (bool, error) {
 		if change.ghost != "" && ghostID == change.ghost {
 			return change.pictured, nil
