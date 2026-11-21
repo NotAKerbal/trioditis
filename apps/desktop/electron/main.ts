@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   nativeTheme,
   net,
   session,
@@ -16,6 +17,8 @@ import {
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { dotBitmap } from './badge.ts'
+import { invitationFrom, linkArgument, PROTOCOL, type Invitation } from './links.ts'
 import { isExternalAllowed, normalizeServer, pageIsReady, sameOrigin, serverKind, TOO_OLD } from './server.ts'
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
@@ -26,6 +29,10 @@ app.setName('Trioditis')
 app.setPath('userData', path.join(app.getPath('appData'), 'Trioditis'))
 // Windows shows notifications only for an app with an ID.
 if (process.platform === 'win32') app.setAppUserModelId('org.trioditis.desktop')
+// Invitation links (links.ts). An installed app declares the scheme in its package on a Mac and
+// Linux (electron-builder.yml); Windows' installer doesn't, so the app claims it as it starts.
+// Never from a development run, which would point the system at node_modules.
+if (process.platform === 'win32' && app.isPackaged) app.setAsDefaultProtocolClient(PROTOCOL)
 
 const here = import.meta.dirname
 const preload = path.join(here, 'preload.cjs')
@@ -52,6 +59,9 @@ let quitting = false
 let onStay: (() => void) | null = null
 /** That window, which a Mac must close rather than hide. */
 let leaving: BrowserWindow | null = null
+/** Set once the app has opened its first window: a link before then waits for it. */
+let started = false
+let waitingLink: Invitation | null = null
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 
@@ -90,7 +100,12 @@ function partitionFor(origin: string): string {
   const partition = `persist:server-${createHash('sha256').update(origin).digest('hex').slice(0, 16)}`
   if (!prepared.has(partition)) {
     prepared.add(partition)
-    const ses = session.fromPartition(partition)
+    // No HTTP cache: nothing a server sends is written to disk for reuse. The web app already
+    // keeps decrypted files in memory only (src/data/media.ts) and fetches media uncached, but
+    // a server's other answers (sign-in, its pages) aren't the app's to judge. Older versions
+    // cached, so what they left is cleared.
+    const ses = session.fromPartition(partition, { cache: false })
+    void ses.clearCache()
     ses.setPermissionRequestHandler((_contents, permission, callback, details) =>
       callback(ALLOWED_PERMISSIONS.has(permission) && sameOrigin(details.requestingUrl, origin)),
     )
@@ -125,7 +140,73 @@ function keepOnOrigin(contents: WebContents, origin: string) {
   })
 }
 
-function openServer(origin: string) {
+/** The unread badge: a count in the Dock or launcher, and a dot on Windows' taskbar button. */
+function showBadge(count: number) {
+  app.setBadgeCount(count)
+  if (process.platform !== 'win32' || !serverWindow || serverWindow.isDestroyed()) return
+  const dot = count > 0 ? nativeImage.createFromBitmap(dotBitmap(32), { width: 32, height: 32, scaleFactor: 2 }) : null
+  serverWindow.setOverlayIcon(dot, count > 0 ? `${count} unread` : '')
+}
+
+/**
+ * A page that crashes or hangs: the person is told and can reload it, rather than looking at a
+ * blank or frozen window. Logged by reason only, never the page's address, which can hold an
+ * invitation's token.
+ */
+function watchPage(win: BrowserWindow, name: string) {
+  let restarting = false
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`The ${name} page stopped (${details.reason}, exit code ${details.exitCode}).`)
+    if (restarting || details.reason === 'clean-exit' || win.isDestroyed()) return
+    void dialog
+      .showMessageBox(win, {
+        type: 'error',
+        buttons: ['Reload', 'Close'],
+        defaultId: 0,
+        cancelId: 1,
+        message: 'Trioditis stopped working',
+        detail: 'The window stopped unexpectedly. Reload it to carry on. Messages you hadn’t sent are lost.',
+      })
+      .then(({ response }) => {
+        if (win.isDestroyed()) return
+        if (response === 0) win.webContents.reload()
+        else win.close()
+      })
+  })
+  let waiting: AbortController | null = null
+  win.on('unresponsive', () => {
+    if (waiting || win.isDestroyed()) return
+    console.error(`The ${name} page stopped responding.`)
+    waiting = new AbortController()
+    void dialog
+      .showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Wait', 'Reload'],
+        defaultId: 0,
+        cancelId: 0,
+        message: 'Trioditis isn’t responding',
+        detail: 'You can wait for it, or reload the window. Reloading loses messages you haven’t sent.',
+        signal: waiting.signal,
+      })
+      .then(({ response }) => {
+        waiting = null
+        if (response !== 1 || win.isDestroyed()) return
+        // A hung page can't run its own unload, so it is stopped first; that isn't a crash to
+        // ask about again.
+        restarting = true
+        win.webContents.forcefullyCrashRenderer()
+        win.webContents.reload()
+        win.webContents.once('did-finish-load', () => (restarting = false))
+      })
+  })
+  // Came back by itself: the question is moot.
+  win.on('responsive', () => {
+    waiting?.abort()
+    waiting = null
+  })
+}
+
+function openServer(origin: string, url = `${origin}/`) {
   const previous = serverWindow
   const win = new BrowserWindow({
     width: 1280,
@@ -139,6 +220,7 @@ function openServer(origin: string) {
   serverWindow = win
   serverOrigin = origin
   keepOnOrigin(win.webContents, origin)
+  watchPage(win, 'server')
   let loaded = false
   // The status of the page now loading, so a server's error page (mid-update, say) or the
   // network's (offline) isn't taken for an old web app. Each load starts with none; a failed
@@ -202,8 +284,8 @@ function openServer(origin: string) {
   win.on('closed', () => {
     if (serverWindow === win) serverWindow = null
   })
-  void win.loadURL(`${origin}/`)
-  app.setBadgeCount(0)
+  void win.loadURL(url)
+  showBadge(0)
   previous?.destroy()
 }
 
@@ -247,6 +329,7 @@ function showConnect(error?: string) {
     webPreferences,
   })
   connectWindow = win
+  watchPage(win, 'connect')
   win.webContents.on('will-navigate', (event) => event.preventDefault())
   win.on('close', (event) => {
     if (!committing) return
@@ -303,19 +386,20 @@ ipcMain.handle('connect:current', (event) =>
     : { address: null, open: false },
 )
 
-ipcMain.handle('connect:connect', async (event, address: unknown) => {
-  if (!fromConnectPage(event) || typeof address !== 'string') return { error: 'That request isn’t allowed.' }
-  if (committing) return { error: 'Another server is being saved. Try again in a moment.' }
-  const parsed = normalizeServer(address)
-  if ('error' in parsed) return parsed
+/**
+ * Checks `origin` is a Trioditis server, then leaves the server open now for it, at `url` (its
+ * home page by default). Gives up, changing nothing, if another check starts meanwhile.
+ */
+async function switchServer(origin: string, url?: string): Promise<{ error?: string }> {
   const mine = ++attempt
-  const problem = await probe(parsed.origin)
+  const problem = await probe(origin)
   // Cancelled, closed or tried again while the server was being checked: this one is moot.
   if (mine !== attempt) return {}
   if (problem) return { error: problem }
-  // Already open: nothing to change.
-  if (serverWindow && parsed.origin === serverOrigin) {
+  // Already open: nothing to change, beyond the page asked for.
+  if (serverWindow && origin === serverOrigin) {
     connectWindow?.close()
+    if (url) void serverWindow.loadURL(url).catch(() => undefined)
     reveal(serverWindow)
     return {}
   }
@@ -327,7 +411,7 @@ ipcMain.handle('connect:connect', async (event, address: unknown) => {
     if (serverWindow && !(await closeServer(serverWindow)))
       return { error: 'You stayed, so the server wasn’t changed. Send or clear your messages first.' }
     try {
-      await saveSettings({ ...settings, server: parsed.origin })
+      await saveSettings({ ...settings, server: origin })
     } catch {
       if (previous) openServer(previous)
       return { error: 'That server couldn’t be saved. Try again.' }
@@ -335,10 +419,61 @@ ipcMain.handle('connect:connect', async (event, address: unknown) => {
   } finally {
     committing = false
   }
-  openServer(parsed.origin)
+  openServer(origin, url)
   connectWindow?.close()
   return {}
+}
+
+ipcMain.handle('connect:connect', async (event, address: unknown) => {
+  if (!fromConnectPage(event) || typeof address !== 'string') return { error: 'That request isn’t allowed.' }
+  if (committing) return { error: 'Another server is being saved. Try again in a moment.' }
+  const parsed = normalizeServer(address)
+  if ('error' in parsed) return parsed
+  return switchServer(parsed.origin)
 })
+
+/**
+ * An invitation link the system handed the app. On the server already open it just opens there;
+ * one for another server, or with none open yet, asks first, naming the server, since anyone
+ * can send a link and the app would otherwise move to their server unasked.
+ */
+async function openInvitation(link: Invitation) {
+  if (!started) {
+    waitingLink = link
+    return
+  }
+  if (serverWindow && serverOrigin === link.origin) {
+    reveal(serverWindow)
+    // A page holding unsent text asks first, as a reload does.
+    void serverWindow.loadURL(link.url).catch(() => undefined)
+    return
+  }
+  if (committing) return
+  const host = new URL(link.origin).host
+  const options = {
+    type: 'question' as const,
+    buttons: ['Open Invitation', 'Open in Browser', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    message: `Open an invitation to ${host}?`,
+    detail: serverOrigin
+      ? `The app is connected to ${new URL(serverOrigin).host}. Opening the invitation connects it to ${host} instead.`
+      : `The app connects to ${host} to open it.`,
+  }
+  const parent = serverWindow ?? connectWindow
+  const { response } = await (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+  if (response === 1) return openExternal(link.url)
+  if (response !== 0 || committing) return
+  const { error } = await switchServer(link.origin, link.url)
+  if (error) showConnect(error)
+}
+
+/** A link from the system: an invitation is opened, anything else just shows the app. */
+function openLink(link: string | undefined) {
+  const invitation = link ? invitationFrom(link) : null
+  if (invitation) void openInvitation(invitation)
+  else if (started) reveal(serverWindow ?? connectWindow)
+}
 
 ipcMain.on('connect:cancel', (event) => {
   if (!fromConnectPage(event) || !serverWindow || committing) return
@@ -348,7 +483,7 @@ ipcMain.on('connect:cancel', (event) => {
 
 ipcMain.on('desktop:badge', (event, count: unknown) => {
   if (fromServerPage(event) && Number.isInteger(count) && (count as number) >= 0)
-    app.setBadgeCount(Math.min(count as number, 999))
+    showBadge(Math.min(count as number, 999))
 })
 
 ipcMain.on('desktop:focus', (event) => {
@@ -412,10 +547,17 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('will-attach-webview', (event) => event.preventDefault())
 })
 
+// A Mac hands links to the running app, from before it's ready.
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  openLink(url)
+})
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => reveal(serverWindow ?? connectWindow))
+  // Windows and Linux start the app again with the link; this, the first, takes it.
+  app.on('second-instance', (_event, argv) => openLink(linkArgument(argv)))
   app.on('before-quit', () => (quitting = true))
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
@@ -432,7 +574,15 @@ if (!app.requestSingleInstanceLock()) {
     settings = await loadSettings()
     const asked = serverArgument()
     const parsed = normalizeServer(asked ?? settings.server ?? '')
+    const launchLink = linkArgument(process.argv)
+    const link = waitingLink ?? (launchLink ? invitationFrom(launchLink) : null)
+    waitingLink = null
+    started = true
+    // An invitation to the server the app opens anyway goes straight to it; any other is asked
+    // about over the usual window, so cancelling it still leaves the app open.
+    if ('origin' in parsed && link?.origin === parsed.origin) return openServer(parsed.origin, link.url)
     if ('origin' in parsed) openServer(parsed.origin)
     else showConnect(asked !== undefined ? parsed.error : undefined)
+    if (link) void openInvitation(link)
   })
 }

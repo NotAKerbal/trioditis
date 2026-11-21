@@ -229,24 +229,69 @@ forward and open the server picker, each checked in the main process. Opening th
 changes nothing by itself: the person still types the address, and the picker checks it.
 
 Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
-the desktop app; a browser asks first (Settings → Notifications). They show who sent the
-message (the chat's name; a group's own name, until member names exist) and what it says,
-never the network. The system can keep them in its notification history, outside the
-sealing: a deliberate exception (AGENTS.md).
+the desktop app; a browser asks first (Settings → Notifications), and turning them off there
+stops them in the app too. They show who sent the message (the chat's name; a group's own
+name, until member names exist) and what it says, never the network. The system can keep them
+in its notification history, outside the sealing: a deliberate exception (AGENTS.md). The
+unread badge is a count on the Mac's Dock and on Linux launchers that show one (Ubuntu's dock
+does, for an installed app), and a red dot on the app's Windows taskbar button.
 
-On Ubuntu, Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox` isn't owned
-by root there; for local testing pass `--no-sandbox` after `app`. Installers that set this up
-properly are not built yet.
+On Ubuntu, Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox`
+isn't owned by root there; for local testing pass `--no-sandbox` after `app`. The `.deb`
+installer sets it up properly.
 
 On a Mac and on Linux, passkeys don't work in the desktop app: Electron reaches the Mac's own
 (iCloud Keychain) only from a signed app tied to the server's domain, which a self-hosted
 server can't be, and it can't ask a security key for the PIN that signing in, unlocking and
 adding a passkey all require. On Windows the system asks, so they work. Sign-in, unlock and
-Settings → Keys and devices say so; use the password or recovery key in the app, or the
-passkey in a browser.
+Settings → Keys and devices say so and disable their passkey buttons; use the password or
+recovery key in the app, or the passkey in a browser.
 
 Unsent drafts live only in the page's memory, so reloading, closing the window or changing
-servers with one open asks first.
+servers with one open asks first. If the page crashes or stops responding, the app says so
+and offers to reload it; it logs only why (Chromium's reason and exit code), never the page's
+address.
+
+#### Invitation links
+
+An invitation link is `https://<server>/invite?email=…#token=…`, and the system opens https
+links in the browser: a self-hosted server can't tie its address to the app. So the browser's
+invitation page offers **Open in the desktop app**, the same link as
+`trioditis://<server>/invite?email=…#token=…`, which an installed app opens. The app takes
+only that: the `/invite` path with an email address and a token, rebuilt from those parts
+(`apps/desktop/electron/links.ts`); anything else just brings the app forward. A server on
+this machine is plain http, any other https. An invitation to the server the app is connected
+to opens there; one to another server, or with none yet, asks first and names the server, since
+anyone can send a link. On Windows and Linux the link reaches the app as a launch argument, so
+it is briefly in the process list of the launch that hands it over.
+
+#### What the app keeps on disk
+
+Each server's session keeps no HTTP cache: what the server sends stays in memory, and a cache
+left by an older version is cleared. Decrypted pictures and files are only ever in memory as
+`data:` URLs (`src/data/media.ts`); one the person saves goes to their downloads. On disk, in
+the app's data folder (`~/.config/Trioditis`, `~/Library/Application Support/Trioditis`,
+`%APPDATA%\Trioditis`), are the server's address (`settings.json`) and, per server, what a
+browser keeps: the sign-in cookie, display preferences in local storage, the identity key in
+IndexedDB (encrypted with a non-extractable device key), and Chromium's compiled-code cache for
+the web app's scripts. None of it holds message text, chat names or contact names.
+
+#### Installers
+
+```sh
+pnpm --filter @trioditis/desktop package:linux   # AppImage and .deb, in apps/desktop/release
+pnpm --filter @trioditis/desktop package:mac     # .dmg and .zip; on a Mac
+pnpm --filter @trioditis/desktop package:win     # NSIS installer; on Windows
+pnpm --filter @trioditis/desktop package:dir     # this system's app, unpacked, to try quickly
+```
+
+`electron-builder.yml` packages only the main process, preload and server picker: the web
+app comes from the server. Each build is made on its own system (a Mac build needs a Mac). None
+are signed, since the project has no Apple Developer ID or Windows code-signing certificate:
+Gatekeeper and SmartScreen warn, a Mac must be told to open the app the first time
+(right-click → Open), and a Mac also needs a signed app for its own passkeys. The AppImage
+needs `--no-sandbox` where unprivileged user namespaces are restricted (Ubuntu 24.04 and
+later); the `.deb` doesn't.
 
 ### Starting over
 
