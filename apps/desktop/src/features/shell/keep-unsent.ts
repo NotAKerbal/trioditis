@@ -66,7 +66,7 @@ export function useKeepUnsent() {
       timer = undefined
       if (!storage || !changed.size) return
       try {
-        for (const chatId of [...changed]) {
+        for (const chatId of changed) {
           const draft = getDraft<Reply>(chatId)
           saveDraft(storage, owner, chatId, draft, draft.sent)
           revs.set(chatId, draft.rev)
