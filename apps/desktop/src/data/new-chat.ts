@@ -4,6 +4,8 @@ import {
   contactKey,
   parseIdentifier,
   START_TARGETS,
+  startIdentifier,
+  type StartIdentifierProblem,
   type Network,
   type NetworkContact,
   type PersonPlaintext,
@@ -51,12 +53,24 @@ export function identifierPrompt(network: Network): string | null {
 /** What to tell the person when a chat couldn't start. */
 export function startError(code: ErrorCode | undefined, network: Network): string {
   const name = networkName(network)
-  if (code === 'not_found') return `No one on ${name} has that number or username.`
+  // The number was sent in full and in the form the network takes (startIdentifier), so this
+  // is the network's own answer; it can still be a number saved without its country code.
+  if (code === 'not_found')
+    return `${name} found no one with that number or username. Check it’s complete, with the country code.`
   if (code === 'unsupported') return `${name} can’t start chats from here.`
   if (code === 'not_connected') return `Your ${name} account isn’t connected.`
   if (code === 'rate_limited') return `${name} is limiting new chats. Try again later.`
   if (code === 'expired' || code === 'timeout') return `${name} didn’t answer. Try again.`
   return `${name} couldn’t start that chat.`
+}
+
+/** What to tell the person when what they typed can't start a chat, before it's sent. */
+export function identifierProblem(problem: StartIdentifierProblem, network: Network): string {
+  const name = networkName(network)
+  if (problem === 'needs_country_code') return `${name} needs the number with its country code, like +1 555 123 4567.`
+  if (problem === 'phone_only') return `${name} starts chats from phone numbers, not usernames.`
+  if (problem === 'username_only') return `${name} starts chats from usernames, not phone numbers.`
+  return 'That isn’t a whole phone number. Check it has all its digits.'
 }
 
 /**
@@ -89,9 +103,13 @@ export function useStartChat(onStarted: (chatId: Id<'chats'>) => void) {
       if ('ghostId' in target) {
         await start({ networkAccountId, requestId, ghostId: target.ghostId, sessionId: session.sessionId })
       } else {
+        // Sent in one shape the bridge host takes (people.ts, normalPhone), or not at all.
+        const targets = START_TARGETS[network] ?? { phone: false, username: false }
+        const typed = startIdentifier(target.identifier, network, targets)
+        if ('problem' in typed) return setError(identifierProblem(typed.problem, network))
         if (!bridge.key) return setError('Trioditis isn’t ready to start chats yet. Try again in a moment.')
         const sealedIdentifier = sealJson(
-          { identifier: target.identifier },
+          { identifier: typed.identifier },
           [{ publicKey: fromBase64Url(bridge.key) }],
           {
             kind: 'outbound',

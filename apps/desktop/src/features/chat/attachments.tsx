@@ -103,8 +103,14 @@ function Picture({ network, attachment }: { network: Network; attachment: Attach
   const [asked, setAsked] = useState(false)
   const wanted = loadsByItself(attachment) || asked
   const media = useMedia(network, attachment, wanted, near || open)
+  // The file arrived, but this browser can't draw it (a HEIC from an iPhone, say, or a broken
+  // file): it can still be saved and opened elsewhere.
+  const [undrawable, setUndrawable] = useState<string | null>(null)
   const box = boxOf(attachment)
   const name = attachment.name || 'Photo'
+  if (media.state === 'ready' && undrawable === media.url) {
+    return <FileTile network={network} attachment={attachment} note="Can’t be shown here" />
+  }
   if (!wanted || media.state === 'failed') {
     return (
       <Button
@@ -152,6 +158,7 @@ function Picture({ network, attachment }: { network: Network; attachment: Attach
           src={media.url}
           alt={name}
           style={box ?? { maxWidth: MAX_W, maxHeight: MAX_H }}
+          onError={() => setUndrawable(media.url)}
           onLoad={(e) => {
             const { naturalWidth: width, naturalHeight: height } = e.currentTarget
             if (!box && width && height) loadedShapes.set(attachment.mediaId, { width, height })
@@ -220,20 +227,60 @@ function SaveButton({
   )
 }
 
+/** What a file's tile says under its name: why it isn't shown, how it's doing, or its size. */
+export function tileStatus({
+  note,
+  cantPlay,
+  state,
+  size,
+}: {
+  note?: string
+  cantPlay: boolean
+  state: 'idle' | 'loading' | 'ready' | 'failed'
+  size: number
+}) {
+  if (note) return note
+  if (cantPlay) return 'Can’t be played here'
+  if (state === 'failed') return 'Couldn’t be opened'
+  if (state === 'loading') return 'Opening…'
+  return fileSize(size)
+}
+
 /**
  * Any other file: its name and size, and what can be done with it. Video and sound small enough
- * play in place when asked; anything else is saved.
+ * play in place when asked, and can be saved too; anything else is saved. `note` replaces the
+ * size, for a picture shown as a file because it can't be drawn.
  */
-function FileTile({ network, attachment }: { network: Network; attachment: Attachment }) {
-  const canPlay = playable(attachment)
+function FileTile({ network, attachment, note }: { network: Network; attachment: Attachment; note?: string }) {
+  const canPlay = playable(attachment) && !note
   const media = useMedia(network, canPlay ? attachment : undefined, false)
+  // Played media this browser can't decode (a codec it lacks, or a broken file) falls back to
+  // the tile, which says so and keeps Save.
+  const [undecodable, setUndecodable] = useState<string | null>(null)
   const name = attachment.name || (isVideo(attachment) ? 'Video' : isAudio(attachment) ? 'Audio' : 'File')
+  const cantPlay = media.state === 'ready' && undecodable === media.url
 
-  if (media.state === 'ready' && isVideo(attachment)) {
-    return <video src={media.url} controls autoPlay className="max-h-[360px] max-w-[min(100%,480px)] rounded-[14px]" />
+  if (media.state === 'ready' && !cantPlay && isVideo(attachment)) {
+    return (
+      <span className="flex flex-col items-start gap-1">
+        <video
+          src={media.url}
+          controls
+          autoPlay
+          onError={() => setUndecodable(media.url)}
+          className="max-h-[360px] max-w-[min(100%,480px)] rounded-[14px]"
+        />
+        <SaveButton network={network} attachment={attachment} name={name} label="Save" />
+      </span>
+    )
   }
-  if (media.state === 'ready' && isAudio(attachment)) {
-    return <audio src={media.url} controls autoPlay className="max-w-full" />
+  if (media.state === 'ready' && !cantPlay && isAudio(attachment)) {
+    return (
+      <span className="flex flex-col items-start gap-1">
+        <audio src={media.url} controls autoPlay onError={() => setUndecodable(media.url)} className="max-w-full" />
+        <SaveButton network={network} attachment={attachment} name={name} label="Save" />
+      </span>
+    )
   }
   const broken = media.state === 'failed'
   return (
@@ -242,10 +289,10 @@ function FileTile({ network, attachment }: { network: Network; attachment: Attac
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium">{name}</span>
         <span className="block text-xs text-subtle-foreground">
-          {broken ? 'Couldn’t be opened' : media.state === 'loading' ? 'Opening…' : fileSize(attachment.size)}
+          {tileStatus({ note, cantPlay, state: media.state, size: attachment.size })}
         </span>
       </span>
-      {canPlay ? (
+      {canPlay && !cantPlay ? (
         <Button
           variant="bare"
           type="button"
@@ -257,14 +304,13 @@ function FileTile({ network, attachment }: { network: Network; attachment: Attac
         >
           <Play className="size-4" />
         </Button>
-      ) : (
-        <SaveButton
-          network={network}
-          attachment={attachment}
-          name={name}
-          className="size-7 justify-center rounded-full"
-        />
-      )}
+      ) : null}
+      <SaveButton
+        network={network}
+        attachment={attachment}
+        name={name}
+        className="size-7 justify-center rounded-full"
+      />
     </span>
   )
 }

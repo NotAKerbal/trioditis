@@ -27,6 +27,7 @@ import { Textarea } from '@trioditis/ui/textarea'
 import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import {
+  ArrowLeft,
   Download,
   Link2,
   MessageSquare,
@@ -47,16 +48,22 @@ import { chatOptions, useStartableAccounts, useStartChat } from '~/data/new-chat
 import {
   contactsByKey,
   download,
+  fitCard,
   importPlanner,
+  PartlySaved,
   shrinkPhoto,
   useNetworkContacts,
   usePeople,
   usePeopleActions,
   useSyncContacts,
   Stale,
+  TooLarge,
   type Change,
   type StoredPerson,
 } from '~/data/people.ts'
+import { fromHandleField, toHandleField, type HandleField } from '~/features/people/handles.ts'
+import { emptyReport, importSummary, partlyImported } from '~/features/people/import-report.ts'
+import { usePage } from '~/features/people/paging.ts'
 import { Group, Loading } from '~/features/settings/layout.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
@@ -155,7 +162,12 @@ function People({
       return true
     } catch (err) {
       if (sessionChanged(err)) window.location.reload()
-      else toast(err instanceof Stale ? err.message : errorMessage(err, failure))
+      else if (err instanceof PartlySaved) {
+        toast(
+          `Saved ${err.written.toLocaleString()} of ${err.total.toLocaleString()} before it stopped: ` +
+            errorMessage(err.reason, failure),
+        )
+      } else toast(err instanceof Stale || err instanceof TooLarge ? err.message : errorMessage(err, failure))
       return false
     }
   }
@@ -173,27 +185,39 @@ function People({
 
   async function importFile(file: File) {
     setBusy(true)
+    const failure = 'That file couldn’t be imported.'
     try {
       const cards = parseContactsFile(await file.text())
       if (!cards.length) return toast('No contacts were found in that file.')
+      // Everything the import has to change to save a card is counted, and said at the end.
+      const report = emptyReport()
+      const ready: PersonPlaintext[] = []
       for (const card of cards) {
         if (card.photo) {
           const small = await shrinkPhoto(card.photo)
           if (small) card.photo = small
-          else delete card.photo
+          else {
+            delete card.photo
+            report.unreadablePhotos++
+          }
         }
+        const fit = await fitCard(card, shrinkPhoto, { cutNote: true })
+        if (fit.photo === 'smaller') report.smallerPhotos++
+        if (fit.photo === 'dropped') report.droppedPhotos++
+        if (fit.noteCut) report.cutNotes.push(cardTitle(card))
+        // One that still doesn't fit stops the import in saveMany, before anything is saved.
+        ready.push(fit.card)
       }
-      const planner = importPlanner(cards)
-      const written = await actions.saveMany(planner.plan, planner.written)
-      toast(
-        written
-          ? `Imported ${written.toLocaleString()} ${written === 1 ? 'person' : 'people'}`
-          : 'Everyone in that file is here already.',
-      )
+      const planner = importPlanner(ready)
+      report.written = await actions.saveMany(planner.plan, planner.written)
+      report.unchanged = !report.written
+      toast(importSummary(report))
       onViewChange('suggested')
     } catch (err) {
       if (sessionChanged(err)) window.location.reload()
-      else toast(errorMessage(err, 'That file couldn’t be imported.'))
+      else if (err instanceof PartlySaved)
+        toast(partlyImported(err.written, err.total, errorMessage(err.reason, failure)))
+      else toast(err instanceof TooLarge ? `${err.message} Nothing was imported.` : errorMessage(err, failure))
     } finally {
       setBusy(false)
     }
@@ -218,11 +242,20 @@ function People({
     }
   }
 
+  // A narrow window shows the list or what's chosen from it, not both side by side: beside a
+  // 300px list there's no room left for a form.
+  const listOnly = view === 'all'
   return (
     <>
-      <div className="flex w-[300px] shrink-0 flex-col border-r border-border bg-rail">
+      <div
+        className={cn(
+          'w-full shrink-0 flex-col border-border bg-rail md:flex md:w-[300px] md:border-r',
+          listOnly ? 'flex' : 'hidden',
+        )}
+      >
         <DialogTitle className="sr-only">People</DialogTitle>
-        <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
+        {/* On a narrow window the list is full width, under the window's close button. */}
+        <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border pr-14 pl-2.5 md:px-2.5">
           <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
             <Input
               value={query}
@@ -316,7 +349,18 @@ function People({
           )}
         </nav>
       </div>
-      <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7">
+      <div
+        className={cn('relative min-w-0 flex-1 overflow-y-auto px-4 pt-14 pb-7 md:block md:px-7', listOnly && 'hidden')}
+      >
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="All people"
+          className="absolute top-4 left-2 md:hidden"
+          onClick={() => onViewChange('all')}
+        >
+          <ArrowLeft className="size-[18px]" />
+        </Button>
         {view === 'new' ? (
           <PersonForm
             card={{ name: query.trim() }}
@@ -471,9 +515,9 @@ function PersonDetail({
   const subtitle = [card.title, card.org].filter(Boolean).join(', ')
   return (
     <div>
-      <div className="mb-7 flex items-center gap-4">
+      <div className="mb-7 flex flex-wrap items-center gap-x-4 gap-y-3">
         <Avatar name={cardTitle(card)} src={card.photo} size={56} />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[8rem] flex-1">
           <h2 className="truncate text-lg font-bold tracking-[-0.015em]">{cardTitle(card)}</h2>
           {subtitle ? <div className="truncate text-sm text-muted-foreground">{subtitle}</div> : null}
         </div>
@@ -643,15 +687,17 @@ function ChooseContact({
 }) {
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
-  const shown = contacts
-    .filter(
+  const page = usePage(
+    contacts.filter(
       (c) =>
         !q ||
         [c.profile.name, c.profile.handle, ...(c.identifiers ?? []), networkName(c.network)].some((t) =>
           t?.toLowerCase().includes(q),
         ),
-    )
-    .slice(0, 200)
+    ),
+    q,
+  )
+  const shown = page.shown
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[520px] w-[min(480px,calc(100vw-32px))] flex-col" aria-describedby={undefined}>
@@ -683,6 +729,7 @@ function ChooseContact({
           ) : (
             <p className="px-5 text-sm text-muted-foreground">No contacts match.</p>
           )}
+          <ShowMore more={page.more} onClick={page.showMore} className="mx-5" />
         </div>
       </DialogContent>
     </Dialog>
@@ -702,7 +749,11 @@ function ChoosePerson({
   onChoose: (person: Person) => void
 }) {
   const [query, setQuery] = useState('')
-  const shown = people.filter((p) => matches(p.card, query)).slice(0, 200)
+  const page = usePage(
+    people.filter((p) => matches(p.card, query)),
+    query,
+  )
+  const shown = page.shown
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[520px] w-[min(480px,calc(100vw-32px))] flex-col" aria-describedby={undefined}>
@@ -735,6 +786,7 @@ function ChoosePerson({
           ) : (
             <p className="px-2 text-sm text-muted-foreground">No one matches.</p>
           )}
+          <ShowMore more={page.more} onClick={page.showMore} className="mx-2" />
         </div>
       </DialogContent>
     </Dialog>
@@ -751,6 +803,7 @@ function Suggestions({
   onLink: (personKey: string, contacts: NetworkContact[]) => Promise<boolean>
 }) {
   const [busy, setBusy] = useState(false)
+  const page = usePage(suggestions)
   const names = new Map(people.map((p) => [p.personKey, cardTitle(p.card)]))
   // A contact suggested for several cards is left for the person to choose; a shared number,
   // email or username for only one is safe to link in one go.
@@ -778,7 +831,7 @@ function Suggestions({
         ) : undefined
       }
     >
-      {suggestions.slice(0, 500).map((s) => (
+      {page.shown.map((s) => (
         <ContactLine key={`${contactKey(s.contact)}>${s.personKey}`} contact={s.contact}>
           <div className="min-w-0 text-right">
             <div className="truncate font-medium">{names.get(s.personKey)}</div>
@@ -789,7 +842,18 @@ function Suggestions({
           </Button>
         </ContactLine>
       ))}
+      <ShowMore more={page.more} onClick={page.showMore} className="mx-4 mb-2" />
     </Group>
+  )
+}
+
+/** Says how many more a long list has, and shows them when asked. */
+function ShowMore({ more, onClick, className }: { more: number; onClick: () => void; className?: string }) {
+  if (!more) return null
+  return (
+    <Button type="button" size="sm" variant="ghost" className={className} onClick={onClick}>
+      Show more ({more.toLocaleString()} not shown)
+    </Button>
   )
 }
 
@@ -806,6 +870,7 @@ function Unsorted({
 }) {
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState<NetworkContact[] | null>(null)
+  const page = usePage(groups)
   if (!groups.length) return <p className="text-sm text-muted-foreground">Every contact is in People.</p>
   return (
     <>
@@ -825,7 +890,7 @@ function Unsorted({
           </Button>
         }
       >
-        {groups.slice(0, 500).map((group) => (
+        {page.shown.map((group) => (
           <div key={group.map(contactKey).join(' ')} className="flex min-h-[52px] items-center gap-3 px-4 py-2">
             <span className="flex gap-1">
               {group.map((c) => (
@@ -852,6 +917,7 @@ function Unsorted({
             </Button>
           </div>
         ))}
+        <ShowMore more={page.more} onClick={page.showMore} className="mx-4 mb-2" />
       </Group>
       <ChoosePerson
         open={!!adding}
@@ -882,8 +948,8 @@ function FieldsEditor({
   legend: string
   /** What one of them is called, for the add button's accessible name. */
   noun: string
-  fields: PersonField[]
-  onChange: (fields: PersonField[]) => void
+  fields: HandleField[]
+  onChange: (fields: HandleField[]) => void
   placeholder: string
   labels: string[]
   type?: string
@@ -897,7 +963,7 @@ function FieldsEditor({
       {fields.map((f, i) => (
         <div key={i} className="flex gap-2">
           <Input
-            className="w-32"
+            className="w-24 shrink-0 sm:w-32"
             list={listId}
             value={f.label ?? ''}
             placeholder="Label"
@@ -942,18 +1008,6 @@ function FieldsEditor({
 
 const SERVICES = ['signal', 'telegram', 'instagram', 'twitter', 'bluesky', 'linkedin', 'slack', 'skype', 'xmpp']
 
-/** Usernames edit as service and name; they're stored as `service:name` so they match networks'. */
-const toHandleField = (f: PersonField): PersonField => {
-  const id = parseIdentifier(f.value)
-  return id?.kind === 'username' ? { value: id.value, label: id.service } : { value: f.value, label: f.label ?? '' }
-}
-const fromHandleField = (f: PersonField): PersonField | null => {
-  const value = f.value.trim().replace(/^@/, '')
-  if (!value) return null
-  const service = f.label?.trim().toLowerCase()
-  return { value: service && !value.includes(':') ? `${service}:${value}` : value }
-}
-
 function PersonForm({
   card,
   onSave,
@@ -968,7 +1022,8 @@ function PersonForm({
   const [title, setTitle] = useState(card.title ?? '')
   const [phones, setPhones] = useState(card.phones ?? [])
   const [emails, setEmails] = useState(card.emails ?? [])
-  const [handles, setHandles] = useState((card.handles ?? []).map(toHandleField))
+  // Usernames edit as service and name (handles.ts), keeping any label of their own.
+  const [handles, setHandles] = useState<HandleField[]>((card.handles ?? []).map(toHandleField))
   const [birthday, setBirthday] = useState(card.birthday ?? '')
   const [note, setNote] = useState(card.note ?? '')
   const [saving, setSaving] = useState(false)
@@ -1013,7 +1068,7 @@ function PersonForm({
       <h2 className="sr-only">{card.name ? `Edit ${card.name}` : 'New person'}</h2>
       <div className="space-y-2">
         <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" aria-label="Name" />
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <Input value={org} onChange={(e) => setOrg(e.target.value)} placeholder="Company" aria-label="Company" />
           <Input
             value={title}
