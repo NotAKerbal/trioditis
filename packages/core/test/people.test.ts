@@ -157,15 +157,10 @@ describe('importing again', () => {
   }
   const newKey = (index: number) => `person-new-${String(index).padStart(6, '0')}`
 
-  it('replaces a known card’s fields with the file’s, keeping its links and photo', () => {
+  it('updates a known card from the file without taking away its note, links or photo', () => {
     const file = { name: 'Ann Lee', uid: 'u1', note: 'new', addresses: [{ street: '1 Main St' }] }
     const plan = planImport([existing], [file, file], newKey)
-    expect(plan).toEqual([
-      {
-        personKey: existing.personKey,
-        card: { ...file, links: existing.card.links, photo: existing.card.photo },
-      },
-    ])
+    expect(plan).toEqual([{ personKey: existing.personKey, card: { ...existing.card, name: 'Ann Lee' } }])
     // Importing the same file again changes nothing.
     expect(planImport([{ personKey: existing.personKey, card: plan[0]!.card }], [file], newKey)).toEqual([])
   })
@@ -188,18 +183,43 @@ describe('importing again', () => {
 
 describe('reimporting a file without UIDs', () => {
   const newKey = (i: number) => `new-card-key-${String(i).padStart(4, '0')}`
+  const otherKey = (i: number) => `other-key-${i}-0000000`
   const rows = [
     { name: 'Ann Lee', phones: [{ value: '+1 555 123 4567' }] },
     { name: 'Bob Stone', emails: [{ value: 'bob@example.com' }] },
-    { name: 'Just A Name' },
   ]
 
   it('updates the cards the first import made instead of adding everyone again', () => {
     const first = planImport([], rows, newKey)
-    expect(first).toHaveLength(3)
-    // Same people, edited a little in the address book they came from.
-    const again = planImport(first, [{ ...rows[0]!, org: 'Acme' }, rows[1]!, rows[2]!], (i) => `other-key-${i}-0000000`)
+    expect(first).toHaveLength(2)
+    const again = planImport(first, [{ ...rows[0]!, org: 'Acme' }, rows[1]!], otherKey)
     expect(again).toEqual([{ personKey: first[0]!.personKey, card: { ...rows[0]!, org: 'Acme' } }])
+  })
+
+  it('takes nothing away that was added here since, when an older export is imported again', () => {
+    const here: Person = {
+      personKey: 'person-ann-0000000',
+      card: {
+        name: 'Ann Lee',
+        emails: [{ value: 'ann@example.com' }],
+        phones: [{ value: '+15550001111', label: 'work' }],
+        handles: [{ value: 'telegram:ann', label: 'Personal' }],
+        note: 'Met at the conference',
+        uid: 'vcf-1',
+        links: [{ network: 'signal', ghostId: 'g1' }],
+      },
+    }
+    const plan = planImport(
+      [here],
+      [{ name: 'Ann Lee', emails: [{ value: 'ANN@example.com' }, { value: 'a@old.example' }], note: 'old note' }],
+      newKey,
+    )
+    expect(plan).toEqual([
+      {
+        personKey: here.personKey,
+        card: { ...here.card, emails: [{ value: 'ann@example.com' }, { value: 'a@old.example' }] },
+      },
+    ])
   })
 
   it('matches by number written another way, and keeps the card’s UID and links', () => {
@@ -217,18 +237,16 @@ describe('reimporting a file without UIDs', () => {
       [{ name: 'Ann Lee', phones: [{ value: '+1 (555) 123-4567' }], note: 'hi' }],
       newKey,
     )
-    expect(plan).toEqual([
-      {
-        personKey: existing.personKey,
-        card: {
-          name: 'Ann Lee',
-          phones: [{ value: '+1 (555) 123-4567' }],
-          note: 'hi',
-          uid: 'vcf-1',
-          links: existing.card.links,
-        },
-      },
-    ])
+    expect(plan).toEqual([{ personKey: existing.personKey, card: { ...existing.card, name: 'Ann Lee', note: 'hi' } }])
+  })
+
+  it('never matches on a name alone', () => {
+    const here: Person[] = [
+      { personKey: 'person-a-00000000', card: { name: 'Sam', note: 'the plumber' } },
+      { personKey: 'person-b-00000000', card: { name: 'Sam', note: 'from school' } },
+    ]
+    const plan = planImport(here, [{ name: 'Sam', org: 'Acme' }], newKey)
+    expect(plan).toEqual([{ personKey: newKey(0), card: { name: 'Sam', org: 'Acme' } }])
   })
 
   it('keeps apart people who only share a name, and cards with their own different UIDs', () => {
@@ -247,18 +265,39 @@ describe('reimporting a file without UIDs', () => {
     expect(plan.map((p) => p.personKey)).toEqual([newKey(0), newKey(1)])
   })
 
-  it('matches each card once, so two rows that are the same make two cards again', () => {
-    const first = planImport([], [rows[2]!, rows[2]!], newKey)
-    expect(first).toHaveLength(2)
-    expect(planImport(first, [rows[2]!, rows[2]!], (i) => `other-key-${i}-0000000`)).toEqual([])
+  it('leaves out and reports an entry that could be either of two cards, whatever their order', () => {
+    const a: Person = { personKey: 'zzzz-key-00000000', card: { name: 'Ann', emails: [{ value: 'ann@x.co' }] } }
+    const b: Person = { personKey: 'aaaa-key-00000000', card: { name: 'Ann', emails: [{ value: 'ann@x.co' }] } }
+    for (const order of [
+      [a, b],
+      [b, a],
+    ]) {
+      const skipped: number[] = []
+      const plan = planImport(
+        order,
+        [{ name: 'Ann', emails: [{ value: 'ann@x.co' }], note: 'n' }],
+        newKey,
+        undefined,
+        undefined,
+        (i) => skipped.push(i),
+      )
+      expect(plan).toEqual([])
+      expect(skipped).toEqual([0])
+    }
+  })
+
+  it('matches each card once, so two rows that are the same don’t both land on it', () => {
+    const here: Person = { personKey: 'person-ann-0000000', card: rows[0]! }
+    const plan = planImport([here], [rows[0]!, { ...rows[0]!, org: 'Acme' }], newKey)
+    expect(plan).toEqual([{ personKey: newKey(1), card: { ...rows[0]!, org: 'Acme' } }])
   })
 
   it('doesn’t match a card this same import made', () => {
-    const first = planImport([], [rows[2]!, rows[2]!], newKey)
+    const first = planImport([], [rows[0]!, rows[0]!], newKey)
     // The first call wrote one; working the rest out again mustn't fold the second into it.
     const again = planImport(
       [first[0]!],
-      [rows[2]!],
+      [rows[0]!],
       () => newKey(1),
       undefined,
       (k) => k !== first[0]!.personKey,

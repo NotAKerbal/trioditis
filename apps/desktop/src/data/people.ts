@@ -155,14 +155,15 @@ export interface Fitted {
 }
 
 /**
- * A card made to fit what a card can be sealed to. Its photo is made smaller, step by step,
- * then left out; its note is cut only if `cutNote` allows it (an import, which reports it),
- * never for an edit, which is refused instead so the person can shorten it themselves.
+ * A card made to fit what a card can be sealed to. Its photo is made smaller, step by step.
+ * Leaving the photo out, then cutting the note, happen only when allowed (`dropPhoto`,
+ * `cutNote`): an import, which reports them. An edit allows neither, and is refused instead,
+ * so a saved card never loses its photo or note without the person doing it.
  */
 export async function fitCard(
   card: PersonPlaintext,
   shrink: (photo: string, pixels: number) => Promise<string | null>,
-  { cutNote = false } = {},
+  { cutNote = false, dropPhoto = false } = {},
 ): Promise<Fitted> {
   let out = card
   if (fits(out)) return { card: out, fits: true }
@@ -176,6 +177,7 @@ export async function fitCard(
       photo = 'smaller'
       if (fits(out)) return { card: out, photo, fits: true }
     }
+    if (!dropPhoto) return { card, fits: false }
     out = { ...out }
     delete out.photo
     photo = 'dropped'
@@ -256,7 +258,8 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
       const fit = await fitCard(p.card, shrinkPhoto)
       if (!fit.fits) {
         throw new TooLarge(
-          `${cardTitle(p.card)} is too large to save. Shorten the note or remove some details, then try again.`,
+          `${cardTitle(p.card)} is too large to save${p.card.photo ? ', even with a smaller photo' : ''}. ` +
+            'Shorten the note or remove some details, then try again.',
         )
       }
       out.push({ personKey: p.personKey, card: fit.card })
@@ -334,8 +337,11 @@ export function importPlanner(imported: readonly PersonPlaintext[]) {
   const own = new Set(keys)
   const done = new Set<number>()
   const entriesOf = new Map<string, number[]>()
+  // The entries the latest plan left out because each could be more than one card.
+  let ambiguous = new Set<number>()
   return {
     plan: (existing: readonly Person[]) => {
+      ambiguous = new Set()
       const pending = imported.flatMap((card, index) => (done.has(index) ? [] : [{ card, index }]))
       const planned = planImport(
         existing,
@@ -344,9 +350,12 @@ export function importPlanner(imported: readonly PersonPlaintext[]) {
         (i, personKey) => entriesOf.set(personKey, [...(entriesOf.get(personKey) ?? []), pending[i]!.index]),
         // A card this import made, seen in a later plan, isn't someone else to match.
         (personKey) => !own.has(personKey),
+        (i) => ambiguous.add(pending[i]!.index),
       )
       return planned
     },
+    /** The cards left out because each matched several people here, for the import's summary. */
+    ambiguous: () => [...ambiguous].map((index) => imported[index]!),
     written: (personKeys: Iterable<string>) => {
       for (const key of personKeys) for (const index of entriesOf.get(key) ?? []) done.add(index)
     },

@@ -201,7 +201,7 @@ function People({
             report.unreadablePhotos++
           }
         }
-        const fit = await fitCard(card, shrinkPhoto, { cutNote: true })
+        const fit = await fitCard(card, shrinkPhoto, { cutNote: true, dropPhoto: true })
         if (fit.photo === 'smaller') report.smallerPhotos++
         if (fit.photo === 'dropped') report.droppedPhotos++
         if (fit.noteCut) report.cutNotes.push(cardTitle(card))
@@ -210,7 +210,8 @@ function People({
       }
       const planner = importPlanner(ready)
       report.written = await actions.saveMany(planner.plan, planner.written)
-      report.unchanged = !report.written
+      report.ambiguous = planner.ambiguous().map(cardTitle)
+      report.unchanged = !report.written && !report.ambiguous.length
       toast(importSummary(report))
       onViewChange('suggested')
     } catch (err) {

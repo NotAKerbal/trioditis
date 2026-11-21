@@ -472,17 +472,80 @@ function exactKey(id: Identifier): string {
   return `tel:${international ? '+' : ''}${digits}`
 }
 
+/** Two lists of fields as one: the card's own first, then the file's it doesn't have yet. */
+function unionFields(
+  mine: readonly PersonField[] | undefined,
+  theirs: readonly PersonField[] | undefined,
+  key: (value: string) => string,
+): PersonField[] | undefined {
+  const out = [...(mine ?? [])]
+  const seen = new Set(out.map((f) => key(f.value)))
+  for (const f of theirs ?? []) {
+    if (seen.has(key(f.value))) continue
+    seen.add(key(f.value))
+    out.push(f)
+  }
+  return out.length ? out : undefined
+}
+
+const phoneKey = (value: string) => {
+  const d = phoneDigits(value)
+  return d ? `tel:${d.international ? '+' : ''}${d.digits}` : value.trim()
+}
+const handleKey = (value: string) => {
+  const id = parseIdentifier(value)
+  return id ? bucket(id) : value.trim().toLowerCase()
+}
+
 /**
- * The cards an import makes or changes, worked out from the cards there are now. A card whose
- * UID is already here gets the file's fields, keeping its links (and its photo, if the file
- * has none); a UID the file repeats is one card. An entry without a UID match (a CSV row has
- * no UID, and Google's and Outlook's exports have none) goes to a card already here that is
- * the same person: the same name, and the same number, email or username exactly (or neither
- * has any), so importing the same file twice doesn't make everyone twice. Each card here is
- * matched by one entry at most. Every other entry gets the key `keyFor` gives its place in the
- * file, so working the import out again later (after another device changed the address book)
- * gives the same cards, and keeps the links they have by then. Cards that wouldn't change are
- * left out.
+ * A card already here with what a file says about the same person added to it. Reimporting an
+ * older export mustn't take away what was added here since: numbers, emails, usernames, links
+ * and addresses are put together, a note written here stays, and a field the file leaves out
+ * stays as it is. A field the file has replaces the card's (a new job title, say).
+ */
+function merged(now: PersonPlaintext, file: PersonPlaintext): PersonPlaintext {
+  const next: PersonPlaintext = { ...now }
+  for (const [key, value] of Object.entries(file)) {
+    if (value === undefined || value === '' || (Array.isArray(value) && !value.length)) continue
+    next[key] = value
+  }
+  const set = (key: 'phones' | 'emails' | 'handles' | 'urls', list: PersonField[] | undefined) => {
+    if (list) next[key] = list
+    else delete next[key]
+  }
+  set('phones', unionFields(now.phones, file.phones, phoneKey))
+  set(
+    'emails',
+    unionFields(now.emails, file.emails, (v) => normalEmail(v)),
+  )
+  set('handles', unionFields(now.handles, file.handles, handleKey))
+  set(
+    'urls',
+    unionFields(now.urls, file.urls, (v) => v.trim()),
+  )
+  const addresses = [...(now.addresses ?? [])]
+  for (const a of file.addresses ?? []) {
+    if (!addresses.some((b) => JSON.stringify(b) === JSON.stringify(a))) addresses.push(a)
+  }
+  if (addresses.length) next.addresses = addresses
+  if (now.note?.trim()) next.note = now.note
+  if (now.links?.length) next.links = now.links
+  if (now.uid) next.uid = now.uid
+  return next
+}
+
+/**
+ * The cards an import makes or changes, worked out from the cards there are now. An entry goes
+ * to a card already here that is the same person: one with its UID, or, for an entry without
+ * a UID match (a CSV row has none, and Google's and Outlook's exports have none), the one card
+ * with the same name and the same number, email or username exactly. A name alone never
+ * matches: two people can share one. An entry that matches several cards isn't guessed at; it's
+ * left out and reported through `ambiguous`. A matched card keeps what it has and gains what
+ * the file adds (merged), so importing a file again, even an older one, takes nothing away; a
+ * UID the file repeats is one card, and each card here is matched by one entry at most. Every
+ * other entry gets the key `keyFor` gives its place in the file, so working the import out
+ * again later (after another device changed the address book) gives the same cards, and keeps
+ * the links they have by then. Cards that wouldn't change are left out.
  */
 export function planImport(
   existing: readonly Person[],
@@ -495,6 +558,8 @@ export function planImport(
    * later plan sees as existing.
    */
   matchable: (personKey: string) => boolean = () => true,
+  /** Told of each entry left out because it matches more than one card. */
+  ambiguous?: (index: number) => void,
 ): Person[] {
   const byUid = new Map(existing.filter((p) => p.card.uid).map((p) => [p.card.uid!, p]))
   const byKey = new Map(existing.map((p) => [p.personKey, p]))
@@ -509,32 +574,31 @@ export function planImport(
   const claimed = new Set<string>()
   const keyForUid = new Map<string, string>()
   const out = new Map<string, Person>()
-  const sameAs = (card: PersonPlaintext): string | undefined => {
+  /** The one card this entry is, null when several could be, undefined when none is. */
+  const sameAs = (card: PersonPlaintext): string | null | undefined => {
     const ids = cardIdentifiers(card).map(exactKey)
-    const match = (byName.get(normalName(card.name)) ?? []).find(
+    if (!ids.length) return undefined
+    const matches = (byName.get(normalName(card.name)) ?? []).filter(
       ({ person, ids: theirs }) =>
-        !claimed.has(person.personKey) &&
         // Cards from two sources with their own UIDs are two cards.
-        (!card.uid || !person.card.uid) &&
-        (ids.length || theirs.size ? ids.some((id) => theirs.has(id)) : true),
+        (!card.uid || !person.card.uid) && ids.some((id) => theirs.has(id)),
     )
-    return match?.person.personKey
+    if (matches.length > 1) return null
+    const only = matches[0]?.person.personKey
+    return only && !claimed.has(only) ? only : undefined
   }
   imported.forEach((card, index) => {
-    const personKey =
-      byUid.get(card.uid ?? '')?.personKey ??
-      (card.uid ? keyForUid.get(card.uid) : undefined) ??
-      sameAs(card) ??
-      keyFor(index)
+    let personKey = byUid.get(card.uid ?? '')?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined)
+    if (!personKey) {
+      const same = sameAs(card)
+      if (same === null) return ambiguous?.(index)
+      personKey = same ?? keyFor(index)
+    }
     if (card.uid) keyForUid.set(card.uid, personKey)
     claimed.add(personKey)
     placed?.(index, personKey)
-    const now = byKey.get(personKey)?.card
-    const next: PersonPlaintext = { ...card }
-    if (now?.links?.length) next.links = now.links
-    if (!next.photo && now?.photo) next.photo = now.photo
-    if (!next.uid && now?.uid) next.uid = now.uid
-    out.set(personKey, { personKey, card: next })
+    const now = out.get(personKey)?.card ?? byKey.get(personKey)?.card
+    out.set(personKey, { personKey, card: now ? merged(now, card) : { ...card } })
   })
   return [...out.values()].filter((p) => JSON.stringify(byKey.get(p.personKey)?.card) !== JSON.stringify(p.card))
 }
