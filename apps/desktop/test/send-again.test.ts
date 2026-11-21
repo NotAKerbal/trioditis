@@ -62,8 +62,8 @@ describe('sending again', () => {
 
   it('goes by what the server says, not by what the list shows, so leaving the chat changes nothing', async () => {
     // The server had the ID already: nothing went this time.
-    expect(await sendAgain('cccccccccccccccc1', async () => 'sent' as const)).toBe('used')
-    expect(await sendAgain('cccccccccccccccc2', async () => 'scheduled' as const)).toBe('used')
+    expect(await sendAgain('cccccccccccccccc1', async () => ({ already: 'send' }))).toBe('used')
+    expect(await sendAgain('cccccccccccccccc2', async () => ({ already: 'scheduled' }))).toBe('used')
     expect(await sendAgain('cccccccccccccccc3', async () => 'queued' as const)).toBe('sent')
   })
 

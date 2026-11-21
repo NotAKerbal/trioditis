@@ -3,7 +3,7 @@ import { internal } from './_generated/api'
 import type { Doc } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
-import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
@@ -104,7 +104,7 @@ export const copies = query({
 /**
  * Schedules a message. Sealed exactly as for `messages.send`. `clientMessageId` is the send's
  * ID when it goes out, so scheduling the same ID twice does nothing. Returns the scheduled ID,
- * or what the ID was used for already (`sent`, `scheduled`).
+ * or what the ID was used for already and where that stands (`alreadyUsed`, lib/send.ts).
  */
 export const create = mutation({
   args: {
@@ -115,7 +115,7 @@ export const create = mutation({
     sendAt: v.number(),
     replyTo: v.optional(v.string()),
   },
-  returns: v.union(v.literal('sent'), v.literal('scheduled'), v.id('scheduledSends')),
+  returns: v.union(v.id('scheduledSends'), alreadyUsed),
   handler: async (ctx, { chatId, sendAt, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)

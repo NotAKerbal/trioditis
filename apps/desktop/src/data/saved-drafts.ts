@@ -8,10 +8,21 @@ import { tryOpen } from '~/lib/sealed.ts'
 // unlocks; anything saved by another account, or for another key, doesn't open, and is left out.
 //
 // Each chat has entries of its own, so tabs saving different chats never touch each other's:
-//   trioditis.draft.<user>.<chat>              its draft, with who wrote it (`w`)
-//   trioditis.draftSending.<user>.<chat>.<id>  a send or schedule under way, until it settles
-//   trioditis.draftHeld.<user>.<chat>          messages waiting for the composer to be free
-//   trioditis.draftSent.<user>.<chat>          the last draft sent from it, by client message ID
+//   trioditis.draft.<user>.<chat>                   its draft, with which write it is (`w`)
+//   trioditis.draftHeld.<user>.<chat>.<id>          one message waiting for the composer
+//   trioditis.draftSending.<user>.<chat>.<sendId>   a send or schedule under way, until it settles
+//   trioditis.draftSent.<user>.<chat>               the last draft sent from it, by client message ID
+//
+// Two rules keep them right across tabs and crashes:
+//
+// I1. Every change to a chat's entries runs inside the Web Locks lock
+//     `trioditis.drafts.<user>.<chat>` (withChatLock), reading storage again inside it, so one
+//     tab's read-then-write never interleaves with another's. Without Web Locks, as before.
+// I2. Write before delete. A copy that moves (a send under way back to the draft, a held message
+//     into the composer, a scheduled message being cancelled into a held one) is deleted only
+//     once where it's going is written. A write that fails deletes nothing, and the chat stays
+//     unsaved, so leaving the page asks first. A tab deletes only entries it wrote or read
+//     itself: never one another tab saved that it hasn't seen.
 
 export interface SavedDraft<Reply> {
   text: string
@@ -39,18 +50,18 @@ const prefix = (kind: Kind, userId: string) => `trioditis.${kind}.${userId}.`
 export const savedDraftKey = (userId: string, chatId: string) => `${prefix('draft', userId)}${chatId}`
 const sendingKey = (userId: string, chatId: string, sendId: string) =>
   `${prefix('draftSending', userId)}${chatId}.${sendId}`
-const heldKey = (userId: string, chatId: string) => `${prefix('draftHeld', userId)}${chatId}`
+const heldKey = (userId: string, chatId: string, id: string) => `${prefix('draftHeld', userId)}${chatId}.${id}`
 const sentKey = (userId: string, chatId: string) => `${prefix('draftSent', userId)}${chatId}`
 
-/** What a storage key keeps for this person: its kind and chat (and send), or null. */
-export function keyOf(userId: string, key: string | null) {
+/** What a storage key keeps for this person: its kind, chat and (held or sending) ID; or null. */
+export function keyOf(userId: string, key: string | null): { kind: Kind; chatId: string; sub: string } | null {
   for (const kind of ['draftSending', 'draftHeld', 'draftSent', 'draft'] as const) {
     const p = prefix(kind, userId)
     if (!key?.startsWith(p)) continue
     const rest = key.slice(p.length)
-    if (kind !== 'draftSending') return rest ? { kind, chatId: rest, sendId: '' } : null
+    if (kind === 'draft' || kind === 'draftSent') return rest ? { kind, chatId: rest, sub: '' } : null
     const dot = rest.lastIndexOf('.')
-    return dot > 0 ? { kind, chatId: rest.slice(0, dot), sendId: rest.slice(dot + 1) } : null
+    return dot > 0 && dot < rest.length - 1 ? { kind, chatId: rest.slice(0, dot), sub: rest.slice(dot + 1) } : null
   }
   return null
 }
@@ -63,6 +74,13 @@ export function keyOf(userId: string, key: string | null) {
  */
 export function draftSendId(id: string, text: string, replyEventId: string | undefined): string {
   return `d_${digest(`trioditis/draft-send/v1/${id}\n${replyEventId ?? ''}\n${text.trim()}`)}`
+}
+
+/** Runs `work` holding the chat's drafts lock (I1), or straight away where there are no Web Locks. */
+export function withChatLock<T>(userId: string, chatId: string, work: () => T | Promise<T>): Promise<T> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  if (!locks) return Promise.resolve().then(work)
+  return locks.request(`trioditis.drafts.${userId}.${chatId}`, work) as Promise<T>
 }
 
 function json(value: string | null): Record<string, unknown> | null {
@@ -80,64 +98,33 @@ const seal = (value: unknown, owner: Owner, chatId: string) =>
     ownerUserId: owner.userId,
     objectId: chatId,
   })
-const open = <T>(sealed: unknown, owner: Owner, chatId: string) =>
-  sealed && typeof sealed === 'object'
-    ? tryOpen<T>(sealed as Envelope, owner.keyPair, 'draft', owner.userId, chatId)
-    : null
 
-/** Which write a stored draft is, so a tab removes only one it wrote or read itself. */
-export const draftWriter = (storage: DraftStorage, userId: string, chatId: string): string | null => {
-  const w = json(storage.getItem(savedDraftKey(userId, chatId)))?.w
-  return typeof w === 'string' ? w : null
-}
+const sealedCopy = <Reply>(owner: Owner, chatId: string, copy: SavedDraft<Reply>, extra: object = {}) =>
+  JSON.stringify({ v: 1, id: copy.id, sealed: seal({ text: copy.text, reply: copy.reply }, owner, chatId), ...extra })
 
-/** Saves a chat's draft; returns this write's mark (`w`), to know it again. Throws if storage refuses. */
-export function writeDraft<Reply>(storage: DraftStorage, owner: Owner, chatId: string, draft: SavedDraft<Reply>) {
-  const w = crypto.randomUUID()
-  const sealed = seal({ text: draft.text, reply: draft.reply }, owner, chatId)
-  storage.setItem(savedDraftKey(owner.userId, chatId), JSON.stringify({ v: 1, id: draft.id, w, sealed }))
-  return w
-}
-
-/**
- * Removes a chat's saved draft, but only the one `w` names: what this tab wrote or brought back.
- * Another tab's newer draft for the chat stays. Says whether it went.
- */
-export function removeDraftIfOurs(storage: DraftStorage, userId: string, chatId: string, w: string | undefined) {
-  if (!w || draftWriter(storage, userId, chatId) !== w) return false
-  storage.removeItem(savedDraftKey(userId, chatId))
-  return true
-}
-
-export function writeSending<Reply>(
-  storage: DraftStorage,
+function openCopy<Reply>(
+  value: string | null,
   owner: Owner,
   chatId: string,
-  sendId: string,
-  draft: SavedDraft<Reply>,
-) {
-  const sealed = seal({ text: draft.text, reply: draft.reply }, owner, chatId)
-  storage.setItem(sendingKey(owner.userId, chatId, sendId), JSON.stringify({ v: 1, id: draft.id, sealed }))
+): (SavedDraft<Reply> & { w?: string }) | null {
+  const entry = json(value)
+  if (entry?.v !== 1 || typeof entry.id !== 'string' || !entry.id || !entry.sealed || typeof entry.sealed !== 'object')
+    return null
+  const opened = tryOpen<{ text: unknown; reply?: Reply }>(
+    entry.sealed as Envelope,
+    owner.keyPair,
+    'draft',
+    owner.userId,
+    chatId,
+  )
+  if (!opened || typeof opened.text !== 'string') return null
+  return {
+    text: opened.text,
+    reply: opened.reply ?? null,
+    id: entry.id,
+    ...(typeof entry.w === 'string' ? { w: entry.w } : {}),
+  }
 }
-
-export const removeSending = (storage: DraftStorage, userId: string, chatId: string, sendId: string) =>
-  storage.removeItem(sendingKey(userId, chatId, sendId))
-
-/** Saves a chat's held messages (none removes them). */
-export function writeHeld<Reply>(
-  storage: DraftStorage,
-  owner: Owner,
-  chatId: string,
-  list: { text: string; reply: Reply | null; id?: string }[],
-) {
-  const key = heldKey(owner.userId, chatId)
-  if (!list.length) return storage.removeItem(key)
-  storage.setItem(key, JSON.stringify({ v: 1, sealed: seal(list, owner, chatId) }))
-}
-
-/** Notes that `sendId` took the chat's draft, for other tabs and the next load. */
-export const writeSent = (storage: DraftStorage, userId: string, chatId: string, sendId: string) =>
-  storage.setItem(sentKey(userId, chatId), JSON.stringify({ v: 1, sent: sendId }))
 
 /** The send a stored sent note names, if `value` is one. */
 export function parseSent(value: string | null): string | null {
@@ -147,14 +134,14 @@ export function parseSent(value: string | null): string | null {
 
 export interface Loaded<Reply> {
   drafts: Map<string, SavedDraft<Reply> & { w: string }>
-  sending: { chatId: string; sendId: string; draft: SavedDraft<Reply> }[]
-  held: Map<string, { text: string; reply: Reply | null; id?: string }[]>
+  held: { chatId: string; copy: SavedDraft<Reply> }[]
+  sending: { chatId: string; sendId: string; copy: SavedDraft<Reply> }[]
   sent: Map<string, string>
 }
 
 /** Everything saved for this person that opens with their key. */
 export function loadAll<Reply>(storage: DraftStorage, owner: Owner): Loaded<Reply> {
-  const out: Loaded<Reply> = { drafts: new Map(), sending: [], held: new Map(), sent: new Map() }
+  const out: Loaded<Reply> = { drafts: new Map(), held: [], sending: [], sent: new Map() }
   const keys: string[] = []
   for (let i = 0; i < storage.length; i++) keys.push(storage.key(i) ?? '')
   for (const key of keys) {
@@ -166,22 +153,97 @@ export function loadAll<Reply>(storage: DraftStorage, owner: Owner): Loaded<Repl
       if (sent) out.sent.set(at.chatId, sent)
       continue
     }
-    const entry = json(value)
-    if (entry?.v !== 1) continue
-    if (at.kind === 'draftHeld') {
-      const list = open<{ text: string; reply: Reply | null; id?: string }[]>(entry.sealed, owner, at.chatId)
-      if (Array.isArray(list))
-        out.held.set(
-          at.chatId,
-          list.filter((d) => typeof d?.text === 'string'),
-        )
-      continue
-    }
-    const opened = open<{ text: unknown; reply?: Reply }>(entry.sealed, owner, at.chatId)
-    if (!opened || typeof opened.text !== 'string' || typeof entry.id !== 'string') continue
-    const draft = { text: opened.text, reply: opened.reply ?? null, id: entry.id }
-    if (at.kind === 'draftSending') out.sending.push({ chatId: at.chatId, sendId: at.sendId, draft })
-    else if (typeof entry.w === 'string') out.drafts.set(at.chatId, { ...draft, w: entry.w })
+    const copy = openCopy<Reply>(value, owner, at.chatId)
+    if (!copy) continue
+    const { w, ...draft } = copy
+    if (at.kind === 'draft' && w) out.drafts.set(at.chatId, { ...draft, w })
+    // A held message's key names its identity: one whose doesn't match isn't trusted.
+    if (at.kind === 'draftHeld' && at.sub === draft.id) out.held.push({ chatId: at.chatId, copy: draft })
+    if (at.kind === 'draftSending') out.sending.push({ chatId: at.chatId, sendId: at.sub, copy: draft })
   }
   return out
 }
+
+/** What this tab wants stored for a chat, from its memory (drafts.ts). */
+export interface ChatWant<Reply> {
+  /** The composer's draft; null when empty. */
+  draft: SavedDraft<Reply> | null
+  /** Whether the draft changed since this tab last saved it. */
+  draftChanged: boolean
+  held: SavedDraft<Reply>[]
+  sending: Map<string, SavedDraft<Reply>>
+  /** Sends that took the chat's draft, to note for other tabs. */
+  sent: string[]
+}
+
+/** What this tab has stored for a chat or read from it: the only entries it may delete (I2). */
+export interface ChatKnown {
+  /** The mark of the draft write this tab made or read. */
+  w: string | undefined
+  held: Set<string>
+  sending: Set<string>
+}
+
+export const newKnown = (): ChatKnown => ({ w: undefined, held: new Set(), sending: new Set() })
+
+/**
+ * Brings a chat's stored entries to what `want` says, under I2: everything to write first, and
+ * only if all of that was written, the deletions, of entries `known` says this tab wrote or read.
+ * Call inside withChatLock (I1). Says whether everything was saved; if not, nothing was deleted.
+ */
+export function syncChat<Reply>(
+  storage: DraftStorage,
+  owner: Owner,
+  chatId: string,
+  want: ChatWant<Reply>,
+  known: ChatKnown,
+): boolean {
+  const { userId } = owner
+  try {
+    for (const sent of want.sent) storage.setItem(sentKey(userId, chatId), JSON.stringify({ v: 1, sent }))
+    if (want.draft && want.draftChanged) {
+      const w = crypto.randomUUID()
+      storage.setItem(savedDraftKey(userId, chatId), sealedCopy(owner, chatId, want.draft, { w }))
+      known.w = w
+    }
+    for (const copy of want.held)
+      if (!known.held.has(copy.id)) {
+        storage.setItem(heldKey(userId, chatId, copy.id), sealedCopy(owner, chatId, copy))
+        known.held.add(copy.id)
+      }
+    for (const [sendId, copy] of want.sending)
+      if (!known.sending.has(sendId)) {
+        storage.setItem(sendingKey(userId, chatId, sendId), sealedCopy(owner, chatId, copy))
+        known.sending.add(sendId)
+      }
+  } catch {
+    return false
+  }
+  // Everything is where it's going: now what's moved on can go.
+  if (!want.draft && want.draftChanged && known.w) {
+    // Only the draft this tab wrote or read; another tab's newer one stays.
+    if (json(storage.getItem(savedDraftKey(userId, chatId)))?.w === known.w)
+      storage.removeItem(savedDraftKey(userId, chatId))
+    known.w = undefined
+  }
+  const heldNow = new Set(want.held.map((c) => c.id))
+  for (const id of known.held)
+    if (!heldNow.has(id)) {
+      storage.removeItem(heldKey(userId, chatId, id))
+      known.held.delete(id)
+    }
+  for (const sendId of known.sending)
+    if (!want.sending.has(sendId)) {
+      storage.removeItem(sendingKey(userId, chatId, sendId))
+      known.sending.delete(sendId)
+    }
+  return true
+}
+
+/** Saves one held message on its own, before what it's a copy of goes (a scheduled cancel). */
+export function writeHeld<Reply>(storage: DraftStorage, owner: Owner, chatId: string, copy: SavedDraft<Reply>) {
+  storage.setItem(heldKey(owner.userId, chatId, copy.id), sealedCopy(owner, chatId, copy))
+}
+
+export const removeHeld = (storage: DraftStorage, userId: string, chatId: string, id: string) =>
+  storage.removeItem(heldKey(userId, chatId, id))

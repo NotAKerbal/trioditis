@@ -119,12 +119,48 @@ describe('two tabs changing preferences', () => {
     // A notification is due: what's stored says previews, but the person turned them off.
     expect(tab.currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
     expect(tab.shownPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
-    // Once a save goes through, the choices are stored.
+    // Saving another preference later never writes them as a side effect; they still apply here.
     vi.stubGlobal('localStorage', {
       getItem: (k: string) => stored.get(k) ?? null,
       setItem: (k: string, v: string) => void stored.set(k, v),
     })
     tab.setPref('theme', 'dark')
-    expect(JSON.parse(stored.get(KEY)!)).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
+    expect(JSON.parse(stored.get(KEY)!)).toMatchObject({
+      theme: 'dark',
+      notifications: true,
+      notificationDetail: 'message',
+    })
+    expect(tab.currentPrefs()).toMatchObject({ theme: 'dark', notifications: false, notificationDetail: 'hidden' })
+  })
+
+  it('drop an unsaved choice once another tab saves that preference', async () => {
+    stored.set(KEY, JSON.stringify({ notificationDetail: 'message' }))
+    const tab = await freshTab()
+    const refuse = () => {
+      throw new Error('quota')
+    }
+    vi.stubGlobal('localStorage', { getItem: (k: string) => stored.get(k) ?? null, setItem: refuse })
+    tab.setPref('notificationDetail', 'sender')
+    expect(tab.currentPrefs().notificationDetail).toBe('sender')
+    // Later, another tab chooses Nothing: that newer choice wins here too.
+    otherTabSaves({ notificationDetail: 'hidden' })
+    expect(tab.currentPrefs().notificationDetail).toBe('hidden')
+    // And this tab's old choice doesn't come back when the other tab moves on.
+    otherTabSaves({ notificationDetail: 'message' })
+    expect(tab.currentPrefs().notificationDetail).toBe('message')
+  })
+
+  it('never show more in notifications from a choice that wasn’t saved', async () => {
+    stored.set(KEY, JSON.stringify({ notifications: false, notificationDetail: 'hidden' }))
+    const tab = await freshTab()
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: () => {
+        throw new Error('quota')
+      },
+    })
+    tab.setPref('notificationDetail', 'message')
+    tab.setPref('notifications', true)
+    expect(tab.currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
   })
 })

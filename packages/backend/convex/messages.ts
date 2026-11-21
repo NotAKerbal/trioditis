@@ -10,7 +10,7 @@ import { markOwnReadRange as markRange } from './lib/ingest'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
-import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
 /** The most messages one page holds. */
@@ -115,8 +115,9 @@ const _feedMatchesCore: SameShape<keyof Infer<typeof arrivalFeed>, keyof Arrival
  *
  * `clientMessageId` makes the send idempotent end to end: sending the same ID again does
  * nothing. Retrying a failed or unknown send uses a new ID, which the person chooses to do.
- * Returns `queued` for a new send, or what the ID was used for already (`sent`, `scheduled`),
- * so a client can say what happened rather than report a send that wasn't this one.
+ * Returns `queued` for a new send, or what the ID was used for already and where that stands
+ * (`alreadyUsed`), so a client can say what happened rather than report a send that wasn't
+ * this one.
  */
 export const send = mutation({
   args: {
@@ -126,7 +127,7 @@ export const send = mutation({
     copy: envelope,
     replyTo: v.optional(v.string()),
   },
-  returns: v.union(v.literal('queued'), v.literal('sent'), v.literal('scheduled')),
+  returns: v.union(v.literal('queued'), alreadyUsed),
   handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)

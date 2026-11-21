@@ -1,7 +1,7 @@
-import { ConvexError, type Infer } from 'convex/values'
+import { ConvexError, v, type Infer } from 'convex/values'
 import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx, QueryCtx } from '../_generated/server'
-import type { envelope } from '../validators'
+import { deliveryState, type envelope } from '../validators'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './envelope'
 import { sortKey } from './ingest'
 import { noteMessage } from './lastMessage'
@@ -24,24 +24,47 @@ export interface SendInput {
 }
 
 /**
- * What `clientMessageId` has been used for by this person: a send, a scheduled send, or
- * nothing yet (null). A scheduled send that has gone out was a send too, and says so.
+ * What a `clientMessageId` was already used for, as `messages.send` and `scheduled.create`
+ * return it when it was: a send, with its copy's delivery state (null once that copy was
+ * discarded), or a scheduled send that hasn't gone out, with where it stands.
+ */
+export const alreadyUsed = v.union(
+  v.object({ already: v.literal('send'), delivery: v.union(v.null(), deliveryState) }),
+  v.object({
+    already: v.literal('scheduled'),
+    state: v.union(v.literal('scheduled'), v.literal('cancelled'), v.literal('failed')),
+  }),
+)
+export type AlreadyUsed = Infer<typeof alreadyUsed>
+
+/**
+ * What `clientMessageId` has been used for by this person, or null if nothing yet. A
+ * scheduled send that has gone out was a send too, and says so.
  */
 export async function clientMessageIdUsed(
   ctx: QueryCtx,
   userId: string,
   clientMessageId: string,
-): Promise<'sent' | 'scheduled' | null> {
+): Promise<AlreadyUsed | null> {
   const sent = await ctx.db
     .query('outbox')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  if (sent) return 'sent'
+  if (sent) {
+    const copy = await ctx.db
+      .query('messages')
+      .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
+      .first()
+    return { already: 'send', delivery: copy ? (copy.delivery ?? null) : null }
+  }
   const scheduled = await ctx.db
     .query('scheduledSends')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  return scheduled ? 'scheduled' : null
+  if (!scheduled) return null
+  // `sent` has its outbox row, found above; one in between still counts as pending.
+  const state = scheduled.state === 'cancelled' || scheduled.state === 'failed' ? scheduled.state : 'scheduled'
+  return { already: 'scheduled', state }
 }
 
 /** Refuses a send that can't go out as given. */

@@ -1,9 +1,8 @@
 import { generateKeyPair, ready } from '@trioditis/crypto'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   adoptDraft,
   allHeld,
-  allSending,
   beginSend,
   clearSentDraft,
   endSend,
@@ -17,59 +16,89 @@ import {
 } from '../src/data/drafts.ts'
 import {
   draftSendId,
-  draftWriter,
   keyOf,
   loadAll,
+  newKnown,
   parseSent,
-  removeDraftIfOurs,
-  removeSending,
   savedDraftKey,
-  writeDraft,
+  syncChat,
+  withChatLock,
   writeHeld,
-  writeSending,
-  writeSent,
+  type ChatKnown,
+  type ChatWant,
   type DraftStorage,
 } from '../src/data/saved-drafts.ts'
 
 beforeAll(ready)
+afterEach(() => vi.unstubAllGlobals())
 
-function memory(): DraftStorage & { data: Map<string, string> } {
+/** Storage two tabs share; `refuse` makes every write fail, as a full one does. */
+function memory(): DraftStorage & { data: Map<string, string>; refuse: boolean } {
   const data = new Map<string, string>()
-  return {
+  const store = {
     data,
+    refuse: false,
     get length() {
       return data.size
     },
-    key: (i) => [...data.keys()][i] ?? null,
-    getItem: (k) => data.get(k) ?? null,
-    setItem: (k, v) => void data.set(k, v),
-    removeItem: (k) => void data.delete(k),
+    key: (i: number) => [...data.keys()][i] ?? null,
+    getItem: (k: string) => data.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      if (store.refuse) throw new Error('quota')
+      data.set(k, v)
+    },
+    removeItem: (k: string) => void data.delete(k),
   }
+  return store
 }
 
 type Reply = { eventId: string; body: string }
 const draft = (text: string, id = 'id-1', reply: Reply | null = null) => ({ text, reply, id })
 const owner = () => ({ userId: 'u1', keyPair: generateKeyPair() })
+const want = (w: Partial<ChatWant<Reply>> = {}): ChatWant<Reply> => ({
+  draft: null,
+  draftChanged: false,
+  held: [],
+  sending: new Map(),
+  sent: [],
+  ...w,
+})
 let n = 0
 const chat = () => `chat-${++n}`
 
 describe('drafts saved across a reload', () => {
-  it('come back after a reload, text, reply and identity', () => {
+  it('come back after a reload: draft, held messages and sends under way, each with its identity', () => {
     const storage = memory()
     const me = owner()
-    writeDraft(storage, me, 'c1', draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }))
-    expect(loadAll<Reply>(storage, me).drafts.get('c1')).toMatchObject(
-      draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }),
+    const known = newKnown()
+    syncChat(
+      storage,
+      me,
+      'c1',
+      want({
+        draft: draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }),
+        draftChanged: true,
+        held: [draft('held one', 'h1')],
+        sending: new Map([['d_s', draft('on its way', 's1')]]),
+      }),
+      known,
     )
+    const loaded = loadAll<Reply>(storage, me)
+    expect(loaded.drafts.get('c1')).toMatchObject(draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }))
+    expect(loaded.held).toEqual([{ chatId: 'c1', copy: draft('held one', 'h1') }])
+    expect(loaded.sending).toEqual([{ chatId: 'c1', sendId: 'd_s', copy: draft('on its way', 's1') }])
   })
 
   it('are stored sealed: no text, reply or plaintext of any kind on disk', () => {
     const storage = memory()
-    const me = owner()
     const secret = draft('the secret plan', 'id-1', { eventId: 'wamid.HBgLreplytarget', body: 'quoted words' })
-    writeDraft(storage, me, 'c1', secret)
-    writeSending(storage, me, 'c2', 'd_x', secret)
-    writeHeld(storage, me, 'c3', [secret])
+    syncChat(
+      storage,
+      owner(),
+      'c1',
+      want({ draft: secret, draftChanged: true, held: [{ ...secret, id: 'h1' }], sending: new Map([['d_x', secret]]) }),
+      newKnown(),
+    )
     const raw = [...storage.data.values()].join()
     for (const word of ['secret', 'quoted', 'replytarget']) expect(raw).not.toContain(word)
   })
@@ -77,7 +106,7 @@ describe('drafts saved across a reload', () => {
   it('open only for their owner’s key and their own chat', () => {
     const storage = memory()
     const me = owner()
-    writeDraft(storage, me, 'c1', draft('hi'))
+    syncChat(storage, me, 'c1', want({ draft: draft('hi'), draftChanged: true }), newKnown())
     expect(loadAll(storage, owner()).drafts.size).toBe(0)
     storage.setItem(savedDraftKey('u1', 'c2'), storage.getItem(savedDraftKey('u1', 'c1'))!)
     storage.removeItem(savedDraftKey('u1', 'c1'))
@@ -96,52 +125,112 @@ describe('drafts saved across a reload', () => {
     expect(keyOf('u1', 'trioditis.draftSending.u1.c1.d_abc')).toEqual({
       kind: 'draftSending',
       chatId: 'c1',
-      sendId: 'd_abc',
+      sub: 'd_abc',
     })
+    expect(keyOf('u1', 'trioditis.draftHeld.u1.c1.h1')).toEqual({ kind: 'draftHeld', chatId: 'c1', sub: 'h1' })
     expect(keyOf('u1', 'trioditis.draftSent.u1.c1')).toMatchObject({ kind: 'draftSent', chatId: 'c1' })
     expect(keyOf('u2', savedDraftKey('u1', 'c1'))).toBeNull()
   })
 })
 
-describe('a tab erasing a draft', () => {
-  it('removes only the saved draft it wrote or brought back, not another tab’s newer one', () => {
+describe('write before delete (I2)', () => {
+  it('a send that didn’t go: its copy under way goes only once the draft it’s back in is saved', () => {
     const storage = memory()
     const me = owner()
-    // Tab B opened before tab A saved: B has seen no saved draft for the chat.
-    const seenByB: string | undefined = undefined
-    // A saves its draft.
-    const wA = writeDraft(storage, me, 'c1', draft('from A'))
-    // B types and erases in the same chat: its removal leaves A's draft.
-    expect(removeDraftIfOurs(storage, 'u1', 'c1', seenByB)).toBe(false)
+    const known = newKnown()
+    syncChat(storage, me, 'c1', want({ sending: new Map([['d_x', draft('hi', 's1')]]) }), known)
+    // Back in the composer, but storage refuses: the copy under way stays, and it says so.
+    storage.refuse = true
+    const back = want({ draft: draft('hi', 's1'), draftChanged: true })
+    expect(syncChat(storage, me, 'c1', back, known)).toBe(false)
+    expect(loadAll(storage, me).sending).toHaveLength(1)
+    // Once the draft is written, the copy under way goes.
+    storage.refuse = false
+    expect(syncChat(storage, me, 'c1', back, known)).toBe(true)
+    const loaded = loadAll<Reply>(storage, me)
+    expect(loaded.sending).toEqual([])
+    expect(loaded.drafts.get('c1')?.text).toBe('hi')
+  })
+
+  it('a held message going into the composer: its held copy goes only once the draft is saved', () => {
+    const storage = memory()
+    const me = owner()
+    const known = newKnown()
+    syncChat(storage, me, 'c1', want({ held: [draft('held', 'h1')] }), known)
+    storage.refuse = true
+    const promoted = want({ draft: draft('held', 'h1'), draftChanged: true })
+    expect(syncChat(storage, me, 'c1', promoted, known)).toBe(false)
+    expect(loadAll(storage, me).held).toHaveLength(1)
+    storage.refuse = false
+    syncChat(storage, me, 'c1', promoted, known)
+    expect(loadAll(storage, me).held).toEqual([])
+    expect(loadAll(storage, me).drafts.get('c1')?.id).toBe('h1')
+  })
+})
+
+describe('a tab that hasn’t seen another’s entries', () => {
+  it('doesn’t erase another tab’s newer draft by typing and erasing', () => {
+    const storage = memory()
+    const me = owner()
+    const a = newKnown()
+    const b = newKnown()
+    // B opened before A saved. A saves its draft.
+    syncChat(storage, me, 'c1', want({ draft: draft('from A'), draftChanged: true }), a)
+    // B types and erases in the same chat: A's draft stays.
+    syncChat(storage, me, 'c1', want({ draftChanged: true }), b)
     expect(loadAll(storage, me).drafts.get('c1')?.text).toBe('from A')
     // A erasing its own does remove it.
-    expect(draftWriter(storage, 'u1', 'c1')).toBe(wA)
-    expect(removeDraftIfOurs(storage, 'u1', 'c1', wA)).toBe(true)
+    syncChat(storage, me, 'c1', want({ draftChanged: true }), a)
     expect(loadAll(storage, me).drafts.size).toBe(0)
+  })
+
+  it('doesn’t erase another tab’s held message, one key per message', () => {
+    const storage = memory()
+    const me = owner()
+    const a = newKnown()
+    const b: ChatKnown = newKnown()
+    syncChat(storage, me, 'c1', want({ held: [draft('A’s', 'h1')] }), a)
+    // B holds and releases its own; A's stays.
+    syncChat(storage, me, 'c1', want({ held: [draft('B’s', 'h2')] }), b)
+    syncChat(storage, me, 'c1', want(), b)
+    expect(loadAll(storage, me).held.map((h) => h.copy.id)).toEqual(['h1'])
+  })
+})
+
+describe('the chat lock (I1)', () => {
+  it('runs each change to a chat’s entries in its own lock, one at a time', async () => {
+    const names: string[] = []
+    let tail = Promise.resolve()
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: (name: string, work: () => unknown) => {
+          names.push(name)
+          const run = tail.then(work)
+          tail = run.then(() => undefined)
+          return run
+        },
+      },
+    })
+    const order: string[] = []
+    await Promise.all([
+      withChatLock('u1', 'c1', async () => {
+        order.push('a start')
+        await new Promise((r) => setTimeout(r, 5))
+        order.push('a end')
+      }),
+      withChatLock('u1', 'c1', () => void order.push('b')),
+    ])
+    expect(names).toEqual(['trioditis.drafts.u1.c1', 'trioditis.drafts.u1.c1'])
+    expect(order).toEqual(['a start', 'a end', 'b'])
+  })
+
+  it('still runs where there are no Web Locks', async () => {
+    vi.stubGlobal('navigator', {})
+    expect(await withChatLock('u1', 'c1', () => 7)).toBe(7)
   })
 })
 
 describe('a send under way', () => {
-  it('is saved until it settles, and comes back from a reload as a draft that sends as the same', () => {
-    const a = chat()
-    setDraftText(a, 'see you at 7')
-    const taken = takeDraft<Reply>(a)!
-    const sendId = draftSendId(taken.id, taken.text, undefined)
-    beginSend(a, sendId, taken)
-    expect(allSending()).toEqual([[sendId, { ...taken, chatId: a }]])
-    // The page crashes before the server has it: what's saved is the send under way.
-    const storage = memory()
-    const me = owner()
-    writeSending(storage, me, a, sendId, taken)
-    const loaded = loadAll<Reply>(storage, me)
-    expect(loaded.sending).toEqual([{ chatId: a, sendId, draft: { text: 'see you at 7', reply: null, id: taken.id } }])
-    // Brought back as the same draft: sending it again is the same send ID, so it dedupes.
-    const back = loaded.sending[0]!.draft
-    expect(draftSendId(back.id, back.text, undefined)).toBe(sendId)
-    endSend(sendId, false)
-    expect(allSending()).toEqual([])
-  })
-
   it('is announced when it goes, apart from whatever the composer holds by then', () => {
     const a = chat()
     const heard: string[] = []
@@ -159,10 +248,9 @@ describe('a send under way', () => {
 
   it('leaves a note other tabs and the next load read', () => {
     const storage = memory()
-    writeSent(storage, 'u1', 'c1', 'd_one')
+    syncChat(storage, owner(), 'c1', want({ sent: ['d_one'] }), newKnown())
     expect(parseSent(storage.getItem('trioditis.draftSent.u1.c1'))).toBe('d_one')
     expect(loadAll(storage, owner()).sent.get('c1')).toBe('d_one')
-    removeSending(storage, 'u1', 'c1', 'd_one')
   })
 })
 
@@ -276,23 +364,16 @@ describe('a held message', () => {
     // Saved, then loaded by two tabs.
     const storage = memory()
     const me = owner()
-    writeHeld(storage, me, a, list)
-    const tab1 = loadAll<Reply>(storage, me).held.get(a)![0]!
-    const tab2 = loadAll<Reply>(storage, me).held.get(a)![0]!
+    writeHeld(storage, me, a, { ...list[0]!, id: list[0]!.id! })
+    const tab1 = loadAll<Reply>(storage, me).held[0]!.copy
+    const tab2 = loadAll<Reply>(storage, me).held[0]!.copy
     // Each tab puts it in an empty composer and sends it: the same send ID, so the server dedupes.
     const b = chat()
     const c = chat()
     holdDraft(b, tab1)
     holdDraft(c, tab2)
-    const sendB = draftSendId(getDraft(b).id, getDraft(b).text, undefined)
-    const sendC = draftSendId(getDraft(c).id, getDraft(c).text, undefined)
-    expect(sendB).toBe(sendC)
-    // A restored send under way keeps its identity the same way.
-    writeSending(storage, me, a, 'd_x', { text: 'went?', reply: null, id: 'sent-id' })
-    const [one, two] = [loadAll<Reply>(storage, me).sending[0]!, loadAll<Reply>(storage, me).sending[0]!]
-    expect(one.draft.id).toBe('sent-id')
-    expect(draftSendId(one.draft.id, one.draft.text, undefined)).toBe(
-      draftSendId(two.draft.id, two.draft.text, undefined),
+    expect(draftSendId(getDraft(b).id, getDraft(b).text, undefined)).toBe(
+      draftSendId(getDraft(c).id, getDraft(c).text, undefined),
     )
   })
 })

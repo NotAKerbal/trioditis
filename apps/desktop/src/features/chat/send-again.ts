@@ -40,12 +40,12 @@ function set(clientMessageId: string, state: SendAgainState | undefined) {
  */
 export async function sendAgain(
   clientMessageId: string,
-  send: (replacement: string) => Promise<'queued' | 'sent' | 'scheduled'>,
+  send: (replacement: string) => Promise<'queued' | { already: string }>,
 ): Promise<SendAgainState | undefined> {
   if (states.has(clientMessageId)) return states.get(clientMessageId)
   set(clientMessageId, 'sending')
   const replacement = replacementId(clientMessageId)
-  let outcome: 'queued' | 'sent' | 'scheduled'
+  let outcome: 'queued' | { already: string }
   try {
     outcome = await send(replacement)
   } catch {
