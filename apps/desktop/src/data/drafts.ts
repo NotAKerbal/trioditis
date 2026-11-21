@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react'
 
-// Drafts live in memory only, per chat: they're plaintext, so they never touch the disk. They're
-// kept here, not in a chat pane, so a send or schedule that finishes after the person left the
-// chat and came back changes the draft they're looking at, never a copy of it.
+// Drafts live in memory, per chat, and are kept across a reload only sealed to the person's own
+// key (saved-drafts.ts): plaintext never touches the disk. They're kept here, not in a chat
+// pane, so a send or schedule that finishes after the person left the chat and came back
+// changes the draft they're looking at, never a copy of it.
 //
 // Sending and scheduling both take the text out of the draft when they start, so it can't go
 // out twice, and what's typed meanwhile is a new draft of its own. Only if one doesn't go does
@@ -43,6 +44,14 @@ export function hasDrafts() {
   return false
 }
 
+/** Whether a send or schedule is on its way, its text out of the draft and not yet stored. */
+export const sendsInFlight = () => inFlight > 0
+
+/** Every chat's draft that has something in it. */
+export function allDrafts<Reply>(): [string, Draft<Reply>][] {
+  return ([...store] as [string, Draft<Reply>][]).filter(([, d]) => d.text.trim() || d.reply)
+}
+
 export function getDraft<Reply>(chatId: string): Draft<Reply> {
   return (store.get(chatId) as Draft<Reply> | undefined) ?? EMPTY
 }
@@ -74,17 +83,22 @@ export function restoreDraft<Reply>(chatId: string, text: string, reply: Reply |
   change(chatId, { text: now.text ? `${text}\n${now.text}` : text, reply: now.reply ?? reply })
 }
 
-/** Adds a cancelled scheduled message's text below the draft. Says whether there was one already. */
-export function appendToDraft(chatId: string, text: string): boolean {
-  const now = getDraft(chatId).text
-  change(chatId, { text: now.trim() ? `${now}\n${text}` : text })
-  return !!now.trim()
+/**
+ * Adds a cancelled scheduled message's text below the draft, and its reply if the draft has
+ * none: a reply already set is the newer choice. Says whether there was a draft already.
+ */
+export function appendToDraft<Reply>(chatId: string, text: string, reply: Reply | null = null): boolean {
+  const now = getDraft<Reply>(chatId)
+  change<Reply>(chatId, { text: now.text.trim() ? `${now.text}\n${text}` : text, reply: now.reply ?? reply })
+  return !!now.text.trim()
 }
 
-function subscribe(listener: () => void) {
+/** Calls `listener` after every change to any draft. */
+export function subscribeDrafts(listener: () => void) {
   listeners.add(listener)
   return () => listeners.delete(listener)
 }
+const subscribe = subscribeDrafts
 
 /** A chat's draft, kept up to date with every change, from wherever it came. */
 export function useDraft<Reply>(chatId: string): Draft<Reply> {

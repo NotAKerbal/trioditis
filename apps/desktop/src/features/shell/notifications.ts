@@ -7,7 +7,7 @@ import { toChat, useChatCounts, type Chat } from '~/data/chats.ts'
 import { openLastMessage } from '~/data/last-message.ts'
 import { newArrivals, notificationText, type Cursor } from '~/data/notify.ts'
 import { desktop } from '~/lib/desktop.ts'
-import { usePrefs } from '~/lib/prefs.ts'
+import { currentPrefs } from '~/lib/prefs.ts'
 import { useSession } from '~/lib/session.tsx'
 
 // Some browsers have notifications but can't make one from a page (Chrome on Android wants a
@@ -36,19 +36,21 @@ function show(title: string, options: NotificationOptions): Notification | null 
  */
 export function useMessageNotifications(selectedId: string | undefined, open: (chat: Chat) => void) {
   const session = useSession()
-  const prefs = usePrefs()
   const feed = useQuery(convexQuery(api.messages.arrivals, {})).data
   const unread = useChatCounts()?.inbox.count
   const cursor = useRef<Cursor | undefined>(undefined)
   // As of now, for the effect below and for a click that comes later.
-  const latest = useRef({ selectedId, open, prefs })
-  latest.current = { selectedId, open, prefs }
+  const latest = useRef({ selectedId, open })
+  latest.current = { selectedId, open }
 
   useEffect(() => {
     if (!feed) return
     const { cursor: next, fresh } = newArrivals(cursor.current, feed, Date.now())
     cursor.current = next
-    const { selectedId, prefs } = latest.current
+    const { selectedId } = latest.current
+    // Read from storage now, not as this tab last heard: another tab may have turned them off
+    // or down a moment ago.
+    const prefs = currentPrefs()
     if (!prefs.notifications || !canNotify()) return
     const notified = new Set<string>()
     for (const arrival of fresh) {
@@ -58,8 +60,10 @@ export function useMessageNotifications(selectedId: string | undefined, open: (c
       notified.add(chat.id)
       // The chat the person is reading needs no notification.
       if (chat.id === selectedId && document.visibilityState === 'visible' && document.hasFocus()) continue
-      const text = openLastMessage(arrival.message, session)?.text ?? null
-      const { title, body } = notificationText(chat, text)
+      // Opened only when it's to be shown.
+      const text =
+        prefs.notificationDetail === 'message' ? (openLastMessage(arrival.message, session)?.text ?? null) : null
+      const { title, body } = notificationText(chat, text, prefs.notificationDetail)
       // Tagged by chat: a newer message replaces the last one's notification, and another tab's.
       const notification = show(title, { body, tag: chat.id, icon: '/icon.svg' })
       if (!notification) return

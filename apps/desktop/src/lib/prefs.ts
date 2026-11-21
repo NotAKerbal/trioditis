@@ -5,12 +5,19 @@ import { useSyncExternalStore } from 'react'
 
 export type Theme = 'system' | 'light' | 'dark'
 
+/**
+ * What a notification shows. The system can keep notifications in its history, on disk and
+ * outside the sealing, so it shows neither sender nor text unless the person chooses to.
+ */
+export type NotificationDetail = 'hidden' | 'sender' | 'message'
+
 export interface Prefs {
   theme: Theme
   previews: boolean
   networkBadges: boolean
   /** Notify for new messages, once the browser allows it. */
   notifications: boolean
+  notificationDetail: NotificationDetail
 }
 
 const DEFAULTS: Prefs = {
@@ -18,15 +25,20 @@ const DEFAULTS: Prefs = {
   previews: true,
   networkBadges: true,
   notifications: true,
+  notificationDetail: 'hidden',
 }
 const KEY = 'trioditis.prefs'
+const DETAILS: NotificationDetail[] = ['hidden', 'sender', 'message']
 
 function load(): Prefs {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>
     // Only today's preferences: one that's gone (notificationContent, say) isn't kept or saved.
     const known = Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
-    return { ...DEFAULTS, ...known } as Prefs
+    const loaded = { ...DEFAULTS, ...known } as Prefs
+    // A value this version doesn't know shows the least, never more than was chosen.
+    if (!DETAILS.includes(loaded.notificationDetail)) loaded.notificationDetail = DEFAULTS.notificationDetail
+    return loaded
   } catch {
     return DEFAULTS
   }
@@ -34,6 +46,27 @@ function load(): Prefs {
 
 let prefs = load()
 const listeners = new Set<() => void>()
+
+/**
+ * Reads the preferences again from storage, for a change another tab made: each tab keeps its
+ * own copy, and one left stale would go on showing what the person turned off elsewhere.
+ */
+function reload() {
+  const next = load()
+  if (JSON.stringify(next) === JSON.stringify(prefs)) return
+  prefs = next
+  applyTheme()
+  listeners.forEach((l) => l())
+}
+
+/**
+ * The preferences as stored now, for a decision that can't wait for another tab's change to
+ * arrive, such as whether to show a notification and what it says.
+ */
+export function currentPrefs(): Prefs {
+  reload()
+  return prefs
+}
 
 export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
   prefs = { ...prefs, [key]: value }
@@ -48,14 +81,16 @@ export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
   listeners.forEach((l) => l())
 }
 
+export function subscribePrefs(listener: () => void) {
+  listeners.add(listener)
+  return () => listeners.delete(listener)
+}
+
+/** This tab's copy, as the screen shows it. */
+export const shownPrefs = () => prefs
+
 export function usePrefs(): Prefs {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l)
-      return () => listeners.delete(l)
-    },
-    () => prefs,
-  )
+  return useSyncExternalStore(subscribePrefs, shownPrefs)
 }
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
@@ -66,3 +101,7 @@ export function applyTheme() {
   else delete document.documentElement.dataset.theme
 }
 darkQuery.addEventListener('change', applyTheme)
+// Another tab saved a change (a null key is storage being cleared).
+window.addEventListener('storage', (e) => {
+  if (e.key === KEY || e.key === null) reload()
+})

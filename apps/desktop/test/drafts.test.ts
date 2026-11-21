@@ -67,6 +67,20 @@ describe('drafts, wherever the action that changes them finishes', () => {
     expect(getDraft(a).text).toBe('cancelled\nanother')
   })
 
+  it('puts a cancelled reply’s target back with its text, unless a reply is set already', () => {
+    const a = chat()
+    appendToDraft(a, 'see you then', { eventId: 'e1' })
+    expect(getDraft(a)).toMatchObject({ text: 'see you then', reply: { eventId: 'e1' } })
+    // The reply chosen since is the newer choice.
+    appendToDraft(a, 'and this', { eventId: 'e2' })
+    expect(getDraft(a).reply).toEqual({ eventId: 'e1' })
+    // A cancelled message that wasn't a reply leaves the reply alone.
+    const b = chat()
+    setDraftReply(b, { eventId: 'e3' })
+    appendToDraft(b, 'plain')
+    expect(getDraft(b).reply).toEqual({ eventId: 'e3' })
+  })
+
   it('only ever raises the revision, even through an empty draft', () => {
     const a = chat()
     setDraftText(a, 'x')

@@ -19,6 +19,7 @@ import {
   Bell,
   BellOff,
   Check,
+  ChevronLeft,
   Info,
   MoreHorizontal,
   Pin,
@@ -62,31 +63,40 @@ import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
 import { MediaAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
+import { sendAgain } from './send-again.ts'
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
   /** The open chat no longer exists (deleted, or not the person's). */
   onGone: () => void
+  /** Back to the list, on a narrow screen where the chat covers it. */
+  onBack: () => void
   /** Runs an action that may take the chat off the list; the shell opens the next one if so. */
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
 }
 
-export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
+export function ChatPane({ chatId, onGone, onBack, act }: ChatPaneProps) {
   const chat = useChat(chatId)
   useEffect(() => {
     if (chatId && chat === null) onGone()
   }, [chatId, chat, onGone])
   if (!chatId || !chat) {
     return (
-      <main className="flex min-w-0 flex-1 items-center justify-center bg-surface-2 text-sm text-subtle-foreground">
+      // On a narrow screen the list has the whole width until a chat opens.
+      <main
+        className={cn(
+          'flex min-w-0 flex-1 items-center justify-center bg-surface-2 text-sm text-subtle-foreground',
+          !chatId && 'max-md:hidden',
+        )}
+      >
         {chatId && chat === undefined ? '' : 'No chat open'}
       </main>
     )
   }
-  return <OpenChat key={chat.id} chat={chat} act={act} />
+  return <OpenChat key={chat.id} chat={chat} act={act} onBack={onBack} />
 }
 
-function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
+function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']; onBack: () => void }) {
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
@@ -126,13 +136,16 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
   const scheduledTexts = useScheduledTexts(pending.map((s) => s._id))
   const scheduled = useMemo(
-    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id) })),
+    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id), replyTo: s.replyTo })),
     [pending, scheduledTexts],
   )
 
-  async function sendText(text: string, reply?: string) {
-    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
-    const clientMessageId = newClientId()
+  async function sendText(text: string, reply?: string, clientMessageId = newClientId()) {
+    // Thrown, not only said, so a send again that couldn't go can be tried again.
+    if (!bridgeKey) {
+      toast('This server has no bridge key yet, so nothing can be sent.')
+      throw new Error('No bridge key')
+    }
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
       await send({ chatId: chat.id, clientMessageId, ...sealed, ...(reply ? { replyTo: reply } : {}) })
@@ -187,12 +200,28 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     })
   }
 
+  const byEvent = (eventId: string) => messages.find((m) => m.eventId === eventId)
+
   const name = chat.name
   const muted = chat.muted
+  const toggleArchived = () =>
+    void act(chat.id, async () => {
+      const archiving = !chat.row.archived
+      const ok = await actions.setArchived(chat.id, archiving)
+      if (ok && archiving)
+        toast(`Archived ${name}`, {
+          label: 'Undo',
+          onClick: () => void actions.setArchived(chat.id, false),
+        })
+      return ok
+    })
   return (
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
-        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5">
+        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
+          <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
+            <ChevronLeft className="size-5" />
+          </Button>
           <MediaAvatar
             network={chat.network}
             picture={chat.avatar}
@@ -226,6 +255,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               size="icon"
               aria-label={chat.row.pinned ? 'Unpin' : 'Pin'}
               title={chat.row.pinned ? 'Unpin' : 'Pin'}
+              className="max-sm:hidden"
               onClick={() => void act(chat.id, () => actions.setPinned(chat.id, !chat.row.pinned))}
             >
               {chat.row.pinned ? <PinOff className="size-[18px]" /> : <Pin className="size-[18px]" />}
@@ -271,18 +301,8 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               size="icon"
               aria-label={chat.row.archived ? 'Move to inbox' : 'Archive'}
               title={chat.row.archived ? 'Move to inbox' : 'Archive'}
-              onClick={() =>
-                void act(chat.id, async () => {
-                  const archiving = !chat.row.archived
-                  const ok = await actions.setArchived(chat.id, archiving)
-                  if (ok && archiving)
-                    toast(`Archived ${name}`, {
-                      label: 'Undo',
-                      onClick: () => void actions.setArchived(chat.id, false),
-                    })
-                  return ok
-                })
-              }
+              className="max-sm:hidden"
+              onClick={toggleArchived}
             >
               {chat.row.archived ? <ArchiveRestore className="size-[18px]" /> : <Archive className="size-[18px]" />}
             </Button>
@@ -293,6 +313,17 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {/* On a narrow screen, where the header has no room for their buttons. */}
+                <DropdownMenuItem
+                  className="sm:hidden"
+                  onSelect={() => void act(chat.id, () => actions.setPinned(chat.id, !chat.row.pinned))}
+                >
+                  {chat.row.pinned ? <PinOff /> : <Pin />} {chat.row.pinned ? 'Unpin' : 'Pin'}
+                </DropdownMenuItem>
+                <DropdownMenuItem className="sm:hidden" onSelect={toggleArchived}>
+                  {chat.row.archived ? <ArchiveRestore /> : <Archive />}{' '}
+                  {chat.row.archived ? 'Move to inbox' : 'Archive'}
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void act(chat.id, () => actions.markUnread(chat.id))}>
                   <Bell /> Mark unread
                 </DropdownMenuItem>
@@ -344,8 +375,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
           onSendAgain={(m) => {
-            // A new send with a new client message ID: the person chose to risk a duplicate.
-            if (m.body?.body) void sendText(m.body.body, m.replyTo).catch(() => undefined)
+            // One replacement per message, whatever the clicks: the person chose to risk a
+            // duplicate on the network, once (send-again.ts).
+            const text = m.body?.body
+            if (text && m.clientMessageId) void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id))
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)
@@ -358,7 +391,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               toast(errorMessage(e, 'That message couldn’t be sent.')),
             )
           }
-          onCancelScheduled={(id, body) =>
+          onCancelScheduled={({ id, body, replyTo }) =>
             // Counted like a send until its text is back in the composer: the server's copy is
             // gone once the cancel goes through, so a reload in between would lose it.
             void whileSending(() =>
@@ -369,8 +402,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
                   if (body === null) return toast('Cancelled. It won’t be sent.')
                   if (body === undefined)
                     return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
+                  // A reply goes back as one, to the message it answered, even one not loaded.
+                  const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo)) : null
                   toast(
-                    appendToDraft(chat.id, body)
+                    appendToDraft(chat.id, body, reply)
                       ? 'Cancelled. The message was added below your draft.'
                       : 'Cancelled. The message is back in the composer.',
                   )
@@ -391,7 +426,28 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           disabled={composerBlocked(chat.row, bridge.status)}
         />
       </main>
-      {details ? <DetailsPanel chat={chat} act={act} /> : null}
+      {details ? <DetailsPanel chat={chat} act={act} onClose={() => setDetails(false)} /> : null}
     </>
   )
+}
+
+/**
+ * The message a restored reply answers, when it isn't loaded: the composer shows "a message",
+ * and the send needs only its event ID.
+ */
+function replyStub(eventId: string): Message {
+  return {
+    id: '' as Message['id'],
+    eventId,
+    pending: false,
+    self: false,
+    ghostId: undefined,
+    at: 0,
+    body: null,
+    edited: false,
+    deleted: false,
+    replyTo: undefined,
+    clientMessageId: undefined,
+    delivery: undefined,
+  }
 }

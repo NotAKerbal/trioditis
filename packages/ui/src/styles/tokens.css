@@ -14,16 +14,17 @@
   --border-strong: #d9dde4;
   --scrim: rgb(15 23 42 / 0.32);
 
-  /* Text. */
+  /* Text. Every text colour reads at 4.5:1 or more on every surface, in both themes
+     (apps/desktop/test/contrast.test.ts checks it). */
   --fg: #0f172a;
   --fg-muted: #475569;
-  --fg-subtle: #94a3b8;
+  --fg-subtle: #5b6779;
   /* Text and marks on a coloured fill: avatars, network badges, a switch's thumb. */
   --on-color: #ffffff;
 
   /* The brand accent: the one primary action, selection, unread counts, links. */
-  --accent: #0284c7;
-  --accent-hover: #0369a1;
+  --accent: #0369a1;
+  --accent-hover: #075985;
   --accent-fg: #ffffff;
   --accent-soft: #e0f2fe;
   --accent-ring: #0ea5e9;
@@ -31,10 +32,10 @@
 
   /* Status colours carry meaning only. */
   --success: #16a34a;
-  --warning: #d97706;
+  --warning: #a34a07;
   --warning-soft: #fef3c7;
   --warning-ink: #92400e;
-  --danger: #dc2626;
+  --danger: #b91c1c;
 
   /* Networks, for their small badges. Same in both themes. */
   --net-whatsapp: #25d366;
@@ -106,7 +107,7 @@
 
   --fg: #e9ebf0;
   --fg-muted: #a3aab6;
-  --fg-subtle: #6b7380;
+  --fg-subtle: #8a93a1;
 
   --accent: #38bdf8;
   --accent-hover: #7dd3fc;
