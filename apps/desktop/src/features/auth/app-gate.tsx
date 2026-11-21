@@ -52,7 +52,16 @@ import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
-import { askThrough, confirmSession, keyGateLoad, SLOW_SERVER_MS, type SessionStore } from './gate-load.ts'
+import {
+  askThrough,
+  confirmSession,
+  keyGateLoad,
+  reauthDelay,
+  SLOW_SERVER_MS,
+  wakeableSleep,
+  type SessionStore,
+} from './gate-load.ts'
+import { authRestarts, restartAuth } from '~/lib/auth-epoch.ts'
 import { COLD_START_MS, coldSession, forgetVerified, readVerified, rememberVerified } from '~/lib/verified-session.ts'
 
 /**
@@ -122,10 +131,19 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
       return
     }
     let cancelled = false
-    // Only an answer counts: a request that failed (offline, the server down) says nothing about
-    // the session, so it's asked again, backing off, while the page waits or opens from this
-    // device (useColdSession).
-    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    // Only an answer counts: a request that failed (offline, the server down) or is still under
+    // way says nothing about the session, so it's asked again, backing off, while the page waits
+    // or opens from this device (useColdSession). The wait ends early once the browser is online
+    // again or Convex reconnects, which is when the server can answer.
+    const sleep = wakeableSleep((wake) => {
+      window.addEventListener('online', wake)
+      const stop = convex.subscribeToConnectionState((state) => state.isWebSocketConnected && wake())
+      return () => {
+        window.removeEventListener('online', wake)
+        stop()
+      }
+    })
+    let restart: ReturnType<typeof setTimeout> | undefined
     // Through the provider's store, so an answer after failures signs the page in as well.
     void confirmSession(
       askThrough(authClient.$store.atoms.session as unknown as SessionStore),
@@ -133,9 +151,15 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
       () => cancelled,
     ).then((answer) => {
       if (answer === 'signedOut') setSignedOut(true)
+      // Signed in, yet Convex still isn't (this effect is still running): its token was asked for
+      // while the server was away. Unless it signs in meanwhile, start the provider afresh.
+      if (answer === 'signedIn' && !cancelled) {
+        restart = setTimeout(restartAuth, reauthDelay(authRestarts()))
+      }
     })
     return () => {
       cancelled = true
+      clearTimeout(restart)
     }
   }, [convexSaysSignedOut])
   return signedOut

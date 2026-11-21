@@ -9,6 +9,7 @@ import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
 import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { authClient } from '~/lib/auth-client.ts'
+import { useSession } from '~/lib/session.tsx'
 import { BottomBar } from './bottom-bar.tsx'
 import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
@@ -22,6 +23,7 @@ export function Shell() {
   const navigate = useNavigate({ from: '/' })
   const actions = useChatActions()
   const { data: auth } = authClient.useSession()
+  const session = useSession()
   const [openedUnreadId, setOpenedUnreadId] = useState<string | undefined>()
   const shownRef = useRef<string[] | null>(null)
   // The chats the sidebar has loaded, by ID, so auto-advance can open the next one properly.
@@ -118,7 +120,7 @@ export function Shell() {
           <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
         }
       >
-        <SidebarBoundary onError={() => (shownRef.current = null)}>
+        <SidebarBoundary offline={session.offline} onError={() => (shownRef.current = null)}>
           <Sidebar
             selectedId={selectedId}
             openedUnreadId={openedUnreadId}
