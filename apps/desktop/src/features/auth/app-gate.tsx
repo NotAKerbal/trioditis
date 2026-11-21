@@ -52,7 +52,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
-import { keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
+import { confirmSession, keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
 import { COLD_START_MS, coldSession, forgetVerified, readVerified, rememberVerified } from '~/lib/verified-session.ts'
 
 /**
@@ -123,13 +123,16 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
     }
     let cancelled = false
     // Only an answer counts: a request that failed (offline, the server down) says nothing about
-    // the session, and the page waits, or opens from this device (useColdSession).
-    void authClient.getSession().then(
-      ({ data, error }) => {
-        if (!cancelled && !data && !error) setSignedOut(true)
-      },
-      () => undefined,
-    )
+    // the session, so it's asked again, backing off, while the page waits or opens from this
+    // device (useColdSession).
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    void confirmSession(
+      () => authClient.getSession(),
+      sleep,
+      () => cancelled,
+    ).then((answer) => {
+      if (answer === 'signedOut') setSignedOut(true)
+    })
     return () => {
       cancelled = true
     }

@@ -23,10 +23,12 @@ import {
   isExternalAllowed,
   normalizeServer,
   pageIsReady,
+  proxyCouldNotReach,
   quitsWhenAllClosed,
   sameOrigin,
   serverKind,
   TOO_OLD,
+  unreachableMessage,
 } from './server.ts'
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
@@ -239,6 +241,14 @@ function openServer(origin: string, url = `${origin}/`) {
   })
   win.webContents.on('did-navigate', (_event, _url, code) => (status = code))
   win.webContents.on('did-finish-load', () => {
+    // A proxy's error page for a server that's down loads like any page: at start, it's the picker
+    // with Retry, as when the server can't be reached at all.
+    if (!loaded && proxyCouldNotReach(status) && serverWindow === win) {
+      serverWindow = null
+      showConnect(unreachableMessage(origin, `it answered ${status}`))
+      win.destroy()
+      return
+    }
     loaded = true
     if (status < 200 || status >= 300) return
     // The picker checked the server, but a saved one, `--server` or a reload can bring an older
@@ -279,7 +289,7 @@ function openServer(origin: string, url = `${origin}/`) {
     if (!isMainFrame || loaded || code === -3 || serverWindow !== win) return
     serverWindow = null
     // The picker opens first: with no window left for a moment, the app would quit.
-    showConnect(`Couldn’t reach your server at ${origin} (${description}). Check your connection, then retry.`)
+    showConnect(unreachableMessage(origin, description))
     win.destroy()
   })
   // On a Mac, closing the window keeps the app running for notifications, as Mac apps do.
@@ -361,6 +371,7 @@ async function probe(origin: string): Promise<string | null> {
     net.fetch(url, { cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
   try {
     const page = await get(`${origin}/`)
+    if (proxyCouldNotReach(page.status)) return unreachableMessage(origin, `it answered ${page.status}`)
     const html = page.ok ? await page.text() : undefined
     if (serverKind({ html }) === 'ready') return null
     // The self-hosted bundle publishes /config.json, from before the desktop app too.

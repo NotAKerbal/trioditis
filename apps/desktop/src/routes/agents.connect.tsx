@@ -73,7 +73,9 @@ function Consent({ requestId }: { requestId: string }) {
   // Reached the choice signed in: sign-in has nowhere to bring this tab back to now. Only once the
   // server has answered for this account, not on mount: the app can open from this device before
   // the server confirms anyone (app-gate.tsx, useColdSession), and a sign-in then must still come back.
-  const answered = request !== undefined
+  // The request query alone doesn't check who's asking, so it can answer while the app is open
+  // from this device (`session.offline`); only the gate's confirmed session counts.
+  const answered = request !== undefined && !session.offline
   useEffect(() => {
     if (answered) dropConsentReturn()
   }, [answered])

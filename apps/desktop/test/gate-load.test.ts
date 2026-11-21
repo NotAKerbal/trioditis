@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { keyGateLoad } from '../src/features/auth/gate-load.ts'
+import { confirmSession, keyGateLoad, retryDelay, sessionAnswer } from '../src/features/auth/gate-load.ts'
 
 const base = {
   token: 1 as number | 'failed' | null,
@@ -39,5 +39,55 @@ describe('the key gate before it can decide', () => {
     expect(
       keyGateLoad({ ...base, remote: { failed: false, hasData: true }, local: { pending: false, hasKey: true } }),
     ).toBe('decide')
+  })
+})
+
+describe('confirming the browser is signed out', () => {
+  it('counts only an answer, never a failed request', () => {
+    expect(sessionAnswer({ data: null, error: null })).toBe('signedOut')
+    expect(sessionAnswer({ data: { session: {} }, error: null })).toBe('signedIn')
+    expect(sessionAnswer({ data: null, error: { status: 0 } })).toBe('unknown')
+    expect(sessionAnswer(null)).toBe('unknown')
+  })
+
+  it('backs off from 2 seconds to at most 30', () => {
+    expect([0, 1, 2, 3, 4, 5, 10].map(retryDelay)).toEqual([2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000])
+  })
+
+  it('asks again after each failure until it gets an answer', async () => {
+    const answers: ({ data: unknown; error: unknown } | Error)[] = [
+      new TypeError('Failed to fetch'),
+      { data: null, error: { status: 502 } },
+      { data: null, error: null },
+    ]
+    const waits: number[] = []
+    const result = await confirmSession(
+      async () => {
+        const next = answers.shift()!
+        if (next instanceof Error) throw next
+        return next
+      },
+      async (ms) => void waits.push(ms),
+      () => false,
+    )
+    expect(result).toBe('signedOut')
+    expect(waits).toEqual([2_000, 4_000])
+  })
+
+  it('stops when the page no longer needs to know', async () => {
+    let cancelled = false
+    let asked = 0
+    const result = await confirmSession(
+      async () => {
+        asked++
+        return { data: null, error: { status: 0 } }
+      },
+      async () => {
+        cancelled = true
+      },
+      () => cancelled,
+    )
+    expect(result).toBeNull()
+    expect(asked).toBe(1)
   })
 })

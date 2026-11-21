@@ -223,10 +223,14 @@ What finishes later is fenced on membership meanwhile:
   but their logouts and login cancels. Their other commands are settled as if they ran out of
   time: a send never handed over becomes `failed`, one that may have gone out becomes
   `unknown`. Neither is sent again.
-- **Logouts.** `api.members.removedCleanup` lists removed people whose network accounts aren't
-  confirmed logged out yet: `{ userId, email, removedAt, accounts, pending, failed }`. A logout
-  that ran out of time is queued again by itself; one a bridge host refused can be tried again
-  with `api.members.retryCleanup({ userId, sessionId? })`, which answers `{ queued, left }`.
+- **Logouts.** `api.members.removedCleanup({ paginationOpts })` pages through removed people
+  whose network accounts aren't confirmed logged out yet, newest first: `{ userId, email,
+removedAt, accounts, pending, failed }`. Only cleanups still active are read, however many
+  have finished. An account of theirs that reports in after the removal (a login that finished,
+  or a logged-out account reconnecting) is logged out at once and makes their cleanup active
+  again. A logout that ran out of time is queued again by itself; one a bridge host refused can
+  be tried again with `api.members.retryCleanup({ userId, sessionId? })`, which answers
+  `{ queued, left }`.
 
 Errors: `You can’t remove yourself. Ask another admin.` · `That person isn’t a member of this
 server.` · `The server’s last admin can’t be removed.`

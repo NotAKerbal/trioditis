@@ -9,7 +9,7 @@ import { audit } from './lib/audit'
 import { queueLoginCancel, queueLogout } from './lib/outbox'
 import { issueReset } from './account'
 import { deleteAllAuthRows } from './lib/authRows'
-import { noteCleanup } from './lib/formerMembers'
+import { leftSignedIn, noteCleanup, settleCleanup } from './lib/formerMembers'
 
 // Who is on this server. Accounts start from an invitation; the first account, the admin,
 // starts from the setup token the installer generates (TRIODITIS_SETUP_TOKEN).
@@ -351,39 +351,25 @@ export const removeMember = mutation({
   },
 })
 
-/** A removed member's network accounts not yet confirmed logged out. */
-async function leftSignedIn(ctx: QueryCtx, userId: string) {
-  const accounts = await ctx.db
-    .query('networkAccounts')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .take(REMOVE_LIMIT)
-  return accounts.filter((account) => account.state !== 'LOGGED_OUT')
-}
-
 /**
- * Removed members whose network accounts are still being logged out, for Settings → Members: how
- * many are left, how many wait on the bridge host, and how many failed and can be tried again.
+ * Removed members whose network accounts are still being logged out, for Settings → Members, a
+ * page at a time, newest first: how many are left, how many wait on the bridge host, and how many
+ * failed and can be tried again. Only records still `active` are read, so none is hidden behind
+ * cleanups that finished.
  */
 export const removedCleanup = query({
-  args: {},
-  returns: v.array(
-    v.object({
-      userId: v.string(),
-      email: v.union(v.null(), v.string()),
-      removedAt: v.number(),
-      accounts: v.number(),
-      pending: v.number(),
-      failed: v.number(),
-    }),
-  ),
-  handler: async (ctx) => {
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, { paginationOpts }) => {
     await requireAdmin(ctx)
-    const rows = await ctx.db.query('removedMembers').order('desc').take(100)
-    const out = []
-    for (const row of rows) {
+    const result = await ctx.db
+      .query('removedMembers')
+      .withIndex('by_active', (q) => q.eq('active', true))
+      .order('desc')
+      .paginate(paginationOpts)
+    const page = []
+    for (const row of result.page) {
       const left = await leftSignedIn(ctx, row.userId)
-      if (left.length === 0) continue
-      out.push({
+      page.push({
         userId: row.userId,
         email: row.email ?? null,
         removedAt: row.removedAt,
@@ -392,7 +378,7 @@ export const removedCleanup = query({
         failed: left.filter((account) => !account.logoutPending).length,
       })
     }
-    return out
+    return { ...result, page }
   },
 })
 
@@ -413,7 +399,7 @@ export const retryCleanup = mutation({
     if (!record) throw new ConvexError('There’s nothing left to clean up for that person.')
     const left = await leftSignedIn(ctx, record.userId)
     if (left.length === 0) {
-      await ctx.db.delete(record._id)
+      await settleCleanup(ctx, record.userId)
       return { queued: 0, left: 0 }
     }
     let queued = 0
