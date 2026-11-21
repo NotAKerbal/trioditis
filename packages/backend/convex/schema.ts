@@ -562,6 +562,13 @@ export default defineSchema({
      * `migrations.scheduleCommandDeadlines` schedules one for rows from before that.
      */
     deadlineScheduled: v.optional(v.boolean()),
+    /**
+     * For a send made with `messages.sendAgain`: the original send's client message ID, the
+     * attempt before it, and its place in the chain (1, 2…). See lib/retry.ts.
+     */
+    retryRoot: v.optional(v.string()),
+    retryOf: v.optional(v.string()),
+    retryIndex: v.optional(v.number()),
   })
     // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
     // ones by deadline. Both orders are needed.
@@ -570,7 +577,8 @@ export default defineSchema({
     .index('by_lease', ['state', 'leaseUntil'])
     .index('by_expiry', ['state', 'expiresAt'])
     .index('by_chat', ['chatId', 'state'])
-    .index('by_clientMessageId', ['userId', 'clientMessageId']),
+    .index('by_clientMessageId', ['userId', 'clientMessageId'])
+    .index('by_retryRoot', ['userId', 'retryRoot', 'retryIndex']),
 
   /**
    * The bridge-readable part of a command (a message or login input, sealed to the bridge

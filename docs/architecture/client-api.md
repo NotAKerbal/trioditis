@@ -792,9 +792,19 @@ await convex.mutation(api.messages.send, {
   `{ already: 'scheduled', state }` (`scheduled`, `cancelled` or `failed`; one that has gone
   out is a send). A client should keep the text of one that was cancelled or failed, since it
   never went, and send it again only with a new ID.
-- `api.messages.sendStates({ clientMessageIds })`, at most 100, answers the same for each ID
-  already used, `[{ clientMessageId, used }]`, leaving out unused ones: how a send stands even
-  once its copy is gone from the chat.
+- **Sending again** is decided by the server. Every attempt is a link in a chain from the
+  original send; its outbox row records the original and the attempt before it.
+  `api.messages.retryStates({ clientMessageIds })`, at most 100 IDs of any sends in chains,
+  returns `[{ clientMessageId, state }]` with `state` `{ root, latest, delivery, allowed,
+nextId }`: the original, the latest attempt and its delivery state, and whether another may be
+  made now, with its client message ID. Every send of a chain gets the same answer. Another is
+  allowed only when none has been made and the original failed or may not have gone, or the
+  latest attempt failed: never after one that may have gone. To make it, seal the text for
+  `nextId` exactly as for `messages.send` and call `api.messages.sendAgain({ clientMessageId,
+nextId, forBridge, copy, replyTo? })` with any send of the chain. It returns
+  `{ created, state }`: made only if it's still allowed and `nextId` is still the next one, so
+  repeated clicks, other tabs and stale pages make one attempt per link. Nothing is ever sent
+  again on its own.
 - The send appears in `messages.list` at once as the pending copy, and the network's echo
   replaces it in place.
 

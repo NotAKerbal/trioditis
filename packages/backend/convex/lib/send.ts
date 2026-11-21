@@ -94,7 +94,13 @@ export async function checkSend(ctx: QueryCtx, chat: Doc<'chats'>, input: SendIn
  * Queues a send that has passed `checkSend`: the person's pending copy and the outbox command.
  * Its 24-hour deadline starts now.
  */
-export async function queueSend(ctx: MutationCtx, chat: Doc<'chats'>, input: SendInput) {
+export async function queueSend(
+  ctx: MutationCtx,
+  chat: Doc<'chats'>,
+  input: SendInput,
+  /** For an attempt made with `messages.sendAgain` (lib/retry.ts). */
+  retry?: { root: string; of: string; index: number },
+) {
   const now = Date.now()
   const pendingId = `pending:${input.clientMessageId}`
   const copy = {
@@ -132,6 +138,7 @@ export async function queueSend(ctx: MutationCtx, chat: Doc<'chats'>, input: Sen
       clientMessageId: input.clientMessageId,
       createdAt: now,
       expiresAt: now + SEND_EXPIRY_MS,
+      ...(retry ? { retryRoot: retry.root, retryOf: retry.of, retryIndex: retry.index } : {}),
     },
     input.forBridge,
   )
