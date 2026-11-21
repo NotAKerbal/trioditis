@@ -52,6 +52,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
+import { keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
 
 /**
  * Everything signed in passes through here: the account must be a member of this server, and
@@ -120,7 +121,22 @@ function MemberGate({ children }: { children: ReactNode }) {
     }
   }, [sessionId])
   if (opened.current && sessionId && opened.current !== sessionId) return <Splash />
-  if (me.isPending) return <Splash />
+  if (me.isPending) return <Splash slow />
+  // A failed answer with nothing to go on: say so, rather than a splash that never ends.
+  if (me.isError && me.data === undefined) {
+    return (
+      <LoadFailed
+        what="your account"
+        error={me.error}
+        onRetry={() => void me.refetch()}
+        signOut={
+          <Button block onClick={() => window.location.reload()}>
+            Reload
+          </Button>
+        }
+      />
+    )
+  }
   // The session Convex was given has ended. Loaded afresh, the page asks for a token again and
   // finds none, rather than going on with the one it holds until it expires.
   // A sign-out under way here goes on to the sign-in page itself, with what it must say.
@@ -310,7 +326,27 @@ function KeyGate({
     const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
     return <SessionContext value={session}>{children}</SessionContext>
   }
-  if (token === null || remote.isPending || local.isPending || !remote.data) return <Splash />
+  const load = keyGateLoad({
+    token,
+    remote: { failed: remote.isError, hasData: !!remote.data },
+    local: { pending: local.isPending, hasKey: !!local.data },
+    recoveryCheckPending: !!pendingRecoveryCheck(userId),
+  })
+  if (load === 'openLocal' && local.data) {
+    const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
+    return <SessionContext value={session}>{children}</SessionContext>
+  }
+  if (load === 'failed') {
+    return (
+      <LoadFailed
+        what="your key"
+        error={remote.error}
+        onRetry={() => void remote.refetch()}
+        signOut={<Button onClick={() => void signOutHere(null)}>Sign out</Button>}
+      />
+    )
+  }
+  if (load === 'wait' || !remote.data) return <Splash slow />
   const { state, publicKey, kid, backups } = remote.data
   const here = local.data && local.data.kid === kid ? local.data : null
   const setupFor: SetupFor | null =
@@ -1287,10 +1323,48 @@ export function SignOutButton({
   )
 }
 
-export function Splash() {
+/** The splash. With `slow`, it also says the server is taking a while, once it has. */
+export function Splash({ slow = false }: { slow?: boolean }) {
+  const [late, setLate] = useState(false)
+  useEffect(() => {
+    if (!slow) return
+    const timer = setTimeout(() => setLate(true), SLOW_SERVER_MS)
+    return () => clearTimeout(timer)
+  }, [slow])
   return (
-    <div className="flex h-full items-center justify-center bg-rail" aria-busy="true" aria-label="Loading">
+    <div
+      className="flex h-full flex-col items-center justify-center gap-4 bg-rail"
+      aria-busy="true"
+      aria-label="Loading"
+    >
       <img src="/icon.svg" alt="" className="size-10 opacity-80 motion-safe:animate-pulse" />
+      {late ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          Still trying to reach your server…
+        </p>
+      ) : null}
     </div>
+  )
+}
+
+/** A load the gate needs failed: what went wrong, a retry, and a way out. */
+function LoadFailed({
+  what,
+  error,
+  onRetry,
+  signOut,
+}: {
+  what: string
+  error: unknown
+  onRetry: () => void
+  signOut: ReactNode
+}) {
+  return (
+    <AuthCard title={`Couldn’t load ${what}`} description={errorMessage(error, 'The server didn’t answer.')}>
+      <Button variant="primary" size="lg" block className="mb-2" onClick={onRetry}>
+        Try again
+      </Button>
+      {signOut}
+    </AuthCard>
   )
 }
