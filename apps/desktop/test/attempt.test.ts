@@ -16,6 +16,18 @@ describe('an auth request a form waits on', () => {
     expect(errorMessage(result.error, 'fallback')).toBe(UNREACHABLE)
   })
 
+  it('says the server couldn’t be reached when a proxy answers for one that is down', async () => {
+    for (const status of [502, 503, 504]) {
+      const result = await attempt(async () => ({ data: null, error: { status, statusText: 'Bad Gateway' } }))
+      expect(result.data).toBeNull()
+      expect(errorMessage(result.error, 'That email and password didn’t match.')).toBe(UNREACHABLE)
+    }
+    const wrong = await attempt(async () => ({ data: null, error: { status: 401 } }))
+    expect(errorMessage(wrong.error, 'That email and password didn’t match.')).toBe(
+      'That email and password didn’t match.',
+    )
+  })
+
   it('keeps what went wrong when something else threw', async () => {
     const result = await attempt(async () => {
       throw new Error('out of memory deriving the password')

@@ -43,7 +43,13 @@ export async function attempt<D, E>(
   call: () => Promise<{ data: D; error: E }>,
 ): Promise<{ data: D; error: E } | { data: null; error: unknown }> {
   try {
-    return await call()
+    const result = await call()
+    // A proxy or gateway answering for a server that is down (502, 503, 504) is the server not
+    // being reached, not the credentials being wrong: say so rather than the form's fallback.
+    const status = (result.error as { status?: unknown } | null)?.status
+    if (typeof status === 'number' && status >= 502 && status <= 504)
+      return { data: null, error: new Error(UNREACHABLE) }
+    return result
   } catch (error) {
     // fetch rejects with a TypeError ("Failed to fetch") when the request never got an answer.
     if (error instanceof TypeError || !error) return { data: null, error: new Error(UNREACHABLE) }
