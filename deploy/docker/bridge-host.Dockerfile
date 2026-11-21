@@ -53,6 +53,8 @@ COPY apps/bridge-host/go.mod apps/bridge-host/go.sum apps/bridge-host/
 # The patched mautrix-signal the bridge host's go.mod replaces upstream with; resolving the
 # modules needs its go.mod.
 COPY apps/bridge-host/third_party/mautrix-signal/go.mod apps/bridge-host/third_party/mautrix-signal/
+# And the patched mautrix (bridgev2), likewise.
+COPY apps/bridge-host/third_party/mautrix/go.mod apps/bridge-host/third_party/mautrix/
 RUN --mount=type=cache,target=/go/pkg/mod cd apps/bridge-host && go mod download
 COPY --from=libsignal /out/ /libsignal/
 ARG DEBIAN_SNAPSHOT=

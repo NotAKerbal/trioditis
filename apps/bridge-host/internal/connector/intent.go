@@ -117,40 +117,40 @@ func (c *Connector) protocolSender(ctx context.Context, o *owner, s sender) (*pr
 	return &protocol.Sender{GhostID: ghostID}, nil
 }
 
-// SendMessage turns a message, edit, reaction or redaction into its protocol event. Once that
-// is journaled (or there was nothing to journal), a network handler waiting on the remote
-// event being handled is told (package handled), so it can acknowledge the event.
+// SendMessage turns a message, edit, reaction or redaction into its protocol event. A part of
+// a message whose network will send it again if it isn't acknowledged (package handled) is
+// recorded as in flight first, until bridgev2 says how handling it ended (remoteEventDone):
+// bridgev2 saves each part as it goes, and a part left saved by a handling that failed, or
+// that a stop cut off, would make it drop the redelivery as a duplicate.
 func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
 	remote := bridgev2.GetRemoteEventFromContext(ctx)
-	ended := handled.Writing(remote)
-	resp, err := in.sendMessage(ctx, roomID, eventType, content, extra)
-	ended(err, ownWrite(remote, eventType, content, extra))
-	return resp, err
+	if messagePart(remote, eventType, content, extra) {
+		m := handled.Message{Receiver: string(extra.MessageMeta.Room.Receiver), ID: string(extra.MessageMeta.ID)}
+		if handled.NoteMessage(remote, m) {
+			if err := in.c.Store.PutInflight(ctx, store.InflightMessage{Receiver: m.Receiver, MessageID: m.ID}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return in.sendMessage(ctx, roomID, eventType, content, extra)
 }
 
-// ownWrite says whether a write is the one a remote event exists for, which is what tells its
-// handler the event reached the journal: a part of the message itself, the edit, the reaction,
-// the removal. bridgev2 also writes on the side of some events (an error notice when a message
-// couldn't be converted, the removal of the reaction a new one replaces), and those don't
-// count: the event's own write may never come.
-func ownWrite(remote bridgev2.RemoteEvent, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) bool {
-	if remote == nil {
+// messagePart says whether a write is a part of the message a remote event brings, as against
+// an edit, a reaction, or something bridgev2 writes on the side (an error notice when the
+// message couldn't be converted).
+func messagePart(remote bridgev2.RemoteEvent, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) bool {
+	if remote == nil || extra == nil || extra.MessageMeta == nil || isEdit(content) {
 		return false
 	}
-	isMessage := eventType == event.EventMessage || eventType == event.EventSticker
+	if eventType != event.EventMessage && eventType != event.EventSticker {
+		return false
+	}
 	switch remote.GetType() {
 	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventMessageUpsert:
 		msg, ok := remote.(bridgev2.RemoteMessage)
-		return ok && isMessage && extra != nil && extra.MessageMeta != nil && extra.MessageMeta.ID == msg.GetID()
-	case bridgev2.RemoteEventEdit:
-		return isMessage && isEdit(content)
-	case bridgev2.RemoteEventReaction:
-		return eventType == event.EventReaction
-	case bridgev2.RemoteEventReactionRemove, bridgev2.RemoteEventMessageRemove:
-		return eventType == event.EventRedaction
-	default:
-		return true
+		return ok && extra.MessageMeta.ID == msg.GetID()
 	}
+	return false
 }
 
 // remoteSourceID is the network's own ID for the remote event being handled, where its

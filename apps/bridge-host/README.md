@@ -354,9 +354,12 @@ suite). But the connectors' own storage, in the same database, does:
   journaled sealed (usually moments). bridgev2 also reports success when its 5-minute handler
   limit passes, while handling carries on in the background, so the host wraps
   mautrix-whatsapp's handler (`wabuffer.Acker`, installed by `networks/whatsapp.go` on each
-  login's client): a handler that took that long says success only once the connector has
-  journaled the message (`internal/handled`), and failure if that doesn't happen within 20
-  minutes or the host is stopping. Plaintext stays in a row only when handling failed, the
+  login's client): a handler that took that long says what bridgev2's handling really ended
+  with, which the patched bridgev2 reports when the handler returns
+  (`third_party/mautrix.patch`, `internal/handled`), and failure if that doesn't come within 20
+  minutes or the host is stopping. A message whose handling failed part way, or that a stop cut
+  off (`trioditis_inflight`, undone when the host starts, before any login connects), has its
+  saved parts forgotten so the redelivery is bridged whole. Plaintext stays in a row only when handling failed, the
   process stopped in between, or a backgrounded message wasn't journaled in time (the message
   wasn't acknowledged, so WhatsApp redelivers it, and the redelivery is bridged, or applied
   once if it reached the journal meanwhile, and cleared), or when clearing it failed with a database

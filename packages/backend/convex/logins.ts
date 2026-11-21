@@ -10,6 +10,7 @@ import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand, queueLoginCancel, queueLogout } from './lib/outbox'
 import { offeredNetworks, retired } from './lib/networks'
+import { settleCancelledLogins } from './lib/ingest'
 import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
@@ -314,6 +315,8 @@ export const cancel = mutation({
     await queueLoginCancel(ctx, session)
     if (session.state === 'error') return 'error'
     await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: Date.now() })
+    // A cancelled login's account may have been waiting for this one to settle.
+    await settleCancelledLogins(ctx, session.userId, session.network)
     return 'cancelled'
   },
 })

@@ -16,16 +16,16 @@ import (
 
 // signalmeow acknowledges an envelope once its handler returns success, and bridgev2 says
 // success at its handler limit while the message is still being handled: a backgrounded
-// message is acknowledged only once its own write reaches the journal.
+// message is acknowledged only once its handling really ended in success.
 func TestSignalMessageIsAcknowledgedOnlyOnceJournaled(t *testing.T) {
-	a := &handled.Acker{Limit: 50 * time.Millisecond, Settle: 30 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: context.Background(), Log: zerolog.Nop()}
+	a := &handled.Acker{Limit: 50 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: context.Background(), Log: zerolog.Nop()}
 	backgrounded := func(chat *events.ChatEvent, journal bool) func(events.SignalEvent) bool {
 		return func(events.SignalEvent) bool {
 			time.Sleep(60 * time.Millisecond)
 			if journal {
 				go func() {
-					// What the connector reports for a write of bridgev2's remote event.
-					handled.Writing(&signal.Bv2ChatEvent{ChatEvent: chat})(nil, true)
+					// What the patched bridgev2 reports when handling bridgev2's remote event ends.
+					handled.Finished(&signal.Bv2ChatEvent{ChatEvent: chat}, true)
 				}()
 			}
 			return true

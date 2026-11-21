@@ -747,6 +747,33 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
     updatedAt: event.at,
     ...(event.step.loginId ? { loginId: event.step.loginId } : {}),
   })
+  if (state !== 'active') await settleCancelledLogins(ctx, session.userId, session.network)
+}
+
+/**
+ * Decides, for the accounts the person's cancelled logins connected anyway, whether to log them
+ * out now. One was left while another attempt on the network was going (retried); this runs
+ * whenever one of their logins ends, so it is decided once that attempt settles: logged out
+ * unless a newer attempt connected the same account (the one the person kept), or one is
+ * still going.
+ */
+export async function settleCancelledLogins(ctx: MutationCtx, userId: string, network: Network) {
+  const sessions = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .order('desc')
+    .take(20)
+  for (const s of sessions) {
+    if (s.state !== 'cancelled' || s.network !== network || !s.loginId || retried(sessions, s, s.loginId)) continue
+    const loginId = s.loginId
+    const account = await ctx.db
+      .query('networkAccounts')
+      .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', loginId))
+      .unique()
+    // Only an account that attempt made: one the person had before it is left as it is.
+    if (!account || account.userId !== userId || account._creationTime < s._creationTime) continue
+    await queueLogout(ctx, account)
+  }
 }
 
 async function applySendStatus(

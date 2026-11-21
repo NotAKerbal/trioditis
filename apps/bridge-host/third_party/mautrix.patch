@@ -1,0 +1,30 @@
+diff --git a/bridgev2/portal.go b/bridgev2/portal.go
+index 1eef3b9b491326870c9cfd4961d42a608488fb3c..71d4844903b076921221baea1d2eb6f2893ff0f7 100644
+--- a/bridgev2/portal.go
++++ b/bridgev2/portal.go
+@@ -114,6 +114,13 @@ type Portal struct {
+ }
+ 
+ var PanicOnStuckEvent = false
++
++// Trioditis: RemoteEventDone, if set, is called with each remote event's real outcome once its
++// handler returns, including a handler that ran past EventHandlingTimeoutTicks, for which the
++// caller was already given an assumed success. A network that acknowledges an event once its
++// handler returns (whatsmeow, signalmeow) can then wait for the real outcome. It runs on the
++// handler's goroutine, before the outcome is passed on.
++var RemoteEventDone func(evt RemoteEvent, res EventHandlingResult)
+ var EventHandlingTimeoutTicks = 10
+ 
+ func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, queryErr error, key *networkid.PortalKey) (*Portal, error) {
+@@ -454,6 +461,11 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
+ 			log.Debug().Err(res.Error).Msg("Not bubbling up Matrix error from event handler")
+ 			res = EventHandlingResultIgnored
+ 		}
++		// Trioditis: say how handling a remote event really ended, also when this function
++		// already stopped waiting for it and returned an assumed success.
++		if remote, ok := rawEvt.(*portalRemoteEvent); ok && RemoteEventDone != nil {
++			RemoteEventDone(remote.evt, res)
++		}
+ 		outerRes = res
+ 		handleDuration = time.Since(start)
+ 		close(doneCh)

@@ -26,17 +26,12 @@ func init() {
 }
 
 func testAcker(ctx context.Context) *handled.Acker {
-	return &handled.Acker{Limit: 50 * time.Millisecond, Settle: 30 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: ctx, Log: zerolog.Nop()}
-}
-
-// write reports one write for msg, as the connector does: own says it is the message's own.
-func write(msg *events.Message, err error, own bool) {
-	handled.Writing(remoteFor{msg})(err, own)
+	return &handled.Acker{Limit: 50 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: ctx, Log: zerolog.Nop()}
 }
 
 // backgrounded is a handler bridgev2 gave up waiting for: it returns success past the limit,
-// and then carries on with the writes in the background.
-func backgrounded(msg *events.Message, after func()) func(any) bool {
+// and the handling ends later, as after reports through the patched bridgev2.
+func backgrounded(after func()) whatsmeow.EventHandlerWithSuccessStatus {
 	return func(any) bool {
 		time.Sleep(60 * time.Millisecond)
 		go after()
@@ -59,93 +54,92 @@ func TestAckerPassesQuickAnswersThrough(t *testing.T) {
 }
 
 // bridgev2 says success at its limit while the message is still being handled: the message is
-// acknowledged only once it is journaled.
-func TestAckerWaitsForABackgroundedMessage(t *testing.T) {
+// acknowledged only once bridgev2 says its handling really ended, and succeeded. A message
+// whose parts are journaled one by one, with a slow save between them, is still waited for:
+// what counts is the handler's own end, not the journal going quiet.
+func TestAckerWaitsForTheRealOutcome(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
-	journaled := make(chan struct{})
-	ok := WrapAck(a)(backgrounded(msg, func() {
-		time.Sleep(40 * time.Millisecond)
-		write(msg, nil, true)
-		close(journaled)
+	ended := make(chan struct{})
+	ok := WrapAck(a)(backgrounded(func() {
+		handled.NoteMessage(remoteFor{msg}, handled.Message{Receiver: "l", ID: "m"}) // part 1
+		time.Sleep(120 * time.Millisecond)                                           // a slow save
+		handled.NoteMessage(remoteFor{msg}, handled.Message{Receiver: "l", ID: "m"}) // part 2
+		close(ended)
+		handled.Finished(remoteFor{msg}, true)
 	}))(msg)
 	if !ok {
-		t.Fatal("a message journaled in the background is acknowledged")
+		t.Fatal("a message handled in full in the background is acknowledged")
 	}
 	select {
-	case <-journaled:
+	case <-ended:
 	default:
-		t.Fatal("acknowledged before it was journaled")
+		t.Fatal("acknowledged before the last part")
 	}
 }
 
-// Only the message's own write counts: the error notice bridgev2 journals when converting the
-// message failed, or the removal of a reaction being replaced, followed by nothing more (a
-// stall, or bridgev2 giving up), mustn't acknowledge it.
-func TestAckerIgnoresWritesOnTheSide(t *testing.T) {
+// A handling that fails (a part that couldn't be sent or saved), or never ends, or a host that
+// is stopping: not acknowledged, so WhatsApp sends it again.
+func TestAckerDoesntAcknowledgeAFailedOrUnfinishedMessage(t *testing.T) {
 	a := testAcker(context.Background())
-	msg := &events.Message{}
-	if WrapAck(a)(backgrounded(msg, func() { write(msg, nil, false) }))(msg) {
-		t.Fatal("a side write followed by a stall acknowledged the message")
+	failed := &events.Message{}
+	if WrapAck(a)(backgrounded(func() { handled.Finished(remoteFor{failed}, false) }))(failed) {
+		t.Fatal("a message whose handling failed was acknowledged")
 	}
-}
-
-// A message journaled in part, whose next part then fails, isn't acknowledged, and neither is
-// one whose next write is still running when the wait runs out.
-func TestAckerDoesntAcknowledgeAPartialMessage(t *testing.T) {
-	a := testAcker(context.Background())
-	msg := &events.Message{}
-	start := time.Now()
-	if WrapAck(a)(backgrounded(msg, func() {
-		write(msg, nil, true)
-		write(msg, errors.New("part 2 failed"), true)
-	}))(msg) {
-		t.Fatal("a message with a failed part was acknowledged")
-	} else if time.Since(start) > 250*time.Millisecond {
-		t.Fatal("a failed write should end the wait at once")
+	stuck := &events.Message{}
+	if WrapAck(a)(backgrounded(func() {}))(stuck) {
+		t.Fatal("a message whose handling never ended was acknowledged")
 	}
-	stalled := &events.Message{}
-	if WrapAck(a)(backgrounded(stalled, func() {
-		write(stalled, nil, true)
-		_ = handled.Writing(remoteFor{stalled}) // part 2 starts and never ends
-	}))(stalled) {
-		t.Fatal("a message whose next part stalled was acknowledged")
-	}
-}
-
-// Never journaled (the process stopping meanwhile, say): it isn't acknowledged, so WhatsApp
-// sends it again.
-func TestAckerDoesntAcknowledgeAnUnjournaledMessage(t *testing.T) {
-	a := testAcker(context.Background())
-	msg := &events.Message{}
-	if WrapAck(a)(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
-		t.Fatal("a backgrounded message never journaled must not be acknowledged")
-	}
-	// Another message's journaling doesn't count for this one.
 	other := &events.Message{}
-	if WrapAck(a)(backgrounded(msg, func() { write(other, nil, true) }))(msg) {
-		t.Fatal("another message's journaling was taken for this one's")
+	if WrapAck(a)(backgrounded(func() { handled.Finished(remoteFor{&events.Message{}}, true) }))(other) {
+		t.Fatal("another message's outcome was taken for this one's")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	if WrapAck(testAcker(ctx))(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
+	if WrapAck(testAcker(ctx))(backgrounded(func() {}))(&events.Message{}) {
 		t.Fatal("a stopping host must not acknowledge it")
 	} else if time.Since(start) > 200*time.Millisecond {
 		t.Fatal("a stopping host shouldn't wait")
 	}
 }
 
-// A message journaled just as the limit passed is acknowledged after the journal settles.
-func TestAckerAcknowledgesOnceJournaledParts(t *testing.T) {
+// The outcome reported before the handler returned (bridgev2 finished just as its limit
+// passed) is the one that counts.
+func TestAckerTakesAnOutcomeThatCameFirst(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
 	if !WrapAck(a)(func(any) bool {
-		write(msg, nil, true)
 		time.Sleep(60 * time.Millisecond)
+		handled.Finished(remoteFor{msg}, true)
 		return true
 	})(msg) {
-		t.Fatal("a message journaled before the handler returned is acknowledged")
+		t.Fatal("a message whose handling succeeded is acknowledged")
+	}
+}
+
+// A handling that fails after its handler gave up waiting still reports the messages it
+// noted, so they can be undone for the redelivery.
+func TestALateFailureStillReportsItsMessages(t *testing.T) {
+	a := &handled.Acker{Limit: 10 * time.Millisecond, MaxWait: time.Hour, Ctx: context.Background(), Log: zerolog.Nop()}
+	msg := &events.Message{}
+	got := make(chan []handled.Message, 1)
+	stop, cancel := context.WithCancel(context.Background())
+	a.Ctx = stop
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		cancel() // the handler stops waiting (the host is stopping)
+		time.Sleep(20 * time.Millisecond)
+		messages, _ := handled.Finished(remoteFor{msg}, false)
+		got <- messages
+	}()
+	WrapAck(a)(func(any) bool {
+		handled.NoteMessage(remoteFor{msg}, handled.Message{Receiver: "l", ID: "m"})
+		time.Sleep(20 * time.Millisecond)
+		return true
+	})(msg)
+	if messages := <-got; len(messages) != 1 || messages[0].ID != "m" {
+		t.Fatalf("a late failure reported %v", messages)
 	}
 }
 
