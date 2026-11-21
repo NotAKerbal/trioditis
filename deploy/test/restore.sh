@@ -34,17 +34,22 @@ cat "$root/pairs" >>"$root/env"
 # A setting the operator added by hand, which backups leave out and a restore keeps.
 echo 'OPERATOR_NOTE=keep-me' >>"$root/env"
 
-# A stub installer: records its options, whether it was handed the lock, and the settle marker.
-cat >"$root/deploy/install/install.sh" <<'EOF'
+# A stub installer: records its options, whether it was handed the lock, the settle marker,
+# and whether the bridge host's volume holds the marker that has it settle its own queue (which
+# it removes, as the bridge host does once it has).
+cat >"$root/deploy/install/install.sh" <<EOF
 #!/bin/sh
-root=$(cd "$(dirname "$0")/../.." && pwd)
+root=\$(cd "\$(dirname "\$0")/../.." && pwd)
 lock=no
-if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
-echo "$* lock=$lock $(cat "$root/deploy/.restore-settle" 2>/dev/null)" >>"$root/installs"
-[ ! -e "$root/install-fails" ] || exit 1
+if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "\$root/deploy/.operation.lock" ]; then lock=held; fi
+bridge=none
+docker run --rm --log-driver none -v "${project}_bridge-whatsapp:/data" --entrypoint sh "$tool" -c \
+  '[ -e /data/restore-pending ] && [ "\$(stat -c %u /data/restore-pending)" = "\$(stat -c %u /data)" ] && rm /data/restore-pending' && bridge=marked
+echo "\$* lock=\$lock \$(paste -sd' ' "\$root/deploy/.restore-settle" 2>/dev/null) bridge=\$bridge" >>"\$root/installs"
+[ ! -e "\$root/install-fails" ] || exit 1
 # As the real one does once it has settled the restored sends: the gate comes off.
-sed -i '/^RESTORE_PENDING=/d' "$root/deploy/.env"
-rm -f "$root/deploy/.restore-settle"
+sed -i '/^RESTORE_PENDING=/d' "\$root/deploy/.env"
+rm -f "\$root/deploy/.restore-settle"
 EOF
 chmod +x "$root/deploy/install/install.sh"
 
@@ -167,9 +172,9 @@ created=$(sed -n 's/^created=//p' "$b1/backup.info")
 [ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] &&
   check ok "it restores every volume as it was backed up, owners and modes included" ||
   { check fail "it restores every volume as it was backed up, owners and modes included"; cat "$root/out" >&2; contents >&2; }
-[ "$(cat "$root/installs" 2>/dev/null)" = "--no-setup-link lock=held backup_at=${created}000" ] &&
-  check ok "the installer starts it, holding the lock, with the sends to settle from the backup's time" ||
-  check fail "the installer starts it, holding the lock, with the sends to settle from the backup's time ($(cat "$root/installs" 2>/dev/null))"
+[ "$(cat "$root/installs" 2>/dev/null)" = "--no-setup-link lock=held state=ready backup_at=${created}000 bridge=marked" ] &&
+  check ok "the installer starts it, holding the lock, with the sends to settle from the backup's time, and the bridge's queue marked to settle" ||
+  check fail "the installer starts it, holding the lock, with the sends to settle from the backup's time, and the bridge's queue marked to settle ($(cat "$root/installs" 2>/dev/null))"
 for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY BACKUP_KEY OPERATOR_NOTE TRIODITIS_VERSION POSTGRES_PASSWORD; do
   [ "$(sed -n "s/^$name=//p" "$env_file")" = "$(sed -n "s/^$name=//p" "$root/env.now")" ] || echo "$name" >>"$root/differs"
 done
@@ -271,8 +276,15 @@ run restore --yes --keys "$backups/keys" "$b1"
   [ "$(docker run --rm --log-driver none -v "${project}_bridge-whatsapp:/w:ro" --entrypoint cat "$tool" /w/a)" = gone ] &&
   check ok "with no install, it won't overwrite the project's volumes another checkout has on this Docker" ||
   { check fail "with no install, it won't overwrite the project's volumes another checkout has on this Docker"; cat "$root/out" >&2; }
-# A new machine: none of the project's volumes are here.
+# A new machine: none of the project's volumes are here; but a volume of one of their names,
+# without Compose's labels, is still not the restore's to empty.
 docker volume ls -q --filter "label=com.docker.compose.project=$project" | xargs -r docker volume rm -f >/dev/null
+docker volume create "${project}_postgres" >/dev/null
+run restore --yes --keys "$backups/keys" "$b1"
+[ "$status" != 0 ] && grep -q "A volume named ${project}_postgres is already on this Docker" "$root/out" && [ ! -e "$env_file" ] &&
+  check ok "with no install, it won't overwrite a volume of the backup's name, labelled or not" ||
+  { check fail "with no install, it won't overwrite a volume of the backup's name, labelled or not"; cat "$root/out" >&2; }
+docker volume rm -f "${project}_postgres" >/dev/null
 run restore --yes --keys "$backups/keys" "$b1"
 [ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] && [ "$(sort "$env_file")" = "$(grep -v '^OPERATOR_NOTE=' "$root/env.lost" | sort)" ] &&
   [ -e "$root/installs" ] && check ok "with --keys it restores onto a checkout with no install" ||

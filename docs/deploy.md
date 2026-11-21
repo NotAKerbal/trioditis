@@ -434,7 +434,11 @@ backup from before the update, data and settings (`deploy/trioditis restore`, wh
 backup of the failed state beside it and then runs the installer), since the failed version's
 migrations or database images may have changed the data in ways the older code can't read. The
 older code never runs on that data otherwise: if the backup is gone or can't be restored, the
-updater stops the server and the report says so, for you to restore the backup by hand. It
+updater stops the server, checks with Docker that nothing of it is still running, and the report
+says so, for you to restore the backup by hand; if it can't confirm the server stopped, the update
+stays in progress, as going back, and the updater tries again when it next starts. An update cut
+off while the server was being backed up (before anything was installed) starts the server again
+as it was when the updater next starts, and is reported as not installed. It
 reports both the failure and the way back; a commit whose update failed
 isn't tried again automatically (Update now still tries it). The installer runs with `--no-setup-link`, since its
 output goes to the journal.
@@ -537,9 +541,10 @@ server is still stopping, leaves nothing behind, and if the server doesn't start
 backup counts as failed. The destination must be outside the checkout (symlinks resolved,
 before anything is made there): image builds copy the checkout.
 
-The settings are put together, checked and encrypted in a private directory in memory (the
-user's runtime directory, or `/dev/shm`), so the destination only ever gets the encrypted files
-and `backup.info`. Both files are encrypted with `BACKUP_KEY`, a random key the installer makes into
+The backup's copy of `deploy/.env` (keys included), and the settings it puts together, checks and
+encrypts, stay in a private directory in memory (the user's runtime directory, or `/dev/shm`),
+so neither the checkout nor the destination ever gets them: the destination only gets the
+encrypted files and `backup.info`. Both files are encrypted with `BACKUP_KEY`, a random key the installer makes into
 `deploy/.env` (`deploy/scripts/backup-crypt.mjs`, run in the bundle's Node image with no
 network: AES-256-GCM in 64 KiB chunks under a key derived for each file, so a file that's
 damaged, cut short or reordered doesn't decrypt). The archive goes straight from the volumes
@@ -604,15 +609,21 @@ settings. It asks before it changes anything (`--yes` skips that). In order:
    `deploy/trioditis restore <that backup>`. If that backup fails, the server starts again and
    nothing has changed.
 3. **It replaces the data.** From here interrupts are held off. First it closes the gate:
-   it writes `deploy/.restore-settle` and `RESTORE_PENDING` into `deploy/.env`, and removes the
-   gateway's container. Until the installer has settled the restored sends, `deploy/trioditis`
+   it writes `deploy/.restore-settle` (saying `loading`) and `RESTORE_PENDING` into
+   `deploy/.env`, and removes the gateway's container. While the marker says `loading` the
+   installer starts nothing, not even Postgres, since the data may be half one and half the
+   other; it says `ready` only once the volumes and the settings are the backup's and checked. Until the installer has settled the restored sends, `deploy/trioditis`
    refuses `up`, `start`, `restart`, `run` and the like, and Compose hands the gateway
    `RESTORE_PENDING`, which it refuses to start with, however it's started. Then it empties
    every volume the backup has (making any that's missing), fills it from the archive, owners and
    modes as they were, and checks each against the manifest's count of entries and bytes. If that
    fails partway, it puts the copy from step 2 back and checks it the same way, and only then
    opens the gate and starts the server as it was; if that fails too, the gate stays closed.
-   Volumes the backup doesn't have (a network added since) are left as they are.
+   Volumes the backup doesn't have (a network added since) are left as they are. Each bridge
+   host's volume gets a `restore-pending` marker: the bridge host's own queue of commands, in
+   its database, is the backup's too, so on its next start it records every send in it, queued
+   or started, as `unknown` instead of running it (and ends logins in progress), reports that
+   through its journal like any send status, and only then removes the marker.
 4. **It restores the settings**: the backup's, with this server's private keys and
    `BACKUP_KEY` (the backup has only the public halves, the same ones) and any setting you
    added by hand, which backups leave out.
@@ -653,7 +664,9 @@ deploy/trioditis restore --keys ~/trioditis-server-keys.env <backup>
 With no install there, `--keys` brings the server's keys: each pair must be the one the backup
 is sealed to, and the file's `BACKUP_KEY` opens the backup. A checkout with no install can't
 stop or back up another checkout's server, so if the backup's project already has volumes or
-containers on this Docker, the restore refuses: restore from that install's own checkout. The restore writes `deploy/.env`
+containers on this Docker, or a volume of any of the names the backup's would take (labelled by
+Compose or not), the restore refuses: restore from that install's own checkout. If Docker's
+volumes or containers can't be listed, it refuses too. The restore writes `deploy/.env`
 from the backup's settings and those keys, restores the volumes, and runs the installer, which
 builds the images and starts the server. Then update from the app as usual.
 
