@@ -34,20 +34,20 @@ function show(title: string, options: NotificationOptions): Notification | null 
  * the desktop app's badge at the number of unread chats. The shell mounts it once; clicking a
  * notification opens its chat with `open`, as clicking it in the list does.
  */
-export function useMessageNotifications(selectedId: string | undefined, open: (chat: Chat) => void) {
+export function useMessageNotifications(openIds: readonly string[], open: (chat: Chat) => void) {
   const session = useSession()
   const feed = useQuery(convexQuery(api.messages.arrivals, {})).data
   const unread = useChatCounts()?.inbox.count
   const cursor = useRef<Cursor | undefined>(undefined)
   // As of now, for the effect below and for a click that comes later.
-  const latest = useRef({ selectedId, open })
-  latest.current = { selectedId, open }
+  const latest = useRef({ openIds, open })
+  latest.current = { openIds, open }
 
   useEffect(() => {
     if (!feed) return
     const { cursor: next, fresh } = newArrivals(cursor.current, feed, Date.now())
     cursor.current = next
-    const { selectedId } = latest.current
+    const { openIds } = latest.current
     // Read from storage now, not as this tab last heard: another tab may have turned them off
     // or down a moment ago.
     const prefs = currentPrefs()
@@ -58,8 +58,8 @@ export function useMessageNotifications(selectedId: string | undefined, open: (c
       // One per chat, for its newest message; none for a muted chat.
       if (chat.muted || notified.has(chat.id)) continue
       notified.add(chat.id)
-      // The chat the person is reading needs no notification.
-      if (chat.id === selectedId && document.visibilityState === 'visible' && document.hasFocus()) continue
+      // The chat the person is reading needs no notification, nor do the rest of its conversation.
+      if (openIds.includes(chat.id) && document.visibilityState === 'visible' && document.hasFocus()) continue
       // Opened only when it's to be shown.
       const text =
         prefs.notificationDetail === 'message' ? (openLastMessage(arrival.message, session)?.text ?? null) : null

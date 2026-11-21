@@ -21,6 +21,7 @@ import {
   type MessagePlaintext,
 } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
+import type { PersonRef } from './conversations.ts'
 import { openLastMessage } from './last-message.ts'
 
 export type ChatId = Id<'chats'>
@@ -47,7 +48,79 @@ export interface Chat {
   muted: boolean
   /** The last message, opened here, for the list's preview; null until the row has one. */
   last: LastShown | null
+  /** In a direct chat, the other person's contact on its network, once the bridge host has said. */
+  dmGhostId: string | undefined
+  /**
+   * The People card a direct chat is with. On a conversation that puts a person's direct chats
+   * on several networks together (conversations.ts), the chats themselves are `members`, the
+   * newest first, and the rest of the fields sum them up.
+   */
+  person?: PersonRef | undefined
+  members?: Chat[] | undefined
 }
+
+/** The chats a row or pane stands for: a conversation's members, or the chat itself. */
+export const membersOf = (chat: Chat): Chat[] => chat.members ?? [chat]
+
+/**
+ * Runs an action on each chat of a conversation, all at once. True if every one went: each
+ * says its own failure.
+ */
+export async function onEach(chats: readonly Chat[], run: (chatId: ChatId) => Promise<boolean>) {
+  const done = await Promise.all(chats.map((c) => run(c.id)))
+  return done.every(Boolean)
+}
+
+/**
+ * One conversation for a person's direct chats: named and pictured after their card, unread if
+ * any of them is, muted if all are, and showing the newest message of any. It goes by the first
+ * chat's ID, so opening it opens that chat, and the pane finds the rest (conversations.ts).
+ */
+export function mergedChat(members: readonly Chat[], person: PersonRef | undefined): Chat {
+  const first = members[0]!
+  if (members.length < 2) return person ? { ...first, person } : first
+  const newest = members.reduce((a, b) => ((b.last?.at ?? 0) > (a.last?.at ?? 0) ? b : a))
+  const sum = (f: (c: Chat) => number) => members.reduce((n, c) => n + f(c), 0)
+  return {
+    ...first,
+    row: {
+      ...first.row,
+      pinned: members.some((c) => c.row.pinned),
+      markedUnread: members.some((c) => c.row.markedUnread),
+      unreadCount: sum((c) => c.row.unreadCount),
+      mentionCount: sum((c) => c.row.mentionCount),
+      labelIds: [...new Set(members.flatMap((c) => c.row.labelIds))],
+      lastMessageAt: Math.max(...members.map((c) => c.row.lastMessageAt)),
+    },
+    name: person?.name || first.name,
+    named: !!person?.name || first.named,
+    avatar: members.find((c) => c.avatar)?.avatar,
+    described: members.some((c) => c.described),
+    unread: sum((c) => c.unread),
+    hasUnread: members.some((c) => c.hasUnread),
+    mentions: sum((c) => c.mentions),
+    muted: members.every((c) => c.muted),
+    last: newest.last,
+    person,
+    members: [...members],
+  }
+}
+
+/** Live rows for these chats, in order, leaving out any that's gone; undefined while any loads. */
+export function useChatsById(ids: readonly ChatId[]): Chat[] | undefined {
+  const session = useSession()
+  const answers = useQueries({
+    queries: ids.map((chatId) => ({ ...convexQuery(api.chats.get, { chatId }), retry: false })),
+    combine: rowsOf,
+  })
+  return useMemo(() => {
+    if (answers.some((a) => a.pending)) return undefined
+    return answers.flatMap((a) => (a.row ? [toChat(a.row as ChatRow, session)] : []))
+  }, [answers, session])
+}
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const rowsOf = (results: { data?: unknown; isPending: boolean }[]) =>
+  results.map((r) => ({ row: r.data ?? null, pending: r.isPending }))
 
 export const networkName = (network: string) => NETWORK_INFO[network as Network]?.name ?? network
 
@@ -94,6 +167,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     mentions: row.mentionCount,
     muted,
     last: openLastMessage(row.lastMessage, session),
+    dmGhostId: row.kind === 'dm' && typeof meta?.dmGhostId === 'string' ? meta.dmGhostId : undefined,
   }
 }
 

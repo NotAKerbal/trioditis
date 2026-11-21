@@ -1,12 +1,15 @@
 import { Button } from '@trioditis/ui/button'
+import type { Network } from '@trioditis/core'
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrail,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
+import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
 import { Clock, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
@@ -14,8 +17,17 @@ import { networkName } from '~/data/chats.ts'
 import type { Message } from '~/data/messages.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 
+/** One of a conversation's chats a message can go by: its network, and which account if several. */
+export interface ViaOption {
+  id: string
+  network: Network
+  label: string
+}
+
 interface ComposerProps {
-  network: string
+  network: Network
+  /** In a conversation of a person's chats on several networks, the ones to choose from. */
+  via?: { options: ViaOption[]; current: string; onChange: (id: string) => void } | undefined
   draft: string
   onDraft: (text: string) => void
   replyTo: Message | null
@@ -27,6 +39,7 @@ interface ComposerProps {
 
 export function Composer({
   network,
+  via,
   draft,
   onDraft,
   replyTo,
@@ -65,6 +78,29 @@ export function Composer({
       {/* The placeholder says why too, but it's gone once there's text. */}
       {disabled && draft.length > 0 ? <p className="mx-3 mt-2 text-sm text-subtle-foreground">{disabled}</p> : null}
       <div className="flex items-end gap-1 p-1.5">
+        {via ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={`Sending on ${networkName(network)}. Change`}
+                title="Send on another network"
+              >
+                <NetworkBadge network={network} label={networkName(network)} size={18} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top">
+              <DropdownMenuLabel>Send on</DropdownMenuLabel>
+              {via.options.map((o) => (
+                <DropdownMenuCheckboxItem key={o.id} checked={o.id === via.current} onSelect={() => via.onChange(o.id)}>
+                  <NetworkBadge network={o.network} label={networkName(o.network)} />
+                  {o.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
         <Textarea
           variant="bare"
           ref={input}

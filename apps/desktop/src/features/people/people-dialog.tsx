@@ -449,7 +449,7 @@ function NavRow({
 }
 
 /** A network contact on one line: where, who, and what the network knows them by. */
-function ContactLine({ contact, children }: { contact: NetworkContact; children?: ReactNode }) {
+export function ContactLine({ contact, children }: { contact: NetworkContact; children?: ReactNode }) {
   const name = contact.profile.name || contact.profile.handle || 'Unknown'
   const handle =
     contact.profile.handle && contact.profile.handle !== name ? shownIdentifier(contact.profile.handle) : ''
@@ -597,7 +597,7 @@ function PersonDetail({
 }
 
 /** Starts a chat with the person, on one of the ways their card offers (chatOptions). */
-function MessageButton({
+export function MessageButton({
   card,
   byContact,
   onOpenChat,
@@ -632,12 +632,12 @@ function MessageButton({
   )
 }
 
-const shownHandle = (value: string) => {
+export const shownHandle = (value: string) => {
   const id = parseIdentifier(value)
   return id?.kind === 'username' ? `${id.service} @${id.value}` : value
 }
 
-function FieldGroup({ title, fields }: { title: string; fields: PersonField[] | undefined }) {
+export function FieldGroup({ title, fields }: { title: string; fields: PersonField[] | undefined }) {
   if (!fields?.length) return null
   return (
     <Group title={title}>
@@ -651,7 +651,7 @@ function FieldGroup({ title, fields }: { title: string; fields: PersonField[] | 
   )
 }
 
-function Details({ card }: { card: PersonPlaintext }) {
+export function Details({ card }: { card: PersonPlaintext }) {
   const rows: [string, ReactNode][] = []
   if (card.nickname) rows.push(['Nickname', card.nickname])
   if (card.birthday) rows.push(['Birthday', card.birthday.replace(/^--/, '')])
@@ -741,7 +741,7 @@ function ChooseContact({
 }
 
 /** Searches the person's cards, to add contacts to one. */
-function ChoosePerson({
+export function ChoosePerson({
   open,
   onOpenChange,
   people,

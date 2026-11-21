@@ -726,6 +726,16 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 		kind = "space"
 	}
 	override := chatOverride{kind: kind, initialState: req.InitialState}
+	// bridgev2 saves the portal's room only after this returns, so the database can't say yet
+	// who a direct chat is with; the portal it is creating the room for can. This runs on that
+	// portal's own loop, the only one that changes it.
+	if req.IsDirect {
+		if key, ok := ids.ParseRoomID(roomID); ok {
+			if portal, err := in.c.Bridge.GetExistingPortalByKey(ctx, key); err == nil && portal != nil {
+				override.otherUser = portal.OtherUserID
+			}
+		}
+	}
 	if err := in.c.emitChat(ctx, roomID, override); err != nil && !errors.Is(err, errNotPortal) {
 		return "", err
 	}
@@ -785,6 +795,8 @@ type chatOverride struct {
 	// request, if set, is whether the chat is a message request, from bridge info bridgev2
 	// is sending now.
 	request *bool
+	// otherUser, if set, is who a direct chat is with, before the database has it.
+	otherUser networkid.UserID
 }
 
 func roomKind(roomType database.RoomType) string {
@@ -815,9 +827,13 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	var parentKey networkid.PortalKey
 	var parentRoom id.RoomID
 	var request bool
+	otherUser := override.otherUser
 	if portal != nil {
 		plain.Name, plain.Topic, avatarURL = portal.Name, portal.Topic, portal.AvatarMXC
 		request = portal.MessageRequest
+		if otherUser == "" {
+			otherUser = portal.OtherUserID
+		}
 		if kind == "" {
 			kind = roomKind(portal.RoomType)
 		}
@@ -868,6 +884,13 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			plain.AvatarUnchanged = true
 		}
 	}
+	// Who a direct chat is with, so a client can show their profile and put their chats on
+	// every network together. Opaque, as every ghostId is, and sealed with the rest.
+	if kind == "dm" && otherUser != "" {
+		if plain.DMGhostID, err = c.ghostOpaque(ctx, otherUser); err != nil {
+			return err
+		}
+	}
 	fitChat(&plain)
 	sealed, err := c.seal(ctx, o, seal.KindChat, o.portalID, plain)
 	if err != nil {
@@ -895,6 +918,39 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	}
 	sent()
 	return nil
+}
+
+// DescribeDirectChats describes every direct chat again, once per database, so a chat
+// described before chat metadata said who a direct chat is with gets its dmGhostId. A chat
+// whose login is gone is left out. Any other failure leaves it to be tried again at the next
+// start, from the beginning: describing a chat twice changes nothing.
+func (c *Connector) DescribeDirectChats(ctx context.Context) error {
+	if done, err := c.Store.DescribedDirectChats(ctx); err != nil || done {
+		return err
+	}
+	portals, err := c.Bridge.DB.Portal.GetAllWithMXID(ctx)
+	if err != nil {
+		return err
+	}
+	failed := 0
+	for _, portal := range portals {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		if portal.RoomType != database.RoomTypeDM || portal.OtherUserID == "" {
+			continue
+		}
+		if _, err = c.owner(ctx, portal.MXID); err != nil {
+			continue
+		}
+		if err = c.emitChat(ctx, portal.MXID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d direct chats couldn't be described again", failed)
+	}
+	return c.Store.SetDescribedDirectChats(ctx)
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in

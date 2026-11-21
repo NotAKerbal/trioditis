@@ -1,7 +1,8 @@
 import { toast } from '@trioditis/ui/toast'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { useChat, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
+import { membersOf, onEach, useChat, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
+import { useConversationIds } from '~/data/conversations.ts'
 import { NOTHING_READ, readOnOpen } from '~/data/read-on-open.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
@@ -45,18 +46,22 @@ export function Shell() {
     void navigate({ search: (s) => ({ ...s, people: undefined, chat: chatId }) })
   }
 
+  // The open chat and the rest of its conversation: a person's direct chats on other networks.
+  const openIds = useConversationIds(selectedId)
+
   function open(chat: Chat) {
-    if (chat.id !== selectedId) setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
-    select(chat.id)
-    // Opening another chat marks it read once it's shown (useReadWhileOpen). Choosing the open
+    const members = membersOf(chat)
+    const isOpen = members.some((m) => m.id === selectedId)
+    if (!isOpen) {
+      setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
+      select(chat.id)
+    }
+    // Opening another chat marks it read once it's shown (ReadWhileOpen). Choosing the open
     // one again doesn't open it again, so a chat marked unread while open is marked read here.
-    if (chat.id === selectedId && chat.hasUnread) void actions.markRead(chat.id)
+    if (isOpen) for (const m of members) if (m.hasUnread) void actions.markRead(m.id)
   }
 
-  useMessageNotifications(selectedId, open)
-  // Opening a chat, by a click, a notification or a link, marks it read, as does a new message
-  // while it's open and on screen (useReadWhileOpen).
-  useReadWhileOpen(selectedId as ChatId | undefined, actions.markRead)
+  useMessageNotifications(openIds, open)
   useKeepUnsent()
 
   /**
@@ -88,23 +93,31 @@ export function Shell() {
 
   function onSidebarAction(action: SidebarAction) {
     const { chat } = action
+    // A conversation's row acts on each of its chats; the open one, if it's among them, is what
+    // auto-advance watches.
+    const members = membersOf(chat)
+    const id = members.find((m) => m.id === selectedId)?.id ?? chat.id
+    const each = (run: (chatId: ChatId) => Promise<boolean>) => onEach(members, run)
     if (action.type === 'archive')
-      void act(chat.id, async () => {
-        const ok = await actions.setArchived(chat.id, true)
+      void act(id, async () => {
+        const ok = await each((c) => actions.setArchived(c, true))
         if (ok)
-          toast(`Archived ${chat.name}`, { label: 'Undo', onClick: () => void actions.setArchived(chat.id, false) })
+          toast(`Archived ${chat.name}`, {
+            label: 'Undo',
+            onClick: () => void each((c) => actions.setArchived(c, false)),
+          })
         return ok
       })
-    if (action.type === 'restore') void act(chat.id, () => actions.setArchived(chat.id, false))
-    if (action.type === 'wake') void act(chat.id, () => actions.wake(chat.id))
-    if (action.type === 'accept') void act(chat.id, () => actions.acceptRequest(chat.id))
+    if (action.type === 'restore') void act(id, () => each((c) => actions.setArchived(c, false)))
+    if (action.type === 'wake') void act(id, () => each((c) => actions.wake(c)))
+    if (action.type === 'accept') void act(id, () => each((c) => actions.acceptRequest(c)))
     if (action.type === 'snooze')
-      void act(chat.id, async () => {
-        const ok = await actions.snooze(chat.id, action.until)
+      void act(id, async () => {
+        const ok = await each((c) => actions.snooze(c, action.until))
         if (ok)
           toast(`Snoozed ${chat.name} until ${formatWhen(action.until)}`, {
             label: 'Undo',
-            onClick: () => void actions.wake(chat.id),
+            onClick: () => void each((c) => actions.wake(c)),
           })
         return ok
       })
@@ -135,11 +148,19 @@ export function Shell() {
           />
         </SidebarBoundary>
       </SidebarFrame>
+      {/* Opening a chat, by a click, a notification or a link, marks it read, as does a new
+          message while it's open and on screen: each chat of its conversation. */}
+      {openIds.map((id) => (
+        <ReadWhileOpen key={id} chatId={id as ChatId} markRead={actions.markRead} />
+      ))}
       <ChatPane
         chatId={selectedId as ChatId | undefined}
+        chatIds={openIds as ChatId[]}
         onGone={() => select(undefined)}
         onBack={() => select(undefined)}
         act={act}
+        onOpenPerson={(personKey) => openPeople(`p:${personKey}`)}
+        onOpenChat={openStarted}
       />
       <SettingsDialog
         section={search.settings}
@@ -166,7 +187,12 @@ function subscribeSeen(onChange: () => void) {
 }
 const seen = () => document.visibilityState === 'visible' && document.hasFocus()
 
-/** Marks the open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
+/** Marks an open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
+function ReadWhileOpen({ chatId, markRead }: { chatId: ChatId; markRead: (chatId: ChatId) => Promise<unknown> }) {
+  useReadWhileOpen(chatId, markRead)
+  return null
+}
+
 function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId) => Promise<unknown>) {
   // The same object until the chat's row changes, so the effect runs once per change.
   const chat = useChat(chatId)

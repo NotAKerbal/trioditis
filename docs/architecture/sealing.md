@@ -152,6 +152,13 @@ change to the chat's name alone still carries the avatar, and a device that neve
 it. `avatarUnchanged` is left for an avatar from before references were kept, or one whose
 reference can't be opened (sealed to an earlier bridge key).
 
+A direct chat's metadata also says who it is with: `dmGhostId`, the other person's
+`ghostId`, the same opaque ID their messages and contact carry. It is sealed with the rest, so
+the server never learns who a direct chat is with; a client matches it to the person's People
+cards to show their profile and put their chats on every network together. A bridge host
+describes each direct chat it had again once, at its first start with this field, so older
+chats get it too (`Connector.DescribeDirectChats`).
+
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.
 

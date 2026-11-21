@@ -517,6 +517,10 @@ type ChatPlaintext struct {
 	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
 	// this time (its upload expired). Clients keep the avatar they have.
 	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
+	// DMGhostID is, in a direct chat, the ghostId of the person on the other side: the contact
+	// whose profile and People card the chat is with. Sealed, so the server never learns who a
+	// chat is with.
+	DMGhostID string `json:"dmGhostId,omitempty"`
 }
 
 // ContactPlaintext is a contact's sealed profile.

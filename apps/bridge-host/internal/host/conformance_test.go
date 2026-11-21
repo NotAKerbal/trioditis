@@ -584,6 +584,48 @@ func TestConformance(t *testing.T) {
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
 		}
+		// Who it's with, as the same opaque ID their messages carry, so a client can match it to
+		// their contact and People card.
+		if chatPlain.DMGhostID == "" || chatPlain.DMGhostID != msg.Sender.GhostID {
+			t.Fatalf("dmGhostId %q, sender %q", chatPlain.DMGhostID, msg.Sender.GhostID)
+		}
+
+		// A database from before chats said who they're with describes each direct chat again,
+		// once: here, as if this one were from then.
+		ctx := context.Background()
+		if _, err := h.host.Store.DB.Exec(ctx, `DELETE FROM trioditis_secret WHERE name='described_direct_chats'`); err != nil {
+			t.Fatal(err)
+		}
+		isCarol := func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == msg.PortalID }
+		before := gw.count(isCarol)
+		if err := h.host.Connector.DescribeDirectChats(ctx); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for gw.count(isCarol) == before && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		var again *protocol.Event
+		for _, e := range gw.snapshot() {
+			if isCarol(e) {
+				again = e
+			}
+		}
+		if gw.count(isCarol) == before {
+			t.Fatal("the direct chat wasn't described again")
+		}
+		var againPlain protocol.ChatPlaintext
+		h.open("alice", again, &againPlain)
+		if againPlain.DMGhostID != msg.Sender.GhostID || againPlain.Name != "Carol" {
+			t.Fatalf("described again as %+v", againPlain)
+		}
+		// Once is enough: the next start leaves the chats alone.
+		if err := h.host.Connector.DescribeDirectChats(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := h.host.Store.DescribedDirectChats(ctx); err != nil || !done {
+			t.Fatalf("not marked done: %v %v", done, err)
+		}
 	})
 
 	t.Run("a contact whose ID is a phone number comes with it, to the login that saw it", func(t *testing.T) {

@@ -226,6 +226,9 @@ func (h *Host) Start(ctx context.Context) error {
 	go func() {
 		defer close(h.postStart)
 		h.Bridge.PostStart(postCtx)
+		if err := h.Connector.DescribeDirectChats(postCtx); err != nil && postCtx.Err() == nil {
+			h.Config.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Describing direct chats again failed; it is tried again at the next start")
+		}
 	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,
 	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from

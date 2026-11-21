@@ -28,3 +28,25 @@ func (s *Store) SetSettledRestore(ctx context.Context, id string) error {
 		settledRestoreName, id)
 	return err
 }
+
+// describedDirectChatsName marks that every direct chat this database had was described again
+// once its metadata said who the chat is with (Connector.DescribeDirectChats).
+const describedDirectChatsName = "described_direct_chats"
+
+// DescribedDirectChats reports whether DescribeDirectChats has finished on this database.
+func (s *Store) DescribedDirectChats(ctx context.Context) (bool, error) {
+	var value string
+	err := s.DB.QueryRow(ctx, `SELECT value FROM trioditis_secret WHERE name=$1`, describedDirectChatsName).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// SetDescribedDirectChats records that DescribeDirectChats has finished on this database.
+func (s *Store) SetDescribedDirectChats(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_secret (name, value) VALUES ($1, '1') ON CONFLICT (name) DO NOTHING`,
+		describedDirectChatsName)
+	return err
+}

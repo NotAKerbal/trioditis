@@ -202,3 +202,27 @@ const subscribe = subscribeDrafts
 export function useDraft<Reply>(chatId: string): Draft<Reply> {
   return useSyncExternalStore(subscribe, () => getDraft<Reply>(chatId))
 }
+
+/** The first of these chats' drafts with text in it, or the first chat's: a conversation's row. */
+export function useFirstDraft<Reply>(chatIds: readonly string[]): Draft<Reply> {
+  return useSyncExternalStore(subscribe, () => {
+    for (const id of chatIds) {
+      const draft = getDraft<Reply>(id)
+      if (draft.text.trim()) return draft
+    }
+    return getDraft<Reply>(chatIds[0] ?? '')
+  })
+}
+
+/**
+ * Moves a draft to another chat of the same conversation, when the person sends it on another
+ * network: its text only, as a new draft, since a reply is to a message in the chat it was in.
+ * Nothing moves into a chat that has a draft of its own.
+ */
+export function moveDraft(from: string, to: string) {
+  if (from === to) return
+  const draft = getDraft(from)
+  if (!draft.text.trim() || filled(getDraft(to))) return
+  change(to, { text: draft.text, reply: null })
+  change(from, { text: '', reply: null })
+}

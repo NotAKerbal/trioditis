@@ -12,12 +12,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
+import { MAX_MERGED } from './conversations.ts'
 import type { BridgeStatus } from './bridge-ready.ts'
 import { reactionGroups, reactionRequests, showReactions, type Shown } from './reaction-requests.ts'
 import { CONFIRM_MS, confirmed, sameKey, withPending, type PendingReaction, type Reaction } from './reaction-toggle.ts'
 
 export interface Message {
   id: Id<'messages'>
+  /** The chat it's in: one of a conversation's, when the pane shows several (conversations.ts). */
+  chatId: ChatId
   eventId: string
   /** Still the person's pending copy: not echoed by the network yet. */
   pending: boolean
@@ -44,6 +47,7 @@ function openBody(m: Doc<'messages'>, session: Session): MessagePlaintext | null
 function toMessage(m: Doc<'messages'>, session: Session): Message {
   return {
     id: m._id,
+    chatId: m.chatId as ChatId,
     eventId: m.eventId,
     pending: m.eventId.startsWith('pending:'),
     self: 'self' in m.sender,
@@ -58,17 +62,68 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
   }
 }
 
-/** A chat's messages, oldest first for display, loading older pages on request. */
-export function useMessages(chatId: ChatId) {
+const usePage = (chatId: ChatId | undefined) =>
+  usePaginatedQuery(api.messages.list, chatId ? { chatId } : 'skip', { initialNumItems: 50 })
+
+/**
+ * The messages of a chat, or of every chat of a conversation together (at most MAX_MERGED),
+ * oldest first for display, loading older pages on request.
+ *
+ * Each chat pages on its own, so their pages reach back to different times. Only what every
+ * chat has loaded back to is shown together (`mergePages`): older messages of one wait until
+ * the others have loaded back that far, so nothing appears out of place and then has another
+ * chat's messages arrive in between. Loading more loads more of each that has more.
+ */
+export function useMessages(chatIds: ChatId | readonly ChatId[]) {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.messages.list, { chatId }, { initialNumItems: 50 })
-  const messages = useMemo(() => [...results].reverse().map((m) => toMessage(m, session)), [results, session])
+  const ids = typeof chatIds === 'string' ? [chatIds] : chatIds
+  // One page per slot, always as many: a chat beyond those it holds is skipped.
+  const all = [usePage(ids[0]), usePage(ids[1]), usePage(ids[2]), usePage(ids[3]), usePage(ids[4]), usePage(ids[5])]
+  const slots = all.slice(0, Math.min(ids.length, MAX_MERGED))
+  const statuses = slots.map((p) => p.status).join()
+  const messages = useMemo(
+    () =>
+      mergePages(
+        slots.map((p) => ({
+          messages: [...p.results].reverse().map((m) => toMessage(m, session)),
+          more: p.status === 'CanLoadMore' || p.status === 'LoadingMore',
+        })),
+      ),
+    // A slot's results are the same array until its page changes; every slot is listed, so the
+    // list is as long whatever the number of chats.
+    [session, statuses, ...all.map((p) => p.results)],
+  )
   return {
     messages,
-    loading: status === 'LoadingFirstPage',
-    canLoadMore: status === 'CanLoadMore',
-    loadingMore: status === 'LoadingMore',
-    loadMore: () => loadMore(50),
+    loading: slots.some((p) => p.status === 'LoadingFirstPage'),
+    canLoadMore: slots.some((p) => p.status === 'CanLoadMore'),
+    loadingMore: slots.some((p) => p.status === 'LoadingMore'),
+    loadMore: () => {
+      for (const p of slots) if (p.status === 'CanLoadMore') p.loadMore(50)
+    },
+  }
+}
+
+/**
+ * Several chats' loaded messages (each oldest first) as one list, oldest first. A chat with
+ * more to load sets how far back the list goes: its oldest loaded message. Each chat keeps its
+ * own order, and they're merged by time.
+ */
+export function mergePages<M extends { at: number }>(chats: readonly { messages: readonly M[]; more: boolean }[]): M[] {
+  if (chats.length === 1) return [...chats[0]!.messages]
+  const horizon = Math.max(-Infinity, ...chats.flatMap((c) => (c.more && c.messages.length ? [c.messages[0]!.at] : [])))
+  const lists = chats.map((c) => c.messages.filter((m) => m.at >= horizon))
+  const at = lists.map(() => 0)
+  const out: M[] = []
+  for (;;) {
+    let pick = -1
+    for (let i = 0; i < lists.length; i++) {
+      const m = lists[i]![at[i]!]
+      if (m && (pick < 0 || m.at < lists[pick]![at[pick]!]!.at)) pick = i
+    }
+    if (pick < 0) return out
+    out.push(lists[pick]![at[pick]!]!)
+    at[pick]!++
   }
 }
 
@@ -89,20 +144,29 @@ const REACTIONS_GC_MS = 10_000
  * the cache, so the requests grow as answers come. While a group's new request is on its way, its
  * messages keep what they showed, for a few seconds at most (showReactions).
  */
-export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at: number }[]) {
+export function useReactions(messages: { id: Id<'messages'>; at: number; chatId: ChatId }[]) {
   const queryClient = useQueryClient()
-  const request = (asked: Id<'messages'>[]) => convexQuery(api.messages.reactions, { chatId, messageIds: asked })
-  const answerFor = (asked: Id<'messages'>[]) => queryClient.getQueryData<ReactionAnswer>(request(asked).queryKey)
-  const requests = reactionGroups(messages).flatMap((group) => reactionRequests(group, answerFor))
+  const request = (chatId: ChatId, asked: Id<'messages'>[]) =>
+    convexQuery(api.messages.reactions, { chatId, messageIds: asked })
+  // Asked chat by chat: each request is for one chat's messages.
+  const byChat = new Map<ChatId, typeof messages>()
+  for (const m of messages) byChat.set(m.chatId, [...(byChat.get(m.chatId) ?? []), m])
+  const requests = [...byChat].flatMap(([chatId, list]) =>
+    reactionGroups(list).flatMap((group) =>
+      reactionRequests(group, (asked) => queryClient.getQueryData<ReactionAnswer>(request(chatId, asked).queryKey)).map(
+        (asked) => ({ chatId, asked }),
+      ),
+    ),
+  )
   const results = useQueries({
-    queries: requests.map((asked) => ({ ...request(asked), gcTime: REACTIONS_GC_MS })),
+    queries: requests.map((r) => ({ ...request(r.chatId, r.asked), gcTime: REACTIONS_GC_MS })),
     combine: resultsOf,
   })
   const before = useRef(new Map<string, Shown<ReactionAnswer[string]>>())
   // Bumped when a kept list runs out, to show what's true then.
   const [tick, setTick] = useState(0)
   const ids = messages.map((m) => m.id).join()
-  const asked = requests.map((r) => r.join()).join('|')
+  const asked = requests.map((r) => r.asked.join()).join('|')
   // `tick` is a dependency so it looks again when a kept list runs out.
   const { shown, expires } = useMemo(() => {
     // A failed request counts as neither an answer nor one on its way, even with data from
@@ -148,7 +212,8 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
  * says, and `onUnconfirmed` is told; one the server refused goes back at once, with its error.
  */
 export function useReactionToggle(
-  chatId: ChatId,
+  /** The chat each message is in. */
+  chatIdOf: (messageId: Id<'messages'>) => ChatId | undefined,
   server: Map<string, Reaction[]>,
   onUnconfirmed: () => void,
   onError: (e: unknown) => void,
@@ -161,6 +226,8 @@ export function useReactionToggle(
   }, [live, pending.length])
   const onUnconfirmedRef = useRef(onUnconfirmed)
   onUnconfirmedRef.current = onUnconfirmed
+  const chatIdOfRef = useRef(chatIdOf)
+  chatIdOfRef.current = chatIdOf
   const oldest = live.length ? Math.min(...live.map((p) => p.at)) : null
   useEffect(() => {
     if (oldest === null) return
@@ -180,6 +247,8 @@ export function useReactionToggle(
       // A change still on its way can't be undone yet: the bridge host may not have the
       // reaction to take away until it has added it. The choice shows as made meanwhile.
       if (live.some((q) => q.messageId === messageId && sameKey(q.key, key))) return
+      const chatId = chatIdOfRef.current(messageId)
+      if (!chatId) return
       const remove = !!shown.get(messageId)?.some((r) => r.mine && sameKey(r.key, key))
       const p: PendingReaction = { messageId, key, remove, at: Date.now() }
       const others = (q: PendingReaction) => q.messageId !== messageId || !sameKey(q.key, key)
@@ -189,14 +258,20 @@ export function useReactionToggle(
         onError(e)
       })
     },
-    [live, shown, react, chatId, onError],
+    [live, shown, react, onError],
   )
   return { reactions: shown, toggle }
 }
 
-/** Who is typing now. Queries don't rerun as time passes, so expiry is checked here. */
-export function useTyping(chatId: ChatId) {
-  const { data } = useQuery(convexQuery(api.messages.typing, { chatId }))
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const typingOf = (results: { data?: { expiresAt: number }[] | undefined }[]) => results.flatMap((r) => r.data ?? [])
+
+/** Who is typing now, in any of these chats. Queries don't rerun as time passes, so expiry is checked here. */
+export function useTyping(chatIds: readonly ChatId[]) {
+  const data = useQueries({
+    queries: chatIds.map((chatId) => convexQuery(api.messages.typing, { chatId })),
+    combine: typingOf,
+  })
   const [now, setNow] = useState(() => Date.now())
   const next = Math.min(...(data ?? []).map((t) => t.expiresAt).filter((t) => t > now), Infinity)
   useEffect(() => {

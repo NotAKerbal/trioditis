@@ -57,6 +57,16 @@ const CHATS: Fixture[] = [
     pinned: true,
   },
   {
+    // Alice on Signal too: link her two contacts on one People card and her chats are one.
+    portalId: 'p_demo_alice_signal',
+    network: 'signal',
+    kind: 'dm',
+    name: 'Alice Moreno',
+    people: ['g_demo_alice'],
+    lines: ['Sent you the photos on here', 'Got them, thanks!', 'The one by the lake is my favourite'],
+    unread: 1,
+  },
+  {
     portalId: 'p_demo_family',
     network: 'whatsapp',
     kind: 'group',
@@ -407,7 +417,12 @@ export const seedForMe = action({
         network: chat.network,
         portalId: chat.portalId,
         kind: chat.kind,
-        sealed: seal({ name: chat.name }, 'chat', chat.portalId),
+        // A direct chat says who it's with, as a bridge host's does (sealing.md).
+        sealed: seal(
+          { name: chat.name, ...(chat.kind === 'dm' ? { dmGhostId: chat.people[0] } : {}) },
+          'chat',
+          chat.portalId,
+        ),
         unread: chat.unread,
         isRequest: chat.isRequest ?? false,
         snoozed: chat.snoozed ?? false,

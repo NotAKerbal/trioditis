@@ -602,21 +602,21 @@ chats with that label in the view, in the order they were labelled, pinned or no
 
 A `ChatRow` (type in `@trioditis/core`):
 
-| Field                                        | Meaning                                                                                                                                             |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_id`, `portalId`                            | The chat, and its opaque network-side ID (the object ID of `sealedMeta`)                                                                            |
-| `network`, `networkAccountId`                | Which network and which of the person's accounts it belongs to (`null` if not known yet)                                                            |
-| `kind`                                       | `dm`, `group`, `channel`, `space`                                                                                                                   |
-| `sealedMeta`                                 | Name, topic and avatar: open with kind `chat`, object ID `portalId`. `null` until described. Plaintext is `ChatPlaintext`; honour `avatarUnchanged` |
-| `unreadCount`, `mentionCount`                | Unread messages, and how many of those mention the person (flagged by the bridge host)                                                              |
-| `unreadRev`                                  | One more with every message counted unread, so two answers with the same count can be told apart                                                    |
-| `markedUnread`                               | The person marked it unread                                                                                                                         |
-| `pinned`, `archived`, `blocked`, `isRequest` | As named                                                                                                                                            |
-| `mutedUntil`                                 | `null`, a time, or `Number.MAX_SAFE_INTEGER` for "until I unmute"                                                                                   |
-| `snoozedUntil`, `woke`                       | When the snooze ends, and whether it has                                                                                                            |
-| `labelIds`                                   | The person's labels on this chat                                                                                                                    |
-| `lastMessageAt`                              | Network time of the latest message                                                                                                                  |
-| `lastMessage`                                | The newest message, for a preview: see below. `null` when the chat has no messages                                                                  |
+| Field                                        | Meaning                                                                                                                                                                                                       |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_id`, `portalId`                            | The chat, and its opaque network-side ID (the object ID of `sealedMeta`)                                                                                                                                      |
+| `network`, `networkAccountId`                | Which network and which of the person's accounts it belongs to (`null` if not known yet)                                                                                                                      |
+| `kind`                                       | `dm`, `group`, `channel`, `space`                                                                                                                                                                             |
+| `sealedMeta`                                 | Name, topic and avatar: open with kind `chat`, object ID `portalId`. `null` until described. Plaintext is `ChatPlaintext`; honour `avatarUnchanged`. A `dm`'s says who it's with: `dmGhostId` (Conversations) |
+| `unreadCount`, `mentionCount`                | Unread messages, and how many of those mention the person (flagged by the bridge host)                                                                                                                        |
+| `unreadRev`                                  | One more with every message counted unread, so two answers with the same count can be told apart                                                                                                              |
+| `markedUnread`                               | The person marked it unread                                                                                                                                                                                   |
+| `pinned`, `archived`, `blocked`, `isRequest` | As named                                                                                                                                                                                                      |
+| `mutedUntil`                                 | `null`, a time, or `Number.MAX_SAFE_INTEGER` for "until I unmute"                                                                                                                                             |
+| `snoozedUntil`, `woke`                       | When the snooze ends, and whether it has                                                                                                                                                                      |
+| `labelIds`                                   | The person's labels on this chat                                                                                                                                                                              |
+| `lastMessageAt`                              | Network time of the latest message                                                                                                                                                                            |
+| `lastMessage`                                | The newest message, for a preview: see below. `null` when the chat has no messages                                                                                                                            |
 
 #### The last message
 
@@ -1060,9 +1060,9 @@ the migrations install each network with an account that isn't logged out.
 
 For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
 signed-in person a connected account on each of seven networks (WhatsApp, Signal, Google
-Messages, Telegram, Instagram, Slack and Messenger), with six contacts and eight chats (two
-groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
-messages each. The fixtures are made-up text sealed on the server to the person's identity
+Messages, Telegram, Instagram, Slack and Messenger), with six contacts and nine chats (two
+groups, a pinned chat, a message request, a snoozed chat, an archived one, and Alice on both
+WhatsApp and Signal, to link on one People card) of 20 messages each. The fixtures are made-up text sealed on the server to the person's identity
 public key, so they open like anything else. It needs `keys.setup` done first and works only
 where `TRIODITIS_DEMO=1` and no bridge host is configured (`TRIODITIS_NETWORKS` empty or
 unset; exactly when `server.info` says `demo: true`), so no real account can be there. The
@@ -1167,6 +1167,36 @@ Errors: `Your people changed on another device. Try again.` (`people_changed`) �
 ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
 person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
 people at once.` · `You can have at most 10,000 people.`
+
+## Conversations
+
+A person's direct chats on several networks are shown as one conversation once their People
+card links the contacts they're with. The server can't put them together: who a direct chat
+is with is sealed in its metadata (`dmGhostId`, the other person's `ghostId` on the chat's
+network, the same one their messages and contact carry) and a card's links are sealed too.
+So the client does, from the chats it has loaded (apps/desktop `data/conversations.ts`):
+
+- **The list.** In each view, a person's direct chats come together in the place of the first
+  of them, which keeps the view's order (pins first, then the newest). The row is named and
+  pictured after the card, unread if any chat is (counts summed), muted only if all are, and
+  shows the newest message of any. A chat stays in its own view: an archived one isn't pulled
+  into the inbox. At most six chats are one conversation; more stay rows of their own.
+- **The pane.** Its messages are every chat's, merged by time, each chat keeping its own
+  order. Each chat pages on its own, so only what every chat with more to load has reached is
+  shown, and loading earlier messages loads more of each. A run of messages starts again where
+  the network changes, and says which. Pinning, archiving, snoozing, muting, labels and
+  blocking change every chat in it, and opening it marks each one read.
+- **Sending.** A message goes by one of the chats, chosen in the composer: a chat with a draft
+  first, then the one they last wrote from, then the one opened. It stays chosen until the
+  person changes it or replies to a message in another chat, whose chat a reply goes by.
+  Changing it takes the draft's text along (not its reply), but never over another chat's draft.
+- **Profiles.** A direct chat's details, and a group sender's avatar or name, show the
+  person's profile: their card's networks, each with its chat when there is one, and its
+  numbers, emails and usernames; or, with no card, the contact's own profile and a way to add
+  them to People, a new card or one they belong on (`suggestLinks`).
+
+A chat described before `dmGhostId` existed has none until its bridge host describes it again,
+which each host does once for every direct chat it has, at its first start with the field.
 
 ## New chats
 
