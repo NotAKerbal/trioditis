@@ -31,6 +31,8 @@ export interface ScheduledItem {
   replyTo: string | null
   /** Its cancel is on its way: Cancel is off until the server answers. */
   cancelling: boolean
+  /** In a conversation of several chats, the one it goes on, as the network chooser names it. */
+  via?: string | undefined
 }
 
 /** A cancelled scheduled message the server keeps until it's restored or discarded. */
@@ -40,6 +42,8 @@ export interface CancelledItem {
   replyTo: string | null
   /** Restored to the composer from here: it says so, and Restore stays. */
   restored: boolean
+  /** In a conversation of several chats, the one it was for. */
+  via?: string | undefined
 }
 
 interface MessageListProps {
@@ -465,6 +469,7 @@ export function MessageList(props: MessageListProps) {
             </div>
             <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-primary-ink">
               <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
+              {s.via ? ` on ${s.via}` : null}
               <Button
                 variant="link"
                 size="sm"
@@ -556,6 +561,7 @@ function CancelledRow({
       </div>
       <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {item.restored ? 'Cancelled message · Restored to your draft' : 'Cancelled message'}
+        {item.via ? ` · ${item.via}` : null}
         {confirming ? (
           <>
             <span className="text-danger">Discard it for good?</span>

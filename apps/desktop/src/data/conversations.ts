@@ -162,10 +162,26 @@ export function useSendRequest(): string | null {
   return useSyncExternalStore(subscribe, () => sendRequest)
 }
 
-/** Labels made unique by numbering any that are still the same, so no two choices look alike. */
-export function uniqueLabels(labels: readonly string[]): string[] {
-  return labels.map((label, i) => {
-    const same = labels.filter((l) => l === label).length
-    return same > 1 ? `${label} (${labels.slice(0, i + 1).filter((l) => l === label).length})` : label
-  })
+/**
+ * Labels made unique: any still alike are numbered in the order of their keys, which stay the
+ * same as the conversation's order changes, so "(1)" always means the same chat; a number is
+ * skipped when that would make it look like another label.
+ */
+export function uniqueLabels(items: readonly { key: string; label: string }[]): string[] {
+  const out = items.map((i) => i.label)
+  const taken = new Set(out)
+  for (const label of new Set(out)) {
+    const alike = items.flatMap((item, i) => (item.label === label ? [{ key: item.key, i }] : []))
+    if (alike.length < 2) continue
+    alike.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    let n = 0
+    for (const { i } of alike) {
+      let next: string
+      do next = `${label} (${++n})`
+      while (taken.has(next))
+      taken.add(next)
+      out[i] = next
+    }
+  }
+  return out
 }

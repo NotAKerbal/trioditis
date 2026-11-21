@@ -160,12 +160,17 @@ describe('a chat chosen to send on from a profile', () => {
 })
 
 describe('the choices of network to send on', () => {
-  it('never look alike', () => {
-    expect(uniqueLabels(['WhatsApp', 'Signal'])).toEqual(['WhatsApp', 'Signal'])
-    expect(uniqueLabels(['WhatsApp · Alice', 'WhatsApp · Alice', 'Signal'])).toEqual([
-      'WhatsApp · Alice (1)',
-      'WhatsApp · Alice (2)',
-      'Signal',
-    ])
+  const items = (...pairs: [string, string][]) => pairs.map(([key, label]) => ({ key, label }))
+  it('never look alike, whatever the labels', () => {
+    expect(uniqueLabels(items(['a', 'WhatsApp'], ['b', 'Signal']))).toEqual(['WhatsApp', 'Signal'])
+    const labels = uniqueLabels(items(['c', 'Alice'], ['a', 'Alice'], ['b', 'Alice (1)']))
+    expect(new Set(labels).size).toBe(3)
+    expect(labels).toEqual(['Alice (3)', 'Alice (2)', 'Alice (1)'])
+  })
+
+  it('keep their numbers as the conversation’s order changes', () => {
+    const before = uniqueLabels(items(['a', 'WhatsApp · Alice'], ['b', 'WhatsApp · Alice']))
+    const after = uniqueLabels(items(['b', 'WhatsApp · Alice'], ['a', 'WhatsApp · Alice']))
+    expect(after).toEqual([before[1], before[0]])
   })
 })

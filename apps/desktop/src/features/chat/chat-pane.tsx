@@ -43,7 +43,7 @@ import {
 } from '~/data/chats.ts'
 import { accountLabels } from '~/data/account-label.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
-import { useContacts } from '~/data/contacts.ts'
+import { useContacts, useContactsAcross } from '~/data/contacts.ts'
 import {
   cardIndex,
   cardOfChat,
@@ -150,8 +150,16 @@ function OpenChat({
   const actions = useChatActions()
   // The person's direct chats on other networks, shown with this one as one conversation.
   const together = chatIds.length > 1 && chatIds.includes(chat.id)
-  const live = useChatsById(together ? chatIds : [])
-  const members = useMemo(() => (live && live.length > 1 ? live : [chat]), [live, chat])
+  const looked = useChatsById(together ? chatIds : [])
+  // While a newly linked chat's row is on its way, the chats already here stay (with their page
+  // slots and read trackers), less any no longer in the conversation; the opened one always is.
+  const lastLive = useRef<Chat[] | undefined>(undefined)
+  if (looked) lastLive.current = looked
+  const live = together ? (looked ?? lastLive.current?.filter((m) => chatIds.includes(m.id))) : undefined
+  const members = useMemo(
+    () => (live && live.length > 1 && live.some((m) => m.id === chat.id) ? live : [chat]),
+    [live, chat],
+  )
   const accounts = useAccounts()
   const accountNames = useMemo(
     () => accountLabels((accounts ?? []).map((a) => ({ id: a._id as string, network: a.network, hint: a.hint }))),
@@ -173,7 +181,7 @@ function OpenChat({
   )
   // A conversation's chats and their first pages are still on their way: until they're in, what
   // it shows of each (and so what it marks read) isn't known.
-  const waiting = together && (!live || loading)
+  const waiting = together && (!looked || loading)
   const networkOfChat = new Map(members.map((m) => [m.id as string, m.network]))
   // Where focus goes back to when the side panel's sheet closes: what opened it.
   const detailsButton = useRef<HTMLButtonElement>(null)
@@ -234,25 +242,25 @@ function OpenChat({
   }, [sendId, waiting, loading, requested, messages, memberIds, chat.id])
   const sendChat = members.find((m) => m.id === sendId) ?? chat
   sendIdRef.current = sendChat.id
-  // What the network chooser calls each chat: its network, and its account when there are two;
-  // then, for two chats on one account (two numbers of one person), who each is with.
+  // What the network chooser (and a scheduled message) calls each chat: its network, and its
+  // account when there are two; then, for two chats on one account (two numbers of one
+  // person), who each is with; and a number for any still alike, the same one each time.
   const sameAccount = members.filter((m) =>
     members.some((o) => o !== m && o.network === m.network && o.row.networkAccountId === m.row.networkAccountId),
   )
-  const sharedNetwork = sameAccount[0]?.network ?? chat.network
-  const whoOf = useContacts(
-    sharedNetwork,
-    sameAccount.flatMap((m) => (m.network === sharedNetwork && m.dmGhostId ? [m.dmGhostId] : [])),
+  const whoOf = useContactsAcross(
+    sameAccount.flatMap((m) => (m.dmGhostId ? [{ network: m.network, ghostId: m.dmGhostId }] : [])),
   )
   const sendLabels = uniqueLabels(
     members.map((m) => {
       const base =
         (m.row.networkAccountId ? accountNames.get(m.row.networkAccountId)?.full : undefined) ?? networkName(m.network)
-      if (!sameAccount.includes(m)) return base
-      const who = m.network === sharedNetwork && m.dmGhostId ? whoOf.get(m.dmGhostId) : undefined
-      return `${base} · ${who?.handle || who?.name || m.name}`
+      if (!sameAccount.includes(m)) return { key: m.id, label: base }
+      const who = m.dmGhostId ? whoOf.get(`${m.network}/${m.dmGhostId}`) : undefined
+      return { key: m.id, label: `${base} · ${who?.handle || who?.name || m.name}` }
     }),
   )
+  const labelOf = (chatId: string) => (merged ? sendLabels[memberIds.indexOf(chatId as ChatId)] : undefined)
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen. Each chat of a
   // conversation keeps its own: the composer shows the draft of the chat it sends on, so what's
@@ -291,14 +299,17 @@ function OpenChat({
         body: scheduledTexts.get(s._id),
         replyTo: s.replyTo,
         cancelling: cancelling.has(s._id),
+        via: labelOf(s.chatId),
       })),
-    [pending, scheduledTexts, cancelling],
+    // `labelOf` follows the members' labels.
+    [pending, scheduledTexts, cancelling, sendLabels.join()],
   )
   const cancelled = cancelledHere.map((c) => ({
     id: c._id,
     body: scheduledTexts.get(c._id),
     replyTo: c.replyTo,
     restored: restored.has(c._id),
+    via: labelOf(c.chatId),
   }))
 
   async function sendText(chatId: ChatId, text: string, reply?: string, clientMessageId = newClientId()) {

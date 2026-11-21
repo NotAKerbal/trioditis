@@ -97,8 +97,14 @@ export function PersonProfile({
     }
   }
   // Worked out again from the latest cards, so a contact another device linked meanwhile stays.
+  // Only while they're on no card: one another device put them on since stays there, and says so.
   const addTo = (personKey: string, them: NetworkContact) =>
-    save((fresh) => moveLinks(fresh, personKey, [them]), 'That couldn’t be linked.')
+    save((fresh) => {
+      const on = fresh.find((p) => p.card.links?.some((l) => contactKey(l) === contactKey(them)))
+      if (on?.personKey === personKey) return []
+      if (on) throw new Stale(`They were added to ${cardTitle(on.card) || 'someone else'} on another device.`)
+      return moveLinks(fresh, personKey, [them])
+    }, 'That couldn’t be linked.')
   const addNew = (them: NetworkContact) =>
     save((fresh) => {
       if (fresh.some((p) => p.card.links?.some((l) => contactKey(l) === contactKey(them)))) return []
