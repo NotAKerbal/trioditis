@@ -1,0 +1,69 @@
+/*
+ * Trioditis Starlight theme.
+ * Matches the Brand Guide (src/content/docs/contributing/brand.mdx) and packages/ui/src/styles/tokens.css:
+ *   Light accent: #0284c7  |  Dark accent: #38bdf8
+ *   Light ink:    #0f172a  |  Dark ink:    #e9ebf0
+ *   Font: DM Sans Variable
+ */
+
+:root {
+  --sl-font: 'DM Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Dark mode palette (Starlight default) */
+  --sl-color-accent-low: #082f49;
+  --sl-color-accent: #0284c7;
+  --sl-color-accent-high: #38bdf8;
+
+  --sl-color-white: #e9ebf0;
+  --sl-color-gray-1: #d0d5df;
+  --sl-color-gray-2: #a3aab6;
+  --sl-color-gray-3: #6b7380;
+  --sl-color-gray-4: #333944;
+  --sl-color-gray-5: #252a33;
+  --sl-color-gray-6: #161920;
+  --sl-color-black: #0f1115;
+
+  --sl-color-bg-nav: #121419;
+  --sl-color-bg-sidebar: #121419;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e0f2fe;
+  --sl-color-accent: #0284c7;
+  --sl-color-accent-high: #075985;
+
+  --sl-color-white: #0f172a;
+  --sl-color-gray-1: #1e293b;
+  --sl-color-gray-2: #475569;
+  --sl-color-gray-3: #64748b;
+  --sl-color-gray-4: #94a3b8;
+  --sl-color-gray-5: #d9dde4;
+  --sl-color-gray-6: #f4f5f7;
+  --sl-color-gray-7: #f8f9fb;
+  --sl-color-black: #ffffff;
+
+  --sl-color-bg-nav: #ffffff;
+  --sl-color-bg-sidebar: #f4f5f7;
+}
+
+.site-title img {
+  height: 1.75rem;
+  width: auto;
+}
+
+.hero {
+  padding-block: clamp(2.5rem, calc(1rem + 5vmin), 5rem);
+}
+
+.hero h1 {
+  letter-spacing: -0.025em;
+}
+
+/* Keep the transit-junction icon crisp with clear space and no extra shadow or frame. */
+.hero > img {
+  width: min(12rem, 42vw);
+  height: auto;
+  filter: none;
+  box-shadow: none;
+}

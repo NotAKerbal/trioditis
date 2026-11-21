@@ -2,6 +2,7 @@
 # no local data, secrets or deployment state, and no other worktrees.
 **/node_modules
 **/.turbo
+**/.astro
 **/dist
 .git
 .worktrees
