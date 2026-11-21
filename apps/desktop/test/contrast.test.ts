@@ -6,7 +6,14 @@ import { describe, expect, it } from 'vitest'
 
 const css = readFileSync(new URL('../../../packages/ui/src/styles/tokens.css', import.meta.url), 'utf8')
 
-const hex = (c: number[]) => `#${c.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('')}`
+const hex = (c: number[]) =>
+  `#${c
+    .map((v) =>
+      Math.round(v * 255)
+        .toString(16)
+        .padStart(2, '0'),
+    )
+    .join('')}`
 const rgb = (value: string) => [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255)
 
 /** A theme's colours as hex. A translucent one (`rgb(r g b / a)`) is laid over its `--surface`. */

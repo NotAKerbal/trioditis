@@ -19,6 +19,7 @@ import {
   Bell,
   BellOff,
   Check,
+  ChevronLeft,
   Info,
   MoreHorizontal,
   Pin,
@@ -68,26 +69,34 @@ interface ChatPaneProps {
   chatId: ChatId | undefined
   /** The open chat no longer exists (deleted, or not the person's). */
   onGone: () => void
+  /** Back to the list, on a narrow screen where the chat covers it. */
+  onBack: () => void
   /** Runs an action that may take the chat off the list; the shell opens the next one if so. */
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
 }
 
-export function ChatPane({ chatId, onGone, act }: ChatPaneProps) {
+export function ChatPane({ chatId, onGone, onBack, act }: ChatPaneProps) {
   const chat = useChat(chatId)
   useEffect(() => {
     if (chatId && chat === null) onGone()
   }, [chatId, chat, onGone])
   if (!chatId || !chat) {
     return (
-      <main className="flex min-w-0 flex-1 items-center justify-center bg-surface-2 text-sm text-subtle-foreground">
+      // On a narrow screen the list has the whole width until a chat opens.
+      <main
+        className={cn(
+          'flex min-w-0 flex-1 items-center justify-center bg-surface-2 text-sm text-subtle-foreground',
+          !chatId && 'max-md:hidden',
+        )}
+      >
         {chatId && chat === undefined ? '' : 'No chat open'}
       </main>
     )
   }
-  return <OpenChat key={chat.id} chat={chat} act={act} />
+  return <OpenChat key={chat.id} chat={chat} act={act} onBack={onBack} />
 }
 
-function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
+function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']; onBack: () => void }) {
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
@@ -195,10 +204,24 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
 
   const name = chat.name
   const muted = chat.muted
+  const toggleArchived = () =>
+    void act(chat.id, async () => {
+      const archiving = !chat.row.archived
+      const ok = await actions.setArchived(chat.id, archiving)
+      if (ok && archiving)
+        toast(`Archived ${name}`, {
+          label: 'Undo',
+          onClick: () => void actions.setArchived(chat.id, false),
+        })
+      return ok
+    })
   return (
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
-        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5">
+        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
+          <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
+            <ChevronLeft className="size-5" />
+          </Button>
           <MediaAvatar
             network={chat.network}
             picture={chat.avatar}
@@ -232,6 +255,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               size="icon"
               aria-label={chat.row.pinned ? 'Unpin' : 'Pin'}
               title={chat.row.pinned ? 'Unpin' : 'Pin'}
+              className="max-sm:hidden"
               onClick={() => void act(chat.id, () => actions.setPinned(chat.id, !chat.row.pinned))}
             >
               {chat.row.pinned ? <PinOff className="size-[18px]" /> : <Pin className="size-[18px]" />}
@@ -277,18 +301,8 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               size="icon"
               aria-label={chat.row.archived ? 'Move to inbox' : 'Archive'}
               title={chat.row.archived ? 'Move to inbox' : 'Archive'}
-              onClick={() =>
-                void act(chat.id, async () => {
-                  const archiving = !chat.row.archived
-                  const ok = await actions.setArchived(chat.id, archiving)
-                  if (ok && archiving)
-                    toast(`Archived ${name}`, {
-                      label: 'Undo',
-                      onClick: () => void actions.setArchived(chat.id, false),
-                    })
-                  return ok
-                })
-              }
+              className="max-sm:hidden"
+              onClick={toggleArchived}
             >
               {chat.row.archived ? <ArchiveRestore className="size-[18px]" /> : <Archive className="size-[18px]" />}
             </Button>
@@ -299,6 +313,17 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {/* On a narrow screen, where the header has no room for their buttons. */}
+                <DropdownMenuItem
+                  className="sm:hidden"
+                  onSelect={() => void act(chat.id, () => actions.setPinned(chat.id, !chat.row.pinned))}
+                >
+                  {chat.row.pinned ? <PinOff /> : <Pin />} {chat.row.pinned ? 'Unpin' : 'Pin'}
+                </DropdownMenuItem>
+                <DropdownMenuItem className="sm:hidden" onSelect={toggleArchived}>
+                  {chat.row.archived ? <ArchiveRestore /> : <Archive />}{' '}
+                  {chat.row.archived ? 'Move to inbox' : 'Archive'}
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void act(chat.id, () => actions.markUnread(chat.id))}>
                   <Bell /> Mark unread
                 </DropdownMenuItem>
@@ -353,8 +378,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
             // One replacement per message, whatever the clicks: the person chose to risk a
             // duplicate on the network, once (send-again.ts).
             const text = m.body?.body
-            if (text && m.clientMessageId)
-              void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id))
+            if (text && m.clientMessageId) void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id))
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)
@@ -402,7 +426,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           disabled={composerBlocked(chat.row, bridge.status)}
         />
       </main>
-      {details ? <DetailsPanel chat={chat} act={act} /> : null}
+      {details ? <DetailsPanel chat={chat} act={act} onClose={() => setDetails(false)} /> : null}
     </>
   )
 }

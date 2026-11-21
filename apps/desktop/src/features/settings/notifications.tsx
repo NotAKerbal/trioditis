@@ -30,10 +30,7 @@ export function Notifications() {
     <>
       <Heading title="Notifications" />
       <Group>
-        <Setting
-          title="Desktop notifications"
-          about={supported ? undefined : 'This browser can’t show notifications.'}
-        >
+        <Setting title="Desktop notifications" about={supported ? undefined : 'This browser can’t show notifications.'}>
           <Switch
             checked={on}
             disabled={!supported}

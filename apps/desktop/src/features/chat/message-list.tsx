@@ -415,12 +415,7 @@ export function MessageList(props: MessageListProps) {
               </Button>
               {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
                   composer when it's here, and the person is told when it isn't. */}
-              <Button
-                variant="link"
-                size="sm"
-                className="h-auto text-xs"
-                onClick={() => props.onCancelScheduled(s)}
-              >
+              <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onCancelScheduled(s)}>
                 {s.body === null ? 'Cancel send' : 'Cancel'}
               </Button>
             </div>

@@ -103,8 +103,11 @@ export function Shell() {
   }
 
   return (
+    // Side by side on a wide screen; on a narrow one (under 768px) one pane at a time: the list,
+    // or the open chat with a way back, and its details over it (chat-pane.tsx).
     <div className="flex h-full bg-background">
       <SidebarFrame
+        chatOpen={!!selectedId}
         bottomBar={
           <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
         }
@@ -124,7 +127,12 @@ export function Shell() {
           />
         </SidebarBoundary>
       </SidebarFrame>
-      <ChatPane chatId={selectedId as ChatId | undefined} onGone={() => select(undefined)} act={act} />
+      <ChatPane
+        chatId={selectedId as ChatId | undefined}
+        onGone={() => select(undefined)}
+        onBack={() => select(undefined)}
+        act={act}
+      />
       <SettingsDialog
         section={search.settings}
         connect={!!search.connect}

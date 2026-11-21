@@ -515,9 +515,26 @@ export function Sidebar({
  * The sidebar's column, with the bottom bar outside the list, so its menus stay open and
  * Settings stays in reach while SidebarBoundary retries a list that couldn't load.
  */
-export function SidebarFrame({ bottomBar, children }: { bottomBar: ReactNode; children: ReactNode }) {
+export function SidebarFrame({
+  bottomBar,
+  chatOpen,
+  children,
+}: {
+  bottomBar: ReactNode
+  /** A chat is open: on a narrow screen it takes the whole width, and the list steps aside. */
+  chatOpen: boolean
+  children: ReactNode
+}) {
   return (
-    <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
+    // Hidden, not unmounted, behind an open chat on a narrow screen: the shell still reads what
+    // the list shows to move on after an archive or snooze.
+    <aside
+      className={cn(
+        'flex w-[332px] shrink-0 flex-col border-r border-border bg-rail max-md:w-full max-md:border-r-0',
+        chatOpen && 'max-md:hidden',
+      )}
+      aria-label="Chats"
+    >
       {children}
       <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
     </aside>

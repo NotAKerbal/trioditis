@@ -66,7 +66,10 @@ describe('notification preferences', () => {
     const { currentPrefs, setPref } = await freshTab()
     setPref('notificationDetail', 'message')
     // Another tab turns notifications off; this tab hasn't heard yet.
-    stored.set(KEY, JSON.stringify({ ...JSON.parse(stored.get(KEY)!), notifications: false, notificationDetail: 'hidden' }))
+    stored.set(
+      KEY,
+      JSON.stringify({ ...JSON.parse(stored.get(KEY)!), notifications: false, notificationDetail: 'hidden' }),
+    )
     expect(currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
   })
 })
