@@ -36,8 +36,8 @@ describe('the key gate before it can decide', () => {
 
   it('decides from the server’s answer once it has one', () => {
     expect(keyGateLoad({ ...base, remote: { failed: false, hasData: true } })).toBe('decide')
-    expect(keyGateLoad({ ...base, remote: { failed: false, hasData: true }, local: { pending: false, hasKey: true } })).toBe(
-      'decide',
-    )
+    expect(
+      keyGateLoad({ ...base, remote: { failed: false, hasData: true }, local: { pending: false, hasKey: true } }),
+    ).toBe('decide')
   })
 })

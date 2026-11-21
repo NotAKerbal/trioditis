@@ -23,7 +23,10 @@ async function sam(t: T, { withKey = true } = {}) {
   const userId = await t.run(async (ctx) => {
     const now = Date.now()
     const user = (await ctx.runMutation(components.betterAuth.adapter.create, {
-      input: { model: 'user', data: { name: 'Sam', email: 'sam@x.test', emailVerified: false, createdAt: now, updatedAt: now } },
+      input: {
+        model: 'user',
+        data: { name: 'Sam', email: 'sam@x.test', emailVerified: false, createdAt: now, updatedAt: now },
+      },
     })) as { _id: string }
     await ctx.runMutation(components.betterAuth.adapter.create, {
       input: {
@@ -111,10 +114,12 @@ describe('resetting a forgotten password', { timeout: 60_000 }, () => {
 
     await resetWith(t, token, s.recovery.bytes, 'new password!!')
 
-    expect(await verifyPassword({ hash: await credentialHash(t, s.userId), password: 'auth:new password!!' })).toBe(true)
-    const backup = (
-      await t.run(async (ctx) => await ctx.db.query('keyBackups').collect())
-    ).find((row) => row.userId === s.userId && row.kind === 'password')!
+    expect(await verifyPassword({ hash: await credentialHash(t, s.userId), password: 'auth:new password!!' })).toBe(
+      true,
+    )
+    const backup = (await t.run(async (ctx) => await ctx.db.query('keyBackups').collect())).find(
+      (row) => row.userId === s.userId && row.kind === 'password',
+    )!
     const opened = unwrapIdentityKey(
       backup,
       passwordKey('new password!!', backup.params!),
@@ -165,7 +170,9 @@ describe('resetting a forgotten password', { timeout: 60_000 }, () => {
     const { token } = await admin.mutation(api.members.issuePasswordReset, { userId: s.userId })
     expect((await t.query(api.account.resetInfo, { token }))?.key).toBeNull()
     await t.action(api.account.resetPassword, { token, newAuthPassword: 'auth:new password!!' })
-    expect(await verifyPassword({ hash: await credentialHash(t, s.userId), password: 'auth:new password!!' })).toBe(true)
+    expect(await verifyPassword({ hash: await credentialHash(t, s.userId), password: 'auth:new password!!' })).toBe(
+      true,
+    )
   })
 
   it('is issued only by an admin, for someone else, and works only until it expires or a newer one replaces it', async () => {

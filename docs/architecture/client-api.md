@@ -91,17 +91,20 @@ follow-up: there is no email change yet).
 A server has no open sign-up. Every account starts from an invitation, and the first one,
 the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 
-| What                | How                                                                                                                                                                           |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members |
-| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                |
-| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
-| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                           |
-| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
-| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
-| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
-| Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
+| What                | How                                                                                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members          |
+| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                         |
+| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                              |
+| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                                    |
+| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404                     |
+| Forgotten password  | An admin's reset link and the recovery key: see Resetting a forgotten password below                                                                                                   |
+| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                                |
+| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member            |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                |
+| Invitations (admin) | `api.members.invitations({ paginationOpts })` pages through the invitations nobody has joined with yet, newest first, without tokens. `api.members.revokeInvitation({ invitationId })` |
+| Members (admin)     | `api.members.list({ paginationOpts })` pages through the members, oldest first: `{ userId, role, createdAt, name, email, you }`                                                        |
+| Remove (admin)      | `api.members.removeMember({ userId, sessionId? })`. See Removing a member below                                                                                                        |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
 `INVITE_REQUIRED`.
@@ -190,10 +193,58 @@ then lose the race for it; without the per-address limit, one address can. A pas
 isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
 and buckets that have refilled are deleted every ten minutes.
 
-Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
+### Members and invitations (admins)
+
+`members.list` and `members.invitations` are paginated queries (`usePaginatedQuery`): a server with many members or
+invitations shows them all, a page at a time, rather than only the newest hundred.
+
+Errors: `Only an admin can do that.` (`invite`, `invitations`, `list`, `revokeInvitation`,
+`removeMember`, `issuePasswordReset`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
 invitation can’t be revoked.` · `Someone is signing up with that invitation right now. Try
 again in a few minutes.`
+
+### Removing a member
+
+`members.removeMember` takes a member off the server in one transaction: their membership
+goes (so every member function refuses them at once), with their Better Auth sessions,
+password credential, passkeys and user (so the email can be invited again, as a new account),
+their key backups, key challenges and reset links, and every agent connection they approved.
+Their network accounts are logged out and their logins in progress ended, through the bridge
+host, as removing a network does. Their stored chats and messages stay, sealed to a key nobody
+else holds. An admin can't remove themselves, and the last admin can't be removed.
+
+Errors: `You can’t remove yourself. Ask another admin.` · `That person isn’t a member of this
+server.` · `The server’s last admin can’t be removed.`
+
+### Resetting a forgotten password
+
+Sign-in takes a password derived from the person's own, and their identity key is wrapped by
+it, so neither the server nor an admin can sign anyone in or open their messages. A reset
+needs two things: a link an admin makes, and the person's recovery key.
+
+1. An admin calls `api.members.issuePasswordReset({ userId, sessionId? })` (Settings →
+   Members → Reset password), which returns `{ token, expiresAt }` once, and shares
+   `/reset#token=…`. It works for a day, once; a newer one replaces it. It isn't for the
+   admin's own account. A locked-out admin, or a server's only admin, gets one from the
+   deployment's command line: `npx convex run members:issuePasswordResetFor '{"email": "…"}'`.
+2. Signed out, the reset page calls `api.account.resetInfo({ token })`: `{ userId, email,
+key }`, or `null` for a link that no longer works. `key` is `{ kid, publicKey, recovery,
+passwordParams }`, or `null` for an account that never set its key up.
+3. It opens the key with the recovery key (`unwrapIdentityKey` of `key.recovery`), wraps it
+   with the new password (fresh `newPasswordParams()`, never weaker than `passwordParams`),
+   proves it holds the key with `api.account.resetChallenge({ token })` (a sealed box, as
+   `keys.challenge` gives), and derives the new sign-in password with `authPassword` and
+   `email`.
+4. `api.account.resetPassword({ token, newAuthPassword, newWrap, proof })` changes the
+   sign-in credential and the password backup in one transaction, uses the link up and ends
+   every session the account has. An account with no key sends neither `newWrap` nor `proof`.
+   Then sign in with the new password.
+
+Errors: `This reset link has expired or was already used. Ask your admin for a new one.` ·
+`Open your key with your recovery key first.` · `Your password changed meanwhile. Open the
+reset link again.` · `That new password isn’t allowed.` · `Change your own password in
+Settings → Keys and devices.`
 
 ## Keys
 
@@ -238,6 +289,12 @@ await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
   bytes, or a low-order X25519 point), in `keys.challenge` and in `keys.setup`.
 - `keys.setup` is complete only when both backups exist. Repeating it with the same key then
   does nothing; a different key for an account that has one is refused.
+- It returns `{ kid, stored }`: `stored` is the backups this call stored (`password`,
+  `recovery`), decided in the transaction that writes them. Two devices finishing setup at
+  once both succeed, but only one stores its recovery key; the other's `stored` leaves
+  `recovery` out. An empty `stored` can also mean an earlier try of the same call stored
+  them and its answer was lost, so compare the recovery backup's `ct` before telling the
+  person their recovery key didn't take.
 - For a key that exists without its backups (`needsBackup`), get the proof from
   `keys.challenge({})` (below).
 

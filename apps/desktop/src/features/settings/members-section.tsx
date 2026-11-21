@@ -238,11 +238,7 @@ function Invitations({ closed, demo }: { closed: boolean; demo: boolean }) {
   const [inviting, setInviting] = useState(false)
   const inviteOpener = useRef<HTMLButtonElement>(null)
   const loaded = invitations.status !== 'LoadingFirstPage'
-  const shownLinks = linksToShow(
-    links,
-    loaded ? invitations.results : undefined,
-    invitations.status === 'Exhausted',
-  )
+  const shownLinks = linksToShow(links, loaded ? invitations.results : undefined, invitations.status === 'Exhausted')
 
   return (
     <Group

@@ -91,11 +91,21 @@ describe('resetting a forgotten password', { timeout: 30_000 }, () => {
   it('says so for a link that no longer works, and for a key with no recovery backup', async () => {
     const a = account()
     await expect(
-      resetPassword({ ...a.server, info: async () => null }, 't', { recoveryKey: '', newPassword: 'x'.repeat(12) }, derive),
+      resetPassword(
+        { ...a.server, info: async () => null },
+        't',
+        { recoveryKey: '', newPassword: 'x'.repeat(12) },
+        derive,
+      ),
     ).rejects.toThrow(/expired or was already used/)
     const noRecovery = { ...a.info, key: { ...a.info.key!, recovery: null } }
     await expect(
-      resetPassword({ ...a.server, info: async () => noRecovery }, 't', { recoveryKey: '', newPassword: 'x'.repeat(12) }, derive),
+      resetPassword(
+        { ...a.server, info: async () => noRecovery },
+        't',
+        { recoveryKey: '', newPassword: 'x'.repeat(12) },
+        derive,
+      ),
     ).rejects.toThrow(/no recovery key backup/)
     expect(a.sent).toEqual([])
   })

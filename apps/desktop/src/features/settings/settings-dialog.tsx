@@ -61,7 +61,7 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
+import { Disclosure, Group, Heading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Members } from './members-section.tsx'
 import { Networks } from './networks.tsx'

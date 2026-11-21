@@ -158,7 +158,10 @@ describe('the invitation list', () => {
     const seen: string[] = []
     let cursor: string | null = null
     for (;;) {
-      const result: { page: { email: string }[]; isDone: boolean; continueCursor: string } = await admin.query(api.members.invitations, { paginationOpts: { numItems: 50, cursor } })
+      const result: { page: { email: string }[]; isDone: boolean; continueCursor: string } = await admin.query(
+        api.members.invitations,
+        { paginationOpts: { numItems: 50, cursor } },
+      )
       for (const invitation of result.page) {
         expect(invitation).not.toHaveProperty('tokenHash')
         seen.push(invitation.email)

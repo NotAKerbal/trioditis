@@ -809,7 +809,10 @@ describe('key writes bound to a session', () => {
       sessionId,
     })
     const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), device.identity))
-    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({ kid: device.kid, stored: ['password', 'recovery'] })
+    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({
+      kid: device.kid,
+      stored: ['password', 'recovery'],
+    })
 
     const bob = await fresh(t, 'bob')
     const bobDevice = firstDevice('bob', 'bob password!!!!')

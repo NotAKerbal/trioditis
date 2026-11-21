@@ -245,7 +245,8 @@ export const commitPasswordReset = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const reset = await requireReset(ctx, args.token)
-    if (reset.userId !== args.userId) throw new ConvexError('This reset link has changed. Ask your admin for a new one.')
+    if (reset.userId !== args.userId)
+      throw new ConvexError('This reset link has changed. Ask your admin for a new one.')
     const member = await memberById(ctx, args.userId)
     const credential = await credentialOf(ctx, member.userId)
     if (!credential || credential.passwordHash !== args.previousHash) {

@@ -44,7 +44,10 @@ function Reset() {
   }
   if (done) {
     return (
-      <AuthCard title="Your password is reset" description="You’re signed out everywhere. Sign in with your new password.">
+      <AuthCard
+        title="Your password is reset"
+        description="You’re signed out everywhere. Sign in with your new password."
+      >
         <Link to="/sign-in" className="font-semibold text-primary hover:underline">
           Sign in
         </Link>
