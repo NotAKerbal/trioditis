@@ -58,17 +58,34 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
   }
 }
 
-/** A chat's messages, oldest first for display, loading older pages on request. */
-export function useMessages(chatId: ChatId) {
+const PAGE = 50
+
+/**
+ * The first page's size on each try. The cache keeps a page's subscription, its error too, for
+ * minutes after it's let go, under a key made from its arguments (the library's pagination ID
+ * is always 0). A different size is a different key, so a retry asks the server afresh rather
+ * than getting the error back. The server bounds the size whatever it is.
+ */
+export const firstPageSize = (attempt: number) => PAGE + attempt
+
+/**
+ * A chat's messages, oldest first for display, loading older pages on request. `attempt` counts
+ * the retries after a page couldn't load (RetryBoundary), each of which must ask afresh.
+ */
+export function useMessages(chatId: ChatId, attempt = 0) {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.messages.list, { chatId }, { initialNumItems: 50 })
+  const { results, status, loadMore } = usePaginatedQuery(
+    api.messages.list,
+    { chatId },
+    { initialNumItems: firstPageSize(attempt) },
+  )
   const messages = useMemo(() => [...results].reverse().map((m) => toMessage(m, session)), [results, session])
   return {
     messages,
     loading: status === 'LoadingFirstPage',
     canLoadMore: status === 'CanLoadMore',
     loadingMore: status === 'LoadingMore',
-    loadMore: () => loadMore(50),
+    loadMore: () => loadMore(PAGE),
   }
 }
 
