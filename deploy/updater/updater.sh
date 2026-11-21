@@ -104,10 +104,10 @@ load_state() {
       pending_target | pending_previous | done_target | done_previous | failed_target)
         [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
       pending_request | done_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
-      pending_phase) [[ "$value" =~ ^(install|rollback)$ ]] || continue ;;
+      pending_phase) [[ "$value" =~ ^(backup|install|rollback)$ ]] || continue ;;
       pending_branch) [[ "$value" =~ ^(main|dev)$ ]] || continue ;;
       pending_backup) [[ "$value" =~ ^/[A-Za-z0-9._/@+=,%~-]+$ ]] && [[ ! "$value" =~ (^|/)\.\.(/|$) ]] || continue ;;
-      done_result) [[ "$value" =~ ^(updated|back|stuck)$ ]] || continue ;;
+      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed)$ ]] || continue ;;
       auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
       *) continue ;;
     esac
@@ -373,8 +373,15 @@ update() {
   fi
   # A backup first: if the update fails, going back restores it, data and settings, rather
   # than running older code on data the new version's migrations or database images may have
-  # changed. No backup, no update.
+  # changed. No backup, no update. The backup phase is saved first: the backup stops the server,
+  # and if the updater is cut off before the install starts, its next start finds the server
+  # stopped with nothing installed, and starts it again (recover).
+  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=backup
+  pending_branch='' pending_backup=''
+  save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
   if ! take_backup; then
+    pending_target='' pending_previous='' pending_request='' pending_phase=''
+    save_state
     release_lock
     outcome failed "Couldn't back up the server before updating, so nothing was installed: $backup_error"
     return
@@ -419,7 +426,15 @@ finish_update() {
     failed_target=$target pending_phase=rollback
     save_state
   fi
-  if go_back "$previous"; then conclude back; else
+  if go_back "$previous"; then conclude back; elif [ "$stop_unconfirmed" = 1 ]; then
+    # The server may still be running on data the failed version changed, and that can't be
+    # left as if it were over: the update stays in progress, as going back, and the updater
+    # exits so its next start (systemd starts it again) tries to stop it again.
+    log "Couldn't confirm the server stopped after going back failed; trying again on the next start."
+    done_id='' report failed "The update to ${target:0:7} failed, and going back failed too (${install_error:0:200}). The server couldn't be confirmed stopped; the updater keeps trying." || true
+    release_lock
+    exit 1
+  else
     rollback_detail=$install_error
     conclude stuck
   fi
@@ -437,7 +452,7 @@ finish_update() {
 # that took no backup goes back the old way, installing the commit.)
 go_back() {
   local output status
-  backup_note=''
+  backup_note='' stop_unconfirmed=0
   if [ -z "$pending_backup" ]; then
     run_install "$1" "$pending_branch"
     return
@@ -468,6 +483,11 @@ go_back() {
 stop_server() {
   log "Stopping the server."
   "$root/deploy/trioditis" stop >&2 || log "Couldn't stop the server."
+  # Only what Docker says counts: none of the project's containers still running.
+  local running
+  running=$(docker ps -q --filter "label=com.docker.compose.project=$project") && [ -z "$running" ] && return 0
+  stop_unconfirmed=1
+  return 1
 }
 
 # conclude RESULT: the update in progress is over (updated, back on the previous commit, or
@@ -495,6 +515,7 @@ report_done() {
       installed_notes=$(release_notes "$done_previous" "$done_target")
       ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
+    resumed) outcome failed "The update to $target was cut off while the server was being backed up, before anything was installed. The server is still on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
   if UPDATER_INSTALLED_FROM=$installed_from UPDATER_INSTALLED_TO=$installed_to \
@@ -511,6 +532,19 @@ report_done() {
 # on its own.
 recover() {
   [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
+  # Cut off while backing up, before the checkout moved: nothing was installed, and the backup
+  # may have left the server stopped. It starts again as it was, and the request is reported
+  # done; the target isn't counted as failed.
+  if [ "$pending_phase" = backup ]; then
+    log "The update to $pending_target was cut off while backing up; starting the server again as it was."
+    take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
+    "$root/deploy/trioditis" start >&2 || log "Couldn't start the server again; run deploy/trioditis up -d."
+    conclude resumed
+    describe_current
+    report_done
+    release_lock
+    return 0
+  fi
   log "The update to $pending_target was cut off; going back to $pending_previous."
   take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
   done_id='' report updating "Going back to ${pending_previous:0:7}: the update to ${pending_target:0:7} was cut off."

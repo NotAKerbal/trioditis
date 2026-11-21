@@ -67,7 +67,7 @@ async function delivery(t: T, n: number) {
   })
 }
 
-type Phase = 'scheduled' | 'queued' | 'claimed' | 'dispatched' | 'expired'
+type Phase = 'scheduled' | 'queued' | 'claimed' | 'dispatched' | 'expired' | 'logouts'
 
 /** What the restore does: every phase, a batch at a time, until it's done. */
 async function settle(t: T, backupAt: number) {
@@ -179,6 +179,46 @@ describe('settling after a restore', () => {
     expect(await claim(t, 10)).toHaveLength(0)
     const rows = await t.run(async (ctx) => await ctx.db.query('scheduledSends').collect())
     expect(rows.map((row) => row.state)).toEqual(['sent', 'sent'])
+  })
+
+  it("finishes with more removed members' pending logouts than a batch, and queues each again once", async () => {
+    const { t } = await ready()
+    // 25 accounts of someone who is no longer a member, each with a logout waiting: expiring one
+    // used to queue its replacement straight away, so the queued phase never ran out.
+    await t.run(async (ctx) => {
+      for (let n = 0; n < 25; n++) {
+        const loginId = `l_gone_${n}`
+        const accountId = await ctx.db.insert('networkAccounts', {
+          userId: 'user_gone',
+          network: 'whatsapp',
+          loginId,
+          state: 'CONNECTED',
+          updatedAt: 1,
+        })
+        const now = Date.now()
+        const commandId = await ctx.db.insert('outbox', {
+          userId: 'user_gone',
+          network: 'whatsapp',
+          loginId,
+          payload: { type: 'logout' },
+          state: 'queued',
+          attempts: 0,
+          createdAt: now,
+          expiresAt: now + 60_000,
+        })
+        await ctx.db.patch(accountId, { logoutPending: true, logoutCommandId: commandId })
+      }
+    })
+    const calls = await settle(t, Date.now())
+    expect(calls).toBeLessThan(20)
+    const [outbox, accounts] = await t.run(async (ctx) => [
+      await ctx.db.query('outbox').collect(),
+      await ctx.db.query('networkAccounts').collect(),
+    ])
+    // Each old logout expired once, and each account has one new logout queued after settling.
+    expect(outbox.filter((row) => row.state === 'expired')).toHaveLength(25)
+    expect(outbox.filter((row) => row.state === 'queued')).toHaveLength(25)
+    expect(accounts.filter((row) => row.logoutPending)).toHaveLength(25)
   })
 
   it('works through more rows than one batch, and changes nothing when run again', async () => {

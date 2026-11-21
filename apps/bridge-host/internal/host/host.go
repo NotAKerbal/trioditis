@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -32,6 +33,10 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
+
+// RestoreMarker is the file deploy/trioditis restore leaves in a restored bridge host's data
+// directory, so its first start settles the restored commands rather than running them.
+const RestoreMarker = "restore-pending"
 
 // Config configures one bridge host process.
 type Config struct {
@@ -208,6 +213,21 @@ func (h *Host) Start(ctx context.Context) error {
 	}
 	if err = h.Bridge.Start(ctx); err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
+	}
+	// Just restored from a backup: the restore leaves RestoreMarker in the data directory, and
+	// nothing the restored queue holds runs (SettleRestored). The marker goes only once every
+	// such command is settled and its status is in the journal, which the pusher delivers; a
+	// start that stops before then settles again on the next one.
+	marker := filepath.Join(h.Config.DataDir, RestoreMarker)
+	if _, statErr := os.Stat(marker); statErr == nil {
+		if err = h.Connector.SettleRestored(ctx); err != nil {
+			return fmt.Errorf("host: failed to settle the restored commands: %w", err)
+		}
+		if err = os.Remove(marker); err != nil {
+			return fmt.Errorf("host: failed to clear the restore marker: %w", err)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("host: failed to check for a restore: %w", statErr)
 	}
 	if err = h.Connector.RecoverCommands(ctx); err != nil {
 		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)

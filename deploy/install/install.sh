@@ -211,6 +211,16 @@ fi
 
 get() { printf '%s\n' "$env_text" | env_value "$1"; }
 has() { printf '%s\n' "$env_text" | env_names | grep -qx "$1"; }
+# A restore (deploy/trioditis restore) still replacing the volumes and settings, or cut off while
+# it did, leaves the data half one and half the other: nothing starts on it, Postgres included,
+# until the restore has finished (deploy/.restore-settle says `ready`) or is run again.
+if [ -e "$here/.restore-settle" ]; then
+  restore_state=$(sed -n 's/^state=//p' "$here/.restore-settle" 2>/dev/null | head -1)
+  [ "$restore_state" = ready ] ||
+    die "A restore didn't finish replacing the data and settings (deploy/.restore-settle says ${restore_state:-nothing}), so nothing was started. Run the restore again, or restore the backup it made of the server first."
+elif [ -n "$(get RESTORE_PENDING)" ]; then
+  die "deploy/.env says a restore is under way, but deploy/.restore-settle is gone, so nothing was started. Run the restore again."
+fi
 # Writes the runtime config, $2, to path $1 through a private temp file beside it, then a
 # rename onto the exact name, so it's never half written and a symlink at the name is
 # replaced, not followed. $3 is its mode. (deploy/.env is written only by env_write.)

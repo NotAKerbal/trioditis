@@ -117,6 +117,9 @@ case " $* " in
     if [ -n "${UPDATER_INSTALLED_TO:-}" ]; then
       printf '%s %s\n%s\n' "$UPDATER_INSTALLED_FROM" "$UPDATER_INSTALLED_TO" "$UPDATER_INSTALLED_NOTES" >>"$REPORT_LOG.installed"
     fi ;;
+  # What's running, after the updater stopped the server: nothing, unless a test says a container
+  # is still up.
+  ' ps '*) [ ! -e "$REPORT_LOG.still-running" ] || echo abc123 ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
 EOF
@@ -209,6 +212,31 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c3" ] && grep -qx 'st
   [ -d "$work/backups/trioditis-test-20250101-000000" ] &&
   check ok "it keeps only its three newest backups, in its own directory" ||
   check fail "it keeps only its three newest backups, in its own directory ($(ls -R "$work/backups"))"
+
+# Going back fails and the server can't be confirmed stopped (a container still running): the
+# update stays in progress, as going back, for the next start to try again.
+git_ -C "$work/checkout" checkout -q "$c2"
+rm -f "$state"
+touch "$work/installs.restore-fails" "$work/reports.still-running"
+run update nightly
+rm -f "$work/installs.restore-fails" "$work/reports.still-running"
+grep -qx 'pending_phase=rollback' "$state" && grep -qx "pending_target=$c3" "$state" && grep -qx 'done_result=' "$state" &&
+  grep -q "couldn't be confirmed stopped" "$work/reports" &&
+  check ok "a server that can't be confirmed stopped keeps the update in progress, to try again" ||
+  check fail "a server that can't be confirmed stopped keeps the update in progress, to try again ($(cat "$state" "$work/reports"))"
+rm -f "$state"
+
+# Cut off while backing up (the server may be stopped, nothing installed): the next start starts
+# it again, reports the request done, and doesn't count the target as failed.
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+printf 'pending_target=%s\npending_previous=%s\npending_request=req5\npending_phase=backup\n' "$c3" "$c2" >"$state"
+run recover
+head_is "$c2" && [ ! -s "$work/installs" ] && grep -qx 'start lock=held' "$work/installs.server" &&
+  grep -q "^failed|The update to ${c3%"${c3#???????}"} was cut off while the server was being backed up, before anything was installed.*|req5|" "$work/reports" &&
+  grep -qx 'pending_target=' "$state" && grep -qx 'failed_target=' "$state" &&
+  check ok "an update cut off while backing up starts the server again, installing nothing" ||
+  check fail "an update cut off while backing up starts the server again, installing nothing ($(cat "$work/reports" "$work/installs.server" "$state"))"
+rm -f "$state"
 
 # From c1, with dev at c3: a request cancelled before the update claimed it, and a lock held
 # by someone else, both leave the checkout where it is.

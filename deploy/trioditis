@@ -46,14 +46,29 @@ fi
 # under the lock; everything else reads it in place. Its raw bytes are checked first: a NUL,
 # which the shell would drop without a word, or a carriage return, is refused before anything
 # reads it.
+# A private directory in memory (the user's runtime directory, else /dev/shm) for what must
+# never reach a disk in the clear: a backup's snapshot of deploy/.env (keys included), its
+# settings before they're encrypted, and the keys' values its last check looks for.
+memory_dir() {
+  for base in "${XDG_RUNTIME_DIR:-}" /dev/shm; do
+    [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
+    [ "$(stat -f -c %T "$base" 2>/dev/null)" = tmpfs ] || continue
+    (umask 077 && mktemp -d "$base/trioditis-XXXXXX") && return 0
+  done
+  echo "This needs a memory-backed directory it can write (\$XDG_RUNTIME_DIR or /dev/shm), so a backup's settings never reach a disk in the clear." >&2
+  return 1
+}
+
 env_source=$env_file
 snapshot=''
+plain=''
 if [ "${1:-}" = backup ]; then
   take_lock
   { [ -f "$env_file" ] && [ ! -L "$env_file" ]; } || { echo "deploy/.env isn't a regular file." >&2; exit 1; }
-  snapshot=$(umask 077 && mktemp "$env_file.backup-XXXXXX")
-  trap 'rm -f "$snapshot"' EXIT
-  cp "$env_file" "$snapshot"
+  plain=$(memory_dir) || exit 1
+  snapshot="$plain/env"
+  trap 'rm -rf "$plain"' EXIT
+  (umask 077 && cp "$env_file" "$snapshot")
   env_source=$snapshot
 fi
 if [ "$fresh" = 1 ]; then
@@ -143,19 +158,6 @@ backup_id() {
     { echo "$1/backup.info has an ID that isn't one backup writes." >&2; exit 1; }
   printf '%s' "$id"
 }
-# A private directory in memory (the user's runtime directory, else /dev/shm) for what must
-# never reach a disk in the clear: a backup's settings before they're encrypted, and the
-# private keys' values its last check looks for.
-memory_dir() {
-  for base in "${XDG_RUNTIME_DIR:-}" /dev/shm; do
-    [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
-    [ "$(stat -f -c %T "$base" 2>/dev/null)" = tmpfs ] || continue
-    (umask 077 && mktemp -d "$base/trioditis-XXXXXX") && return 0
-  done
-  echo "This needs a memory-backed directory it can write (\$XDG_RUNTIME_DIR or /dev/shm), so a backup's settings never reach a disk in the clear." >&2
-  return 1
-}
-
 # The server's private keys, which open what's sealed to it: the bridge key (sends and login
 # input) and the agent-access key (granted chats); and the backup key, which opens its backups.
 # Backups leave them out; `keys` moves them.
@@ -265,9 +267,8 @@ case "${1:-}" in
     mkdir -p "$2"
     dir=$(cd "$2" && pwd -P)
     outside "$dir"
-    # The settings in the clear, and the keys' values the last check looks for, stay in memory.
-    plain=$(memory_dir) || exit 1
-    trap 'rm -f "$snapshot"; rm -rf "$plain"' EXIT
+    # The settings in the clear, and the keys' values the last check looks for, stay in memory,
+    # beside the snapshot ($plain, made above).
     worker="$project-backup-$(random_hex)"
     # What the backup's files are bound to (crypt), so they only decrypt together.
     id="$project-$created-$(random_hex)"
@@ -290,7 +291,9 @@ case "${1:-}" in
       trap '' INT TERM HUP
       docker rm -f "$worker" "$worker-crypt" >/dev/null 2>&1 || true
       [ -z "$work" ] || rm -rf "$work" || true
-      rm -rf "$plain" || true
+      # The settings in the clear go now; the snapshot (Compose's settings) once the server is
+      # started again.
+      rm -f "$plain/secrets.env" "$plain/.patterns" || true
       # Only a name this backup made (recorded once mkdir succeeded), and only while empty.
       [ -z "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
       if [ -n "$running" ] && [ "$keep_stopped" = 1 ] && [ "$status" = 0 ]; then
@@ -304,7 +307,7 @@ case "${1:-}" in
           status=1
         }
       fi
-      rm -f "$snapshot"
+      rm -rf "$plain"
       if [ "$status" = 0 ]; then
         echo "Backed up project $project to $published (archive.enc, and the settings in secrets.env.enc), encrypted with BACKUP_KEY."
         [ -z "$left_out" ] || echo "Left out of secrets.env, as settings the installer doesn't write (keep them yourself if you need them):$left_out"
@@ -583,7 +586,12 @@ case "${1:-}" in
       # A checkout with no install has no way to stop, or back up, another checkout's server of
       # the same project on this Docker, so if that project has anything here (a volume, or a
       # container, running or not), the restore is that install's to do, from its own checkout.
-      [ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] ||
+      # Docker's inventory must be readable: a failed read isn't an empty one. Every name the
+      # backup's volumes would take is checked again, labels or not, once the manifest is read.
+      docker_volumes=$(docker volume ls -q) || refuse "Couldn't read Docker's volumes, so can't check nothing would be overwritten."
+      labelled=$(docker ps -aq --filter "label=com.docker.compose.project=$project") ||
+        refuse "Couldn't read Docker's containers, so can't check nothing would be overwritten."
+      [ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")$labelled" ] ||
         refuse "Project $project already has volumes or containers on this Docker, from another checkout. Restore it from that checkout (deploy/trioditis restore there backs it up first), or remove that install first."
     else
       [ "$backup_project" = "$project" ] || refuse "The backup is of project $backup_project, and this install is $project."
@@ -643,6 +651,10 @@ case "${1:-}" in
     for volume in $volumes; do
       case "$volume" in "${project}_"*) ;; *) refuse "The backup holds volume $volume, which isn't this install's." ;; esac
       printf '%s\n' "$volume" | grep -qxE '[A-Za-z0-9][A-Za-z0-9_.-]*' || refuse "The backup's manifest names a volume oddly ($volume)."
+      # With no install, a volume of that name already here (labelled by Compose or not) isn't
+      # this restore's to empty.
+      [ "$fresh" = 0 ] || ! printf '%s\n' "$docker_volumes" | grep -qxF "$volume" ||
+        refuse "A volume named $volume is already on this Docker. Restore from the checkout it belongs to, or remove it first."
     done
     # shellcheck disable=SC2016 # expanded in the container
     stray=$( { stream "$source_dir"; echo "$?" >"$work/read"; } |
@@ -719,10 +731,16 @@ case "${1:-}" in
     # refuses to start anything beside; RESTORE_PENDING is in deploy/.env, which Compose hands
     # the gateway, which then refuses to start (apps/gateway/src/config.ts); and the gateway's
     # container is gone, so nothing can start it again as it was.
+    # The marker says how far the restore got: `loading` while the volumes and settings are
+    # being replaced, which the installer refuses to start anything on (the data may be half one
+    # and half the other); `ready` once both are the backup's and checked, which it settles.
     trap '' INT TERM HUP
-    marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX")
-    printf 'backup_at=%s\n' "$backup_at" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle" ||
-      { rm -f "$marker_tmp"; refuse "Couldn't write deploy/.restore-settle."; }
+    write_marker() {
+      marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX") &&
+        printf 'state=%s\nbackup_at=%s\n' "$1" "$backup_at" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle" ||
+        { rm -f "$marker_tmp"; echo "Couldn't write deploy/.restore-settle." >&2; return 1; }
+    }
+    write_marker loading || refuse "The restore couldn't mark itself as under way."
     if [ "$fresh" = 0 ]; then
       { printf '%s\n' "$env_text" | grep -v '^RESTORE_PENDING=' || true; echo "RESTORE_PENDING=$backup_at"; } |
         sed '/^$/d' | env_write "$env_file" || { echo "Couldn't mark deploy/.env as restoring." >&2; exit 1; }
@@ -732,6 +750,11 @@ case "${1:-}" in
     # checks every one against the manifest's count of entries and bytes.
     load() {
       for volume in $2; do
+        # With no install, one made since the check above is someone else's.
+        if [ "$fresh" = 1 ] && docker volume inspect "$volume" >/dev/null 2>&1; then
+          echo "A volume named $volume appeared on this Docker during the restore; it's left as it is." >&2
+          return 1
+        fi
         docker volume inspect "$volume" >/dev/null 2>&1 ||
           docker volume create --label "com.docker.compose.project=$project" \
             --label "com.docker.compose.volume=${volume#"${project}_"}" "$volume" >/dev/null || return 1
@@ -777,6 +800,18 @@ case "${1:-}" in
       echo "Nothing was restored: the server is as it was." >&2
       exit 1
     fi
+    # Each bridge host's own queue of commands, in its database, is the backup's too, and may
+    # hold sends the original server went on to make: a marker in its data directory has its
+    # next start settle them as unknown instead of running them (bridge-host SettleRestored),
+    # and it removes the marker once that's recorded. Owned like the directory, so it can.
+    bridge_volumes=$(printf '%s\n' "$volumes" | grep -E "^${project}_bridge-" || true)
+    for volume in $bridge_volumes; do
+      docker run --rm --log-driver none -v "$volume:/data" --entrypoint sh "$tool" -c \
+        ': >/data/restore-pending && chown "$(stat -c %u:%g /data)" /data/restore-pending' || {
+        echo "Couldn't mark $volume's bridge queue to be settled. The volumes are the backup's; run the restore again." >&2
+        exit 1
+      }
+    done
 
     # The settings: the backup's, with this server's keys (the backup has only the public
     # halves, the same ones) and any setting the operator added by hand, which backups leave out.
@@ -801,6 +836,8 @@ $name=$(value_in "$name" "$env_text")"
       exit 1
     }
     env_source=$env_file
+    # Volumes and settings are the backup's and checked: the installer may settle and start.
+    write_marker ready || { echo "Run the restore again." >&2; exit 1; }
     trap 'exit 130' INT TERM HUP
 
     # The installer starts the server: it builds this version's images, settles the restored

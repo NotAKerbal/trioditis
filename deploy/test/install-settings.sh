@@ -390,5 +390,23 @@ for setting in LOGIN_BROWSER_MAX=1 LOGIN_BROWSER_MAX=64 DEBIAN_SNAPSHOT=20261101
     check ok "$setting is kept" || { check fail "$setting is kept"; tail -2 "$work/out" >&2; }
 done
 
+# A restore that didn't finish replacing the data (its marker says loading, or deploy/.env says
+# one is under way with no marker): the installer starts nothing, not even Postgres.
+for case in loading pending; do
+  checkout
+  rm -f "$work/compose.log"
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n' >"$work/checkout/deploy/.env"
+  if [ "$case" = loading ]; then
+    printf 'state=loading\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+  else
+    echo 'RESTORE_PENDING=1800000000000' >>"$work/checkout/deploy/.env"
+  fi
+  chmod 600 "$work/checkout/deploy/.env"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ ! -s "$work/compose.log" ] &&
+    check ok "an unfinished restore ($case) stops the install before anything starts" ||
+    { check fail "an unfinished restore ($case) stops the install before anything starts"; tail -2 "$work/out" >&2; }
+done
+
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]
