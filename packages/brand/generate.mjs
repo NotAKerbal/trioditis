@@ -243,6 +243,22 @@ for (const dir of ['apps/desktop/public', 'apps/site', 'apps/docs/public']) {
   write(`${dir}/apple-touch-icon.png`, png(icon, 180))
 }
 write('apps/desktop/electron/icon.png', png(icon, 512))
+// The installed app's own icon (electron-builder.yml): the whole tile on Windows and Linux. A Mac
+// icon sits on Apple's grid instead, the tile at 824 of 1024 with a soft shadow below it, so it
+// is the same size as every other app in the Dock and Finder.
+write('apps/desktop/build/icon.png', png(icon, 1024))
+const macIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <filter id="trioditis-shadow" x="-10%" y="-10%" width="120%" height="130%">
+    <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
+  </filter>
+  <g filter="url(#trioditis-shadow)">
+    <svg x="100" y="100" width="824" height="824" viewBox="0 0 64 64">
+      ${tile(C.accent, C.white)}
+    </svg>
+  </g>
+</svg>
+`
+write('apps/desktop/build/icon-mac.png', png(macIcon, 1024))
 // The project site and docs site link previews and header lockups.
 for (const dir of ['apps/site', 'apps/docs/public']) {
   write(`${dir}/social-card.png`, png(card, 1200))
