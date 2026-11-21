@@ -4,7 +4,7 @@ import type { Doc } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
 import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
-import { envelope } from './validators'
+import { deliveryState, envelope } from './validators'
 
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
 // the time comes it becomes an ordinary send, and its 24-hour deadline starts then. Until then
@@ -201,31 +201,35 @@ export const cancelled = query({
   handler: async (ctx, { chatId }) => {
     const member = await requireMember(ctx)
     if (chatId) await ownChat(ctx, member.userId, chatId)
+    // Only those still holding their copies: forgotten ones never crowd them out.
     const rows = chatId
       ? await ctx.db
           .query('scheduledSends')
-          .withIndex('by_chat', (q) => q.eq('chatId', chatId).eq('state', 'cancelled'))
+          .withIndex('by_chat_kept', (q) =>
+            q.eq('chatId', chatId).eq('state', 'cancelled').eq('forgottenAt', undefined),
+          )
           .take(MAX_SCHEDULED)
       : await ctx.db
           .query('scheduledSends')
-          .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('state', 'cancelled'))
+          .withIndex('by_user_kept', (q) =>
+            q.eq('userId', member.userId).eq('state', 'cancelled').eq('forgottenAt', undefined),
+          )
           .take(MAX_SCHEDULED)
-    return rows
-      .filter((row) => !row.forgottenAt)
-      .map((row) => ({
-        _id: row._id,
-        chatId: row.chatId,
-        clientMessageId: row.clientMessageId,
-        replyTo: row.replyTo ?? null,
-        cancelledAt: row.cancelledAt ?? row.createdAt,
-      }))
+    return rows.map((row) => ({
+      _id: row._id,
+      chatId: row.chatId,
+      clientMessageId: row.clientMessageId,
+      replyTo: row.replyTo ?? null,
+      cancelledAt: row.cancelledAt ?? row.createdAt,
+    }))
   },
 })
 
 /**
  * Cancels a scheduled message, or dismisses one that failed. The answer is what happened:
  * `cancelled`, with its sealed copy (kind `message`, object ID `clientMessageId`) and the
- * message it replies to, kept until `forget`; or `sent` if its time, or Send now, came first.
+ * message it replies to, kept until `forget`; or `sent` if its time, or Send now, came first,
+ * with how that send stands now (its delivery state; null if not known).
  * Cancelling one already cancelled answers the same again, so a retry after a lost answer still
  * gets its text. A failed one is dismissed: its copies go at once, and the answer is `dismissed`.
  */
@@ -238,12 +242,15 @@ export const cancel = mutation({
       copy: v.union(v.null(), envelope),
       replyTo: v.union(v.null(), v.string()),
     }),
-    v.object({ outcome: v.literal('sent') }),
+    v.object({ outcome: v.literal('sent'), delivery: v.union(v.null(), deliveryState) }),
     v.object({ outcome: v.literal('dismissed') }),
   ),
   handler: async (ctx, { scheduledId }) => {
     const row = await ownScheduled(ctx, scheduledId)
-    if (row.state === 'sent') return { outcome: 'sent' as const }
+    if (row.state === 'sent') {
+      const used = await clientMessageIdUsed(ctx, row.userId, row.clientMessageId)
+      return { outcome: 'sent' as const, delivery: used?.already === 'send' ? used.delivery : null }
+    }
     if (row.state === 'failed') {
       await ctx.db.patch(row._id, { state: 'cancelled', cancelledAt: Date.now(), forgottenAt: Date.now() })
       await deletePayload(ctx, row._id)
@@ -261,8 +268,9 @@ export const cancel = mutation({
 })
 
 /**
- * Lets a cancelled message's copies go: once its text is saved in the composer, or the person
- * discards it. Forgetting one already forgotten does nothing.
+ * Lets a cancelled message's copies go: once the text restored from it has been sent or
+ * scheduled, or the person discards it. Until then it's the copy that lasts, whatever happens
+ * to drafts on any device. Forgetting one already forgotten does nothing.
  */
 export const forget = mutation({
   args: { scheduledId: v.id('scheduledSends') },
@@ -282,20 +290,22 @@ export const forgetOldCancelled = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
+    // Only those still holding copies: each one forgotten leaves the range, so this never stalls.
     const rows = await ctx.db
       .query('scheduledSends')
-      .withIndex('by_cancelled', (q) => q.eq('state', 'cancelled').lt('cancelledAt', Date.now() - CANCELLED_KEEP_MS))
+      .withIndex('by_kept', (q) =>
+        q
+          .eq('state', 'cancelled')
+          .eq('forgottenAt', undefined)
+          .lt('cancelledAt', Date.now() - CANCELLED_KEEP_MS),
+      )
       .take(FORGET_BATCH)
-    let forgot = 0
     for (const row of rows) {
-      if (row.forgottenAt) continue
       await ctx.db.patch(row._id, { forgottenAt: Date.now() })
       await deletePayload(ctx, row._id)
-      forgot++
     }
     // More to do than one batch: carry on straight after.
-    if (rows.length === FORGET_BATCH && forgot > 0)
-      await ctx.scheduler.runAfter(0, internal.scheduled.forgetOldCancelled, {})
+    if (rows.length === FORGET_BATCH) await ctx.scheduler.runAfter(0, internal.scheduled.forgetOldCancelled, {})
     return null
   },
 })

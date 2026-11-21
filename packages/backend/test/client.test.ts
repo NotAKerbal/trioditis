@@ -753,7 +753,10 @@ describe('scheduled sends', () => {
     // Send now came first: the cancel says so, and changes nothing.
     const other = (await scheduleOne(a, chatId, 6, 60_000)) as Id<'scheduledSends'>
     await a.mutation(api.scheduled.sendNow, { scheduledId: other })
-    expect(await a.mutation(api.scheduled.cancel, { scheduledId: other })).toEqual({ outcome: 'sent' })
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId: other })).toEqual({
+      outcome: 'sent',
+      delivery: 'queued',
+    })
   })
 
   it('forgets a cancelled message nobody restored after 30 days', async () => {
@@ -769,6 +772,34 @@ describe('scheduled sends', () => {
     await t.run(async (ctx) => {
       await ctx.db.patch(scheduledId, { cancelledAt: Date.now() - 30 * 24 * 60 * 60 * 1000 - 1 })
     })
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+  })
+
+  it('isn’t held up by older forgotten ones, kept for their IDs, in cleanup or the list', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const old = Date.now() - 31 * 24 * 60 * 60 * 1000
+    // More forgotten ones than a cleanup batch, all older than the one still kept.
+    await t.run(async (ctx) => {
+      for (let n = 0; n < 250; n++)
+        await ctx.db.insert('scheduledSends', {
+          userId: 'user_a',
+          chatId,
+          clientMessageId: `forgotten-${String(n).padStart(12, '0')}`,
+          sendAt: old,
+          state: 'cancelled',
+          createdAt: old - 2,
+          cancelledAt: old - 1,
+          forgottenAt: old,
+        })
+    })
+    const kept = (await scheduleOne(a, chatId, 8, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.cancel, { scheduledId: kept })
+    expect((await a.query(api.scheduled.cancelled, { chatId })).map((r) => r._id)).toEqual([kept])
+    await t.run(async (ctx) => await ctx.db.patch(kept, { cancelledAt: old }))
     await t.mutation(internal.scheduled.forgetOldCancelled, {})
     expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
