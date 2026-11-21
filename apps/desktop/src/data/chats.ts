@@ -39,6 +39,8 @@ export interface Chat {
   topic: string | undefined
   /** Its picture, to decrypt and show (data/media.ts). */
   avatar: Attachment | undefined
+  /** The network the picture is fetched through, when it isn't the chat's own (a conversation's). */
+  avatarNetwork?: Network | undefined
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
   unread: number
@@ -81,6 +83,7 @@ export function mergedChat(members: readonly Chat[], person: PersonRef | undefin
   if (members.length < 2) return person ? { ...first, person } : first
   const newest = members.reduce((a, b) => ((b.last?.at ?? 0) > (a.last?.at ?? 0) ? b : a))
   const sum = (f: (c: Chat) => number) => members.reduce((n, c) => n + f(c), 0)
+  const pictured = members.find((c) => c.avatar)
   return {
     ...first,
     row: {
@@ -94,7 +97,9 @@ export function mergedChat(members: readonly Chat[], person: PersonRef | undefin
     },
     name: person?.name || first.name,
     named: !!person?.name || first.named,
-    avatar: members.find((c) => c.avatar)?.avatar,
+    // The first chat's picture, or another's, fetched through that chat's network.
+    avatar: pictured?.avatar,
+    avatarNetwork: pictured?.network,
     described: members.some((c) => c.described),
     unread: sum((c) => c.unread),
     hasUnread: members.some((c) => c.hasUnread),

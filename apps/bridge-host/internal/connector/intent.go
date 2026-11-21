@@ -940,7 +940,19 @@ func (c *Connector) DescribeDirectChats(ctx context.Context) error {
 		if portal.RoomType != database.RoomTypeDM || portal.OtherUserID == "" {
 			continue
 		}
-		if _, err = c.owner(ctx, portal.MXID); err != nil {
+		// Only a chat whose login is gone, or isn't a Trioditis user's, is left out for good:
+		// anything else that fails is tried again at the next start.
+		key, ok := ids.ParseRoomID(portal.MXID)
+		if !ok || key.Receiver == "" {
+			continue
+		}
+		login, err := c.Bridge.DB.UserLogin.GetByID(ctx, key.Receiver)
+		if err != nil {
+			failed++
+			continue
+		} else if login == nil {
+			continue
+		} else if _, ok = ids.ParseUserMXID(login.UserMXID); !ok {
 			continue
 		}
 		if err = c.emitChat(ctx, portal.MXID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {

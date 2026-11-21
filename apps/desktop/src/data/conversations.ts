@@ -121,3 +121,43 @@ export function setDmChats(chats: readonly Mergeable[]) {
 export function useDmChats(): ReadonlyMap<string, string> {
   return useSyncExternalStore(subscribe, () => dmChats)
 }
+
+/**
+ * Which chat each of a conversation's page slots holds, kept from `prev` so a chat keeps its
+ * slot (and the pages it has loaded) while the conversation's order changes with each new
+ * message. A chat no longer in it frees its slot; a new one takes the first free slot.
+ */
+export function stableSlots(prev: readonly (string | undefined)[], ids: readonly string[]): (string | undefined)[] {
+  const wanted = new Set(ids.slice(0, MAX_MERGED))
+  const slots = Array.from({ length: MAX_MERGED }, (_, i) => (prev[i] && wanted.has(prev[i]) ? prev[i] : undefined))
+  for (const id of wanted) {
+    if (slots.includes(id)) continue
+    const free = slots.indexOf(undefined)
+    if (free >= 0) slots[free] = id
+  }
+  return slots
+}
+
+// A chat the person chose to send on, from a profile's Message or Open: the conversation's pane
+// sends on it, whether it was open already or opens now.
+
+let sendRequest: string | null = null
+
+/** Asks the open conversation's pane to send on this chat. */
+export function requestSendOn(chatId: string) {
+  sendRequest = chatId
+  for (const listener of listeners) listener()
+}
+
+/** Takes the chat asked to send on, if it's one of these. */
+export function takeSendRequest(chatIds: readonly string[]): string | null {
+  if (!sendRequest || !chatIds.includes(sendRequest)) return null
+  const id = sendRequest
+  sendRequest = null
+  return id
+}
+
+/** The chat asked to send on, as it changes. */
+export function useSendRequest(): string | null {
+  return useSyncExternalStore(subscribe, () => sendRequest)
+}

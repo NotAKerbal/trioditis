@@ -213,16 +213,3 @@ export function useFirstDraft<Reply>(chatIds: readonly string[]): Draft<Reply> {
     return getDraft<Reply>(chatIds[0] ?? '')
   })
 }
-
-/**
- * Moves a draft to another chat of the same conversation, when the person sends it on another
- * network: its text only, as a new draft, since a reply is to a message in the chat it was in.
- * Nothing moves into a chat that has a draft of its own.
- */
-export function moveDraft(from: string, to: string) {
-  if (from === to) return
-  const draft = getDraft(from)
-  if (!draft.text.trim() || filled(getDraft(to))) return
-  change(to, { text: draft.text, reply: null })
-  change(from, { text: '', reply: null })
-}

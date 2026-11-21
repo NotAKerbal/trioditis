@@ -1182,14 +1182,19 @@ So the client does, from the chats it has loaded (apps/desktop `data/conversatio
   shows the newest message of any. A chat stays in its own view: an archived one isn't pulled
   into the inbox. At most six chats are one conversation; more stay rows of their own.
 - **The pane.** Its messages are every chat's, merged by time, each chat keeping its own
-  order. Each chat pages on its own, so only what every chat with more to load has reached is
-  shown, and loading earlier messages loads more of each. A run of messages starts again where
-  the network changes, and says which. Pinning, archiving, snoozing, muting, labels and
-  blocking change every chat in it, and opening it marks each one read.
-- **Sending.** A message goes by one of the chats, chosen in the composer: a chat with a draft
-  first, then the one they last wrote from, then the one opened. It stays chosen until the
-  person changes it or replies to a message in another chat, whose chat a reply goes by.
-  Changing it takes the draft's text along (not its reply), but never over another chat's draft.
+  order. Each chat pages on its own, in a slot it keeps while the conversation's order changes,
+  so only what every chat with more to load has reached is shown, and loading earlier messages
+  loads more of each. A run of messages starts again where the network changes, and says which.
+  Pinning, archiving, snoozing, muting, labels and blocking change every chat in it. Opening it
+  marks each chat read once its messages are shown: a quieter chat whose messages are all from
+  before what the others have loaded waits until they are.
+- **Sending.** A message goes by one of the chats, chosen in the composer, from a profile's
+  Message or Open, or by replying to a message in it (a reply goes in its message's chat);
+  otherwise the one they last wrote from, then the one opened. The conversation has one draft,
+  kept under one of its chats chosen as the pane opens (one with a draft already, else the one
+  opened), so choosing another network never moves text between chats' saved drafts; it drops a
+  reply to a message in another chat. A cancelled scheduled message is restored only into an
+  empty draft when it was for another network than the one chosen.
 - **Profiles.** A direct chat's details, and a group sender's avatar or name, show the
   person's profile: their card's networks, each with its chat when there is one, and its
   numbers, emails and usernames; or, with no card, the contact's own profile and a way to add

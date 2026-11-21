@@ -1,9 +1,8 @@
 import { toast } from '@trioditis/ui/toast'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { membersOf, onEach, useChat, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
-import { useConversationIds } from '~/data/conversations.ts'
-import { NOTHING_READ, readOnOpen } from '~/data/read-on-open.ts'
+import { useRef, useState } from 'react'
+import { membersOf, onEach, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
+import { requestSendOn, useConversationIds } from '~/data/conversations.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
 import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
@@ -41,7 +40,9 @@ export function Shell() {
   const openPeople = (people: PeopleView | undefined) => void navigate({ search: (s) => ({ ...s, people }) })
   const [newChat, setNewChat] = useState(false)
   // A chat just started opens at once, though its row may not be in the list yet.
+  // From a profile's Message or Open too: its pane then sends on that chat (conversations.ts).
   const openStarted = (chatId: string) => {
+    requestSendOn(chatId)
     setNewChat(false)
     void navigate({ search: (s) => ({ ...s, people: undefined, chat: chatId }) })
   }
@@ -56,7 +57,7 @@ export function Shell() {
       setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
       select(chat.id)
     }
-    // Opening another chat marks it read once it's shown (ReadWhileOpen). Choosing the open
+    // Opening another chat marks it read once it's shown (read-while-open.tsx). Choosing the open
     // one again doesn't open it again, so a chat marked unread while open is marked read here.
     if (isOpen) for (const m of members) if (m.hasUnread) void actions.markRead(m.id)
   }
@@ -148,11 +149,6 @@ export function Shell() {
           />
         </SidebarBoundary>
       </SidebarFrame>
-      {/* Opening a chat, by a click, a notification or a link, marks it read, as does a new
-          message while it's open and on screen: each chat of its conversation. */}
-      {openIds.map((id) => (
-        <ReadWhileOpen key={id} chatId={id as ChatId} markRead={actions.markRead} />
-      ))}
       <ChatPane
         chatId={selectedId as ChatId | undefined}
         chatIds={openIds as ChatId[]}
@@ -172,41 +168,4 @@ export function Shell() {
       <UpdateNotice />
     </div>
   )
-}
-
-/** Whether the window is shown and focused, as it changes: when the person can see the open chat. */
-function subscribeSeen(onChange: () => void) {
-  document.addEventListener('visibilitychange', onChange)
-  window.addEventListener('focus', onChange)
-  window.addEventListener('blur', onChange)
-  return () => {
-    document.removeEventListener('visibilitychange', onChange)
-    window.removeEventListener('focus', onChange)
-    window.removeEventListener('blur', onChange)
-  }
-}
-const seen = () => document.visibilityState === 'visible' && document.hasFocus()
-
-/** Marks an open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
-function ReadWhileOpen({ chatId, markRead }: { chatId: ChatId; markRead: (chatId: ChatId) => Promise<unknown> }) {
-  useReadWhileOpen(chatId, markRead)
-  return null
-}
-
-function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId) => Promise<unknown>) {
-  // The same object until the chat's row changes, so the effect runs once per change.
-  const chat = useChat(chatId)
-  const visible = useSyncExternalStore(subscribeSeen, seen)
-  const done = useRef(NOTHING_READ)
-  useEffect(() => {
-    const open = chat && {
-      id: chat.id,
-      unread: chat.unread,
-      unreadRev: chat.row.unreadRev,
-      markedUnread: chat.row.markedUnread,
-    }
-    const next = readOnOpen(open, visible, done.current)
-    done.current = next.done
-    if (next.mark && chat) void markRead(chat.id)
-  }, [chat, visible, markRead])
 }

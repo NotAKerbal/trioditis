@@ -31,7 +31,15 @@ export function ChatAvatar({
 }: Omit<ComponentProps<typeof Avatar>, 'src' | 'name' | 'shape'> & { chat: Chat }) {
   const shape = chat.row.kind === 'dm' ? 'circle' : 'square'
   if (chat.person?.photo) return <Avatar {...props} name={chat.name} shape={shape} src={chat.person.photo} />
-  return <MediaAvatar {...props} network={chat.network} picture={chat.avatar} name={chat.name} shape={shape} />
+  return (
+    <MediaAvatar
+      {...props}
+      network={chat.avatarNetwork ?? chat.network}
+      picture={chat.avatar}
+      name={chat.name}
+      shape={shape}
+    />
+  )
 }
 
 const sizeFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 })

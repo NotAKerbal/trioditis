@@ -175,7 +175,7 @@ export function PersonProfile({
 
       {accounts.length ? (
         <div className="mt-6">
-          <Group title={card ? 'On' : undefined}>
+          <Group title={card ? 'Accounts' : undefined}>
             {accounts.map((a) => {
               const chatId = dmChats.get(contactKey(a))
               return (

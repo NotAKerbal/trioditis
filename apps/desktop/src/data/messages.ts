@@ -12,7 +12,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
-import { MAX_MERGED } from './conversations.ts'
 import type { BridgeStatus } from './bridge-ready.ts'
 import { reactionGroups, reactionRequests, showReactions, type Shown } from './reaction-requests.ts'
 import { CONFIRM_MS, confirmed, sameKey, withPending, type PendingReaction, type Reaction } from './reaction-toggle.ts'
@@ -74,27 +73,32 @@ const usePage = (chatId: ChatId | undefined) =>
  * the others have loaded back that far, so nothing appears out of place and then has another
  * chat's messages arrive in between. Loading more loads more of each that has more.
  */
-export function useMessages(chatIds: ChatId | readonly ChatId[]) {
+export function useMessages(chatIds: ChatId | readonly (ChatId | undefined)[]) {
   const session = useSession()
+  // One page per slot, always as many: an empty slot is skipped. A chat keeps its slot as the
+  // conversation's order changes (stableSlots), so its pages aren't loaded again from the start.
   const ids = typeof chatIds === 'string' ? [chatIds] : chatIds
-  // One page per slot, always as many: a chat beyond those it holds is skipped.
   const all = [usePage(ids[0]), usePage(ids[1]), usePage(ids[2]), usePage(ids[3]), usePage(ids[4]), usePage(ids[5])]
-  const slots = all.slice(0, Math.min(ids.length, MAX_MERGED))
-  const statuses = slots.map((p) => p.status).join()
-  const messages = useMemo(
-    () =>
-      mergePages(
-        slots.map((p) => ({
-          messages: [...p.results].reverse().map((m) => toMessage(m, session)),
-          more: p.status === 'CanLoadMore' || p.status === 'LoadingMore',
-        })),
-      ),
+  const slots = all.flatMap((p, i) => (ids[i] ? [{ ...p, chatId: ids[i] }] : []))
+  const statuses = slots.map((p) => `${p.chatId}:${p.status}`).join()
+  const { messages, hidden } = useMemo(() => {
+    const chats = slots.map((p) => ({
+      chatId: p.chatId,
+      messages: [...p.results].reverse().map((m) => toMessage(m, session)),
+      more: p.status === 'CanLoadMore' || p.status === 'LoadingMore',
+    }))
+    const horizon = horizonOf(chats)
+    return {
+      messages: mergePages(chats),
+      // Chats whose loaded messages are all from before what's shown: none of theirs is on screen.
+      hidden: chats.flatMap((c) => (c.messages.length && c.messages.at(-1)!.at < horizon ? [c.chatId] : [])),
+    }
     // A slot's results are the same array until its page changes; every slot is listed, so the
     // list is as long whatever the number of chats.
-    [session, statuses, ...all.map((p) => p.results)],
-  )
+  }, [session, statuses, ...all.map((p) => p.results)])
   return {
     messages,
+    hidden,
     loading: slots.some((p) => p.status === 'LoadingFirstPage'),
     canLoadMore: slots.some((p) => p.status === 'CanLoadMore'),
     loadingMore: slots.some((p) => p.status === 'LoadingMore'),
@@ -104,6 +108,12 @@ export function useMessages(chatIds: ChatId | readonly ChatId[]) {
   }
 }
 
+/** How far back merged chats are shown: the oldest loaded message of the latest-reaching chat with more. */
+export function horizonOf(chats: readonly { messages: readonly { at: number }[]; more: boolean }[]): number {
+  if (chats.length === 1) return -Infinity
+  return Math.max(-Infinity, ...chats.flatMap((c) => (c.more && c.messages.length ? [c.messages[0]!.at] : [])))
+}
+
 /**
  * Several chats' loaded messages (each oldest first) as one list, oldest first. A chat with
  * more to load sets how far back the list goes: its oldest loaded message. Each chat keeps its
@@ -111,7 +121,7 @@ export function useMessages(chatIds: ChatId | readonly ChatId[]) {
  */
 export function mergePages<M extends { at: number }>(chats: readonly { messages: readonly M[]; more: boolean }[]): M[] {
   if (chats.length === 1) return [...chats[0]!.messages]
-  const horizon = Math.max(-Infinity, ...chats.flatMap((c) => (c.more && c.messages.length ? [c.messages[0]!.at] : [])))
+  const horizon = horizonOf(chats)
   const lists = chats.map((c) => c.messages.filter((m) => m.at >= horizon))
   const at = lists.map(() => 0)
   const out: M[] = []

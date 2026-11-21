@@ -42,7 +42,7 @@ import {
 } from '~/data/chats.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useContacts } from '~/data/contacts.ts'
-import { cardIndex, cardOfChat } from '~/data/conversations.ts'
+import { cardIndex, cardOfChat, stableSlots, takeSendRequest, useSendRequest } from '~/data/conversations.ts'
 import { usePeople } from '~/data/people.ts'
 import {
   useBridge,
@@ -58,7 +58,6 @@ import {
   appendToDraft,
   endSend,
   getDraft,
-  moveDraft,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -74,6 +73,7 @@ import { Composer } from './composer.tsx'
 import { DetailsPanel, type PanelView } from './details-panel.tsx'
 import { ChatAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
+import { ReadWhileOpen } from './read-while-open.tsx'
 import { draftSendId } from '~/data/saved-drafts.ts'
 import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
 import { restoreConflict } from './cancel-scheduled.ts'
@@ -151,7 +151,12 @@ function OpenChat({
   // Named and pictured after the person; acted on as the chat that was opened.
   const shown = { ...mergedChat(members, person), id: chat.id }
   const each = (run: (chatId: ChatId) => Promise<boolean>) => onEach(members, run)
-  const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(memberIds)
+  // Each chat keeps its page slot while the conversation's order changes with new messages.
+  const slotsRef = useRef<(string | undefined)[]>([])
+  slotsRef.current = stableSlots(slotsRef.current, memberIds)
+  const { messages, hidden, loading, canLoadMore, loadingMore, loadMore } = useMessages(
+    slotsRef.current as (ChatId | undefined)[],
+  )
   const networkOfChat = new Map(members.map((m) => [m.id as string, m.network]))
   // Where focus goes back to when the side panel's sheet closes: what opened it.
   const detailsButton = useRef<HTMLButtonElement>(null)
@@ -190,35 +195,46 @@ function OpenChat({
     forgetScheduled,
     sendScheduledNow,
   } = useSendMutations()
-  // Which of a conversation's chats a message goes by: chosen once the messages are in, and
-  // then kept until the person changes it or replies to a message in another. One with a draft
-  // already comes first, so nothing typed is hidden; then where they last wrote from; then the
-  // chat that was opened.
-  const [sendId, setSendId] = useState<ChatId | null>(null)
-  useEffect(() => {
-    if (sendId !== null || loading) return
-    const drafted = memberIds.find((id) => getDraft(id).text.trim())
-    const theirs = [...messages].reverse().find((m) => !m.self && memberIds.includes(m.chatId))?.chatId
-    setSendId(drafted ?? theirs ?? chat.id)
-  }, [sendId, loading, messages, memberIds, chat.id])
-  const sendChat = members.find((m) => m.id === sendId) ?? chat
-  /** Sends on another of the conversation's chats from now on, taking the draft's text along. */
-  const sendOn = (chatId: ChatId) => {
-    if (chatId === sendChat.id) return
-    moveDraft(sendChat.id, chatId)
-    setSendId(chatId)
-  }
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
-  // after this pane was left and opened again still changes what's on screen. In a
-  // conversation, it's the draft of the chat it goes by.
-  const { text: draft, reply: replyTo } = useDraft<Message>(sendChat.id)
+  // after this pane was left and opened again still changes what's on screen. A conversation has
+  // one draft, kept under one of its chats chosen as the pane opens: one with a draft already,
+  // else the chat opened. Choosing the network to send on never moves it, so nothing typed is
+  // ever in two chats' saved drafts at once, or in none.
+  const [draftKey] = useState<ChatId>(() => {
+    const ids = (chatIds.includes(chat.id) ? chatIds : [chat.id]) as ChatId[]
+    return ids.find((id) => getDraft(id).text.trim() || getDraft(id).reply) ?? chat.id
+  })
+  // Which of a conversation's chats a message goes by: the one the person chose last (in the
+  // composer, a profile, or by replying to a message in it), else, once the messages are in,
+  // where they last wrote from, else the chat that was opened. Kept until the person changes it.
+  const [sendId, setSendId] = useState<ChatId | null>(null)
+  const request = useSendRequest()
+  const requested = request && memberIds.includes(request as ChatId) ? request : null
+  const { text: draft, reply: replyTo } = useDraft<Message>(draftKey)
+  /** Sends on another of the conversation's chats from now on. A reply to a message elsewhere goes. */
+  const sendOn = (chatId: ChatId) => {
+    setSendId(chatId)
+    const reply = getDraft<Message>(draftKey).reply
+    if (reply && reply.chatId !== chatId) setDraftReply(draftKey, null)
+  }
+  useEffect(() => {
+    const id = takeSendRequest(memberIds)
+    if (id) sendOn(id as ChatId)
+    // `sendOn` only reads the draft store.
+  }, [request, memberIds.join()])
+  useEffect(() => {
+    if (sendId !== null || loading || requested) return
+    const theirs = [...messages].reverse().find((m) => !m.self && memberIds.includes(m.chatId))?.chatId
+    setSendId(replyTo?.chatId || theirs || chat.id)
+  }, [sendId, loading, requested, messages, memberIds, replyTo, chat.id])
+  const sendChat = members.find((m) => m.id === sendId) ?? chat
   // Cancelled messages restored to the composer from this pane, to say so. Restore stays.
   const [restored, setRestored] = useState<ReadonlySet<string>>(new Set())
-  const setDraft = (text: string) => setDraftText(sendChat.id, text)
+  const setDraft = (text: string) => setDraftText(draftKey, text)
   // A reply goes in the chat of the message it answers.
   const setReplyTo = (message: Message | null) => {
-    if (message) sendOn(message.chatId)
-    setDraftReply(message?.chatId ?? sendChat.id, message)
+    if (message) setSendId(message.chatId)
+    setDraftReply(draftKey, message)
   }
   // Closed whenever a chat opens; the pane is remade for each chat.
   const [panel, setPanel] = useState<PanelView | null>(null)
@@ -274,17 +290,17 @@ function OpenChat({
     if (!draft.trim()) return
     // Nothing leaves the composer until it can be sent.
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
-    const chatId = sendChat.id
+    const to = sendChat.id
     // The draft's own send ID: the same draft sent again, from another tab or after a reload,
     // is the same send. Noted as under way, and saved so, before the composer is cleared (I2).
-    const taken = takeForSend<Message>(chatId, sendIdOfTaken)
+    const taken = takeForSend<Message>(draftKey, sendIdOfTaken)
     if (!taken) return
     await whileSending(() =>
-      sendText(chatId, taken.text, taken.reply?.eventId, taken.clientMessageId).then(
-        (outcome) => settle(chatId, taken, outcome === 'queued' ? null : outcome),
+      sendText(to, taken.text, replyIn(taken.reply, to), taken.clientMessageId).then(
+        (outcome) => settle(draftKey, taken, outcome === 'queued' ? null : outcome),
         () => {
           // Back first, then the copy under way goes.
-          restoreDraft(chatId, taken.text, taken.reply, taken.id)
+          restoreDraft(draftKey, taken.text, taken.reply, taken.id)
           endSend(taken.clientMessageId, false)
         },
       ),
@@ -318,28 +334,29 @@ function OpenChat({
     } catch (e) {
       return toast(errorMessage(e, 'That time can’t be used.'))
     }
-    const chatId = sendChat.id
+    const to = sendChat.id
     // Taken out of the composer as it goes, like a send: it can't be sent or scheduled twice, and
     // it comes back, ahead of anything typed since, only if it doesn't go.
-    const taken = takeForSend<Message>(chatId, sendIdOfTaken)
+    const taken = takeForSend<Message>(draftKey, sendIdOfTaken)
     if (!taken) return
     await whileSending(async () => {
       try {
         const sealed = sealText(taken.text, taken.clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
+        const reply = replyIn(taken.reply, to)
         const outcome = await schedule({
-          chatId,
+          chatId: to,
           clientMessageId: taken.clientMessageId,
           sendAt,
           ...sealed,
-          ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
+          ...(reply ? { replyTo: reply } : {}),
         })
-        if (typeof outcome === 'object') settle(chatId, taken, outcome)
+        if (typeof outcome === 'object') settle(draftKey, taken, outcome)
         else {
-          settle(chatId, taken, null)
+          settle(draftKey, taken, null)
           toast(`Scheduled for ${formatWhen(sendAt)}`)
         }
       } catch (e) {
-        restoreDraft(chatId, taken.text, taken.reply, taken.id)
+        restoreDraft(draftKey, taken.text, taken.reply, taken.id)
         endSend(taken.clientMessageId, false)
         toast(errorMessage(e, 'That message couldn’t be scheduled.'))
       }
@@ -352,13 +369,16 @@ function OpenChat({
    * kept on the server, until the person discards it (or 30 days pass); nothing goes by itself.
    */
   function restoreCancelled(id: Id<'scheduledSends'>, body: string, replyTo: string | null) {
-    // Back to the chat it was for, in a conversation: the composer goes by that one now.
+    // Back to the chat it was for, in a conversation: the composer goes by that one then. A
+    // draft written for another network isn't sent on this one with it.
     const chatId = chatOfScheduled.get(id) ?? sendChat.id
+    const now = getDraft<Message>(draftKey)
+    if (chatId !== sendChat.id && (now.text.trim() || now.reply)) return toast('Clear or send your draft first.')
+    if (restoreConflict(now, replyTo)) return toast('Clear or send your draft first.')
     sendOn(chatId)
-    if (restoreConflict(getDraft<Message>(chatId), replyTo)) return toast('Clear or send your draft first.')
     // A reply goes back as one, to the message it answered, even one not loaded.
     const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo, chatId)) : null
-    const added = appendToDraft(chatId, body, reply)
+    const added = appendToDraft(draftKey, body, reply)
     setRestored((now) => new Set(now).add(id))
     toast(added ? 'Restored below your draft.' : 'Restored to your draft.')
   }
@@ -701,6 +721,12 @@ function OpenChat({
           disabled={composerBlocked(sendChat.row, bridge.status)}
         />
       </main>
+      {/* Opening a chat marks it read, as does a new message while it's open and on screen: each
+          of a conversation's chats once its messages are shown (a quieter one's may be from before
+          what the others have loaded so far). */}
+      {(merged && loading ? [] : members.filter((m) => !hidden.includes(m.id))).map((m) => (
+        <ReadWhileOpen key={m.id} chatId={m.id} markRead={actions.markRead} />
+      ))}
       {panel ? (
         <DetailsPanel
           key={panel.kind === 'person' ? `${panel.contact.network}/${panel.contact.ghostId}` : 'chat'}
@@ -739,6 +765,10 @@ function replyStub(eventId: string, chatId: ChatId): Message {
     delivery: undefined,
   }
 }
+
+/** A reply's event ID, when it's to a message in the chat it goes to: a network can't reply across chats. */
+const replyIn = (reply: Message | null, chatId: ChatId) =>
+  reply && (reply.chatId === chatId || !reply.chatId) ? reply.eventId : undefined
 
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
   draftSendId(t.id, t.text, t.reply?.eventId)

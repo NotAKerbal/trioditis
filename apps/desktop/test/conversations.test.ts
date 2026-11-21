@@ -1,9 +1,15 @@
-import type { ChatRow, Network } from '@trioditis/core'
+import type { ChatRow, Network, Person } from '@trioditis/core'
 import { describe, expect, it } from 'vitest'
 import { mergedChat, type Chat, type ChatId } from '../src/data/chats.ts'
-import { cardIndex, MAX_MERGED, mergeDms } from '../src/data/conversations.ts'
-import { getDraft, moveDraft, setDraftReply, setDraftText } from '../src/data/drafts.ts'
-import { mergePages } from '../src/data/messages.ts'
+import {
+  cardIndex,
+  MAX_MERGED,
+  mergeDms,
+  requestSendOn,
+  stableSlots,
+  takeSendRequest,
+} from '../src/data/conversations.ts'
+import { horizonOf, mergePages } from '../src/data/messages.ts'
 
 let n = 0
 function chat(network: Network, dmGhostId: string | undefined, over: Partial<ChatRow> = {}, at = 0): Chat {
@@ -47,7 +53,7 @@ const alice = {
       { network: 'signal', ghostId: 'g_sig_alice' },
     ],
   },
-} as const
+} satisfies Person
 
 describe('a person’s direct chats on several networks', () => {
   it('are one conversation once a card links their contacts, in the place of the first', () => {
@@ -120,18 +126,34 @@ describe('a conversation’s messages, each chat paged on its own', () => {
   })
 })
 
-describe('sending on another of a conversation’s networks', () => {
-  it('takes the draft’s text along, but not its reply, and never over another draft', () => {
-    setDraftText('from-1', 'see you at 8')
-    setDraftReply('from-1', { eventId: 'e1' })
-    moveDraft('from-1', 'to-1')
-    expect(getDraft('to-1')).toMatchObject({ text: 'see you at 8', reply: null })
-    expect(getDraft('from-1').text).toBe('')
+describe('a conversation’s page slots', () => {
+  it('keep each chat in its slot as the order changes, so its loaded pages stay', () => {
+    const first = stableSlots([], ['a', 'b'])
+    expect(first.slice(0, 2)).toEqual(['a', 'b'])
+    // A new message in b puts it first; neither moves.
+    expect(stableSlots(first, ['b', 'a'])).toEqual(first)
+    // a leaves, freeing its slot, and c joins in it; b stays where it was.
+    expect(stableSlots(first, ['c', 'b']).slice(0, 3)).toEqual(['c', 'b', undefined])
+    expect(stableSlots([], ['x'])).toHaveLength(MAX_MERGED)
+  })
+})
 
-    setDraftText('from-2', 'one')
-    setDraftText('to-2', 'two')
-    moveDraft('from-2', 'to-2')
-    expect(getDraft('from-2').text).toBe('one')
-    expect(getDraft('to-2').text).toBe('two')
+describe('what a conversation shows of a quieter chat', () => {
+  it('is nothing until the others have loaded back to its messages', () => {
+    const busy = { messages: [{ at: 50 }, { at: 60 }], more: true }
+    const quiet = { messages: [{ at: 10 }, { at: 20 }], more: false }
+    // Every message of the quiet chat is from before what's shown, so it isn't marked read yet.
+    expect(horizonOf([busy, quiet])).toBe(50)
+    expect(quiet.messages.at(-1)!.at < horizonOf([busy, quiet])).toBe(true)
+    expect(horizonOf([quiet])).toBe(-Infinity)
+  })
+})
+
+describe('a chat chosen to send on from a profile', () => {
+  it('is taken once, by a conversation it’s in', () => {
+    requestSendOn('signal-chat')
+    expect(takeSendRequest(['whatsapp-chat'])).toBeNull()
+    expect(takeSendRequest(['whatsapp-chat', 'signal-chat'])).toBe('signal-chat')
+    expect(takeSendRequest(['whatsapp-chat', 'signal-chat'])).toBeNull()
   })
 })
