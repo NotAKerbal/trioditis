@@ -469,6 +469,10 @@ func TestConformance(t *testing.T) {
 		if chatPlain.Name != "Chat family" {
 			t.Fatalf("chat name %q", chatPlain.Name)
 		}
+		// A group with no picture shows its members instead: here the one other than alice.
+		if !slices.Equal(chatPlain.Collage, []string{first.Sender.GhostID}) {
+			t.Fatalf("collage %q, want the other member %q", chatPlain.Collage, first.Sender.GhostID)
+		}
 		contact := gw.waitFor(t, "contact event", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventContact && e.GhostID == first.Sender.GhostID && e.UserID == "alice"
 		})
@@ -583,6 +587,9 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+		if len(chatPlain.Collage) != 0 {
+			t.Fatalf("a direct chat has a collage: %q", chatPlain.Collage)
 		}
 	})
 

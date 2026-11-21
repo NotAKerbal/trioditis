@@ -152,6 +152,15 @@ change to the chat's name alone still carries the avatar, and a device that neve
 it. `avatarUnchanged` is left for an avatar from before references were kept, or one whose
 reference can't be opened (sealed to an earlier bridge key).
 
+A group (or space) with no avatar of its own says in `collage` which of its members make one in
+its place: up to four ghost IDs, never the person's own, those whose contact has a picture
+first, each kind in a fixed order, so the same members keep being chosen. Clients draw each
+from that contact's profile (`contacts.get`), so a member's new picture shows without the chat
+changing. The bridge host chooses again when a member joins or leaves, or gets a picture, if
+that changes the choice. Chats bridged before collages existed are described again once, when
+the bridge host first starts with them (marked `done:collages-described` in
+`trioditis_secret`). A direct chat, or a chat with an avatar, has no `collage`.
+
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.
 

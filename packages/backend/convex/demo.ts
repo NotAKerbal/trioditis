@@ -407,7 +407,12 @@ export const seedForMe = action({
         network: chat.network,
         portalId: chat.portalId,
         kind: chat.kind,
-        sealed: seal({ name: chat.name }, 'chat', chat.portalId),
+        // A demo group has no picture, so it names its members for a collage, as a bridge host would.
+        sealed: seal(
+          chat.kind === 'group' ? { name: chat.name, collage: chat.people } : { name: chat.name },
+          'chat',
+          chat.portalId,
+        ),
         unread: chat.unread,
         isRequest: chat.isRequest ?? false,
         snoozed: chat.snoozed ?? false,

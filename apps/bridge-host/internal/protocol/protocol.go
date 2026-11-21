@@ -517,6 +517,10 @@ type ChatPlaintext struct {
 	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
 	// this time (its upload expired). Clients keep the avatar they have.
 	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
+	// Collage is, for a group with no picture of its own, the contacts (by opaque ghost ID)
+	// whose pictures clients put together in its place: up to four members other than the
+	// person, those with a picture first.
+	Collage []string `json:"collage,omitempty"`
 }
 
 // ContactPlaintext is a contact's sealed profile.

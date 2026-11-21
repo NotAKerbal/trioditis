@@ -38,6 +38,8 @@ export interface Chat {
   topic: string | undefined
   /** Its picture, to decrypt and show (data/media.ts). */
   avatar: Attachment | undefined
+  /** For a group with no picture: the members (ghost IDs) whose pictures make one. */
+  collage: string[]
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
   unread: number
@@ -75,6 +77,16 @@ export function avatarOf(
   return kept.get(key)
 }
 
+/** The most members a collage shows. */
+const COLLAGE_SIZE = 4
+
+/** The members a chat's collage shows, as far as its metadata names them well. */
+export function collageOf(meta: Pick<ChatPlaintext, 'collage'> | null): string[] {
+  if (!Array.isArray(meta?.collage)) return []
+  const ids = meta.collage.filter((id): id is string => typeof id === 'string' && id !== '')
+  return [...new Set(ids)].slice(0, COLLAGE_SIZE)
+}
+
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
   const meta = openMeta(row, session)
   const own = meta?.name?.trim()
@@ -88,6 +100,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     named: !!own,
     topic: meta?.topic,
     avatar: avatarOf(`${session.userId}/${row._id}`, meta),
+    collage: row.kind === 'dm' ? [] : collageOf(meta),
     described: !!meta,
     unread: row.unreadCount,
     hasUnread: row.unreadCount > 0 || row.markedUnread,

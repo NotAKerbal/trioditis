@@ -525,27 +525,53 @@ func (c *Connector) requestState(ctx context.Context, o *owner, request bool) (s
 	}, nil
 }
 
+// setMembership records a member joining or leaving a chat after it was created, and
+// describes the chat again when that changes who its collage shows.
 func (c *Connector) setMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) error {
+	ghost, isGhost := ids.ParseGhostMXID(mxid)
+	leaving := membership == event.MembershipLeave || membership == event.MembershipBan
+	shown := false
+	if isGhost && leaving {
+		// Before they go, while they still count among the members.
+		shown = c.inCollage(ctx, roomID, ghost)
+	}
+	changed, err := c.recordMembership(ctx, roomID, mxid, membership)
+	if err != nil || !changed || !isGhost {
+		return err
+	}
+	if !leaving {
+		shown = c.inCollage(ctx, roomID, ghost)
+	}
+	if shown {
+		if err = c.emitChat(ctx, roomID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordMembership records a member joining or leaving, and says whether it changed anything.
+func (c *Connector) recordMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) (bool, error) {
 	switch membership {
 	case event.MembershipJoin, event.MembershipInvite:
 		added, err := c.Store.AddMember(ctx, string(roomID), string(mxid))
 		if err != nil || !added {
-			return err
+			return false, err
 		}
 		if ghost, ok := ids.ParseGhostMXID(mxid); ok {
 			o, err := c.owner(ctx, roomID)
 			if errors.Is(err, errNotPortal) {
-				return nil
+				return true, nil
 			} else if err != nil {
-				return err
+				return true, err
 			}
-			return c.ensureContact(ctx, o, ghost)
+			return true, c.ensureContact(ctx, o, ghost)
 		}
-		return nil
+		return true, nil
 	case event.MembershipLeave, event.MembershipBan:
-		return c.Store.RemoveMember(ctx, string(roomID), string(mxid))
+		return true, c.Store.RemoveMember(ctx, string(roomID), string(mxid))
 	default:
-		return nil
+		return false, nil
 	}
 }
 
@@ -714,8 +740,9 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 		return id.RoomID("!local_" + string(ids.LocalEventID("room", strconv.FormatInt(time.Now().UnixNano(), 10)))[1:] + ":" + ids.ServerName), nil
 	}
 	members := append(append([]id.UserID{}, req.BeeperInitialMembers...), req.Invite...)
+	// Recorded only: the chat is described once they're all in, collage and all.
 	for _, member := range members {
-		if err := in.c.setMembership(ctx, roomID, member, event.MembershipJoin); err != nil {
+		if _, err := in.c.recordMembership(ctx, roomID, member, event.MembershipJoin); err != nil {
 			return "", err
 		}
 	}
@@ -866,6 +893,13 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			// from before references were kept). Saying so keeps clients from taking a name
 			// change as the avatar's removal.
 			plain.AvatarUnchanged = true
+		}
+	} else if kind != "dm" {
+		// A chat being described must not fail for want of its collage; clients then show
+		// the chat's initials, as before collages.
+		if plain.Collage, err = c.collage(ctx, o); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Choosing a chat's collage failed")
+			plain.Collage = nil
 		}
 	}
 	fitChat(&plain)
@@ -1147,6 +1181,9 @@ func (c *Connector) ghostProfileChanged(ctx context.Context, ghost networkid.Use
 		if err = c.emitContact(ctx, o, ghost, name, avatar); err != nil {
 			return err
 		}
+	}
+	if avatar != nil {
+		c.pictureChanged(ctx, ghost, rooms)
 	}
 	return nil
 }

@@ -80,6 +80,12 @@ export interface ChatPlaintext {
    * rather than clearing it.
    */
   avatarUnchanged?: boolean
+  /**
+   * For a group with no picture of its own: the contacts (by ghost ID, on the chat's network)
+   * whose pictures make one in its place. Up to four members other than the person, those with
+   * a picture first.
+   */
+  collage?: string[]
   [extra: string]: unknown
 }
 
