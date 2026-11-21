@@ -7,7 +7,7 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
 import { useState } from 'react'
 import { networkName } from '~/data/chats.ts'
-import { identifierPrompt, useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
+import { identifierPrompt, newChatChoice, useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
 
 /** Starts a chat with a phone number or username on one of the person's networks. */
 export function NewChatDialog({
@@ -29,14 +29,9 @@ export function NewChatDialog({
 }
 
 function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
-  // The first account on each network that can start from a number or username.
-  const accounts = new Map<Network, Id<'networkAccounts'>>()
-  for (const a of useStartableAccounts()) {
-    if (identifierPrompt(a.network) && !accounts.has(a.network)) accounts.set(a.network, a.networkAccountId)
-  }
-  const networks = [...accounts.keys()]
   const [chosen, setChosen] = useState<Network | undefined>()
-  const network = chosen && accounts.has(chosen) ? chosen : networks[0]
+  const [chosenAccount, setChosenAccount] = useState<Id<'networkAccounts'> | undefined>()
+  const { networks, network, accounts, account } = newChatChoice(useStartableAccounts(), chosen, chosenAccount)
   const [value, setValue] = useState('')
   const start = useStartChat(onStarted)
 
@@ -46,12 +41,14 @@ function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
       onSubmit={(e) => {
         e.preventDefault()
         const identifier = value.trim()
-        if (network && identifier) void start.begin(network, accounts.get(network)!, { identifier })
+        if (network && account && identifier) void start.begin(network, account.networkAccountId, { identifier })
       }}
     >
       <DialogTitle className="text-md">New chat</DialogTitle>
       {!network ? (
-        <p className="text-sm text-muted-foreground">Connect a network that can start chats first.</p>
+        <p className="text-sm text-muted-foreground">
+          None of your connected accounts can start a chat from a phone number or username.
+        </p>
       ) : (
         <>
           {networks.length > 1 ? (
@@ -64,6 +61,20 @@ function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
                   className="flex items-center justify-center"
                 >
                   <NetworkBadge network={n} label={networkName(n)} size={16} />
+                </SegmentedItem>
+              ))}
+            </Segmented>
+          ) : null}
+          {accounts.length > 1 ? (
+            // Each login is its own identity on the network: the person says which one to use.
+            <Segmented
+              value={account?.networkAccountId ?? ''}
+              onValueChange={(id) => setChosenAccount(id as Id<'networkAccounts'>)}
+              aria-label={`Which ${networkName(network)} account`}
+            >
+              {accounts.map((a) => (
+                <SegmentedItem key={a.networkAccountId} value={a.networkAccountId} className="min-w-0 truncate px-2">
+                  {a.detail}
                 </SegmentedItem>
               ))}
             </Segmented>
@@ -84,8 +95,10 @@ function NewChat({ onStarted }: { onStarted: (chatId: Id<'chats'>) => void }) {
               {start.error}
             </p>
           ) : null}
-          <Button type="submit" variant="primary" block loading={start.busy} disabled={!value.trim()}>
-            Start chat on {networkName(network)}
+          <Button type="submit" variant="primary" block loading={start.busy} disabled={!value.trim() || !account}>
+            {account
+              ? `Start chat on ${networkName(network)}${account.detail ? ` (${account.detail})` : ''}`
+              : `Choose which ${networkName(network)} account`}
           </Button>
         </>
       )}

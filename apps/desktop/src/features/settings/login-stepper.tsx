@@ -9,8 +9,10 @@ import { useQuery } from '@tanstack/react-query'
 import { useMutation } from 'convex/react'
 import { ArrowLeft, CheckCircle2, AlertCircle } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { toast } from '@trioditis/ui/toast'
 import { useEffect, useRef, useState } from 'react'
 import { networkName } from '~/data/chats.ts'
+import { bridgeLive, codeGone, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { loginInputBlocked } from '~/data/bridge-ready.ts'
 import { useBridge } from '~/data/messages.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -29,6 +31,9 @@ const ERRORS: Record<string, string> = {
   unsupported: 'This server can’t log in to that network that way.',
   network_rejected: 'The network refused the login.',
   expired: 'That login expired. Start again.',
+  not_found: 'The network couldn’t find that account.',
+  invalid_command: 'The server’s bridge couldn’t take that login. Start again.',
+  internal: 'Something went wrong on the server’s bridge. Start again.',
 }
 
 const INPUT_TYPE: Record<string, string> = {
@@ -43,9 +48,20 @@ const INPUT_TYPE: Record<string, string> = {
 
 /**
  * Connects an account, from the login steps the bridge host sends: one stepper for every
- * network (docs/architecture/client-api.md, The login stepper).
+ * network (docs/architecture/client-api.md, The login stepper). `reconnect` names the account
+ * it connects again, for the title.
  */
-export function LoginStepper({ network, flowId, onClose }: { network: string; flowId: string; onClose: () => void }) {
+export function LoginStepper({
+  network,
+  flowId,
+  reconnect,
+  onClose,
+}: {
+  network: string
+  flowId: string
+  reconnect?: string
+  onClose: () => void
+}) {
   const session = useSession()
   const start = useMutation(api.logins.start)
   const submit = useMutation(api.logins.submit)
@@ -78,6 +94,10 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   const abandon = (id: Id<'loginSessions'>) => void cancel({ loginSessionId: id }).catch(() => undefined)
 
   const begin = () => {
+    // Starting again leaves a login that hasn't ended (a code that expired, a host that went
+    // away) for the new one, so the old one is cancelled rather than left running.
+    const previous = live.current
+    if (previous.id && !previous.over) abandon(previous.id)
     setStartError(null)
     setLoginSessionId(null)
     setValues({})
@@ -130,6 +150,31 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
     live.current.over = over
   }, [over])
 
+  // A QR or pairing code only works while the bridge host showing it is there, and until it
+  // expires (bridge-liveness.ts). Timed from when this page got each value, by its own clock.
+  const clock = useHeardClock()
+  const now = useNow(5_000)
+  const hostOnline = login
+    ? bridgeLive(
+        login.hostOnline,
+        login.hostLastSeenAt,
+        login.hostLastSeenAt == null ? undefined : clock.heardAt('host', login.hostLastSeenAt, now),
+        now,
+      )
+    : true
+  const gone =
+    login && step
+      ? codeGone(
+          step,
+          {
+            updatedAt: login.updatedAt,
+            stepHeardAt: clock.heardAt(`step:${step.stepId}`, login.updatedAt, now),
+            hostOnline,
+          },
+          now,
+        )
+      : null
+
   // A new step clears what was typed for the last one, and can be sent.
   const stepId = step?.stepId
   useEffect(() => {
@@ -156,8 +201,20 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
     }
   }
 
-  // Closing unmounts the stepper, which cancels an unfinished login (above).
-  const close = onClose
+  // Cancel ends the login on the server first (logins.cancel), so what the person sees is
+  // what happened: if it had already finished, they're told it's connected after all.
+  const close = () => {
+    const run = live.current
+    if (run.id && !run.over) {
+      run.over = true
+      const name = networkName(network)
+      void cancel({ loginSessionId: run.id }).then(
+        (state) => state === 'complete' && toast(`${name} finished connecting before the cancel went through.`),
+        () => undefined,
+      )
+    }
+    onClose()
+  }
   // The server's browser signs in for the person (docs/architecture/signin-browser.md); a
   // hidden page needs nobody to look at it.
   const browser = step?.type === 'cookies' && !!step.cookies?.browser && !paste
@@ -176,17 +233,28 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
           <ArrowLeft className="size-[18px]" />
         </Button>
         <NetworkBadge network={network} label={networkName(network)} size={26} />
-        <h2 className="text-lg font-bold">Connect {networkName(network)}</h2>
+        <h2 className="text-lg font-bold">
+          {reconnect ? `Reconnect ${reconnect}` : `Connect ${networkName(network)}`}
+        </h2>
       </div>
 
       {startError ? (
-        <Problem message={startError} onRetry={begin} />
+        <Problem message={startError} onRetry={begin} onBack={close} />
       ) : login === null ? (
-        <Problem message="That login is gone. Start again." onRetry={begin} />
+        <Problem message="That login is gone. Start again." onRetry={begin} onBack={close} />
+      ) : login && !over && !hostOnline ? (
+        // Nothing a host that has gone showed can finish the login, and none can start it.
+        <Problem
+          message={`The server’s bridge for ${networkName(network)} isn’t responding, so this login can’t go on. Try again once it’s back.`}
+          onRetry={begin}
+          onBack={close}
+        />
       ) : !login || login.state === 'pending' || !step ? (
         <p className="py-8 text-center text-sm text-muted-foreground" aria-busy="true">
           Starting the login with {networkName(network)}…
         </p>
+      ) : gone === 'expired' && !over ? (
+        <Problem message="That code expired. Start again for a new one." onRetry={begin} onBack={close} />
       ) : done ? (
         <div className="py-6 text-center">
           <CheckCircle2 className="mx-auto mb-2 size-8 text-success" />
@@ -196,9 +264,13 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
           </Button>
         </div>
       ) : failed ? (
-        <Problem message={ERRORS[step?.error ?? ''] ?? 'The login didn’t finish. Start again.'} onRetry={begin} />
+        <Problem
+          message={ERRORS[step?.error ?? ''] ?? 'The login didn’t finish. Start again.'}
+          onRetry={begin}
+          onBack={close}
+        />
       ) : cancelled ? (
-        <Problem message="The login was cancelled." onRetry={begin} />
+        <Problem message="The login was cancelled." onRetry={begin} onBack={close} />
       ) : hidden ? (
         step.cookies?.browser ? (
           <p className="py-8 text-center text-sm text-muted-foreground" aria-busy="true">
@@ -336,15 +408,21 @@ export function LoginStepper({ network, flowId, onClose }: { network: string; fl
   )
 }
 
-function Problem({ message, onRetry }: { message: string; onRetry: () => void }) {
+/** Why the login can't go on, with starting it again or going back to choose another way. */
+function Problem({ message, onRetry, onBack }: { message: string; onRetry: () => void; onBack: () => void }) {
   return (
     <div className="rounded-lg bg-danger/10 p-4 text-sm text-danger">
-      <p className="flex items-start gap-2">
+      <p className="flex items-start gap-2" role="alert">
         <AlertCircle className="mt-0.5 size-4 shrink-0" /> {message}
       </p>
-      <Button className="mt-3" size="sm" onClick={onRetry}>
-        Start again
-      </Button>
+      <div className="mt-3 flex gap-2">
+        <Button size="sm" onClick={onRetry}>
+          Start again
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onBack}>
+          Back to accounts
+        </Button>
+      </div>
     </div>
   )
 }

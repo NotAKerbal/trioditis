@@ -822,11 +822,12 @@ whether the network has them (Reacting).
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
-   `{ _id, network, state, step, updatedAt, hostLastSeenAt }`, or `null` for a login that
-   doesn't exist or isn't the person's. `hostLastSeenAt` is when the bridge host running it
-   (before one has it, the network's most recently seen host) was last heard from, or `null`:
-   once that is more than two minutes ago (`BRIDGE_HOST_STALE_MS`) by the client's clock, the
-   host has gone, and a QR or pairing code it showed won't work, so hide it. Likewise a
+   `{ _id, network, state, step, updatedAt, hostLastSeenAt, hostOnline }`, or `null` for a
+   login that doesn't exist or isn't the person's. `hostLastSeenAt` is when the bridge host
+   running it (before one has it, the network's most recently seen host) was last heard from,
+   or `null`; `hostOnline` is whether that was within two minutes (`BRIDGE_HOST_STALE_MS`) when
+   the query ran. A host that has gone can't finish the login, so hide a QR or pairing code it
+   showed once `hostOnline` is false or two minutes pass with no new `hostLastSeenAt`. Likewise a
    `step.expiresAt` or `display.expiresAt` (bridge host time, ms) that has passed, where the
    bridge host sends one. `state` is one of `pending`, `active`, `complete`, `cancelled` or
    `error`. `step` is `null` until the bridge host sends the first step (while `pending`);
@@ -904,9 +905,12 @@ a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login do
 
 `bridgeOnline` goes false two minutes after the bridge host's last heartbeat. Queries rerun
 when data changes, not when time passes, so a host that stops heartbeating stays
-`bridgeOnline` in an answer already given: judge it again from `bridgeLastSeenAt` (null if
-never heard from) against `BRIDGE_HOST_STALE_MS` as time passes, and recompute `status` with
-`networkStatus` from `@trioditis/core`.
+`bridgeOnline` in an answer already given. A live host's heartbeat changes
+`bridgeLastSeenAt` (null if never heard from) every 30 seconds, so treat the bridge as down
+once two minutes (`BRIDGE_HOST_STALE_MS`) pass by the client's clock without a new one, and
+recompute `status` with `networkStatus` from `@trioditis/core`. Timing it from when the
+client got the value, not from the value itself, keeps a fast or slow client clock from
+misjudging it.
 
 ### Installing networks (admins)
 

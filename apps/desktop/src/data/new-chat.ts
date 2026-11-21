@@ -14,6 +14,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useMutation } from 'convex/react'
 import { useEffect, useState } from 'react'
+import { accountLabels } from '~/data/account-label.ts'
 import { networkName, useAccounts } from '~/data/chats.ts'
 import { useBridge } from '~/data/messages.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -29,13 +30,19 @@ export type ChatTarget = { ghostId: string } | { identifier: string }
 export interface StartableAccount {
   networkAccountId: Id<'networkAccounts'>
   network: Network
+  /** What tells it apart from the person's other accounts on the network, if they have more (account-label.ts). */
+  detail?: string | null
 }
 
 /** The person's connected accounts that can start chats, in the order they connected. */
 export function useStartableAccounts(): StartableAccount[] {
   const accounts = useAccounts()
+  // Labelled among all their accounts, so one is called the same here as in Settings.
+  const labels = accountLabels((accounts ?? []).map((a) => ({ id: a._id, network: a.network, hint: a.hint })))
   return (accounts ?? []).flatMap((a) =>
-    a.state === 'CONNECTED' && START_TARGETS[a.network] ? [{ networkAccountId: a._id, network: a.network }] : [],
+    a.state === 'CONNECTED' && START_TARGETS[a.network]
+      ? [{ networkAccountId: a._id, network: a.network, detail: labels.get(a._id)?.detail ?? null }]
+      : [],
   )
 }
 
@@ -46,6 +53,25 @@ export function identifierPrompt(network: Network): string | null {
   if (t?.phone) return 'Phone number'
   if (t?.username) return 'Username'
   return null
+}
+
+/**
+ * What the New chat dialog offers: the networks that can start from a number or username, the
+ * one in use (the person's pick, else the first), its accounts, and the account the chat
+ * starts from. With more than one account on the network that's only the one the person
+ * picked: the app doesn't guess which of their logins a new contact should see them on.
+ */
+export function newChatChoice(
+  startable: readonly StartableAccount[],
+  chosenNetwork: Network | undefined,
+  chosenAccount: Id<'networkAccounts'> | undefined,
+) {
+  const usable = startable.filter((a) => identifierPrompt(a.network))
+  const networks = [...new Set(usable.map((a) => a.network))]
+  const network = chosenNetwork && networks.includes(chosenNetwork) ? chosenNetwork : networks[0]
+  const accounts = usable.filter((a) => a.network === network)
+  const account = accounts.length === 1 ? accounts[0] : accounts.find((a) => a.networkAccountId === chosenAccount)
+  return { networks, network, accounts, account }
 }
 
 /** What to tell the person when a chat couldn't start. */
@@ -140,10 +166,12 @@ export function chatOptions(
 ): ChatOption[] {
   const out: ChatOption[] = []
   const onNetwork = (network: Network) => accounts.filter((a) => a.network === network)
-  // "Account 2" is the same account everywhere: numbered in the order the person connected them.
+  // An account is called what Settings calls it (account-label.ts); without that, "account 2"
+  // is the same account everywhere: numbered in the order the person connected them.
   const named = (label: string, network: Network, account: StartableAccount) => {
     const all = onNetwork(network)
-    return all.length > 1 ? `${label} (account ${all.indexOf(account) + 1})` : label
+    if (all.length < 2) return label
+    return `${label} (${account.detail || `account ${all.indexOf(account) + 1}`})`
   }
   // Accounts a linked contact came from, where starting from the contact works for sure.
   const covered = new Set<string>()

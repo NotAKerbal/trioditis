@@ -1,6 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import type { Doc } from './_generated/dataModel'
-import { NETWORK_INFO, type Network } from '@trioditis/core'
+import { BRIDGE_HOST_STALE_MS, NETWORK_INFO, type Network } from '@trioditis/core'
 import { mutation, query, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
@@ -98,19 +98,23 @@ export const session = query({
        * with its own clock, so a QR or pairing code from a host that has gone away isn't left up.
        */
       hostLastSeenAt: v.union(v.null(), v.number()),
+      /** Whether that host had been heard from in the last two minutes when this ran. */
+      hostOnline: v.boolean(),
     }),
   ),
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId || retired(session)) return null
+    const seenAt = await hostLastSeenAt(ctx, session)
     return {
       _id: session._id,
       network: session.network,
       state: session.state,
       step: session.step ?? null,
       updatedAt: session.updatedAt,
-      hostLastSeenAt: await hostLastSeenAt(ctx, session),
+      hostLastSeenAt: seenAt,
+      hostOnline: seenAt !== null && Date.now() - seenAt <= BRIDGE_HOST_STALE_MS,
     }
   },
 })

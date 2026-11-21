@@ -105,7 +105,13 @@ export const health = query({
           error: account.error ?? null,
           lastHealthyAt: account.lastHealthyAt ?? null,
         }))
-      return { network: name, bridgeOnline, bridgeLastSeenAt, accounts: mine, status: networkStatus(mine, bridgeOnline) }
+      return {
+        network: name,
+        bridgeOnline,
+        bridgeLastSeenAt,
+        accounts: mine,
+        status: networkStatus(mine, bridgeOnline),
+      }
     })
   },
 })

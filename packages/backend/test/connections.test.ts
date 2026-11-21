@@ -75,7 +75,10 @@ describe('bridge liveness', () => {
     const heardAt = await lastSeen(t)
     expect((await a.query(api.networks.health, {}))[0]).toMatchObject({ bridgeOnline: true, bridgeLastSeenAt: heardAt })
     vi.advanceTimersByTime(3 * 60_000)
-    expect((await a.query(api.networks.health, {}))[0]).toMatchObject({ bridgeOnline: false, bridgeLastSeenAt: heardAt })
+    expect((await a.query(api.networks.health, {}))[0]).toMatchObject({
+      bridgeOnline: false,
+      bridgeLastSeenAt: heardAt,
+    })
   })
 
   it('gives a login the time its bridge host was last heard from, before and after one takes it', async () => {
@@ -84,7 +87,10 @@ describe('bridge liveness', () => {
     await installNetworks(t)
     const a = await signIn(t, 'user_a')
     const loginSessionId = await a.mutation(api.logins.start, { network: 'whatsapp' })
-    expect((await a.query(api.logins.session, { loginSessionId }))!.hostLastSeenAt).toBeNull()
+    expect(await a.query(api.logins.session, { loginSessionId })).toMatchObject({
+      hostLastSeenAt: null,
+      hostOnline: false,
+    })
     await heartbeat(t)
     const heardAt = await lastSeen(t)
     expect((await a.query(api.logins.session, { loginSessionId }))!.hostLastSeenAt).toBe(heardAt)
@@ -93,6 +99,11 @@ describe('bridge liveness', () => {
     // Another host coming up doesn't speak for a login the first one runs.
     await heartbeat(t, 'whatsapp-2')
     expect((await a.query(api.logins.session, { loginSessionId }))!.hostLastSeenAt).toBe(heardAt)
+    vi.advanceTimersByTime(2 * 60_000)
+    expect(await a.query(api.logins.session, { loginSessionId })).toMatchObject({
+      hostLastSeenAt: heardAt,
+      hostOnline: false,
+    })
   })
 
   it('takes a step that says when its code expires', async () => {
