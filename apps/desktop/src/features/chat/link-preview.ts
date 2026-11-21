@@ -112,7 +112,8 @@ export function fromAddress(url: URL): { service: Service; detail?: string } {
 
   if (host === 'docs.google.com') {
     // docs.google.com/presentation/d/<id>/edit, and /u/1/presentation/... for a second account.
-    const kind = path.find((p) => p in GOOGLE_DOCS)
+    // Own keys only: a path segment such as "constructor" must not find an inherited property.
+    const kind = path.find((p) => Object.hasOwn(GOOGLE_DOCS, p))
     const known = kind ? GOOGLE_DOCS[kind] : undefined
     if (known) return { service: known, detail: known.detail }
   }
@@ -181,8 +182,16 @@ export function cardReplacesText(cards: LinkCard[], text: string): boolean {
   return said !== null && sameAddress(said, new URL(card.href))
 }
 
-/** The same page, ignoring `www.` and a trailing slash, which the network may have tidied. */
+/**
+ * The very same destination, scheme, host, port, query and fragment alike, ignoring only a
+ * trailing slash on the path. Hiding the sent link behind a card that goes anywhere else (the
+ * page's canonical address without the section it pointed to, say) would lose where it went.
+ */
 function sameAddress(a: URL, b: URL): boolean {
-  const key = (u: URL) => `${shownHost(u).toLowerCase()}${u.pathname.replace(/\/$/, '')}${u.search}`
+  const key = (u: URL) => {
+    const copy = new URL(u.href)
+    copy.pathname = copy.pathname.replace(/\/$/, '')
+    return copy.href
+  }
   return key(a) === key(b)
 }

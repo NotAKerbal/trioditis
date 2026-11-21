@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useState } from 'react'
-import { isImage, useMedia } from '~/data/media.ts'
+import { isImage, loadsByItself, useMedia } from '~/data/media.ts'
 import { useNear } from './attachments.tsx'
 import type { LinkCard as Card, ServiceIcon, ServiceTone } from './link-preview.ts'
 
@@ -100,7 +100,9 @@ function PreviewCard({ card, network }: { card: Extract<Card, { kind: 'preview' 
  */
 function PreviewImage({ network, image, className }: { network: Network; image: Attachment; className: string }) {
   const [ref, near] = useNear()
-  const media = useMedia(network, image, true, near)
+  // A picture too large to load by itself (as for a message's own pictures) isn't loaded at all:
+  // the preview's words are enough.
+  const media = useMedia(network, image, loadsByItself(image), near)
   const [broken, setBroken] = useState<string | null>(null)
   const ready = media.state === 'ready' && broken !== media.url
   return (

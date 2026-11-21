@@ -85,6 +85,9 @@ describe('what an address says', () => {
       detail: 'my trip notes',
     })
     expect(said('https://example.com/').detail).toBeUndefined()
+    // A path segment that's an inherited property name is no service.
+    expect(said('https://docs.google.com/constructor/presentation/d/x').service.name).toBe('Google Slides')
+    expect(said('https://docs.google.com/toString/d/x').service).toMatchObject({ icon: 'web' })
     expect(said('https://example.com/%E0%A4%A').detail).toBe('%E0%A4%A')
   })
 })
@@ -93,11 +96,18 @@ describe('a card standing in for the text', () => {
   const card = (href: string) => linkCards(message(href, [{ url: href, title: 'T' }]), href)
   it('replaces a message that is only the previewed link', () => {
     expect(cardReplacesText(card('https://example.com/a'), ' https://example.com/a ')).toBe(true)
-    expect(cardReplacesText(card('https://www.example.com/a/'), 'https://example.com/a')).toBe(true)
+    expect(cardReplacesText(card('https://example.com/a/'), 'https://example.com/a')).toBe(true)
   })
   it('keeps the text when it says more, or when the card is only from the address', () => {
     expect(cardReplacesText(card('https://example.com/a'), 'look https://example.com/a')).toBe(false)
     const body = 'https://example.com/a'
     expect(cardReplacesText(linkCards(message(body), body), body)).toBe(false)
+  })
+  it('keeps the text when the card goes somewhere else', () => {
+    const preview = (href: string) => linkCards(message('x', [{ url: href, title: 'T' }]), 'x')
+    expect(cardReplacesText(preview('https://example.com/a'), 'https://example.com/a#part-2')).toBe(false)
+    expect(cardReplacesText(preview('https://example.com/a'), 'http://example.com/a')).toBe(false)
+    expect(cardReplacesText(preview('https://example.com/a'), 'https://www.example.com/a')).toBe(false)
+    expect(cardReplacesText(preview('https://example.com/a'), 'https://example.com:8443/a')).toBe(false)
   })
 })

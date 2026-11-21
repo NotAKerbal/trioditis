@@ -94,7 +94,7 @@ func TestLinkPreviewsKeepOnlyWebLinksWithSomethingToShow(t *testing.T) {
 func TestPreviewsGoBeforeTheBodyIsCut(t *testing.T) {
 	body := strings.Repeat("a", protocol.MaxMessageSealedBytes-600)
 	plain := &protocol.MessagePlaintext{Type: "text", Body: body, Previews: []protocol.LinkPreview{
-		{URL: "https://example.com", Description: strings.Repeat("d", maxPreviewDescription)},
+		{URL: "https://example.com", Description: strings.Repeat("d", 1024)},
 	}}
 	fitMessage(plain)
 	if plain.Previews != nil || plain.Body != body || !plain.Truncated {

@@ -12,13 +12,14 @@ import (
 )
 
 // A message's previews are kept small: they ride inside the sealed message, and no app shows
-// more than a few lines of one.
+// more than a few lines of one. Small enough, too, that a short message with a preview still
+// seals within the 4 KiB the inbox keeps of a chat's last message for its one-line snippet.
 const (
 	maxPreviews           = 3
 	maxPreviewURLBytes    = 2048
-	maxPreviewTitleBytes  = 512
-	maxPreviewSiteBytes   = 256
-	maxPreviewDescription = 1024
+	maxPreviewTitleBytes  = 300
+	maxPreviewSiteBytes   = 100
+	maxPreviewDescription = 400
 )
 
 // linkPreviews turns the previews a network sent with a message (WhatsApp, Signal, Telegram,
