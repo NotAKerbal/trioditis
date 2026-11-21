@@ -81,3 +81,16 @@ export function serverKind(answer: { config?: unknown; html?: string }): 'ready'
   if (config && typeof config === 'object' && typeof config.convexUrl === 'string' && config.convexUrl) return 'old'
   return 'other'
 }
+
+/**
+ * Whether a page's HTTP status means a proxy in front of the server couldn't reach it (502 Bad
+ * Gateway, 503 Unavailable, 504 Timeout): the server is down or restarting, not a page to show.
+ */
+export function proxyCouldNotReach(status: number): boolean {
+  return status >= 502 && status <= 504
+}
+
+/** What the picker says when the server couldn't be reached, so connecting again is a retry. */
+export function unreachableMessage(origin: string, why: string): string {
+  return `Couldn’t reach your server at ${origin} (${why}). Check your connection, then retry.`
+}

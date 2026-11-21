@@ -62,7 +62,11 @@ export default defineSchema({
     email: v.optional(v.string()),
     removedBy: v.string(),
     removedAt: v.number(),
-  }).index('by_user', ['userId']),
+    /** Some of their accounts aren't logged out yet. Only these are listed (`by_active`). */
+    active: v.optional(v.boolean()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_active', ['active', 'removedAt']),
 
   invitations: defineTable({
     email: v.string(),

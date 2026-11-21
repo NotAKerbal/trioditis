@@ -1,7 +1,7 @@
 import type { ErrorCode } from '@trioditis/core/bridge-protocol'
 import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
-import { isMember } from './formerMembers'
+import { isMember, settleCleanup } from './formerMembers'
 import { queueLogout } from './outbox'
 
 // What a command's failure means to the person, beyond the outbox row: a logout that didn't
@@ -76,4 +76,6 @@ export async function onLoggedOut(ctx: MutationCtx, account: Doc<'networkAccount
   if (account.logoutPending || account.logoutError || account.logoutCommandId) {
     await ctx.db.patch(account._id, { logoutPending: false, logoutError: undefined, logoutCommandId: undefined })
   }
+  // A removed person's last account logging out finishes their cleanup.
+  if (!(await isMember(ctx, account.userId))) await settleCleanup(ctx, account.userId)
 }

@@ -217,10 +217,11 @@ function PersonRow({ person }: { person: Person }) {
  */
 function Cleanup() {
   const session = useSession()
-  const { data: left } = useQuery(convexQuery(api.members.removedCleanup, {}))
+  const cleanups = usePaginatedQuery(api.members.removedCleanup, {}, { initialNumItems: PAGE_SIZE })
+  const left = cleanups.results.filter((row) => row.accounts > 0)
   const retry = useMutation(api.members.retryCleanup)
   const [busy, setBusy] = useState<string | null>(null)
-  if (!left?.length) return null
+  if (!left.length && cleanups.status !== 'CanLoadMore') return null
   return (
     <Group title="Disconnecting removed people">
       {left.map((row) => (
@@ -254,6 +255,7 @@ function Cleanup() {
           ) : null}
         </div>
       ))}
+      {cleanups.status === 'CanLoadMore' ? <More onClick={() => cleanups.loadMore(PAGE_SIZE)} /> : null}
     </Group>
   )
 }

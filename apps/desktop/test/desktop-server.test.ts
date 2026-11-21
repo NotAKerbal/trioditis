@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { isExternalAllowed, normalizeServer, quitsWhenAllClosed, sameOrigin, serverKind } from '../electron/server.ts'
+import {
+  isExternalAllowed,
+  normalizeServer,
+  proxyCouldNotReach,
+  quitsWhenAllClosed,
+  sameOrigin,
+  serverKind,
+  unreachableMessage,
+} from '../electron/server.ts'
 
 describe('the desktop app’s server address', () => {
   it('takes a bare host as https, and keeps only the origin', () => {
@@ -56,5 +64,18 @@ describe('closing the last window', () => {
   it('doesn’t quit while the app changes server, as an invitation link does', () => {
     expect(quitsWhenAllClosed('win32', true)).toBe(false)
     expect(quitsWhenAllClosed('linux', true)).toBe(false)
+  })
+})
+
+describe('a proxy that couldn’t reach the server', () => {
+  it('is a 502, 503 or 504, and nothing else', () => {
+    expect([502, 503, 504].map(proxyCouldNotReach)).toEqual([true, true, true])
+    expect([0, 200, 404, 500, 501, 505].map(proxyCouldNotReach)).toEqual([false, false, false, false, false, false])
+  })
+
+  it('sends the picker back with a retry', () => {
+    expect(unreachableMessage('https://t.example', 'it answered 502')).toBe(
+      'Couldn’t reach your server at https://t.example (it answered 502). Check your connection, then retry.',
+    )
   })
 })

@@ -640,18 +640,6 @@ async function applyLoginState(
   if (existing) {
     await ctx.db.patch(existing._id, fields)
     if (event.state === 'LOGGED_OUT') await onLoggedOut(ctx, existing)
-  } else if (event.state !== 'LOGGED_OUT' && !(await isMember(ctx, event.userId))) {
-    // A login that finished after its person was removed (members.removeMember): logged out at
-    // once, and tracked with the rest of their cleanup so a logout that fails can be retried.
-    accountId = await ctx.db.insert('networkAccounts', {
-      userId: event.userId,
-      network,
-      loginId: event.loginId,
-      ...fields,
-    })
-    await queueLogout(ctx, (await ctx.db.get(accountId))!)
-    await noteCleanup(ctx, event.userId)
-    return
   } else {
     accountId = await ctx.db.insert('networkAccounts', {
       userId: event.userId,
@@ -659,12 +647,20 @@ async function applyLoginState(
       loginId: event.loginId,
       ...fields,
     })
-    // A login the person cancelled that finished on the bridge host anyway, whose `complete`
-    // step came first: they said no to it, so it's logged out rather than left connected.
-    if (event.state !== 'LOGGED_OUT' && (await cancelledLogin(ctx, event.userId, network, event.loginId))) {
-      await queueLogout(ctx, (await ctx.db.get(accountId))!)
-      return
-    }
+  }
+  // An account of someone an admin removed (members.removeMember), new or one coming back: a
+  // login that finished after the removal, or a logged-out account reconnecting. Logged out at
+  // once, and tracked with the rest of their cleanup so a logout that fails can be retried.
+  if (event.state !== 'LOGGED_OUT' && !(await isMember(ctx, event.userId))) {
+    await queueLogout(ctx, (await ctx.db.get(accountId!))!)
+    await noteCleanup(ctx, event.userId)
+    return
+  }
+  // A login the person cancelled that finished on the bridge host anyway, whose `complete`
+  // step came first: they said no to it, so it's logged out rather than left connected.
+  if (!existing && event.state !== 'LOGGED_OUT' && (await cancelledLogin(ctx, event.userId, network, event.loginId))) {
+    await queueLogout(ctx, (await ctx.db.get(accountId!))!)
+    return
   }
   // An account on a network an admin removed is logged out, whenever it reports in: one whose
   // login finished as the network was removed, or whose logout didn't take. A network that was

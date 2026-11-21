@@ -27,5 +27,35 @@ export function keyGateLoad(state: {
   return state.remote.failed ? 'failed' : 'wait'
 }
 
+/** What asking Better Auth for the session said: only an answer settles it, never a failure. */
+export function sessionAnswer(result: { data: unknown; error: unknown } | null): 'signedIn' | 'signedOut' | 'unknown' {
+  if (!result || result.error) return 'unknown'
+  return result.data ? 'signedIn' : 'signedOut'
+}
+
+/** The wait before asking again after the `attempt`th unknown answer: 2s, doubling, at most 30s. */
+export function retryDelay(attempt: number): number {
+  return Math.min(2_000 * 2 ** attempt, 30_000)
+}
+
+/**
+ * Asks whether the browser is signed out until it gets an answer: a request that fails (offline,
+ * the server down) is asked again after `retryDelay`, until `cancelled`. Answers what it learned,
+ * or null if it was cancelled first.
+ */
+export async function confirmSession(
+  ask: () => Promise<{ data: unknown; error: unknown }>,
+  sleep: (ms: number) => Promise<void>,
+  cancelled: () => boolean,
+): Promise<'signedIn' | 'signedOut' | null> {
+  for (let attempt = 0; !cancelled(); attempt++) {
+    const answer = sessionAnswer(await ask().catch(() => null))
+    if (cancelled()) return null
+    if (answer !== 'unknown') return answer
+    await sleep(retryDelay(attempt))
+  }
+  return null
+}
+
 /** How long the splash waits on the server before it also says it's still trying. */
 export const SLOW_SERVER_MS = 15_000

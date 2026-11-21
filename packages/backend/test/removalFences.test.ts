@@ -13,6 +13,19 @@ async function user(t: T, email: string) {
   })
 }
 
+/** The first page of cleanups an admin sees. */
+async function cleanup(as: { query: T['query'] }) {
+  return (await as.query(api.members.removedCleanup, { paginationOpts: { numItems: 50, cursor: null } })).page
+}
+
+const loginState = (t: T, userId: string, loginId: string, seq: number, state: 'CONNECTED' | 'LOGGED_OUT') =>
+  t.mutation(api.gateway.ingest, {
+    secret: GATEWAY_SECRET,
+    hostId: 'whatsapp-1',
+    network: 'whatsapp',
+    events: [{ seq, type: 'loginState', userId, loginId, at: Date.now(), state }],
+  })
+
 const claim = (t: T) =>
   t.mutation(api.gateway.claimCommands, { secret: GATEWAY_SECRET, limit: 10, hostIds: ['whatsapp-1'] })
 
@@ -87,7 +100,7 @@ describe('after a member is removed', () => {
       })
     })
     await admin.mutation(api.members.removeMember, { userId: samId })
-    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([
+    expect(await cleanup(admin)).toMatchObject([
       { userId: samId, email: 'sam@x.test', accounts: 1, pending: 1, failed: 0 },
     ])
 
@@ -116,15 +129,18 @@ describe('after a member is removed', () => {
       accepted: false,
       error: 'invalid_command',
     })
-    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([{ pending: 0, failed: 1 }])
+    expect(await cleanup(admin)).toMatchObject([{ pending: 0, failed: 1 }])
     expect(await admin.mutation(api.members.retryCleanup, { userId: samId })).toEqual({ queued: 1, left: 1 })
-    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([{ pending: 1, failed: 0 }])
+    expect(await cleanup(admin)).toMatchObject([{ pending: 1, failed: 0 }])
 
     // Once the account reports logged out, the cleanup is done.
-    await t.run(async (ctx) => {
-      await ctx.db.patch(account._id, { state: 'LOGGED_OUT', logoutPending: false })
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      events: [{ seq: 1, type: 'loginState', userId: samId, loginId: 'l_sam', at: Date.now(), state: 'LOGGED_OUT' }],
     })
-    expect(await admin.query(api.members.removedCleanup, {})).toEqual([])
+    expect(await cleanup(admin)).toEqual([])
     expect(await admin.mutation(api.members.retryCleanup, { userId: samId })).toEqual({ queued: 0, left: 0 })
   })
 
@@ -145,9 +161,7 @@ describe('after a member is removed', () => {
       network: 'whatsapp',
       events: [{ seq: 1, type: 'loginState', userId: samId, loginId: 'late', at: Date.now(), state: 'CONNECTED' }],
     })
-    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([
-      { userId: samId, email: 'sam@x.test', accounts: 1, pending: 1 },
-    ])
+    expect(await cleanup(admin)).toMatchObject([{ userId: samId, email: 'sam@x.test', accounts: 1, pending: 1 }])
     const logout = (await claim(t)).find((c) => c.payload.type === 'logout')!
     expect(logout).toMatchObject({ loginId: 'late' })
     await t.mutation(api.gateway.commandResult, {
@@ -157,8 +171,44 @@ describe('after a member is removed', () => {
       accepted: false,
       error: 'invalid_command',
     })
-    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([{ failed: 1 }])
+    expect(await cleanup(admin)).toMatchObject([{ failed: 1 }])
     expect(await admin.mutation(api.members.retryCleanup, { userId: samId })).toEqual({ queued: 1, left: 1 })
+  })
+
+  it('logs out again a removed person’s logged-out account that reconnects, and lists it again', async () => {
+    const t = setup()
+    const admin = await signIn(t, await user(t, 'admin@x.test'), 'admin')
+    const samId = await user(t, 'sam@x.test')
+    await signIn(t, samId)
+    await heartbeat(t)
+    await loginState(t, samId, 'l_sam', 1, 'CONNECTED')
+    await admin.mutation(api.members.removeMember, { userId: samId })
+    await loginState(t, samId, 'l_sam', 2, 'LOGGED_OUT')
+    expect(await cleanup(admin)).toEqual([])
+    // The same account comes back on the bridge host later.
+    await loginState(t, samId, 'l_sam', 3, 'CONNECTED')
+    const account = await t.run(async (ctx) => (await ctx.db.query('networkAccounts').collect())[0]!)
+    expect(account).toMatchObject({ state: 'CONNECTED', logoutPending: true })
+    expect(await cleanup(admin)).toMatchObject([{ userId: samId, accounts: 1, pending: 1 }])
+  })
+
+  it('lists an old cleanup still waiting behind more than a hundred finished ones', async () => {
+    const t = setup()
+    await t.run(async (ctx) => {
+      await ctx.db.insert('networkAccounts', {
+        userId: 'old',
+        network: 'whatsapp',
+        loginId: 'l_old',
+        state: 'CONNECTED',
+        updatedAt: 1,
+      })
+      await ctx.db.insert('removedMembers', { userId: 'old', removedBy: 'a', removedAt: 1, active: true })
+      for (let i = 0; i < 120; i++) {
+        await ctx.db.insert('removedMembers', { userId: `done${i}`, removedBy: 'a', removedAt: 10 + i, active: false })
+      }
+    })
+    const admin = await signIn(t, 'admin', 'admin')
+    expect(await cleanup(admin)).toMatchObject([{ userId: 'old', accounts: 1, failed: 1 }])
   })
 
   it('refuses an agent connection approved before the removal, and revokes it on first use', async () => {
