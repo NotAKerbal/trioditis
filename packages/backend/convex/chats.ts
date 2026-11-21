@@ -356,6 +356,21 @@ export const setMuted = mutation({
     if (until !== undefined) checkUntil(until)
     // "Until I unmute" is stored as the largest time a number holds exactly.
     await patchChat(ctx, chat, { mutedUntil: until ?? Number.MAX_SAFE_INTEGER })
+    // A query can't see time pass, so the unread badge (`counts`) and the lists would keep
+    // treating the chat as muted after `until` until something else wrote to it. Ending the
+    // mute with a write at `until` brings them up to date.
+    if (until !== undefined) await ctx.scheduler.runAt(until, internal.chats.muteEnded, { chatId: chat._id, until })
+    return null
+  },
+})
+
+/** Runs at a timed mute's end. A later mute or unmute of the same chat stands; this does nothing then. */
+export const muteEnded = internalMutation({
+  args: { chatId: v.id('chats'), until: v.number() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, until }) => {
+    const chat = await ctx.db.get(chatId)
+    if (chat && chat.mutedUntil === until) await patchChat(ctx, chat, { mutedUntil: undefined })
     return null
   },
 })

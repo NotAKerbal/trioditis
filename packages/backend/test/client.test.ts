@@ -245,6 +245,27 @@ describe('chat actions', () => {
       a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day }),
     ).rejects.toThrow(/year/)
   })
+
+  it('ends a timed mute at its time, so the unread count sees the chat again', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 2 })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 60_000 })
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(0)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBeNull()
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(1)
+
+    // A mute changed before the first one's time leaves the later one standing.
+    const first = Date.now() + 60_000
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: first })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBe(Number.MAX_SAFE_INTEGER)
+  })
 })
 
 describe('messages alongside the page', () => {

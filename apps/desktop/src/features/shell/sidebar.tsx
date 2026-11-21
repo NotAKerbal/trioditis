@@ -159,7 +159,6 @@ export function Sidebar({
   }, [inbox, snoozed, requests, archived, blocked])
   // Search looks through the chats loaded so far, of the views shown; these are the ones with more.
   const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
-  const unloaded = searched.filter((l) => l.canLoadMore)
   const searchedAll = searched.every((l) => l.exhausted)
   const searchLabel = searchScope({
     searchedAll,
@@ -319,23 +318,23 @@ export function Sidebar({
   const drawer = focused && !searching && inbox !== undefined
   const sheetOpen = drawer && sheet !== null
 
-  // What is on screen, in order: the shell uses it to keep the open chat in view.
-  const shown: Chat[] = searching
-    ? results
-    : focused
-      ? [...unread, ...(sheet ? (sections.find((s) => s.key === sheet)?.chats ?? []) : [])]
-      : (inbox ?? [])
+  // What is on screen, in order: the shell uses it to move on after an archive or snooze. An open
+  // sheet covers Unread, so moving on stays in the sheet, and never opens (and reads) a chat
+  // hidden behind it.
+  const sheetChats = sheetOpen ? sections.find((s) => s.key === sheet)?.chats : undefined
+  const shown: Chat[] = searching ? results : focused ? (sheetChats ?? unread) : (inbox ?? [])
   const shownIds = shown.map((c) => c.id as string)
   const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
   shownRef.current = loaded ? shownIds : null
   chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
 
   // A view or filter change that hides the open chat closes it rather than opening another:
-  // opening a chat marks it read, and nobody asked to read it.
+  // opening a chat marks it read, and nobody asked to read it. Not while Unread is still
+  // filling: the open chat may be on a page still to come.
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
   useEffect(() => {
-    if (!loaded || lastFilterKey.current === filterKey) return
+    if (!loaded || filling || lastFilterKey.current === filterKey) return
     lastFilterKey.current = filterKey
     if (selectedId && !shownIds.includes(selectedId)) onClose()
   })
@@ -356,7 +355,12 @@ export function Sidebar({
           <Input
             ref={searchRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              // Search takes the sheet's place, and clearing it comes back to Unread, with the
+              // focus still in the search field.
+              if (e.target.value.trim()) setSheet(null)
+            }}
             placeholder="Search"
             aria-label="Search chats"
           />
@@ -476,9 +480,7 @@ export function Sidebar({
               {/* Search looks through what's loaded, so the views searched load on while the end
                   of the results is in sight: with few matches, that's to their ends. */}
               <AutoLoad lists={searched} />
-              {!results.length && !unloaded.length && !searched.some((l) => l.loading) ? (
-                <Empty>No chats match.</Empty>
-              ) : null}
+              {!results.length && searchedAll ? <Empty>No chats match.</Empty> : null}
             </>
           ) : !focused ? (
             // A page can hold no rows yet more to come, so only the end of the view is empty.
@@ -630,7 +632,8 @@ function Drawer({
   return (
     <>
       {rows.length ? (
-        <div className="shrink-0 border-t border-border px-2 py-1" inert={open !== null}>
+        // At most half the column, scrolling past that, so Unread keeps room in a short window.
+        <div className="max-h-[50%] shrink-0 overflow-y-auto border-t border-border px-2 py-1" inert={open !== null}>
           {rows.map((s) => (
             <SectionRow
               key={s.key}
@@ -666,7 +669,8 @@ function Drawer({
             </div>
             <div data-autoload-root className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
               {current.content()}
-              {current.more ? <AutoLoad lists={[current.more]} /> : null}
+              {/* Rows stay while the sheet slides away, but loading stops as it closes. */}
+              {current.more ? <AutoLoad lists={open ? [current.more] : []} /> : null}
               {current.count === null ? <Empty>Nothing here.</Empty> : null}
             </div>
           </>
