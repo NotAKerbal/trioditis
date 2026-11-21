@@ -13,10 +13,9 @@ import { deliveryState, envelope } from './validators'
 // sees it didn't go, until they dismiss it.
 //
 // Cancelling is the server's to decide: `cancel` says whether it was cancelled or had gone
-// already, and a cancelled one keeps its sealed copy, listed in `cancelled`, until the client
-// has put its text back in the composer, saved, or the person discards it (`forget`). So a
-// crash or reload in between loses nothing, and nothing has to be kept on the device. Cancelled
-// ones not forgotten are forgotten after CANCELLED_KEEP_MS.
+// already, and a cancelled one keeps its sealed copy, listed in `cancelled`, until the person
+// discards it (`forget`), however often its text is restored to a composer. So nothing has to
+// be kept on the device, and nothing goes by itself, but for CANCELLED_KEEP_MS.
 
 const MAX_AHEAD_MS = 365 * 24 * 60 * 60 * 1000
 const MAX_SCHEDULED = 500
@@ -268,9 +267,8 @@ export const cancel = mutation({
 })
 
 /**
- * Lets a cancelled message's copies go: once the text restored from it has been sent or
- * scheduled, or the person discards it. Until then it's the copy that lasts, whatever happens
- * to drafts on any device. Forgetting one already forgotten does nothing.
+ * Lets a cancelled message's copies go, when the person discards it. Forgetting one already
+ * forgotten does nothing.
  */
 export const forget = mutation({
   args: { scheduledId: v.id('scheduledSends') },

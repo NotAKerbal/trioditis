@@ -23,12 +23,6 @@ export interface Draft<Reply> {
   rev: number
   /** This draft's identity while it has something in it; '' when empty. */
   id: string
-  /**
-   * The cancelled scheduled messages whose text was restored into it. The server keeps each
-   * one's copy until this draft is sent or scheduled (scheduled.forget), so losing the draft
-   * here loses nothing: it can be restored again.
-   */
-  origins: string[]
 }
 
 /** A draft's content, as it's taken, kept and put back. */
@@ -37,7 +31,6 @@ export interface DraftCopy<Reply> {
   reply: Reply | null
   /** Its identity, when it should come back as the same draft. */
   id?: string
-  origins?: string[]
 }
 
 /** A send or schedule under way, by its client message ID. */
@@ -50,7 +43,7 @@ const store = new Map<string, Draft<unknown>>()
 const sending = new Map<string, PendingSend<unknown>>()
 const listeners = new Set<() => void>()
 const sentListeners = new Set<(chatId: string, clientMessageId: string) => void>()
-const EMPTY: Draft<never> = { text: '', reply: null, rev: 0, id: '', origins: [] }
+const EMPTY: Draft<never> = { text: '', reply: null, rev: 0, id: '' }
 
 const filled = (d: { text: string; reply: unknown }) => !!d.text.trim() || d.reply !== null
 const newDraftId = () => crypto.randomUUID().replaceAll('-', '')
@@ -101,21 +94,14 @@ export function getDraft<Reply>(chatId: string): Draft<Reply> {
  * identity unless `id` names the one it's coming back as. So is one whose text was cleared,
  * even with its reply kept: typing the same words to the same message again is a new message.
  */
-function change<Reply>(
-  chatId: string,
-  next: Partial<Pick<Draft<Reply>, 'text' | 'reply'>>,
-  id?: string,
-  origins: string[] = [],
-) {
+function change<Reply>(chatId: string, next: Partial<Pick<Draft<Reply>, 'text' | 'reply'>>, id?: string) {
   const draft = getDraft<Reply>(chatId)
   const merged = { ...draft, ...next }
   const has = filled(merged)
   const cleared = !!draft.text.trim() && !merged.text.trim()
   const identity = !has ? '' : filled(draft) && draft.id && !cleared ? draft.id : (id ?? newDraftId())
-  // Restored text erased is no longer this draft's: its cancelled copy stays to restore again.
-  const kept = !has || cleared ? [] : [...new Set([...draft.origins, ...origins])]
   // Kept even when empty, so the revision only ever goes up.
-  store.set(chatId, { ...merged, rev: draft.rev + 1, id: identity, origins: kept })
+  store.set(chatId, { ...merged, rev: draft.rev + 1, id: identity })
   notify()
 }
 
@@ -142,10 +128,10 @@ export function takeDraft<Reply>(chatId: string): { text: string; reply: Reply |
 export function takeForSend<Reply>(
   chatId: string,
   sendIdOf: (taken: { text: string; reply: Reply | null; id: string }) => string,
-): { text: string; reply: Reply | null; id: string; origins: string[]; clientMessageId: string } | null {
-  const { text, reply, id, origins } = getDraft<Reply>(chatId)
+): { text: string; reply: Reply | null; id: string; clientMessageId: string } | null {
+  const { text, reply, id } = getDraft<Reply>(chatId)
   if (!text.trim()) return null
-  const taken = { text: text.trim(), reply, id, origins }
+  const taken = { text: text.trim(), reply, id }
   const clientMessageId = sendIdOf(taken)
   sending.set(clientMessageId, { ...taken, chatId })
   change<Reply>(chatId, { text: '', reply: null })
@@ -175,27 +161,15 @@ export function onDraftSent(listener: (chatId: string, clientMessageId: string) 
  * if none is set. Into an empty composer it comes back as the same draft (`id`), so sending it
  * again is the same send.
  */
-export function restoreDraft<Reply>(
-  chatId: string,
-  text: string,
-  reply: Reply | null,
-  id?: string,
-  origins: string[] = [],
-) {
+export function restoreDraft<Reply>(chatId: string, text: string, reply: Reply | null, id?: string) {
   const now = getDraft<Reply>(chatId)
-  change(chatId, { text: now.text ? `${text}\n${now.text}` : text, reply: now.reply ?? reply }, id, origins)
+  change(chatId, { text: now.text ? `${text}\n${now.text}` : text, reply: now.reply ?? reply }, id)
 }
 
 /** Brings back a draft saved before a reload, as the same draft, into a chat with none. */
-export function adoptDraft<Reply>(
-  chatId: string,
-  text: string,
-  reply: Reply | null,
-  id: string,
-  origins: string[] = [],
-) {
+export function adoptDraft<Reply>(chatId: string, text: string, reply: Reply | null, id: string) {
   if (filled(getDraft(chatId))) return false
-  change<Reply>(chatId, { text, reply }, id, origins)
+  change<Reply>(chatId, { text, reply }, id)
   return true
 }
 
@@ -211,19 +185,9 @@ export function clearSentDraft<Reply>(chatId: string, stillSame: (draft: Draft<R
  * Adds a cancelled scheduled message's text below the draft, and its reply if the draft has
  * none: a reply already set is the newer choice. Says whether there was a draft already.
  */
-export function appendToDraft<Reply>(
-  chatId: string,
-  text: string,
-  reply: Reply | null = null,
-  origin?: string,
-): boolean {
+export function appendToDraft<Reply>(chatId: string, text: string, reply: Reply | null = null): boolean {
   const now = getDraft<Reply>(chatId)
-  change<Reply>(
-    chatId,
-    { text: now.text.trim() ? `${now.text}\n${text}` : text, reply: now.reply ?? reply },
-    undefined,
-    origin ? [origin] : [],
-  )
+  change<Reply>(chatId, { text: now.text.trim() ? `${now.text}\n${text}` : text, reply: now.reply ?? reply })
   return !!now.text.trim()
 }
 

@@ -36,7 +36,7 @@ export interface CancelledItem {
   id: Id<'scheduledSends'>
   body: string | null | undefined
   replyTo: string | null
-  /** Its text is in this chat's draft: Restore would double it, so only Discard is offered. */
+  /** Restored to the composer from here: it says so, and Restore stays. */
   restored: boolean
 }
 
@@ -61,8 +61,8 @@ interface MessageListProps {
   onReply: (m: Message) => void
   /** Adds the person's reaction with this key, or takes it away if it's theirs already. */
   onReact: (m: Message, key: string) => void
-  /** Sends it again once; `asNew` after the server said that one failed, as a new message. */
-  onSendAgain: (m: Message, asNew?: boolean) => void
+  /** Makes the next attempt to send it again (send-again.ts). */
+  onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
   /** Cancels it, putting its text (when here) and reply back in the composer. */
@@ -175,7 +175,8 @@ export function MessageList(props: MessageListProps) {
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
   const sentAgain = useSendAgainStates()
-  const clientIds = new Set(messages.flatMap((m) => (m.clientMessageId ? [m.clientMessageId] : [])))
+  // Each of the person's sends in the list, by client message ID: how sending again stands.
+  const listed = new Map(messages.flatMap((m) => (m.clientMessageId ? [[m.clientMessageId, m.delivery] as const] : [])))
   let lastDay = ''
 
   return (
@@ -369,7 +370,7 @@ export function MessageList(props: MessageListProps) {
                   {m.self ? (
                     <DeliveryProblem
                       m={m}
-                      again={againState(m.clientMessageId, sentAgain, clientIds)}
+                      again={againState(m.clientMessageId, sentAgain, listed)}
                       onSendAgain={props.onSendAgain}
                       onDiscard={props.onDiscard}
                     />
@@ -510,7 +511,7 @@ function CancelledRow({
         )}
       </div>
       <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-        {item.restored ? 'Cancelled · in your draft' : 'Cancelled message'}
+        {item.restored ? 'Cancelled message · Restored to your draft' : 'Cancelled message'}
         {confirming ? (
           <>
             <span className="text-danger">Discard it for good?</span>
@@ -523,7 +524,7 @@ function CancelledRow({
           </>
         ) : (
           <>
-            {typeof item.body === 'string' && !item.restored ? (
+            {typeof item.body === 'string' ? (
               <Button variant="link" size="sm" className="h-auto text-xs" onClick={onRestore}>
                 Restore
               </Button>
@@ -630,7 +631,7 @@ function DeliveryProblem({
   m: Message
   /** Its one replacement: on its way, or gone. Either way it isn't offered again. */
   again: SendAgainState | undefined
-  onSendAgain: (m: Message, asNew?: boolean) => void
+  onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
 }) {
   const sendAgain = (label: string) =>
@@ -641,8 +642,8 @@ function DeliveryProblem({
     ) : again === 'failed' ? (
       <>
         <span className="font-medium">Sending again failed</span>
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m, true)}>
-          Send as new
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
+          {label}
         </Button>
       </>
     ) : (

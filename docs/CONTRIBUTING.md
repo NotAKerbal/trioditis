@@ -255,8 +255,8 @@ Each chat's draft and sends still on their way are saved apart, one tab at a tim
 Web Lock), writing before deleting. A send's client message ID comes from its draft, so the
 same draft sent from two tabs, or again after a reload, is one message; a send under way when
 the page went comes back as a draft, never sent again on its own. A cancelled scheduled message
-isn't kept on the device: the server keeps it, shown in its chat to restore or discard, until
-the text restored from it is sent or scheduled (or 30 days pass). Reloading, closing the window or changing
+isn't kept on the device: the server keeps it, shown in its chat to restore (as often as
+wanted) or discard, until it's discarded or 30 days pass. Reloading, closing the window or changing
 servers asks first only while a send is on its way, or if the browser refused to save a draft.
 If the page crashes or stops responding, the app says so and offers to reload it; it logs
 only why (Chromium's reason and exit code), never the page's address.

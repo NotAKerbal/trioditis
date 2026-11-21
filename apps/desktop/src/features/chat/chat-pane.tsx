@@ -138,7 +138,9 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
   const { send, discard, schedule, cancelScheduled, forgetScheduled, sendScheduledNow } = useSendMutations()
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen.
-  const { text: draft, reply: replyTo, origins } = useDraft<Message>(chat.id)
+  const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
+  // Cancelled messages restored to the composer from this pane, to say so. Restore stays.
+  const [restored, setRestored] = useState<ReadonlySet<string>>(new Set())
   const setDraft = (text: string) => setDraftText(chat.id, text)
   const setReplyTo = (message: Message | null) => setDraftReply(chat.id, message)
   // Closed whenever a chat opens; the pane is remade for each chat.
@@ -162,8 +164,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     id: c._id,
     body: scheduledTexts.get(c._id),
     replyTo: c.replyTo,
-    // Its text is in this composer's draft: restoring again would double it.
-    restored: origins.includes(c._id),
+    restored: restored.has(c._id),
   }))
 
   async function sendText(text: string, reply?: string, clientMessageId = newClientId()) {
@@ -195,7 +196,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
         (outcome) => settle(chatId, taken, outcome === 'queued' ? null : outcome),
         () => {
           // Back first, then the copy under way goes.
-          restoreDraft(chatId, taken.text, taken.reply, taken.id, taken.origins)
+          restoreDraft(chatId, taken.text, taken.reply, taken.id)
           endSend(taken.clientMessageId, false)
         },
       ),
@@ -209,21 +210,16 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
    */
   function settle(
     chatId: ChatId,
-    taken: { text: string; reply: Message | null; clientMessageId: string; origins: string[] },
+    taken: { text: string; reply: Message | null; clientMessageId: string },
     used: AlreadyUsed | null,
   ) {
     const outcome = used ? usedOutcome(used) : null
     if (outcome?.action === 'again') {
       // No identity given: a new draft, so sending it again is a new message.
-      restoreDraft(chatId, taken.text, taken.reply, undefined, taken.origins)
+      restoreDraft(chatId, taken.text, taken.reply)
       endSend(taken.clientMessageId, false)
     } else endSend(taken.clientMessageId, true)
     if (outcome) toast(outcome.say)
-    // Text restored from cancelled messages has gone: their copies on the server can go too.
-    // Not when it may not have gone: then they're still the way to get it back.
-    if (!outcome || outcome.action === 'done')
-      for (const id of taken.origins)
-        void forgetScheduled({ scheduledId: id as Id<'scheduledSends'> }).catch(() => undefined)
   }
 
   async function onSchedule(sendAt: number) {
@@ -255,7 +251,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
           toast(`Scheduled for ${formatWhen(sendAt)}`)
         }
       } catch (e) {
-        restoreDraft(chatId, taken.text, taken.reply, taken.id, taken.origins)
+        restoreDraft(chatId, taken.text, taken.reply, taken.id)
         endSend(taken.clientMessageId, false)
         toast(errorMessage(e, 'That message couldn’t be scheduled.'))
       }
@@ -263,25 +259,18 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
   }
 
   /**
-   * Puts a cancelled message's text back in the composer, if it's free or replies to the same
-   * message, as a new draft that remembers where it came from. The server keeps its copy until
-   * that draft is sent or scheduled, so a draft lost here (another tab's save, a crash) can be
-   * restored again from the row below. Once only: a draft that has it already is left alone.
+   * Copies a cancelled message's text, and the message it replies to, into the composer as an
+   * ordinary new draft: into an empty one, or one replying to the same message. The row stays,
+   * kept on the server, until the person discards it (or 30 days pass); nothing goes by itself.
    */
   function restoreCancelled(id: Id<'scheduledSends'>, body: string, replyTo: string | null) {
     const chatId = chat.id
-    const now = getDraft<Message>(chatId)
-    if (now.origins.includes(id)) return
-    if (restoreConflict(now, replyTo))
-      return toast(
-        'Your draft replies to a different message, so the cancelled one is kept below. Send or clear your draft, then restore it.',
-      )
+    if (restoreConflict(getDraft<Message>(chatId), replyTo)) return toast('Clear or send your draft first.')
     // A reply goes back as one, to the message it answered, even one not loaded.
     const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo)) : null
-    const added = appendToDraft(chatId, body, reply, id)
-    toast(
-      added ? 'The cancelled message was added below your draft.' : 'The cancelled message is back in the composer.',
-    )
+    const added = appendToDraft(chatId, body, reply)
+    setRestored((now) => new Set(now).add(id))
+    toast(added ? 'Restored below your draft.' : 'Restored to your draft.')
   }
 
   const byEvent = (eventId: string) => messages.find((m) => m.eventId === eventId)
@@ -460,15 +449,18 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
           onLoadMore={loadMore}
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
-          onSendAgain={(m, asNew) => {
-            // One replacement per message, whatever the clicks: the person chose to risk a
-            // duplicate on the network, once (send-again.ts).
+          onSendAgain={(m) => {
+            // One attempt per link of the chain, whatever the clicks: the person chose to risk a
+            // duplicate on the network, once each time (send-again.ts).
             const text = m.body?.body
-            if (text && m.clientMessageId)
-              void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id), { asNew }).then((state) => {
-                const say = state ? SEND_AGAIN_SAYS[state] : undefined
-                if (say) toast(say)
-              })
+            if (!text || !m.clientMessageId) return
+            const listed = new Map(
+              messages.flatMap((x) => (x.clientMessageId ? [[x.clientMessageId, x.delivery] as const] : [])),
+            )
+            void sendAgain(m.clientMessageId, listed, (id) => sendText(text, m.replyTo, id)).then((state) => {
+              const say = state ? SEND_AGAIN_SAYS[state] : undefined
+              if (say) toast(say)
+            })
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)
@@ -564,9 +556,8 @@ function replyStub(eventId: string): Message {
 
 /** What to say when sending again found its replacement's ID used already. */
 const SEND_AGAIN_SAYS: Partial<Record<SendAgainState, string>> = {
-  going: 'It’s already being sent again, from another tab or before a reload.',
   maybe: 'It may already have been sent again. Check the chat before sending it once more.',
-  failed: 'Sending it again failed before. Use Send as new to send it as a new message.',
+  failed: 'Sending it again failed. You can try once more.',
 }
 
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
