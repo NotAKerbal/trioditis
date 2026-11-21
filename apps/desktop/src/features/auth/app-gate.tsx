@@ -52,7 +52,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
-import { confirmSession, keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
+import { askThrough, confirmSession, keyGateLoad, SLOW_SERVER_MS, type SessionStore } from './gate-load.ts'
 import { COLD_START_MS, coldSession, forgetVerified, readVerified, rememberVerified } from '~/lib/verified-session.ts'
 
 /**
@@ -126,8 +126,9 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
     // the session, so it's asked again, backing off, while the page waits or opens from this
     // device (useColdSession).
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    // Through the provider's store, so an answer after failures signs the page in as well.
     void confirmSession(
-      () => authClient.getSession(),
+      askThrough(authClient.$store.atoms.session as unknown as SessionStore),
       sleep,
       () => cancelled,
     ).then((answer) => {

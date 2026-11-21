@@ -38,6 +38,24 @@ export function retryDelay(attempt: number): number {
   return Math.min(2_000 * 2 ** attempt, 30_000)
 }
 
+/** Better Auth's session store, the one `authClient.useSession()` and the Convex provider read. */
+export interface SessionStore {
+  get(): { data: unknown; error: unknown; refetch: () => Promise<void> }
+}
+
+/**
+ * Asks for the session through the provider's own store (`authClient.$store.atoms.session`), not a
+ * side request: so an answer that comes after failures reaches the Convex provider too, which then
+ * fetches its token and signs the page in without a reload.
+ */
+export function askThrough(store: SessionStore) {
+  return async () => {
+    await store.get().refetch()
+    const { data, error } = store.get()
+    return { data, error }
+  }
+}
+
 /**
  * Asks whether the browser is signed out until it gets an answer: a request that fails (offline,
  * the server down) is asked again after `retryDelay`, until `cancelled`. Answers what it learned,
