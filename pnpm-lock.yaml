@@ -377,6 +377,9 @@ importers:
       png-to-ico:
         specifier: 2.1.8
         version: 2.1.8
+      prettier:
+        specifier: 3.10.1
+        version: 3.10.1
 
   packages/config: {}
 

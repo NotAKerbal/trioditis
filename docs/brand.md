@@ -4,7 +4,10 @@ _Trioditis_ means "of the three roads": a crossroads for all of your conversatio
 that crossroads, drawn like a transit map. Three routes come in from beyond the edge of the tile
 and meet at one interchange, the way every network meets in one inbox.
 
-![The Trioditis lockup](../assets/brand/lockup.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/brand/lockup-dark.svg">
+  <img src="../assets/brand/lockup.svg" height="56" alt="The Trioditis lockup">
+</picture>
 
 ## The pieces
 

@@ -6,6 +6,7 @@ import path from 'node:path'
 import { Resvg } from '@resvg/resvg-js'
 import opentype from 'opentype.js'
 import pngToIco from 'png-to-ico'
+import prettier from 'prettier'
 
 const root = path.resolve(import.meta.dirname, '../..')
 
@@ -233,12 +234,19 @@ const favicon = await pngToIco([16, 32, 48].map((size) => png(icon, size)))
 write('assets/brand/favicon.ico', favicon)
 
 // The web app and the project site each serve their own copies, and the desktop app's windows
-// and connect page load theirs from beside its main process.
+// load theirs from beside its main process.
 for (const dir of ['apps/desktop/public', 'apps/site']) {
   write(`${dir}/icon.svg`, icon)
   write(`${dir}/favicon.ico`, favicon)
   write(`${dir}/apple-touch-icon.png`, png(icon, 180))
 }
-write('apps/desktop/electron/icon.svg', icon)
 write('apps/desktop/electron/icon.png', png(icon, 512))
+
+// The connect page's policy allows no images, so its icon is drawn inline. It is formatted the way
+// Prettier would, so running this again leaves the page unchanged.
+const connectPage = path.join(root, 'apps/desktop/electron/connect.html')
+const inlineIcon = icon.replace('<svg ', '<svg class="mark" aria-hidden="true" ').trimEnd()
+const page = fs.readFileSync(connectPage, 'utf8').replace(/<svg class="mark"[\s\S]*?<\/svg>/, inlineIcon)
+const pageOptions = { ...(await prettier.resolveConfig(connectPage)), filepath: connectPage }
+write('apps/desktop/electron/connect.html', await prettier.format(page, pageOptions))
 write('packages/ui/src/components/wordmark.tsx', wordmarkComponent)
