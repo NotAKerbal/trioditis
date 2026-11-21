@@ -613,7 +613,10 @@ settings. It asks before it changes anything (`--yes` skips that). In order:
    nothing has changed.
 3. **It replaces the data.** From here interrupts are held off. First it closes the gate:
    it writes `deploy/.restore-settle` (saying `loading`) and `RESTORE_PENDING` into
-   `deploy/.env`, and removes the gateway's container. While the marker says `loading` the
+   `deploy/.env`, and removes the gateway's container and every bridge host's (those of
+   networks no longer enabled too), checking with Docker that none is left: each was made with
+   the settings from before, and anything that makes them again makes them from `deploy/.env` as
+   it is now. While the marker says `loading` the
    installer starts nothing, not even Postgres, since the data may be half one and half the
    other; it says `ready` only once the volumes and the settings are the backup's and checked. Until the installer has settled the restored sends, `deploy/trioditis`
    refuses `up`, `start`, `restart`, `run` and the like, and Compose hands the gateway
@@ -633,8 +636,9 @@ settings. It asks before it changes anything (`--yes` skips that). In order:
    `BACKUP_KEY` (the backup has only the public halves, the same ones) and any setting you
    added by hand, which backups leave out.
 5. **It starts the server through the installer**, which builds this version's images and,
-   while the gate is closed, deploys the functions and settles the restored sends, then opens
-   it and starts the gateway (below), then checks everything is healthy. Its check that an
+   while the gate is closed, deploys the functions and settles the restored sends (the marker
+   then says `settled`), starts the gateway (below), and opens the gate only once Docker shows
+   every bridge host's container made with this restore's `RESTORE_ID`; then checks everything is healthy. Its check that an
    upgrade changing the database images has a backup doesn't apply: the data is the backup's.
    If the installer fails, the data and settings are the backup's and the gate stays closed: fix
    the cause and run the installer again, which settles before it starts anything that sends.
@@ -676,7 +680,8 @@ Compose or not), the restore refuses: restore from that install's own checkout. 
 volumes or containers can't be listed, it refuses too. The volumes it makes carry its restore
 ID (`trioditis.restore`), and it only ever empties one that does. If it's cut off, running it
 again with the same backup carries on from the volumes that run made (its marker,
-`deploy/.restore-settle`, names the backup and the run). The restore writes `deploy/.env`
+`deploy/.restore-settle`, names the backup, by its ID or, for an older backup without one, a
+fingerprint of its files, and the run), even once it has written `deploy/.env`. The restore writes `deploy/.env`
 from the backup's settings and those keys, restores the volumes, and runs the installer, which
 builds the images and starts the server. Then update from the app as usual.
 

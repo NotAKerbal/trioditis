@@ -407,6 +407,17 @@ for case in loading pending; do
     check ok "an unfinished restore ($case) stops the install before anything starts" ||
     { check fail "an unfinished restore ($case) stops the install before anything starts"; tail -2 "$work/out" >&2; }
 done
+# One whose sends are settled but whose bridge hosts weren't checked yet (cut off after
+# settling) goes on: the install gets as far as Compose, and the marker stays.
+checkout
+rm -f "$work/compose.log"
+printf 'COMPOSE_PROJECT_NAME=trioditis-test\nRESTORE_ID=1800000000-0123456789abcdef\n' >"$work/checkout/deploy/.env"
+printf 'state=settled\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+chmod 600 "$work/checkout/deploy/.env"
+install || true
+! grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ -s "$work/compose.log" ] && [ -e "$work/checkout/deploy/.restore-settle" ] &&
+  check ok "a restore settled but not yet checked goes on, keeping its gate" ||
+  { check fail "a restore settled but not yet checked goes on, keeping its gate"; tail -2 "$work/out" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

@@ -216,7 +216,7 @@ has() { printf '%s\n' "$env_text" | env_names | grep -qx "$1"; }
 # until the restore has finished (deploy/.restore-settle says `ready`) or is run again.
 if [ -e "$here/.restore-settle" ]; then
   restore_state=$(sed -n 's/^state=//p' "$here/.restore-settle" 2>/dev/null | head -1)
-  [ "$restore_state" = ready ] ||
+  [ "$restore_state" = ready ] || [ "$restore_state" = settled ] ||
     die "A restore didn't finish replacing the data and settings (deploy/.restore-settle says ${restore_state:-nothing}), so nothing was started. Run the restore again, or restore the backup it made of the server first."
 elif [ -n "$(get RESTORE_PENDING)" ]; then
   die "deploy/.env says a restore is under way, but deploy/.restore-settle is gone, so nothing was started. Run the restore again."
@@ -784,8 +784,11 @@ fi
 # again (deploy/scripts/settle-restore.mjs). The restore's gate (deploy/.restore-settle, and
 # RESTORE_PENDING in deploy/.env, which keeps the gateway from starting) stays until that's done,
 # so a run that stops partway settles them on the next one.
+# The marker then says `settled`, and stays (deploy/trioditis still starts nothing beside it)
+# until every bridge host's container is made again with this restore's ID, below.
 pending=$(get RESTORE_PENDING)
-if [ -e "$here/.restore-settle" ] || [ -n "$pending" ]; then
+restore_state=$(sed -n 's/^state=//p' "$here/.restore-settle" 2>/dev/null | head -1 || true)
+if { [ -e "$here/.restore-settle" ] || [ -n "$pending" ]; } && [ "$restore_state" != settled ]; then
   backup_at=$(sed -n 's/^backup_at=\([0-9]\{1,16\}\)$/\1/p' "$here/.restore-settle" 2>/dev/null || true)
   backup_at=${backup_at:-$pending}
   [[ "$backup_at" =~ ^[0-9]{1,16}$ ]] || die "deploy/.restore-settle isn't one a restore wrote. Run the restore again."
@@ -798,7 +801,9 @@ if [ -e "$here/.restore-settle" ] || [ -n "$pending" ]; then
   compose run --rm --no-deps -T -e "RESTORE_BACKUP_AT=$backup_at" --entrypoint node functions deploy/scripts/settle-restore.mjs ||
     die "Settling the restored sends failed (above), so nothing that sends was started. Fix the cause and run this again."
   ! has RESTORE_PENDING || drop_var RESTORE_PENDING
-  rm -f "$here/.restore-settle"
+  marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX")
+  { sed 's/^state=.*/state=settled/' "$here/.restore-settle" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle"; } ||
+    { rm -f "$marker_tmp"; die "Couldn't record the restored sends as settled. Run this again."; }
 fi
 
 # The functions first (deploy, then migrations), with only the database and backend beside
@@ -829,6 +834,23 @@ fi
 wait_healthy gateway 90
 if [ "${#bridge_services[@]}" -gt 0 ] && ! compose up -d --no-deps "${bridge_services[@]}"; then
   die "Starting the bridge hosts failed (above). Fix the cause and run this again."
+fi
+# After a restore, the gate comes off only once Docker shows every bridge host's container made
+# with this restore's ID, so none can run its restored queue; until then deploy/trioditis starts
+# nothing, and a rerun of this checks again.
+if [ -e "$here/.restore-settle" ]; then
+  restore_id=$(get RESTORE_ID)
+  [ -n "$restore_id" ] || die "deploy/.env has no RESTORE_ID after a restore. Run the restore again."
+  containers=$(docker ps -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null) ||
+    die "Couldn't list the server's containers to check the bridge hosts. Run this again."
+  for container in $containers; do
+    service=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$container" 2>/dev/null) ||
+      die "Couldn't check a container's settings. Run this again."
+    case "$service" in bridge-*) ;; *) continue ;; esac
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null | grep -qxF "TRIODITIS_RESTORE_ID=$restore_id" ||
+      die "$service's container wasn't made with this restore's ID, so the restore's gate stays. Run this again."
+  done
+  rm -f "$here/.restore-settle"
 fi
 ready_services=(gateway caddy)
 for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done
