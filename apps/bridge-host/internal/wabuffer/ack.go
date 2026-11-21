@@ -24,14 +24,14 @@ import (
 //
 // Acker wraps the handler so that doesn't happen. A handler that returned before the limit
 // was waited for in full, and its answer stands. One that took as long as the limit may have
-// been backgrounded: the wrapper waits for the message to be journaled before it says
-// success. If that doesn't happen in MaxWait, or the host is stopping, it says failure, so
-// the message isn't acknowledged and WhatsApp sends it again; a message journaled twice is
-// deduplicated by its event ID.
+// been backgrounded: the wrapper waits for the message's own write to be journaled, with no
+// write failed or still running, before it says success. If that doesn't happen in MaxWait,
+// a write fails, or the host is stopping, it says failure, so the message isn't acknowledged
+// and WhatsApp sends it again; a message journaled twice is deduplicated by its event ID.
 type Acker struct {
 	// Limit is how long a handler may take before bridgev2 may have backgrounded it.
 	Limit time.Duration
-	// Settle is how long the journal must go quiet after a part of the message before the
+	// Settle is how long the journal must go quiet after the message's own write before the
 	// rest is taken to be journaled too (a message's parts are journaled one after another).
 	Settle time.Duration
 	// MaxWait bounds how long a backgrounded message is waited for.
@@ -68,36 +68,45 @@ func (a *Acker) Wrap(next whatsmeow.EventHandlerWithSuccessStatus) whatsmeow.Eve
 	}
 }
 
-// wait reports whether the message was journaled: once a part of it was, and no further part
-// came for Settle.
+// settled is a state the message can be acknowledged in.
+func settled(s handled.State) bool { return s.Done && s.Running == 0 && !s.Failed }
+
+// wait reports whether the message was journaled: one of its own writes (a part of the
+// message, the reaction itself, the edit) reached the journal, none failed, none is still
+// running, and nothing more happened for Settle. Writes on the side, such as the error notice
+// bridgev2 sends when converting the message failed, or the removal of a reaction being
+// replaced, don't count: either can be journaled while the message itself never is.
 func (a *Acker) wait(h *handled.Handling) bool {
 	deadline := time.NewTimer(a.MaxWait)
 	defer deadline.Stop()
-	var settle *time.Timer
-	defer func() {
-		if settle != nil {
-			settle.Stop()
-		}
-	}()
+	settle := time.NewTimer(a.Settle)
+	defer settle.Stop()
+	if !settled(h.State()) {
+		settle.Stop()
+	}
 	for {
-		journaled := settle != nil
-		var settled <-chan time.Time
-		if journaled {
-			settled = settle.C
-		}
 		select {
-		case <-h.Noted():
-			if settle == nil {
-				settle = time.NewTimer(a.Settle)
-			} else {
-				settle.Reset(a.Settle)
+		case <-h.Changed():
+			state := h.State()
+			if state.Failed {
+				// bridgev2 gives up on a message one of whose writes failed: it isn't
+				// acknowledged, so WhatsApp sends it again.
+				a.Log.Warn().Msg("A WhatsApp message handled in the background failed to journal; leaving it unacknowledged")
+				return false
 			}
-		case <-settled:
-			return true
+			if settled(state) {
+				settle.Reset(a.Settle)
+			} else {
+				settle.Stop()
+			}
+		case <-settle.C:
+			if settled(h.State()) {
+				return true
+			}
 		case <-deadline.C:
 			// Not acknowledged, so WhatsApp sends it again; the copy that arrives is bridged
 			// (or deduplicated, if this one got to the journal meanwhile).
-			a.Log.Warn().Bool("part_journaled", journaled).Msg("A WhatsApp message handled in the background wasn't journaled in time; leaving it unacknowledged")
+			a.Log.Warn().Bool("part_journaled", h.State().Done).Msg("A WhatsApp message handled in the background wasn't journaled in time; leaving it unacknowledged")
 			return false
 		case <-a.Ctx.Done():
 			return false
@@ -111,23 +120,37 @@ var ErrNoHandlers = errors.New("wabuffer: whatsmeow's event handler list isn't w
 // WrapHandlers replaces each of cli's event handlers with wrap's version of it. whatsmeow has
 // no way to wrap a handler another package registered (mautrix-whatsapp's, here), so this
 // reaches into its unexported list; a whatsmeow update that moves it fails the tests and
-// returns ErrNoHandlers rather than going unwrapped silently.
+// returns ErrNoHandlers rather than going unwrapped silently. A client with no handlers is
+// refused too: a live one always has mautrix-whatsapp's, so none means it is somewhere this
+// can't see.
 func WrapHandlers(cli *whatsmeow.Client, wrap func(whatsmeow.EventHandlerWithSuccessStatus) whatsmeow.EventHandlerWithSuccessStatus) error {
+	if cli == nil {
+		return ErrNoHandlers
+	}
 	v := reflect.ValueOf(cli).Elem()
+	if v.Kind() != reflect.Struct {
+		return ErrNoHandlers
+	}
 	list := v.FieldByName("eventHandlers")
 	lockField := v.FieldByName("eventHandlersLock")
 	if !list.IsValid() || list.Kind() != reflect.Slice || !lockField.IsValid() || lockField.Type() != reflect.TypeFor[sync.RWMutex]() {
 		return ErrNoHandlers
 	}
 	elem := list.Type().Elem()
+	if elem.Kind() != reflect.Struct {
+		return ErrNoHandlers
+	}
 	fn, ok := elem.FieldByName("fn")
-	if elem.Kind() != reflect.Struct || !ok || fn.Type != reflect.TypeFor[whatsmeow.EventHandlerWithSuccessStatus]() {
+	if !ok || fn.Type != reflect.TypeFor[whatsmeow.EventHandlerWithSuccessStatus]() {
 		return ErrNoHandlers
 	}
 	mu := (*sync.RWMutex)(unsafe.Pointer(lockField.UnsafeAddr()))
 	mu.Lock()
 	defer mu.Unlock()
 	list = reflect.NewAt(list.Type(), unsafe.Pointer(list.UnsafeAddr())).Elem()
+	if list.Len() == 0 {
+		return ErrNoHandlers
+	}
 	for i := range list.Len() {
 		field := list.Index(i).FieldByIndex(fn.Index)
 		field = reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()

@@ -83,6 +83,16 @@ export interface ChatPlaintext {
   [extra: string]: unknown
 }
 
+/**
+ * A network account's own metadata, from its `loginState` events: kind `account`, object ID its
+ * `loginId`, sealed to the owner only. `hint` tells it apart from their other accounts on the
+ * network (its phone number or username); the login ID can't, being a keyed hash.
+ */
+export interface AccountPlaintext {
+  hint?: string
+  [extra: string]: unknown
+}
+
 export interface ContactPlaintext {
   name?: string
   handle?: string

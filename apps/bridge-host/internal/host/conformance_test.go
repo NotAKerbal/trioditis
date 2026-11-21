@@ -163,7 +163,7 @@ var eventFields = map[string][2][]string{
 	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
 	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
 	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
-	protocol.EventLoginState:         {{"state"}, {"error"}},
+	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
 	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
 	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
 	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
@@ -375,6 +375,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
 	case protocol.EventContactIdentifiers:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
+	case protocol.EventLoginState:
+		ctx.Kind, ctx.ObjectID = seal.KindAccount, evt.LoginID
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -406,6 +408,20 @@ func TestConformance(t *testing.T) {
 		defer gw.lock.Unlock()
 		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "testnet-1" {
 			t.Fatalf("the first batch must be an empty heartbeat from testnet-1, got %+v", gw.batches[0])
+		}
+	})
+
+	t.Run("an account's hint is sealed to its owner, and its login ID is opaque", func(t *testing.T) {
+		state := gw.waitFor(t, "a login state with a hint", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginState && e.LoginID == aliceLogin && e.Sealed != nil
+		})
+		var account protocol.AccountPlaintext
+		h.open("alice", state, &account)
+		if account.Hint != "alice-testnet" {
+			t.Fatalf("hint %q", account.Hint)
+		}
+		if err := seal.OpenJSON(state.Sealed, gw.keys["bob"], seal.Context{Kind: seal.KindAccount, OwnerUserID: "alice", ObjectID: aliceLogin}, &account); err == nil {
+			t.Fatal("bob opened alice's account hint")
 		}
 	})
 

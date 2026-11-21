@@ -122,7 +122,7 @@ var eventShapes = map[string]eventShape{
 	EventContact:            {[]string{"ghostId", "sealed"}, nil},
 	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
 	EventChatStarted:        {[]string{"requestId"}, []string{"portalId", "error"}},
-	EventLoginState:         {[]string{"state"}, []string{"error"}},
+	EventLoginState:         {[]string{"state"}, []string{"error", "sealed"}},
 	EventLoginStep:          {[]string{"loginSessionId", "step"}, nil},
 	EventSendStatus:         {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
 	EventBackfillDone:       {[]string{"portalId", "direction", "more"}, nil},
@@ -258,7 +258,7 @@ func (e *Event) Validate() error {
 	}
 	if e.Sealed != nil {
 		limit := MaxMessageSealedBytes
-		if e.Type == EventChat || e.Type == EventContact || e.Type == EventContactIdentifiers {
+		if e.Type == EventChat || e.Type == EventContact || e.Type == EventContactIdentifiers || e.Type == EventLoginState {
 			limit = MaxMetadataSealedBytes
 		}
 		if seal.DecodedLen(e.Sealed.CT) > limit {
@@ -534,4 +534,12 @@ type ContactPlaintext struct {
 // in one person's address book, say).
 type ContactIdentifiersPlaintext struct {
 	Identifiers []string `json:"identifiers"`
+}
+
+// AccountPlaintext is what a loginState event's sealed metadata holds (kind account, object ID
+// the loginId), sealed to the account's owner only: what tells the account apart from their
+// others on the network, such as its phone number or username. The login ID can't: it is a
+// keyed hash, so a phone number never reaches the backend readable.
+type AccountPlaintext struct {
+	Hint string `json:"hint,omitempty"`
 }

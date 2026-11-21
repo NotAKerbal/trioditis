@@ -135,6 +135,8 @@ export default defineSchema({
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
     updatedAt: v.number(),
+    /** What the bridge host last said tells the account apart, sealed to its owner (kind `account`, object ID `loginId`). */
+    sealedMeta: v.optional(envelope),
     /** A logout was asked for and hasn't been confirmed yet. */
     logoutPending: v.optional(v.boolean()),
     /** The command of that pending logout: only its own outcome or timeout ends it. */

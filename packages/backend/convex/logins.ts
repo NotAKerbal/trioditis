@@ -1,6 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import type { Doc } from './_generated/dataModel'
-import { BRIDGE_HOST_STALE_MS, NETWORK_INFO, type Network } from '@trioditis/core'
+import { BRIDGE_HOST_STALE_MS, NETWORK_INFO } from '@trioditis/core'
 import { mutation, query, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
@@ -16,18 +16,14 @@ import { envelope, errorCode, loginState, loginStep, network } from './validator
 // pairing codes, cookies), which arrive as `loginStep` events on the session. What the
 // person types is sealed to the bridge key, never stored in plaintext.
 
-// Networks whose login ID is the account's phone number, digits only (bridgev2's WhatsApp
-// connector uses the JID's user part), so it can be shown as one.
-const PHONE_LOGIN_IDS: ReadonlySet<Network> = new Set(['whatsapp'])
-
 /**
- * How the person tells two of their accounts on one network apart. No name or handle is kept
- * for an account (a network's closing words name it, and those aren't stored), so this comes
- * from its login ID, which the backend already holds: the phone number where the ID is one,
- * otherwise its last few characters. Only the account's owner is ever given it.
+ * How the person tells two of their accounts on one network apart, as far as the backend can:
+ * the end of its login ID. The login ID is the bridge host's keyed hash, so it never reads as a
+ * phone number; what does (the number, a username) comes sealed to the owner (`sealedMeta`,
+ * kind `account`), and their device shows that in place of this. Only the account's owner is
+ * ever given either.
  */
-export function accountHint(network: Network, loginId: string): string {
-  if (PHONE_LOGIN_IDS.has(network) && /^\d{6,15}$/.test(loginId)) return `+${loginId}`
+export function accountHint(loginId: string): string {
   return loginId.length > 4 ? `ID …${loginId.slice(-4)}` : loginId ? `ID ${loginId}` : ''
 }
 
@@ -44,6 +40,12 @@ export const accounts = query({
       updatedAt: v.number(),
       /** What tells it apart from the person's other accounts on the network (accountHint). */
       hint: v.string(),
+      /**
+       * What tells it apart, as the bridge host put it (`AccountPlaintext`): open with kind
+       * `account` and object ID `objectId`, and show its `hint` in place of `hint`. Null until
+       * the bridge host has said.
+       */
+      sealedMeta: v.union(v.null(), v.object({ sealed: envelope, objectId: v.string() })),
       /** A logout was asked for and hasn't been confirmed yet. */
       logoutPending: v.boolean(),
       /** Why the last logout didn't happen, if it didn't. */
@@ -65,7 +67,8 @@ export const accounts = query({
         error: row.error ?? null,
         lastHealthyAt: row.lastHealthyAt ?? null,
         updatedAt: row.updatedAt,
-        hint: accountHint(row.network, row.loginId),
+        hint: accountHint(row.loginId),
+        sealedMeta: row.sealedMeta ? { sealed: row.sealedMeta, objectId: row.loginId } : null,
         logoutPending: row.logoutPending ?? false,
         logoutError: row.logoutError ?? null,
       }))

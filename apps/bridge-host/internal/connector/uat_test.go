@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/simplevent"
+	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -15,6 +18,52 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
+
+// What tells a waiting handler its event is journaled is the event's own write, never one
+// bridgev2 makes on the side.
+func TestOnlyAnEventsOwnWriteCountsAsJournaled(t *testing.T) {
+	message := &simplevent.Message[string]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventMessage}, ID: "m1"}
+	part := &bridgev2.MatrixSendExtra{MessageMeta: &database.Message{ID: "m1"}}
+	text := &event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}}
+	if !ownWrite(message, event.EventMessage, text, part) {
+		t.Fatal("a part of the message is its own write")
+	}
+	// bridgev2's notice after a failed conversion has no message metadata.
+	notice := &event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgNotice, Body: "An error occurred"}}
+	if ownWrite(message, event.EventMessage, notice, &bridgev2.MatrixSendExtra{}) {
+		t.Fatal("an error notice counted as the message")
+	}
+	if ownWrite(message, event.EventMessage, text, &bridgev2.MatrixSendExtra{MessageMeta: &database.Message{ID: "other"}}) {
+		t.Fatal("another message's part counted")
+	}
+	reaction := &simplevent.Reaction{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReaction}}
+	if ownWrite(reaction, event.EventRedaction, &event.Content{Parsed: &event.RedactionEventContent{}}, nil) {
+		t.Fatal("taking away the replaced reaction counted as the new one")
+	}
+	if !ownWrite(reaction, event.EventReaction, &event.Content{Parsed: &event.ReactionEventContent{}}, nil) {
+		t.Fatal("the reaction is its own write")
+	}
+	if ownWrite(nil, event.EventMessage, text, part) {
+		t.Fatal("a write with no remote event counted")
+	}
+}
+
+func TestAccountHintPrefersTheNumber(t *testing.T) {
+	for _, tc := range []struct {
+		state status.BridgeState
+		want  string
+	}{
+		{status.BridgeState{RemoteName: "+15551234567", RemoteProfile: status.RemoteProfile{Phone: "+15551234567", Name: "Alice"}}, "+15551234567"},
+		{status.BridgeState{RemoteProfile: status.RemoteProfile{Username: "alice", Email: "a@example.com"}}, "@alice"},
+		{status.BridgeState{RemoteProfile: status.RemoteProfile{Email: "a@example.com"}}, "a@example.com"},
+		{status.BridgeState{RemoteName: "alice-testnet"}, "alice-testnet"},
+		{status.BridgeState{}, ""},
+	} {
+		if got := accountHint(&tc.state); got != tc.want {
+			t.Errorf("%+v: got %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}
 
 func TestMentionsThePersonOrTheChat(t *testing.T) {
 	for _, tc := range []struct {
@@ -192,6 +241,57 @@ func TestLoginCancelAndCompleteRaceEndsOnce(t *testing.T) {
 		if steps := lastSteps(t, c); len(steps) != 1 {
 			t.Fatalf("race %d: steps %v, want exactly one last step", i, steps)
 		}
+	}
+}
+
+// A cancelled attempt that finishes late logs out the account it made, unless another attempt
+// connected that account or is still going: the person's retry is what they kept.
+func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
+	var loggedOut []*bridgev2.UserLogin
+	old := logoutDiscarded
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) { loggedOut = append(loggedOut, login) }
+	t.Cleanup(func() { logoutDiscarded = old })
+	account := &bridgev2.UserLogin{}
+	completes := func() *bridgev2.LoginStep {
+		return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
+			CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
+	}
+	cancel := func(c *Connector, id string) {
+		if err := c.handleLoginCancel(context.Background(), &protocol.Command{Type: protocol.CommandLoginCancel, UserID: "alice", LoginSessionID: id}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Alone: the late completion is logged out.
+	c := testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	lone := startedSession(c, "lone")
+	cancel(c, "lone")
+	lone.advance(completes(), nil)
+	if len(loggedOut) != 1 {
+		t.Fatalf("a cancelled login's new account must be logged out, got %d logouts", len(loggedOut))
+	}
+
+	// The retry completed the account first.
+	loggedOut = nil
+	c = testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	first, retry := startedSession(c, "first"), startedSession(c, "retry")
+	cancel(c, "first")
+	retry.advance(completes(), nil)
+	first.advance(completes(), nil)
+	if len(loggedOut) != 0 {
+		t.Fatal("a late cancelled attempt logged out the account the retry connected")
+	}
+
+	// The retry is still going.
+	c = testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	first, _ = startedSession(c, "first"), startedSession(c, "retry")
+	cancel(c, "first")
+	first.advance(completes(), nil)
+	if len(loggedOut) != 0 {
+		t.Fatal("a late cancelled attempt logged out while a retry was going")
 	}
 }
 

@@ -1,6 +1,6 @@
 import { api } from '@trioditis/backend/api'
 import type { Id } from '@trioditis/backend/dataModel'
-import type { Attachment, ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
+import type { AccountPlaintext, Attachment, ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
 import { DEFAULT_PREFERENCES, NETWORK_INFO } from '@trioditis/core'
 import { toast } from '@trioditis/ui/toast'
 import { convexQuery } from '@convex-dev/react-query'
@@ -273,8 +273,26 @@ export function useNetworkHealth() {
   return useMemo(() => (rows ? liveHealth(rows, clock, now) : rows), [rows, clock, now])
 }
 
+type AccountRow = FunctionReturnType<typeof api.logins.accounts>[number]
+// Opened account hints (openCached), so re-renders don't decrypt every row again.
+const accountCache = new Map<string, AccountPlaintext | null>()
+
+/**
+ * An account's hint as its bridge host put it (its number or username, sealed to the person),
+ * or the backend's own (the end of its ID) where this device can't open one.
+ */
+export function openAccountHint(row: AccountRow, session: Session): string {
+  const meta = row.sealedMeta
+  const opened = meta
+    ? openCached(accountCache, meta.sealed, session.keyPair, session.kid, 'account', session.userId, meta.objectId)
+    : null
+  return typeof opened?.hint === 'string' && opened.hint ? opened.hint : row.hint
+}
+
 export function useAccounts() {
-  return useQuery(convexQuery(api.logins.accounts, {})).data
+  const session = useSession()
+  const rows = useQuery(convexQuery(api.logins.accounts, {})).data
+  return useMemo(() => rows?.map((row) => ({ ...row, hint: openAccountHint(row, session) })), [rows, session])
 }
 
 export function useScheduled(chatId?: ChatId) {

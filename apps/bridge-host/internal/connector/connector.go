@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exhttp"
@@ -61,6 +63,10 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
+	// connectedBy holds, for each account a login completed, the login session that last
+	// did (networkid.UserLoginID → login session ID), so a cancelled attempt that finishes late
+	// doesn't log out the account a later attempt connected.
+	connectedBy sync.Map
 	// browserSteps holds the login steps the sign-in browser submitted ("<login session
 	// ID>/<step ID>" → struct{}), for as long as the process runs: a paste of one that arrives
 	// later is dropped rather than refused.
@@ -257,10 +263,49 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 	if err != nil {
 		return err
 	}
-	return c.emit(ctx, &protocol.Event{
+	evt := &protocol.Event{
 		Type: protocol.EventLoginState, UserID: userID, LoginID: loginID,
 		State: mapped, Error: code,
-	})
+	}
+	if hint := accountHint(state); hint != "" && mapped != "LOGGED_OUT" {
+		// Sealed to the person only, never an agent key: it names their account.
+		sealed, err := c.seal(ctx, &owner{userID: userID, loginID: loginID}, seal.KindAccount, loginID, protocol.AccountPlaintext{Hint: hint})
+		if err != nil {
+			// The state still goes; the account is told apart by less until the next one.
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Sealing an account's hint failed")
+		} else {
+			evt.Sealed = sealed
+		}
+	}
+	return c.emit(ctx, evt)
+}
+
+// maxAccountHint bounds an account's hint, well inside the sealed metadata limit.
+const maxAccountHint = 256
+
+// accountHint is what tells a login's account apart from the person's others on the network,
+// from what the connector says about it: its number, username, email or name, in that order.
+func accountHint(state *status.BridgeState) string {
+	p := state.RemoteProfile
+	hint := p.Phone
+	switch {
+	case hint != "":
+	case p.Username != "":
+		hint = "@" + strings.TrimPrefix(p.Username, "@")
+	case p.Email != "":
+		hint = p.Email
+	case p.Name != "":
+		hint = p.Name
+	default:
+		hint = state.RemoteName
+	}
+	if len(hint) > maxAccountHint {
+		hint = hint[:maxAccountHint]
+		for !utf8.ValidString(hint) {
+			hint = hint[:len(hint)-1]
+		}
+	}
+	return hint
 }
 
 // BatchSend receives history. Each event already carries its deterministic ID.

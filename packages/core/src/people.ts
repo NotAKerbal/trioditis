@@ -122,18 +122,16 @@ export function samePhone(a: string, b: string): boolean {
 }
 
 // Starting a chat from a typed number. The bridge host (apps/bridge-host/internal/connector,
-// canonicalIdentifier) takes a number matching `^\+?[0-9][0-9 ().-]{5,}[0-9]$` and keeps only
-// its digits, with the `+` if it had one; Signal takes only a number with its `+`. People type
-// and paste numbers in forms it refuses (`(555) 123-4567`, `tel:+1…`, `0044 …`, `+44 (0)20 …`,
-// non-breaking spaces, en dashes, an extension), and each of those came back as "no one has
-// that number". So the client sends every number in one shape that both sides agree on:
+// normalPhone and canonicalIdentifier) reads a number exactly as this does, and both are
+// checked against the same cases (test/fixtures/phone-identifiers.json), so the client sends
+// every number in one shape that both sides agree on:
 //
 //   normalPhone: an optional `tel:`/`sms:` scheme is dropped, and anything from an extension
 //   (`x`, `ext`, `#`, `;`, `,`) on. What's left may hold only digits, spaces of any width,
 //   `.`, `/`, `(`, `)`, any dash, and one leading `+`. `(0)` after a country code is dropped,
 //   and a leading `00` is the international prefix, so it becomes `+`. The result is `+` and
-//   7 to 15 digits (E.164's most), or 7 to 15 national digits as written (a trunk 0 kept: it's
-//   the network's to read). Anything else isn't a number.
+//   7 to 15 digits (E.164's most) not starting with 0, or 7 to 15 national digits as written
+//   (a trunk 0 kept: it's the network's to read). Anything else isn't a number.
 //
 // The bridge host must accept exactly these two shapes (`+` then digits, or digits alone).
 
@@ -147,8 +145,8 @@ export function normalPhone(raw: string): string | null {
     .replace(/^(?:tel|sms):/i, '')
     .split(/[;,#]|\s*(?:x|ext\.?|extension)\s*\d/i)[0]!
     .trim()
-  // `+44 (0)20 …`: the bracketed trunk 0 isn't dialled with the country code.
-  text = text.replace(/^(\+\s*\d{1,3})[\s\u00a0]*\(0\)/, '$1')
+  // `+44 (0)20 …` and `0044 (0)20 …`: the bracketed trunk 0 isn't dialled with the country code.
+  text = text.replace(/^((?:\+|00)\s*\d{1,3})[\s\u00a0]*\(0\)/, '$1')
   const plus = text.startsWith('+')
   const rest = (plus ? text.slice(1) : text).replace(PHONE_PUNCTUATION, '')
   if (!/^\d+$/.test(rest)) return null
@@ -159,11 +157,16 @@ export function normalPhone(raw: string): string | null {
     international = true
   }
   if (digits.length < MIN_PHONE_DIGITS || digits.length > 15) return null
+  // No country code starts with 0.
+  if (international && digits.startsWith('0')) return null
   return international ? `+${digits}` : digits
 }
 
 /** Networks whose connectors find someone by number only with its country code. Mirrors the bridge host's internationalOnly. */
 export const PHONE_NEEDS_COUNTRY_CODE: readonly Network[] = ['signal']
+
+/** Networks that read a number without `+` as international. Mirrors the bridge host's countryCodeFirst. */
+export const PHONE_COUNTRY_CODE_FIRST: readonly Network[] = ['whatsapp']
 
 /** Why a typed identifier can't start a chat on a network, before it's sent. */
 export type StartIdentifierProblem = 'needs_country_code' | 'phone_only' | 'username_only' | 'not_a_number'
@@ -191,6 +194,11 @@ export function startIdentifier(
     const phone = normalPhone(text)
     if (!phone) return { problem: 'not_a_number' }
     if (!phone.startsWith('+') && PHONE_NEEDS_COUNTRY_CODE.includes(network)) return { problem: 'needs_country_code' }
+    // WhatsApp reads digits without a + as international; a leading 0 is a national number
+    // (bridge host's countryCodeFirst), which would look up someone else.
+    if (!phone.startsWith('+') && phone.startsWith('0') && PHONE_COUNTRY_CODE_FIRST.includes(network)) {
+      return { problem: 'needs_country_code' }
+    }
     return { identifier: phone }
   }
   if (!targets.username) return { problem: 'phone_only' }

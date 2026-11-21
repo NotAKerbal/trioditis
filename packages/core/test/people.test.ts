@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { START_TARGETS, type Network } from '../src/index.ts'
 import {
   cardFromContacts,
   groupUnlinked,
@@ -304,11 +306,17 @@ describe('typed phone numbers', () => {
     expect(startIdentifier('12345', 'twitter', { phone: false, username: true })).toEqual({ identifier: '12345' })
   })
 
-  it('gives the bridge host only what its phone pattern takes', () => {
-    // apps/bridge-host/internal/connector/commands.go, phonePattern.
-    const goPattern = /^\+?[0-9][0-9 ().-]{5,}[0-9]$/
-    for (const raw of ['(555) 123-4567', 'tel:+1 555 123 4567', '0044 7700 900123', '+44 (0)20 7946 0958']) {
-      expect(normalPhone(raw)).toMatch(goPattern)
+  // The bridge host reads numbers the same way (commands.go, normalPhone and
+  // canonicalIdentifier), checked against the same table, so it takes what the app sends.
+  it('reads numbers as the bridge host does', () => {
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/phone-identifiers.json', import.meta.url), 'utf8')) as {
+      normalPhone: [string, string | null][]
+      startIdentifier: [Network, string, string | null][]
+    }
+    for (const [raw, want] of fixture.normalPhone) expect([raw, normalPhone(raw)]).toEqual([raw, want])
+    for (const [network, raw, want] of fixture.startIdentifier) {
+      const result = startIdentifier(raw, network, START_TARGETS[network]!)
+      expect([network, raw, 'identifier' in result ? result.identifier : null]).toEqual([network, raw, want])
     }
   })
 })

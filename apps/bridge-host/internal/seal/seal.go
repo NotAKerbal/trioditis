@@ -37,6 +37,8 @@ const (
 	KindDraft    Kind = "draft"
 	KindOutbound Kind = "outbound"
 	KindMedia    Kind = "media"
+	// KindAccount is a network account's own metadata (what tells it apart), object ID its loginId.
+	KindAccount Kind = "account"
 )
 
 // Context is the row a sealed object belongs to. It is bound into the ciphertext.

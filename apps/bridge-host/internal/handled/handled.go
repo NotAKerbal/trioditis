@@ -5,25 +5,57 @@
 // success while the handler carries on in the background. A network that acknowledges an
 // event once its handler returns (WhatsApp) would then acknowledge a message that isn't
 // journaled yet, and lose it if the process stopped before it was. The network's handler
-// marks the event as in flight (Begin), the connector reports each part bridgev2 hands it for
-// that event (Journaled), and the handler waits for that before acknowledging.
+// marks the event as in flight (Begin); the connector reports each write bridgev2 makes for
+// that event (Writing), saying whether it is the write the event exists for (a message's
+// part, a reaction's add, an edit) or something on the side (an error notice after a failed
+// conversion, the removal of a reaction being replaced); and the handler waits for the
+// event's own write, with no write still running and none failed, before acknowledging.
 package handled
 
 import (
 	"sync"
 )
 
-// Handling is one incoming event whose handler is waiting to learn it was journaled.
-type Handling struct {
-	key   any
-	noted chan struct{}
+// State is what the connector has reported for an event so far.
+type State struct {
+	// Running is how many writes are under way.
+	Running int
+	// Done is whether one of the event's own writes reached the journal.
+	Done bool
+	// Failed is whether any write for the event failed.
+	Failed bool
 }
 
-// Noted receives once for each run of parts journaled since it last did: a send means at
-// least one part of the event reached the journal.
-func (h *Handling) Noted() <-chan struct{} { return h.noted }
+// Handling is one incoming event whose handler is waiting to learn it was journaled.
+type Handling struct {
+	key     any
+	changed chan struct{}
 
-// End stops watching the event. Parts journaled after it are not reported.
+	lock  sync.Mutex
+	state State
+}
+
+// Changed receives after the State changed since it last did.
+func (h *Handling) Changed() <-chan struct{} { return h.changed }
+
+// State is what has been reported so far.
+func (h *Handling) State() State {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	return h.state
+}
+
+func (h *Handling) update(fn func(*State)) {
+	h.lock.Lock()
+	fn(&h.state)
+	h.lock.Unlock()
+	select {
+	case h.changed <- struct{}{}:
+	default:
+	}
+}
+
+// End stops watching the event. Writes after it are not reported.
 func (h *Handling) End() {
 	lock.Lock()
 	defer lock.Unlock()
@@ -48,31 +80,46 @@ func AddKey(key func(remote any) any) {
 
 // Begin watches the network's event key (a pointer, compared by identity) until End.
 func Begin(key any) *Handling {
-	h := &Handling{key: key, noted: make(chan struct{}, 1)}
+	h := &Handling{key: key, changed: make(chan struct{}, 1)}
 	lock.Lock()
 	defer lock.Unlock()
 	inFlight[key] = h
 	return h
 }
 
-// Journaled reports that bridgev2's handling of remote, a bridgev2 remote event (or nil),
-// has had a part journaled.
-func Journaled(remote any) {
+func find(remote any) *Handling {
 	if remote == nil {
-		return
+		return nil
 	}
 	lock.Lock()
 	defer lock.Unlock()
 	for _, keyer := range keyers {
-		key := keyer(remote)
-		if key == nil {
-			continue
-		}
-		if h, ok := inFlight[key]; ok {
-			select {
-			case h.noted <- struct{}{}:
-			default:
+		if key := keyer(remote); key != nil {
+			if h, ok := inFlight[key]; ok {
+				return h
 			}
 		}
+	}
+	return nil
+}
+
+// Writing reports that a write for remote, a bridgev2 remote event (or nil), is starting. The
+// function it returns reports how the write ended: err, and whether it was one of the event's
+// own (own), not one on the side.
+func Writing(remote any) (ended func(err error, own bool)) {
+	h := find(remote)
+	if h == nil {
+		return func(error, bool) {}
+	}
+	h.update(func(s *State) { s.Running++ })
+	return func(err error, own bool) {
+		h.update(func(s *State) {
+			s.Running--
+			if err != nil {
+				s.Failed = true
+			} else if own {
+				s.Done = true
+			}
+		})
 	}
 }

@@ -155,6 +155,8 @@ export interface LoginStateEvent extends EventBase {
   type: 'loginState'
   state: LoginState
   error?: ErrorCode
+  /** `AccountPlaintext`, sealed to the owner: kind `account`, object ID `loginId`. */
+  sealed?: Envelope
 }
 
 export interface LoginStep {

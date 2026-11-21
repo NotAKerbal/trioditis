@@ -205,6 +205,8 @@ export const bridgeEvent = v.union(
     type: v.literal('loginState'),
     state: loginState,
     error: v.optional(errorCode),
+    /** The account's own metadata, sealed to its owner (kind `account`, object ID `loginId`): what tells it apart. */
+    sealed: v.optional(envelope),
   }),
   v.object({ ...base, type: v.literal('loginStep'), loginSessionId: v.string(), step: loginStep }),
   v.object({

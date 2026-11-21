@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { accountHint } from '../convex/logins'
-import { GATEWAY_SECRET, heartbeat, installNetworks, setup, signIn, type T } from './setup'
+import { GATEWAY_SECRET, heartbeat, installNetworks, sealed, setup, signIn, type T } from './setup'
 
 // Connecting and disconnecting accounts: telling accounts apart, bridge liveness as time
 // passes, and a cancel that races the login finishing.
@@ -44,23 +44,30 @@ async function logoutsQueued(t: T) {
 }
 
 describe('telling accounts apart', () => {
-  it('shows a WhatsApp account by its number and others by the end of their ID', () => {
-    expect(accountHint('whatsapp', '15550100')).toBe('+15550100')
-    expect(accountHint('signal', '0f8e2c1a-9b7d-4c3e-8a61-2d5f9e4b7c10')).toBe('ID …7c10')
-    // A WhatsApp ID that isn't a number isn't shown as one.
-    expect(accountHint('whatsapp', 'lid-abcdef')).toBe('ID …cdef')
-    expect(accountHint('signal', 'abc')).toBe('ID abc')
-    expect(accountHint('signal', '')).toBe('')
+  it('shows the end of the login ID, which never reads as a number', () => {
+    // The bridge host's login IDs are keyed hashes, like these.
+    expect(accountHint('l_Q2x9aZ0bXy4mN7pR3sT1uV')).toBe('ID …T1uV')
+    expect(accountHint('abc')).toBe('ID abc')
+    expect(accountHint('')).toBe('')
   })
 
-  it('gives each account its hint, and still not its login ID', async () => {
+  it('gives each account its hint and the bridge host’s sealed one, and still not its login ID', async () => {
     seq = 0
     const t = setup()
     const a = await signIn(t, 'user_a')
-    await ingest(t, [loginState('15550100'), loginState('15550199')])
+    const sealedHint = sealed('hint')
+    await ingest(t, [
+      { ...loginState('l_AAAAAAAAAAAAAAAAAAAAAAAA'), sealed: sealedHint },
+      loginState('l_BBBBBBBBBBBBBBBBBBBBBBBB'),
+    ])
     const accounts = await a.query(api.logins.accounts, {})
-    expect(accounts.map((row) => row.hint)).toEqual(['+15550100', '+15550199'])
+    expect(accounts.map((row) => row.hint)).toEqual(['ID …AAAA', 'ID …BBBB'])
+    expect(accounts[0]!.sealedMeta).toEqual({ sealed: sealedHint, objectId: 'l_AAAAAAAAAAAAAAAAAAAAAAAA' })
+    expect(accounts[1]!.sealedMeta).toBeNull()
     expect(accounts[0]).not.toHaveProperty('loginId')
+    // A later report without one keeps what the account had.
+    await ingest(t, [loginState('l_AAAAAAAAAAAAAAAAAAAAAAAA', 'TRANSIENT_DISCONNECT')])
+    expect((await a.query(api.logins.accounts, {}))[0]!.sealedMeta).not.toBeNull()
   })
 })
 
@@ -184,6 +191,29 @@ describe('cancelling a login', () => {
     expect((await a.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
     expect(await a.query(api.logins.accounts, {})).toMatchObject([{ logoutPending: true }])
     expect(await logoutsQueued(t)).toEqual(['15550100'])
+  })
+
+  it('leaves the account a retry connected when the cancelled attempt finishes late', async () => {
+    const { t, a, loginSessionId: first } = await started()
+    await a.mutation(api.logins.cancel, { loginSessionId: first })
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(1000)
+    const retry = await a.mutation(api.logins.start, { network: 'whatsapp' })
+    await claim(t)
+    await ingest(t, [complete(retry, 'l_same'), loginState('l_same'), complete(first, 'l_same')])
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ state: 'CONNECTED', logoutPending: false }])
+    expect(await logoutsQueued(t)).toEqual([])
+  })
+
+  it('leaves the account alone while a retry is still going', async () => {
+    const { t, a, loginSessionId: first } = await started()
+    await a.mutation(api.logins.cancel, { loginSessionId: first })
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(1000)
+    await a.mutation(api.logins.start, { network: 'whatsapp' })
+    await claim(t)
+    await ingest(t, [complete(first, 'l_same'), loginState('l_same')])
+    expect(await logoutsQueued(t)).toEqual([])
   })
 
   it('leaves an account the person already had when a cancelled reconnect finishes anyway', async () => {
