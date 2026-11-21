@@ -1,1 +1,1 @@
-Fixed: When the server is briefly too busy to load a chat's messages, such as right after your computer wakes, only the open chat shows an error and tries again by itself, instead of the whole app showing "Something went wrong" until you reload.
+Fixed: If a chat's messages fail to load, such as when the server is busy after your computer wakes, only that chat shows the error and tries again, not the whole app.
