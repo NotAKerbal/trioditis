@@ -7,6 +7,7 @@ WORKDIR /src
 COPY go.work go.work.sum ./
 COPY apps/bridge-host/go.mod apps/bridge-host/go.sum apps/bridge-host/
 COPY apps/bridge-host/third_party/mautrix-signal/go.mod apps/bridge-host/third_party/mautrix-signal/
+COPY apps/bridge-host/third_party/mautrix/go.mod apps/bridge-host/third_party/mautrix/
 COPY apps/bridge-host/cmd/login-browser apps/bridge-host/cmd/login-browser
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
   cd apps/bridge-host \
