@@ -6,6 +6,24 @@ import type { FunctionReturnType } from 'convex/server'
 
 export type AlreadyUsed = Exclude<FunctionReturnType<typeof api.messages.send>, 'queued'>
 
+/** What to say when a cancel came after the message's time or Send now: by where that send stands. */
+export function beatenBySend(delivery: string | null): string {
+  switch (delivery) {
+    case 'queued':
+    case 'claimed':
+    case 'submitted':
+      return 'Too late to cancel: it’s being sent.'
+    case 'sent':
+    case 'delivered':
+    case 'read':
+      return 'Too late to cancel: it was sent.'
+    case 'failed':
+      return 'Too late to cancel: it went out, and failed.'
+    default:
+      return 'Too late to cancel: it may have been sent. Check the chat.'
+  }
+}
+
 /**
  * What to do with a draft whose send ID was used already, and what to tell the person:
  * - `done`: that use went, is going, or is still scheduled. This one isn't sent again.

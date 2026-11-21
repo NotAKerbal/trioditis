@@ -73,7 +73,7 @@ export const list = query({
         rows.push(
           ...(await ctx.db
             .query('scheduledSends')
-            .withIndex('by_chat', (q) => q.eq('chatId', chatId).eq('state', state))
+            .withIndex('by_chat_kept', (q) => q.eq('chatId', chatId).eq('state', state))
             .take(MAX_SCHEDULED)),
         )
       } else {

@@ -33,18 +33,6 @@ const sendIdOf = (d: { id: string; text: string; reply: Reply | null }) => draft
 /** Whether `draft` is the one sent as `clientMessageId`: same identity, reply and text. */
 const isSentAs = (draft: Draft<Reply>, clientMessageId: string) => !!draft.id && sendIdOf(draft) === clientMessageId
 
-/** This page's saving, while the signed-in app is open. */
-let saver: ((chatId: string) => Promise<boolean>) | null = null
-
-/**
- * Saves a chat's draft as it is now and says whether it's stored: false where this browser
- * keeps nothing, or storage refused. A cancelled scheduled message's copy is let go on the
- * server (scheduled.forget) only once this says its text is saved in the draft.
- */
-export function saveDraftNow(chatId: string): Promise<boolean> {
-  return saver ? saver(chatId) : Promise.resolve(false)
-}
-
 /**
  * Keeps unsent text across a reload. Drafts and sends under way are sealed to the person's own
  * key and saved in this browser, per chat, under the rules in saved-drafts.ts (I1: one tab at a
@@ -83,7 +71,7 @@ export function useKeepUnsent() {
         known(chatId).w = draft.w
         // One that went already (its tab closed before removing it) isn't brought back.
         if (loaded.sent.get(chatId) === sendIdOf(draft)) continue
-        adoptDraft(chatId, draft.text, draft.reply, draft.id)
+        adoptDraft(chatId, draft.text, draft.reply, draft.id, draft.origins)
       }
       for (const { chatId, sendId, copy } of loaded.sending) {
         // Gone already, or still saved as the draft too (the page went before that was removed).
@@ -91,7 +79,7 @@ export function useKeepUnsent() {
         const gone = loaded.sent.get(chatId) === sendId || (asDraft && sendIdOf(asDraft) === sendId)
         // Under way when the page went: back as the same draft, to send again or not. Into a
         // composer with something in it already, it waits, saved, for the next load.
-        if (gone || adoptDraft(chatId, copy.text, copy.reply, copy.id)) known(chatId).sending.add(sendId)
+        if (gone || adoptDraft(chatId, copy.text, copy.reply, copy.id, copy.origins)) known(chatId).sending.add(sendId)
       }
       for (const chatId of knowns.keys()) unsaved.add(chatId)
       for (const [chatId, draft] of allDrafts()) if (known(chatId).w) revs.set(chatId, draft.rev)
@@ -106,7 +94,7 @@ export function useKeepUnsent() {
       const draft = getDraft<Reply>(chatId)
       const filled = !!draft.text.trim() || !!draft.reply
       return {
-        draft: filled ? { text: draft.text, reply: draft.reply, id: draft.id } : null,
+        draft: filled ? { text: draft.text, reply: draft.reply, id: draft.id, origins: draft.origins } : null,
         draftChanged: revs.get(chatId) !== draft.rev,
         sending: new Map(allSending<Reply>().filter(([, p]) => p.chatId === chatId)),
         sent: sentToNote.get(chatId) ?? [],
@@ -178,7 +166,6 @@ export function useKeepUnsent() {
       // What came back is saved before the copies it came from go (I2).
       for (const chatId of unsaved) void save(chatId)
     }
-    saver = save
     const unsubscribe = subscribeDrafts(changed)
     // Said apart from whatever the composer holds next, so other tabs hear of it either way.
     const unsubscribeSent = onDraftSent((chatId, sendId) => {
@@ -216,7 +203,6 @@ export function useKeepUnsent() {
     document.addEventListener('visibilitychange', onHidden)
     return () => {
       flush()
-      if (saver === save) saver = null
       unsubscribe()
       unsubscribeSent()
       window.removeEventListener('storage', onStorage)

@@ -17,10 +17,36 @@ export function replacementId(clientMessageId: string): string {
 }
 
 /**
- * Where a message's replacement stands: on its way; gone; or `used`, when the server said its
- * ID had gone already (from another tab, or before a reload), so nothing went this time.
+ * Where a message's replacement stands: on its way from here (`sending`); sent (`sent`); or,
+ * when the server said its ID was used already (from another tab, or before a reload), how
+ * that send stands: still going (`going`), may have gone (`maybe`), or failed (`failed`), when
+ * it can be sent once more as a new message.
  */
-export type SendAgainState = 'sending' | 'sent' | 'used'
+export type SendAgainState = 'sending' | 'sent' | 'going' | 'maybe' | 'failed'
+
+/** The answer messages.send gives: new, or what the ID went as already. */
+export type SendAnswer =
+  'queued' | { already: 'send'; delivery: string | null } | { already: 'scheduled'; state: string }
+
+/** Where a replacement stands by the server's answer. */
+export function stateOf(answer: SendAnswer): SendAgainState {
+  if (answer === 'queued') return 'sent'
+  if (answer.already === 'scheduled') return answer.state === 'scheduled' ? 'going' : 'failed'
+  switch (answer.delivery) {
+    case 'queued':
+    case 'claimed':
+    case 'submitted':
+      return 'going'
+    case 'sent':
+    case 'delivered':
+    case 'read':
+      return 'sent'
+    case 'failed':
+      return 'failed'
+    default:
+      return 'maybe'
+  }
+}
 
 let states = new Map<string, SendAgainState>()
 const listeners = new Set<() => void>()
@@ -34,25 +60,27 @@ function set(clientMessageId: string, state: SendAgainState | undefined) {
 
 /**
  * Sends `clientMessageId`'s replacement with `send`, given its ID, unless one is on its way or
- * has gone already from this page. If it fails, it can be tried again: with the same ID, so a
- * send that did reach the server isn't made twice. `send` answers as messages.send does:
- * `queued` for a new send, or what the ID had gone as already.
+ * has gone already from this page. If it fails to reach the server, it can be tried again with
+ * the same ID, so a send that did reach it isn't made twice. Once the server says the
+ * replacement failed, `asNew` sends it again under a new ID: the person chose a new message.
  */
 export async function sendAgain(
   clientMessageId: string,
-  send: (replacement: string) => Promise<'queued' | { already: string }>,
+  send: (replacement: string) => Promise<SendAnswer>,
+  { asNew = false }: { asNew?: boolean } = {},
 ): Promise<SendAgainState | undefined> {
-  if (states.has(clientMessageId)) return states.get(clientMessageId)
+  const now = states.get(clientMessageId)
+  if (now && !(asNew && now === 'failed')) return now
   set(clientMessageId, 'sending')
-  const replacement = replacementId(clientMessageId)
-  let outcome: 'queued' | { already: string }
+  const replacement = asNew ? `rn_${crypto.randomUUID().replaceAll('-', '')}` : replacementId(clientMessageId)
+  let answer: SendAnswer
   try {
-    outcome = await send(replacement)
+    answer = await send(replacement)
   } catch {
-    set(clientMessageId, undefined)
-    return undefined
+    set(clientMessageId, now)
+    return now
   }
-  const state = outcome === 'queued' ? 'sent' : 'used'
+  const state = stateOf(answer)
   set(clientMessageId, state)
   return state
 }

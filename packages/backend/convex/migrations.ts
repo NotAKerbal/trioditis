@@ -215,7 +215,7 @@ async function purgeChat(ctx: MutationCtx, chatId: Id<'chats'>) {
   for (const row of small) await ctx.db.delete(row._id)
   const scheduled = await ctx.db
     .query('scheduledSends')
-    .withIndex('by_chat', (q) => q.eq('chatId', chatId))
+    .withIndex('by_chat_kept', (q) => q.eq('chatId', chatId))
     .take(PURGE_LARGE)
   for (const row of scheduled) {
     const payload = await ctx.db

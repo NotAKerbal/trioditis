@@ -385,7 +385,6 @@ export default defineSchema({
     forgottenAt: v.optional(v.number()),
   })
     .index('by_user', ['userId', 'state', 'sendAt'])
-    .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId'])
     // Cancelled ones still holding their copies (`forgottenAt` unset), oldest first: forgotten
     // ones are kept, for their client message IDs, but never in the way of these.

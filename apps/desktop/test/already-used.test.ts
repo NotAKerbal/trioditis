@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { usedOutcome } from '../src/features/chat/already-used.ts'
+import { beatenBySend, usedOutcome } from '../src/features/chat/already-used.ts'
 
 describe('a draft whose send ID was used already', () => {
   it('says it’s already sending while that send is on its way', () => {
@@ -31,5 +31,15 @@ describe('a draft whose send ID was used already', () => {
     expect(usedOutcome({ already: 'send', delivery: 'failed' }).action).toBe('again')
     expect(usedOutcome({ already: 'scheduled', state: 'cancelled' }).action).toBe('again')
     expect(usedOutcome({ already: 'scheduled', state: 'failed' }).action).toBe('again')
+  })
+})
+
+describe('a cancel that came too late', () => {
+  it('says how the send that beat it stands', () => {
+    expect(beatenBySend('queued')).toMatch(/being sent/)
+    expect(beatenBySend('read')).toMatch(/was sent/)
+    expect(beatenBySend('unknown')).toMatch(/may have been sent/)
+    expect(beatenBySend(null)).toMatch(/may have been sent/)
+    expect(beatenBySend('failed')).toMatch(/failed/)
   })
 })
