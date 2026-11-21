@@ -80,7 +80,10 @@ type Connector struct {
 	// starting holds a lock per login (networkid.UserLoginID → *sync.Mutex), so one login's
 	// startChat commands run one at a time.
 	starting sync.Map
-	wake     chan struct{}
+	// collageLocks holds a lock per room (id.RoomID → *sync.Mutex), so a chat's collage is
+	// chosen, sent and recorded by one caller at a time, and the record is what was sent last.
+	collageLocks sync.Map
+	wake         chan struct{}
 }
 
 var (

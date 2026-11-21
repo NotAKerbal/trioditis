@@ -517,6 +517,23 @@ describe('ingest', () => {
     expect(await chat(t)).toMatchObject({ unreadCount: 0, mentionCount: 0 })
   })
 
+  it('keeps a group’s collage apart from its metadata, so neither replaces the other', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      event('chatCollage', { portalId: 'portal_1', sealed: sealed('collage') }),
+      event('chat', { portalId: 'portal_1', kind: 'group', sealed: sealed('meta') }),
+    ])
+    expect(await chat(t)).toMatchObject({ sealedMeta: sealed('meta'), sealedCollage: sealed('collage') })
+    await ingest(t, [event('chatCollage', { portalId: 'portal_1', sealed: sealed('collage2') })])
+    expect(await chat(t)).toMatchObject({ sealedMeta: sealed('meta'), sealedCollage: sealed('collage2') })
+    const row = await t.run(async (ctx) => (await ctx.db.query('chats').collect()).length)
+    expect(row).toBe(1)
+    const big = { ...sealed('collage'), ct: 'A'.repeat(12_000) }
+    await ingest(t, [event('chatCollage', { portalId: 'portal_1', sealed: big })])
+    expect(await quarantined(t)).toMatchObject([{ reason: 'too_large' }])
+  })
+
   it('quarantines chat metadata over its cap', async () => {
     seq = 0
     const t = setup()

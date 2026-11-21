@@ -195,6 +195,7 @@ export const bridgeEvent = v.union(
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
   v.object({ ...base, type: v.literal('contactIdentifiers'), ghostId: v.string(), sealed: envelope }),
+  v.object({ ...base, type: v.literal('chatCollage'), portalId: v.string(), sealed: envelope }),
   v.object({
     ...base,
     type: v.literal('chatStarted'),

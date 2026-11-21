@@ -220,6 +220,8 @@ export default defineSchema({
     kind: chatKind,
     /** Name, topic and avatar. Missing until the bridge host has described the chat. */
     sealedMeta: v.optional(envelope),
+    /** The members whose pictures make a group's picture (chatCollage events), sealed apart. */
+    sealedCollage: v.optional(envelope),
     parentPortalId: v.optional(v.string()),
     lastMessageAt: v.number(),
     /**

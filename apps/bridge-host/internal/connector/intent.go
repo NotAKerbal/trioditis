@@ -525,27 +525,15 @@ func (c *Connector) requestState(ctx context.Context, o *owner, request bool) (s
 	}, nil
 }
 
-// setMembership records a member joining or leaving a chat after it was created, and
-// describes the chat again when that changes who its collage shows.
+// setMembership records a member joining or leaving a chat after it was created, and chooses
+// the chat's collage again.
 func (c *Connector) setMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) error {
-	ghost, isGhost := ids.ParseGhostMXID(mxid)
-	leaving := membership == event.MembershipLeave || membership == event.MembershipBan
-	shown := false
-	if isGhost && leaving {
-		// Before they go, while they still count among the members.
-		shown = c.inCollage(ctx, roomID, ghost)
-	}
 	changed, err := c.recordMembership(ctx, roomID, mxid, membership)
-	if err != nil || !changed || !isGhost {
+	if err != nil || !changed {
 		return err
 	}
-	if !leaving {
-		shown = c.inCollage(ctx, roomID, ghost)
-	}
-	if shown {
-		if err = c.emitChat(ctx, roomID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {
-			return err
-		}
+	if _, isGhost := ids.ParseGhostMXID(mxid); isGhost {
+		c.refreshCollageOrLog(ctx, roomID, collageChange{})
 	}
 	return nil
 }
@@ -740,7 +728,7 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 		return id.RoomID("!local_" + string(ids.LocalEventID("room", strconv.FormatInt(time.Now().UnixNano(), 10)))[1:] + ":" + ids.ServerName), nil
 	}
 	members := append(append([]id.UserID{}, req.BeeperInitialMembers...), req.Invite...)
-	// Recorded only: the chat is described once they're all in, collage and all.
+	// Recorded only: the collage is chosen once they're all in.
 	for _, member := range members {
 		if _, err := in.c.recordMembership(ctx, roomID, member, event.MembershipJoin); err != nil {
 			return "", err
@@ -755,6 +743,11 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 	override := chatOverride{kind: kind, initialState: req.InitialState}
 	if err := in.c.emitChat(ctx, roomID, override); err != nil && !errors.Is(err, errNotPortal) {
 		return "", err
+	}
+	if kind != "dm" {
+		// After the chat, which the collage belongs to. bridgev2 hasn't saved the portal yet,
+		// so it's said here that this is a group.
+		in.c.refreshCollageOrLog(ctx, roomID, collageChange{group: true})
 	}
 	return roomID, nil
 }
@@ -893,13 +886,6 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			// from before references were kept). Saying so keeps clients from taking a name
 			// change as the avatar's removal.
 			plain.AvatarUnchanged = true
-		}
-	} else if kind != "dm" {
-		// A chat being described must not fail for want of its collage; clients then show
-		// the chat's initials, as before collages.
-		if plain.Collage, err = c.collage(ctx, o); err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Choosing a chat's collage failed")
-			plain.Collage = nil
 		}
 	}
 	fitChat(&plain)
@@ -1183,7 +1169,7 @@ func (c *Connector) ghostProfileChanged(ctx context.Context, ghost networkid.Use
 		}
 	}
 	if avatar != nil {
-		c.pictureChanged(ctx, ghost, rooms)
+		c.pictureChanged(ctx, ghost, *avatar != "", rooms)
 	}
 	return nil
 }

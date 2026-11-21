@@ -13,9 +13,9 @@ import (
 )
 
 // crowdGhosts finds the opaque ghost IDs of a crowd chat's members, from their contacts.
-func crowdGhosts(t *testing.T, h *harness, chat networkid.PortalID) map[networkid.UserID]string {
+func crowdGhosts(t *testing.T, h *harness, chat networkid.PortalID) map[int]string {
 	t.Helper()
-	out := make(map[networkid.UserID]string)
+	out := make(map[int]string)
 	for n := 1; n <= testconnector.CrowdSize; n++ {
 		member := testconnector.CrowdMember(chat, n)
 		contact := h.gw.waitFor(t, "a crowd member's contact", func(e *protocol.Event) bool {
@@ -26,30 +26,44 @@ func crowdGhosts(t *testing.T, h *harness, chat networkid.PortalID) map[networki
 			h.open("alice", e, &plain)
 			return plain.Name == testconnector.DisplayName(member)
 		})
-		out[member] = contact.GhostID
+		out[n] = contact.GhostID
 	}
 	return out
 }
 
-// collageOf waits for a chat event for portalID that satisfies match, and returns its collage.
-func collageOf(t *testing.T, h *harness, what, portalID string, match func([]string) bool) []string {
-	t.Helper()
-	var got []string
-	h.gw.waitFor(t, what, func(e *protocol.Event) bool {
-		if e.Type != protocol.EventChat || e.PortalID != portalID {
-			return false
-		}
-		var plain protocol.ChatPlaintext
-		h.open("alice", e, &plain)
-		got = plain.Collage
-		return match(got)
-	})
-	return got
+func isCollage(portalID string) func(*protocol.Event) bool {
+	return func(e *protocol.Event) bool { return e.Type == protocol.EventChatCollage && e.PortalID == portalID }
 }
 
-// A group with no picture says which members its collage shows: four, never the person, and
-// one who gets a picture takes the place of one who has none.
-func TestAGroupWithNoPictureShowsACollageOfItsMembers(t *testing.T) {
+func isChat(portalID string) func(*protocol.Event) bool {
+	return func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == portalID }
+}
+
+// lastCollage waits until the newest collage event for portalID is want.
+func lastCollage(t *testing.T, h *harness, what, portalID string, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var got []string
+	for time.Now().Before(deadline) {
+		got = nil
+		for _, e := range h.gw.snapshot() {
+			if isCollage(portalID)(e) {
+				var plain protocol.ChatCollagePlaintext
+				h.open("alice", e, &plain)
+				got = plain.Ghosts
+			}
+		}
+		if got != nil && slices.Equal(got, want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s: collage %q, want %q", what, got, want)
+}
+
+// A group's collage is four members, never the person; one who gets a picture takes the place of
+// one who has none, and gives it back when it goes. Choosing again never describes the chat.
+func TestAGroupsCollageFollowsItsMembersPictures(t *testing.T) {
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, t.TempDir(), gw)
 	defer h.host.Stop()
@@ -59,65 +73,78 @@ func TestAGroupWithNoPictureShowsACollageOfItsMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	portalID := gw.waitFor(t, "the crowd's message", isMessage("hello crowd", h, "alice")).PortalID
-	ghosts := crowdGhosts(t, h, chat)
-	member := func(n int) string { return ghosts[testconnector.CrowdMember(chat, n)] }
+	m := crowdGhosts(t, h, chat)
+	ctx := context.Background()
 
-	first := []string{member(1), member(2), member(3), member(4)}
-	collageOf(t, h, "the crowd's collage", portalID, func(c []string) bool { return slices.Equal(c, first) })
+	first := []string{m[1], m[2], m[3], m[4]}
+	lastCollage(t, h, "the first collage", portalID, first)
+	chats := gw.count(isChat(portalID))
 
-	if err := h.net.SetPicture(context.Background(), testconnector.CrowdMember(chat, 5), []byte("a picture")); err != nil {
+	if err := h.net.SetPicture(ctx, testconnector.CrowdMember(chat, 5), []byte("a picture")); err != nil {
 		t.Fatal(err)
 	}
-	pictured := []string{member(5), member(1), member(2), member(3)}
-	collageOf(t, h, "the collage with the pictured member", portalID, func(c []string) bool { return slices.Equal(c, pictured) })
+	lastCollage(t, h, "with the pictured member", portalID, []string{m[5], m[1], m[2], m[3]})
+	collages := gw.count(isCollage(portalID))
+
+	// A new picture for a member already shown changes only their contact.
+	if err := h.net.SetPicture(ctx, testconnector.CrowdMember(chat, 5), []byte("another picture")); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "the member's new picture", func(e *protocol.Event) bool {
+		if e.Type != protocol.EventContact || e.GhostID != m[5] {
+			return false
+		}
+		var plain protocol.ContactPlaintext
+		h.open("alice", e, &plain)
+		return plain.Avatar != nil
+	})
+	if n := gw.count(isCollage(portalID)); n != collages {
+		t.Fatalf("an unchanged collage was sent again (%d, was %d)", n, collages)
+	}
+
+	if err := h.net.SetPicture(ctx, testconnector.CrowdMember(chat, 5), nil); err != nil {
+		t.Fatal(err)
+	}
+	lastCollage(t, h, "once the picture is gone", portalID, first)
+	if n := gw.count(isChat(portalID)); n != chats {
+		t.Fatalf("choosing the collage described the chat again (%d chat events, was %d)", n, chats)
+	}
 }
 
-// Groups bridged before collages existed are described again once, with theirs.
-func TestGroupsFromBeforeCollagesAreDescribedAgain(t *testing.T) {
+// Chats from before collages get theirs at the next start; a start with nothing changed sends none.
+func TestCollagesAreChosenAgainAtStart(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
 	_, portalID := setUpChat(t, h, "old-group", "hello from before")
+	gw.waitFor(t, "the group's collage", isCollage(portalID))
 	h.host.Stop()
-	isChat := func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == portalID }
 	ctx := context.Background()
 
-	// Once the pass is done, a start describes nothing again.
-	before := gw.count(isChat)
+	before := gw.count(isCollage(portalID))
 	control := startHost(t, dir, gw)
-	for !func() bool { done, _ := control.host.Store.Marked(ctx, "collages-described"); return done }() {
-		time.Sleep(20 * time.Millisecond)
-	}
-	time.Sleep(time.Second)
+	time.Sleep(1500 * time.Millisecond)
 	control.host.Stop()
-	if gw.count(isChat) != before {
-		t.Fatal("a start after the pass described the group again")
+	if n := gw.count(isCollage(portalID)); n != before {
+		t.Fatalf("an unchanged collage was sent again at start (%d, was %d)", n, before)
 	}
 
 	h2 := buildHost(t, dir, gw)
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// As a database from before collages: its pass never ran.
-	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_secret WHERE name='done:collages-described'`); err != nil {
+	// As a database from before collages.
+	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_collage`); err != nil {
 		t.Fatal(err)
 	}
-	before = gw.count(isChat)
 	if err := h2.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer h2.host.Stop()
 	deadline := time.Now().Add(10 * time.Second)
-	for gw.count(isChat) == before {
+	for gw.count(isCollage(portalID)) == before {
 		if time.Now().After(deadline) {
-			t.Fatal("the old group wasn't described again")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	collageOf(t, h2, "the old group's collage", portalID, func(c []string) bool { return len(c) == 1 })
-	for !func() bool { done, _ := h2.host.Store.Marked(ctx, "collages-described"); return done }() {
-		if time.Now().After(deadline) {
-			t.Fatal("the pass wasn't recorded as done")
+			t.Fatal("the old group's collage wasn't sent")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

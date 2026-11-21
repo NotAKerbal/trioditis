@@ -227,8 +227,8 @@ func (h *Host) Start(ctx context.Context) error {
 		defer close(h.postStart)
 		h.Bridge.PostStart(postCtx)
 		// Here, so a stop waits for it as for bridgev2's own post-start work.
-		if err := h.Connector.DescribeForCollages(postCtx); err != nil && postCtx.Err() == nil {
-			h.Bridge.Log.Warn().Err(err).Msg("Describing chats for their collages failed; it runs again at the next start")
+		if err := h.Connector.RefreshCollages(postCtx); err != nil && postCtx.Err() == nil {
+			h.Bridge.Log.Warn().Err(err).Msg("Choosing chats' collages failed; they're chosen again at the next start")
 		}
 	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,

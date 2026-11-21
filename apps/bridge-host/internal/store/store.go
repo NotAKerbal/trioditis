@@ -139,6 +139,12 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`DROP TABLE trioditis_activation`,
 		})
 	}).
+	WithRaw(9, 10, 0, "The collage each chat last sent", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// Opaque ghost IDs only, so a collage is sent again only when the choice changes.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_collage (room_id TEXT PRIMARY KEY, ghosts TEXT NOT NULL)`,
+		})
+	}).
 	Finish()
 
 // InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
@@ -899,4 +905,23 @@ func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*
 		return nil, err
 	}
 	return &env, nil
+}
+
+// Collage is the collage last sent for a room (opaque ghost IDs, comma-separated), and whether
+// one was.
+func (s *Store) Collage(ctx context.Context, roomID string) (string, bool, error) {
+	var ghosts string
+	err := s.DB.QueryRow(ctx, `SELECT ghosts FROM trioditis_collage WHERE room_id=$1`, roomID).Scan(&ghosts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return ghosts, err == nil, err
+}
+
+// SetCollage records the collage sent for a room.
+func (s *Store) SetCollage(ctx context.Context, roomID, ghosts string) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_collage (room_id, ghosts) VALUES ($1, $2) ON CONFLICT (room_id) DO UPDATE SET ghosts=excluded.ghosts`,
+		roomID, ghosts)
+	return err
 }

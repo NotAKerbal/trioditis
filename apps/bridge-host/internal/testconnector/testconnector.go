@@ -7,6 +7,7 @@ package testconnector
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -247,16 +248,20 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 }
 
 // SetPicture gives a user a profile picture, uploaded through the Matrix connector as a real
-// network's would be.
+// network's would be, or with nil data takes it away.
 func (n *Network) SetPicture(ctx context.Context, userID networkid.UserID, data []byte) error {
 	ghost, err := n.Bridge.GetGhostByID(ctx, userID)
 	if err != nil {
 		return err
 	}
-	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{Avatar: &bridgev2.Avatar{
-		ID:  networkid.AvatarID(fmt.Sprintf("pic-%x", len(data))),
-		Get: func(context.Context) ([]byte, error) { return data, nil },
-	}})
+	avatar := &bridgev2.Avatar{ID: "", Remove: true}
+	if data != nil {
+		avatar = &bridgev2.Avatar{
+			ID:  networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
+			Get: func(context.Context) ([]byte, error) { return data, nil },
+		}
+	}
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{Avatar: avatar})
 	return nil
 }
 

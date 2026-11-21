@@ -72,10 +72,18 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
+  fullPaths:
+    '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
   fileRoutesByTo: FileRoutesByTo
   to: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
-  id: '__root__' | '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
+  id:
+    | '__root__'
+    | '/'
+    | '/invite'
+    | '/reset'
+    | '/setup'
+    | '/sign-in'
+    | '/agents/connect'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {

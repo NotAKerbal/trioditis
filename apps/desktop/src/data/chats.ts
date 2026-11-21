@@ -12,6 +12,7 @@ import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import type { ChatCollagePlaintext } from '@trioditis/core'
 import {
   openCached,
   tryOpen,
@@ -38,7 +39,7 @@ export interface Chat {
   topic: string | undefined
   /** Its picture, to decrypt and show (data/media.ts). */
   avatar: Attachment | undefined
-  /** For a group with no picture: the members (ghost IDs) whose pictures make one. */
+  /** For a group: the members (ghost IDs) whose pictures make one when it has none of its own. */
   collage: string[]
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
@@ -80,11 +81,29 @@ export function avatarOf(
 /** The most members a collage shows. */
 const COLLAGE_SIZE = 4
 
-/** The members a chat's collage shows, as far as its metadata names them well. */
-export function collageOf(meta: Pick<ChatPlaintext, 'collage'> | null): string[] {
-  if (!Array.isArray(meta?.collage)) return []
-  const ids = meta.collage.filter((id): id is string => typeof id === 'string' && id !== '')
+// Opened collages (openCached), apart from metadata: a different object.
+const collageCache = new Map<string, ChatCollagePlaintext | null>()
+
+/** The members a chat's collage shows, as far as the bridge host named them well. */
+export function collageOf(collage: Pick<ChatCollagePlaintext, 'ghosts'> | null): string[] {
+  if (!Array.isArray(collage?.ghosts)) return []
+  const ids = collage.ghosts.filter((id): id is string => typeof id === 'string' && id !== '')
   return [...new Set(ids)].slice(0, COLLAGE_SIZE)
+}
+
+function openCollage(row: ChatRow, session: Session): string[] {
+  if (row.kind === 'dm' || !row.sealedCollage) return []
+  return collageOf(
+    openCached<ChatCollagePlaintext>(
+      collageCache,
+      row.sealedCollage,
+      session.keyPair,
+      session.kid,
+      'chat',
+      session.userId,
+      `${row.portalId}/collage`,
+    ),
+  )
 }
 
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
@@ -100,7 +119,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     named: !!own,
     topic: meta?.topic,
     avatar: avatarOf(`${session.userId}/${row._id}`, meta),
-    collage: row.kind === 'dm' ? [] : collageOf(meta),
+    collage: openCollage(row, session),
     described: !!meta,
     unread: row.unreadCount,
     hasUnread: row.unreadCount > 0 || row.markedUnread,
