@@ -6,16 +6,42 @@ import type { FunctionReturnType } from 'convex/server'
 
 export type AlreadyUsed = Exclude<FunctionReturnType<typeof api.messages.send>, 'queued'>
 
-/** Whether the earlier use of an ID went out, or still will: then this one mustn't. */
-export function wentAlready(used: AlreadyUsed) {
-  if (used.already === 'scheduled') return used.state === 'scheduled'
-  // Unknown may have gone; only a failed one, or one whose copy was discarded, surely didn't.
-  return used.delivery !== null && used.delivery !== 'failed'
-}
-
-/** What to say when a draft's send ID had gone already: it wasn't sent or scheduled again. */
-export function alreadyWent(used: AlreadyUsed) {
-  return used.already === 'send'
-    ? 'That message was already sent, from another tab or before a reload. It wasn’t sent again.'
-    : 'That message is already scheduled, from another tab or before a reload. It wasn’t sent again.'
+/**
+ * What to do with a draft whose send ID was used already, and what to tell the person:
+ * - `done`: that use went, is going, or is still scheduled. This one isn't sent again.
+ * - `check`: it may have gone (`unknown`). Not sent again, and not offered again either: the
+ *   person looks at the chat first, and can type it again if it didn't.
+ * - `again`: it surely never went (failed, or cancelled or failed when scheduled). The text
+ *   comes back as a new draft, so sending it is a new message.
+ */
+export function usedOutcome(used: AlreadyUsed): { action: 'done' | 'check' | 'again'; say: string } {
+  if (used.already === 'scheduled') {
+    if (used.state === 'scheduled')
+      return { action: 'done', say: 'That message is already scheduled, from another tab or before a reload.' }
+    return {
+      action: 'again',
+      say: `That exact message was scheduled before and ${used.state === 'cancelled' ? 'cancelled' : 'never went'}. It’s back in the composer: send it again to send it as a new message.`,
+    }
+  }
+  switch (used.delivery) {
+    case 'queued':
+    case 'claimed':
+    case 'submitted':
+      return { action: 'done', say: 'That message is already sending, from another tab or before a reload.' }
+    case 'sent':
+    case 'delivered':
+    case 'read':
+      return { action: 'done', say: 'That message was already sent, from another tab or before a reload.' }
+    case 'failed':
+      return {
+        action: 'again',
+        say: 'That exact message failed before. It’s back in the composer: send it again to send it as a new message.',
+      }
+    default:
+      // `unknown`, or a send from before its state was kept.
+      return {
+        action: 'check',
+        say: 'That message may already have been sent. Check the chat before sending it again.',
+      }
+  }
 }

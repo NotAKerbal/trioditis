@@ -221,6 +221,7 @@ export function useSendMutations() {
     discard: useMutation(api.messages.discardSend),
     schedule: useMutation(api.scheduled.create),
     cancelScheduled: useMutation(api.scheduled.cancel),
+    forgetScheduled: useMutation(api.scheduled.forget),
     sendScheduledNow: useMutation(api.scheduled.sendNow),
   }
 }

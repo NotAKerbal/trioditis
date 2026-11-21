@@ -181,6 +181,30 @@ describe('settling after a restore', () => {
     expect(rows.map((row) => row.state)).toEqual(['sent', 'sent'])
   })
 
+  it('never sends a cancelled message whose copy is still kept to be restored', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 })
+    const { t, as, chatId } = await ready()
+    const scheduledId = await as.mutation(api.scheduled.create, {
+      chatId,
+      clientMessageId: id(9),
+      forBridge: sealed('b9'),
+      copy: sealed('c9'),
+      sendAt: Date.now() + 60_000,
+    })
+    await as.mutation(api.scheduled.cancel, { scheduledId: scheduledId as Id<'scheduledSends'> })
+    await settle(t, Date.now() - 120_000)
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    const [outbox, rows, payloads] = await t.run(async (ctx) => [
+      await ctx.db.query('outbox').collect(),
+      await ctx.db.query('scheduledSends').collect(),
+      await ctx.db.query('scheduledPayloads').collect(),
+    ])
+    expect(outbox).toEqual([])
+    expect(rows.map((row) => row.state)).toEqual(['cancelled'])
+    expect(payloads).toHaveLength(1)
+  })
+
   it("finishes with more removed members' pending logouts than a batch, and queues each again once", async () => {
     const { t } = await ready()
     // 25 accounts of someone who is no longer a member, each with a logout waiting: expiring one

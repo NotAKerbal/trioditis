@@ -133,6 +133,26 @@ describe('two tabs changing preferences', () => {
     expect(tab.currentPrefs()).toMatchObject({ theme: 'dark', notifications: false, notificationDetail: 'hidden' })
   })
 
+  it('keep an unsaved opt-out when another preference saves later, from nothing stored', async () => {
+    // Nothing chosen yet: every preference is its default.
+    const tab = await freshTab()
+    const refuse = () => {
+      throw new Error('quota')
+    }
+    vi.stubGlobal('localStorage', { getItem: (k: string) => stored.get(k) ?? null, setItem: refuse })
+    tab.setPref('notifications', false)
+    tab.setPref('notificationDetail', 'hidden')
+    // Storage takes writes again, and the theme saves.
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, v),
+    })
+    tab.setPref('theme', 'dark')
+    // Only the theme was written: no defaults that would look like another tab's choice.
+    expect(JSON.parse(stored.get(KEY)!)).toEqual({ theme: 'dark' })
+    expect(tab.currentPrefs()).toMatchObject({ theme: 'dark', notifications: false, notificationDetail: 'hidden' })
+  })
+
   it('drop an unsaved choice once another tab saves that preference', async () => {
     stored.set(KEY, JSON.stringify({ notificationDetail: 'message' }))
     const tab = await freshTab()
