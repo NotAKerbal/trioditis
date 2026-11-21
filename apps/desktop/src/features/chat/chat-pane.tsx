@@ -48,6 +48,7 @@ import {
 } from '~/data/messages.ts'
 import {
   appendToDraft,
+  getDraft,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -63,6 +64,7 @@ import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
 import { MediaAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
+import { cancelKind, restoreConflict } from './cancel-scheduled.ts'
 import { sendAgain } from './send-again.ts'
 
 interface ChatPaneProps {
@@ -407,19 +409,25 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
               toast(errorMessage(e, 'That message couldn’t be sent.')),
             )
           }
-          onCancelScheduled={({ id, body, replyTo }) =>
+          onCancelScheduled={({ id, body, replyTo }) => {
+            const kind = cancelKind(body)
+            // Not opened yet: cancelling would delete its only copy with nothing to put back.
+            if (kind === 'wait') return
+            if (kind === 'restore' && restoreConflict(getDraft<Message>(chat.id), replyTo))
+              return toast('Your draft replies to a different message. Send or clear it first, then cancel this one.')
             // Counted like a send until its text is back in the composer: the server's copy is
             // gone once the cancel goes through, so a reload in between would lose it.
             void whileSending(() =>
               cancelScheduled({ scheduledId: id }).then(
                 () => {
-                  // Keep anything in the composer by now; add the cancelled text below it. A copy
-                  // this device couldn't open, or that hadn't come yet, has nothing to put back.
-                  if (body === null) return toast('Cancelled. It won’t be sent.')
-                  if (body === undefined)
-                    return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
+                  if (body === null || body === undefined) return toast('Discarded. It won’t be sent.')
                   // A reply goes back as one, to the message it answered, even one not loaded.
                   const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo)) : null
+                  // The draft changed while the cancel went: keep its reply, and say this one's went.
+                  if (restoreConflict(getDraft<Message>(chat.id), replyTo)) {
+                    appendToDraft(chat.id, body)
+                    return toast('Cancelled. Its text was added below your draft, which replies to another message.')
+                  }
                   toast(
                     appendToDraft(chat.id, body, reply)
                       ? 'Cancelled. The message was added below your draft.'
@@ -429,7 +437,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
                 (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
               ),
             )
-          }
+          }}
         />
         <Composer
           network={chat.network}

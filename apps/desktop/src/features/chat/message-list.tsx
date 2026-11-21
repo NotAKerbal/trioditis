@@ -18,6 +18,7 @@ import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
+import { cancelKind } from './cancel-scheduled.ts'
 import { againState, useSendAgainStates, type SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
@@ -413,11 +414,7 @@ export function MessageList(props: MessageListProps) {
               >
                 Send now
               </Button>
-              {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
-                  composer when it's here, and the person is told when it isn't. */}
-              <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onCancelScheduled(s)}>
-                {s.body === null ? 'Cancel send' : 'Cancel'}
-              </Button>
+              <CancelScheduled item={s} onCancel={props.onCancelScheduled} />
             </div>
           </div>
         ))}
@@ -453,6 +450,40 @@ export function MessageList(props: MessageListProps) {
         </Button>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Cancels a scheduled message. Its text goes back to the composer, so Cancel waits until it has
+ * opened; one this device can't open is discarded instead, once the person confirms, since
+ * cancelling deletes the server's only copy.
+ */
+function CancelScheduled({ item, onCancel }: { item: ScheduledItem; onCancel: (item: ScheduledItem) => void }) {
+  const [confirming, setConfirming] = useState(false)
+  const kind = cancelKind(item.body)
+  if (kind === 'discard' && confirming)
+    return (
+      <>
+        <span className="text-danger">Discard it for good?</span>
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(false)}>
+          Keep
+        </Button>
+        <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onCancel(item)}>
+          Discard
+        </Button>
+      </>
+    )
+  return (
+    <Button
+      variant="link"
+      size="sm"
+      className="h-auto text-xs"
+      disabled={kind === 'wait'}
+      title={kind === 'wait' ? 'Its text is still opening' : undefined}
+      onClick={() => (kind === 'discard' ? setConfirming(true) : onCancel(item))}
+    >
+      {kind === 'discard' ? 'Discard' : 'Cancel'}
+    </Button>
   )
 }
 
