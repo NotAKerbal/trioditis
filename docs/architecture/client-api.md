@@ -1058,9 +1058,10 @@ network's own username grammar; anything else is `not_found` (it could be one of
 connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
 host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
 chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
-IDs and X's only screen names, so those are left out. A contact's chat starts only on an account
-that has sent the contact (`contacts.list` gives their `networkAccountIds`; `newChats.start` refuses another),
-since some networks' contact IDs belong to one login. The desktop app offers a card's linked
+IDs and X's only screen names, so those are left out. A contact's chat can start on any of the person's accounts on
+that network; `contacts.list` gives the ones whose logins sent the contact (`networkAccountIds`),
+and the desktop app offers those first, letting the person choose when there's more than one
+account, since some networks' contact IDs belong to one login. The desktop app offers a card's linked
 contacts first, then its numbers on networks that take them, then its usernames on their own
 network, on the first account there. A `ghostId` must be one of the person's contacts on that
 account's network. A person can start 20 chats a minute; requests are kept a day. The bridge
@@ -1069,7 +1070,6 @@ include it (whatsmeow's own debug output still names it: never run WhatsApp with
 production).
 
 Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
-`That contact is on another of your accounts.` ·
 `That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
 sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
 then try again.`

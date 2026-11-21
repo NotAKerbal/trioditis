@@ -725,7 +725,7 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
-// one of their chats, and the first time each of their logins sees it. Profiles go only to people who share a chat with the ghost. The
+// one of their chats. Profiles go only to people who share a chat with the ghost. The
 // membership is the claim to send it: recorded first, so a profile update meanwhile reaches the
 // person too, and taken back if sending fails, so the next time tries again. Then, where the
 // ghost's ID is their phone number, that number, once for each of the person's logins.
@@ -735,35 +735,13 @@ func (c *Connector) ensureContact(ctx context.Context, o *owner, ghost networkid
 	if err != nil {
 		return err
 	}
-	// Each of the person's logins sends the contact once too, so the backend knows every
-	// account a chat with them can start on (contacts.accountIds). Marked after it's journaled,
-	// like ensureNumber, and by the contact's opaque ID, since its Matrix ID can be a number.
-	ghostID, err := c.ghostOpaque(ctx, ghost)
-	if err != nil {
-		return err
-	}
-	loginRoom := loginContactsRoom(o.userID, o.loginID)
-	seen, err := c.Store.IsMember(ctx, loginRoom, ghostID)
-	if err != nil {
-		return err
-	}
-	if added || !seen {
+	if added {
 		if err = c.emitContact(ctx, o, ghost, nil, nil); err != nil {
-			if added {
-				c.unclaim(ctx, room, mxid)
-			}
-			return err
-		}
-		if _, err = c.Store.AddMember(ctx, loginRoom, ghostID); err != nil {
+			c.unclaim(ctx, room, mxid)
 			return err
 		}
 	}
 	return c.ensureNumber(ctx, o, ghost)
-}
-
-// loginContactsRoom records which contacts one of a person's logins has sent.
-func loginContactsRoom(userID, loginID string) string {
-	return "login-contacts:" + userID + ":" + loginID
 }
 
 // ensureNumber sends the phone number a contact's ID is to the person, the first time one of

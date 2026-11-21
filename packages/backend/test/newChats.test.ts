@@ -156,31 +156,22 @@ describe('new chats', () => {
   })
 })
 
-describe('a contact’s account', () => {
-  it('starts a contact’s chat only on the account that sent the contact', async () => {
+describe('a contact’s accounts', () => {
+  it('records every account whose login sent the contact, as a hint for where to start', async () => {
     const t = setup()
     const { a, networkAccountId } = await connected(t)
-    const other = await t.run(
-      async (ctx) =>
-        await ctx.db.insert('networkAccounts', {
-          userId: 'user_a',
-          network: 'whatsapp',
-          loginId: 'login_other',
-          state: 'CONNECTED',
-          updatedAt: 0,
-        }),
-    )
-    await expect(
-      a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(50), ghostId: 'g_erin' }),
-    ).rejects.toThrow(/another of your accounts/)
-    await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(51), ghostId: 'g_erin' })
-    // Once the other account's login sends the contact too, its chat can start there as well.
     await ingest(t, [
       { type: 'loginState', state: 'CONNECTED', loginId: 'login_other' },
       { type: 'contact', ghostId: 'g_erin', sealed: sealed('erin2'), loginId: 'login_other' },
     ])
+    const other = await t.run(
+      async (ctx) =>
+        (await ctx.db.query('networkAccounts').collect()).find((row) => row.loginId === 'login_other')!._id,
+    )
+    const [contact] = (await a.query(api.contacts.list, { paginationOpts: { numItems: 10, cursor: null } })).page
+    expect(contact!.networkAccountIds).toEqual([networkAccountId, other])
+    // Either account can be asked; the network says if it can't find them from there.
     await a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(52), ghostId: 'g_erin' })
-    // And still on the first: both stay, the newer doesn't replace the older.
     await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(53), ghostId: 'g_erin' })
   })
 })

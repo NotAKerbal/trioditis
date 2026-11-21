@@ -62,11 +62,6 @@ export const start = mutation({
         )
         .unique()
       if (!contact) throw new ConvexError('That contact doesn’t exist.')
-      // A contact's ID can belong to the login that sent it, so its chat starts on an account
-      // that has sent it.
-      if (contact.accountIds?.length && !contact.accountIds.includes(networkAccountId)) {
-        throw new ConvexError('That contact is on another of your accounts.')
-      }
     }
     const now = Date.now()
     const recent = await ctx.db

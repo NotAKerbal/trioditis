@@ -127,8 +127,8 @@ const USERNAME_NETWORKS: Record<string, Network> = {
 
 /**
  * The ways a card offers to start a chat on these accounts, as each network's connector can
- * (START_TARGETS): its linked contacts first, on the account that sent them (the chat they
- * already have, or a new one), then its numbers on networks that find people by number, and
+ * (START_TARGETS): its linked contacts first, on each account there, those that sent them
+ * first (the chat they already have, or a new one), then its numbers on networks that find people by number, and
  * its usernames on their own network, each on the first account there. A number or username
  * goes as written; the bridge host puts it in the form the network takes.
  */
@@ -143,16 +143,18 @@ export function chatOptions(
     if (!START_TARGETS[link.network]?.contact) continue
     const contact = byContact.get(contactKey(link))
     const label = contact?.profile.name || 'Contact'
-    // On an account that sent the contact, and no other: its ID can belong to that login. One
-    // sent before contacts named their accounts could be on any of them, so each is offered.
-    const onNetwork = accounts.filter((a) => a.network === link.network)
-    const sent = contact?.networkAccountIds
-    const candidates = sent?.length ? onNetwork.filter((a) => sent.includes(a.networkAccountId)) : onNetwork
-    candidates.forEach((account, i) =>
+    // On every account the person has on that network, the ones that sent the contact first:
+    // some networks' contact IDs belong to one login, so with more than one account the person
+    // chooses, rather than the app guessing and failing quietly.
+    const sent = new Set(contact?.networkAccountIds ?? [])
+    const onNetwork = accounts
+      .filter((a) => a.network === link.network)
+      .sort((x, y) => Number(sent.has(y.networkAccountId)) - Number(sent.has(x.networkAccountId)))
+    onNetwork.forEach((account, i) =>
       out.push({
         network: link.network,
         networkAccountId: account.networkAccountId,
-        label: candidates.length > 1 ? `${label} (account ${i + 1})` : label,
+        label: onNetwork.length > 1 ? `${label} (account ${i + 1})` : label,
         target: { ghostId: link.ghostId },
       }),
     )

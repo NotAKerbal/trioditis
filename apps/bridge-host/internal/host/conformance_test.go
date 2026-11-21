@@ -582,10 +582,6 @@ func TestConformance(t *testing.T) {
 		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
 			t.Fatalf("second login's identifiers %q", plain.Identifiers)
 		}
-		// It sends the contact too, under its own login, so a chat can start on either account.
-		gw.waitFor(t, "the contact from alice's second login", func(e *protocol.Event) bool {
-			return e.Type == protocol.EventContact && e.UserID == "alice" && e.GhostID == first.GhostID && e.LoginID == aliceTwo
-		})
 		// A sync sends them again; another login without a chat with them gets nothing.
 		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
 		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
