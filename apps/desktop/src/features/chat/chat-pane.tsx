@@ -44,8 +44,8 @@ import {
   useMessages,
   useReactions,
   useReactionToggle,
+  useRetryStates,
   useSendMutations,
-  useSendStates,
   useTyping,
   type Message,
 } from '~/data/messages.ts'
@@ -71,17 +71,7 @@ import { MessageList } from './message-list.tsx'
 import { draftSendId } from '~/data/saved-drafts.ts'
 import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
 import { restoreConflict } from './cancel-scheduled.ts'
-import {
-  chainOf,
-  chainRoots,
-  fromDelivery,
-  latestAttempt,
-  nextAttempt,
-  sendAgain,
-  stateOf,
-  useSendingAgain,
-  type SendAgainState,
-} from './send-again.ts'
+import { againView, sendAgain, useSendingAgain } from './send-again.ts'
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
@@ -146,7 +136,15 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set())
   const bridge = useBridge()
   const bridgeKey = bridge.key
-  const { send, discard, schedule, cancelScheduled, forgetScheduled, sendScheduledNow } = useSendMutations()
+  const {
+    send,
+    sendAgain: sendAgainMutation,
+    discard,
+    schedule,
+    cancelScheduled,
+    forgetScheduled,
+    sendScheduledNow,
+  } = useSendMutations()
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen.
   const { text: draft, reply: replyTo } = useDraft<Message>(chat.id)
@@ -286,23 +284,22 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
 
   const byEvent = (eventId: string) => messages.find((m) => m.eventId === eventId)
 
-  // Sending again (send-again.ts): each of the person's sends belongs to a chain from its
-  // original, and every row of a chain shows where its latest attempt stands. How each attempt
-  // stands is its copy's delivery state in the list, or the server's for one not loaded or gone.
-  const own = messages.flatMap((m) => (m.clientMessageId ? [m] : []))
-  const roots = chainRoots(own.map((m) => m.clientMessageId!))
-  const troubled = [
-    ...new Set(
-      own.filter((m) => m.delivery === 'failed' || m.delivery === 'unknown').map((m) => roots.get(m.clientMessageId!)!),
-    ),
-  ]
-  // The server takes 100 IDs at a time: the most recent troubled chains, if there are more.
-  const askIds = troubled.slice(-Math.floor(100 / MAX_ASK)).flatMap((root) => chainOf(root).slice(0, MAX_ASK))
-  const serverStates = useSendStates(askIds)
+  // Sending again (send-again.ts): the server says, for each send that failed or may not have
+  // gone, where its chain stands and whether another attempt may be made. Asked in batches of
+  // at most 100, newest first.
+  const troubled = messages
+    .flatMap((m) =>
+      m.clientMessageId && (m.delivery === 'failed' || m.delivery === 'unknown') ? [m.clientMessageId] : [],
+    )
+    .reverse()
+  const retryBatches: string[][] = []
+  for (let i = 0; i < troubled.length; i += 100) retryBatches.push(troubled.slice(i, i + 100))
+  const retryStates = new Map(
+    [useRetryStates(retryBatches[0] ?? []), useRetryStates(retryBatches[1] ?? [])]
+      .flatMap((batch) => batch ?? [])
+      .map((r) => [r.clientMessageId, r.state] as const),
+  )
   const sendingAgain = useSendingAgain()
-  const known = new Map<string, SendAgainState>()
-  for (const s of serverStates ?? []) known.set(s.clientMessageId, stateOf(s.used))
-  for (const m of own) known.set(m.clientMessageId!, fromDelivery(m.delivery))
 
   const name = chat.name
   const muted = chat.muted
@@ -482,21 +479,24 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
             // One attempt per link of the chain, whatever the clicks and from whichever row: the
             // person chose to risk a duplicate on the network, once each time (send-again.ts).
             const text = m.body?.body
-            if (!text || !m.clientMessageId) return
-            const root = roots.get(m.clientMessageId) ?? m.clientMessageId
-            void sendAgain(root, known, (id) => sendText(text, m.replyTo, id)).then((state) => {
-              const say = state ? SEND_AGAIN_SAYS[state] : undefined
-              if (say) toast(say)
-            })
+            const state = m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined
+            if (!text || !state || !bridgeKey) return
+            void sendAgain(state, (nextId) => {
+              const sealed = sealText(text, nextId, session.userId, session.keyPair.publicKey, bridgeKey)
+              return sendAgainMutation({
+                clientMessageId: m.clientMessageId!,
+                nextId,
+                ...sealed,
+                ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+              })
+            }).then(
+              (created) => {
+                if (!created) toast('That message was sent again already, or can’t be now.')
+              },
+              (e: unknown) => toast(errorMessage(e, 'That message couldn’t be sent again.')),
+            )
           }}
-          againOf={(m) => {
-            if (!m.clientMessageId) return { state: undefined, canTry: false }
-            const root = roots.get(m.clientMessageId) ?? m.clientMessageId
-            return {
-              state: latestAttempt(root, known, sendingAgain)?.state,
-              canTry: nextAttempt(root, known, sendingAgain) !== null,
-            }
-          }}
+          againOf={(m) => againView(m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined, sendingAgain)}
           onDiscard={(m) => {
             if (m.clientMessageId)
               void discard({ clientMessageId: m.clientMessageId }).catch((e: unknown) =>
@@ -590,15 +590,6 @@ function replyStub(eventId: string): Message {
     clientMessageId: undefined,
     delivery: undefined,
   }
-}
-
-/** How many attempts of each chain are asked of the server. */
-const MAX_ASK = 8
-
-/** What to say when sending again found its replacement's ID used already. */
-const SEND_AGAIN_SAYS: Partial<Record<SendAgainState, string>> = {
-  maybe: 'It may already have been sent again. Check the chat before sending it once more.',
-  failed: 'Sending it again failed. You can try once more.',
 }
 
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>

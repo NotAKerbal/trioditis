@@ -812,28 +812,99 @@ describe('scheduled sends', () => {
     expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
   })
 
-  it('says how each of some client message IDs stands, the copy gone or not, leaving out unused ones', async () => {
-    const t = setup()
-    const a = await signIn(t, 'user_a')
-    const chatId = await aChat(t, 'user_a', 'p')
-    await a.mutation(api.messages.send, { chatId, clientMessageId: id(11), forBridge: sealed('b'), copy: sealed('c') })
-    await t.run(async (ctx) => {
-      for (const table of ['messages', 'outbox'] as const) {
-        const row = await ctx.db
-          .query(table)
-          .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(11)))
-          .first()
-        await ctx.db.patch(row!._id, { delivery: 'failed' })
-      }
+  describe('sending again, decided by the server', () => {
+    // Sets a send's delivery state on its copy (if there still is one) and its outbox row.
+    const setDelivery = (t: T, clientMessageId: string, delivery: 'failed' | 'unknown' | 'queued') =>
+      t.run(async (ctx) => {
+        for (const table of ['messages', 'outbox'] as const) {
+          const row = await ctx.db
+            .query(table)
+            .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', clientMessageId))
+            .first()
+          if (row) await ctx.db.patch(row._id, { delivery })
+        }
+      })
+    const states = async (a: Awaited<ReturnType<typeof signIn>>, ids: string[]) =>
+      Object.fromEntries(
+        (await a.query(api.messages.retryStates, { clientMessageIds: ids })).map((r) => [r.clientMessageId, r.state]),
+      )
+    const again = (a: Awaited<ReturnType<typeof signIn>>, clientMessageId: string, nextId: string) =>
+      a.mutation(api.messages.sendAgain, { clientMessageId, nextId, forBridge: sealed('b'), copy: sealed('c') })
+
+    async function failedSend() {
+      const t = setup()
+      const a = await signIn(t, 'user_a')
+      const chatId = await aChat(t, 'user_a', 'p')
+      await a.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(11),
+        forBridge: sealed('b'),
+        copy: sealed('c'),
+      })
+      await setDelivery(t, id(11), 'failed')
+      return { t, a }
+    }
+
+    it('makes one attempt per link, from any row of the chain, and says the same on each', async () => {
+      const { t, a } = await failedSend()
+      const first = (await states(a, [id(11)]))[id(11)]!
+      expect(first).toMatchObject({ root: id(11), latest: null, allowed: true })
+      expect(first.nextId).toMatch(/^rt_[A-Za-z0-9_-]{43}$/)
+      // Two clicks, or two tabs: one attempt.
+      expect((await again(a, id(11), first.nextId!)).created).toBe(true)
+      expect((await again(a, id(11), first.nextId!)).created).toBe(false)
+      const r1 = first.nextId!
+      const both = await states(a, [id(11), r1])
+      expect(both[id(11)]).toEqual(both[r1])
+      expect(both[r1]).toMatchObject({ root: id(11), latest: r1, delivery: 'queued', allowed: false, nextId: null })
+      // It failed: the next one is allowed, from the attempt's own row too.
+      await setDelivery(t, r1, 'failed')
+      const next = (await states(a, [r1]))[r1]!
+      expect(next).toMatchObject({ latest: r1, allowed: true })
+      expect(next.nextId).not.toBe(r1)
+      expect((await again(a, r1, next.nextId!)).state).toMatchObject({ latest: next.nextId, allowed: false })
     })
-    // Its copy deleted from the chat: the outbox still says it failed.
-    await a.mutation(api.messages.discardSend, { clientMessageId: id(11) })
-    expect(await a.query(api.messages.sendStates, { clientMessageIds: [id(11), id(12)] })).toEqual([
-      { clientMessageId: id(11), used: { already: 'send', delivery: 'failed' } },
-    ])
-    // Another person's IDs are theirs alone.
-    const b = await signIn(t, 'user_b')
-    expect(await b.query(api.messages.sendStates, { clientMessageIds: [id(11)] })).toEqual([])
+
+    it('never follows an attempt that may have gone, even once the original is deleted', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'unknown')
+      // The original's row is deleted from the chat: the server still knows the chain.
+      await a.mutation(api.messages.discardSend, { clientMessageId: id(11) })
+      const state = (await states(a, [r1]))[r1]!
+      expect(state).toMatchObject({ root: id(11), latest: r1, delivery: 'unknown', allowed: false, nextId: null })
+      // A stale page that thinks another is due: nothing is made.
+      const guess = (await states(a, [id(11)]))[id(11)]!
+      expect(guess.allowed).toBe(false)
+      const outbox = async () => (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).length
+      const before = await outbox()
+      expect((await again(a, r1, 'rt_made-up-by-a-stale-page-0000000000000000000')).created).toBe(false)
+      expect(await outbox()).toBe(before)
+    })
+
+    it('goes on from a failed attempt whose row was deleted, on a click', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      await a.mutation(api.messages.discardSend, { clientMessageId: r1 })
+      const state = (await states(a, [id(11)]))[id(11)]!
+      expect(state).toMatchObject({ latest: r1, delivery: 'failed', allowed: true })
+      expect((await again(a, id(11), state.nextId!)).created).toBe(true)
+    })
+
+    it('answers only for the person’s own sends, and makes none for anyone else', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      const b = await signIn(t, 'user_b')
+      expect(await b.query(api.messages.retryStates, { clientMessageIds: [id(11)] })).toEqual([])
+      await expect(again(b, id(11), r1)).rejects.toThrow(/doesn’t exist/)
+      // Not offered for a send that went fine, nor for a message ID never sent.
+      await setDelivery(t, id(11), 'queued')
+      expect((await states(a, [id(11), id(12)]))[id(11)]).toMatchObject({ allowed: false })
+      expect(await states(a, [id(12)])).toEqual({})
+    })
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {

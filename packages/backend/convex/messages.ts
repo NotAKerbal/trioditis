@@ -10,6 +10,7 @@ import { markOwnReadRange as markRange } from './lib/ingest'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
+import { retryPlan, retryState } from './lib/retry'
 import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
 import { envelope } from './validators'
 
@@ -140,26 +141,61 @@ export const send = mutation({
   },
 })
 
-const MAX_SEND_STATES = 100
+const MAX_RETRY_STATES = 100
 
 /**
- * What some of the person's client message IDs were used for and where each stands, as
- * `messages.send` would answer for them: the ones not used yet are left out. For sending a
- * message again, whose attempts' copies may be gone from the chat (discarded) while their
- * outbox rows, and so their states, are kept.
+ * Where sending each of these messages again stands, for any send in a chain (the original or
+ * an attempt): the chain's original, its latest attempt and that one's delivery state, and
+ * whether another may be made, with its client message ID (lib/retry.ts). IDs that aren't the
+ * person's sends are left out.
  */
-export const sendStates = query({
+export const retryStates = query({
   args: { clientMessageIds: v.array(v.string()) },
-  returns: v.array(v.object({ clientMessageId: v.string(), used: alreadyUsed })),
+  returns: v.array(v.object({ clientMessageId: v.string(), state: retryState })),
   handler: async (ctx, { clientMessageIds }) => {
     const member = await requireMember(ctx)
-    if (clientMessageIds.length > MAX_SEND_STATES) throw new ConvexError(`Ask for at most ${MAX_SEND_STATES} at once.`)
+    if (clientMessageIds.length > MAX_RETRY_STATES)
+      throw new ConvexError(`Ask for at most ${MAX_RETRY_STATES} at once.`)
     const out = []
     for (const clientMessageId of new Set(clientMessageIds)) {
-      const used = await clientMessageIdUsed(ctx, member.userId, clientMessageId)
-      if (used) out.push({ clientMessageId, used })
+      const plan = await retryPlan(ctx, member.userId, clientMessageId)
+      if (!plan) continue
+      const { next: _next, ...state } = plan
+      out.push({ clientMessageId, state })
     }
     return out
+  },
+})
+
+/**
+ * Sends a message again: the next attempt of the chain `clientMessageId` belongs to (any send
+ * in it), sealed by the client for `nextId` as `messages.send` takes it. Made only if the
+ * server allows one now and `nextId` is the one it says (`retryStates`); otherwise nothing is
+ * made, and `created` is false. So repeated clicks, other tabs and stale pages make one attempt
+ * per link, and one that may have gone is never followed by another.
+ */
+export const sendAgain = mutation({
+  args: {
+    clientMessageId: v.string(),
+    nextId: v.string(),
+    forBridge: envelope,
+    copy: envelope,
+    replyTo: v.optional(v.string()),
+  },
+  returns: v.object({ created: v.boolean(), state: retryState }),
+  handler: async (ctx, { clientMessageId, nextId, ...input }) => {
+    const member = await requireMember(ctx)
+    const plan = await retryPlan(ctx, member.userId, clientMessageId)
+    if (!plan) throw new ConvexError('That message doesn’t exist.')
+    const { next, ...state } = plan
+    if (!plan.allowed || plan.nextId !== nextId) return { created: false, state }
+    const chat = await ownChat(ctx, member.userId, next.chatId!)
+    const send = { clientMessageId: nextId, ...input }
+    await checkSend(ctx, chat, send)
+    await queueSend(ctx, chat, send, { root: plan.root, of: next.of, index: next.index })
+    const after = await retryPlan(ctx, member.userId, plan.root)
+    const { next: _next, ...now } = after!
+    return { created: true, state: now }
   },
 })
 

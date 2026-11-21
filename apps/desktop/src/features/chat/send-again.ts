@@ -1,58 +1,21 @@
-import { digest } from '@trioditis/crypto'
 import { useSyncExternalStore } from 'react'
 
-// Sending a failed or unconfirmed message again. Each attempt is a link in a chain from the
-// original: the first attempt's client message ID is worked out from the original's, and each
-// next one from the one before, only once that one has failed. So every click, from any row of
-// the chain, in any tab or after a reload, asks for the same send as the others for that link,
-// and the server does nothing with an ID it has seen (client-api.md, Sending). Where the chain
-// stands is read from how its links stand: their copies in the list, or the server
-// (messages.sendStates) for one whose copy is gone. Nothing here runs on its own: a send whose
-// outcome is `unknown` goes again only on a click, and only while no later attempt might have
-// gone.
-
-/** The most attempts a message can have; enough for any person, and what's asked of the server. */
-export const MAX_ATTEMPTS = 8
-
-const ids = new Map<string, string>()
-
-/**
- * The client message ID of the next attempt after `clientMessageId`: a hash of it, under a
- * prefix of its own, 46 characters within the server's 16 to 64. A hash, not a suffix, so it
- * can't be the ID of some other send, and every link in the chain is as short.
- */
-export function replacementId(clientMessageId: string): string {
-  let id = ids.get(clientMessageId)
-  if (!id) {
-    id = `ra_${digest(`trioditis/send-again/v1/${clientMessageId}`)}`
-    if (ids.size > 5000) ids.clear()
-    ids.set(clientMessageId, id)
-  }
-  return id
-}
-
-/** The IDs every attempt for `original` would have, in order. */
-export function chainOf(original: string): string[] {
-  const out: string[] = []
-  let id = original
-  for (let i = 0; i < MAX_ATTEMPTS; i++) out.push((id = replacementId(id)))
-  return out
-}
+// Sending a failed or unconfirmed message again. The server decides (messages.retryStates and
+// messages.sendAgain, client-api.md): which chain a send belongs to, where its latest attempt
+// stands, whether another may be made, and that attempt's client message ID. This page only
+// shows what it says, the same on every row of a chain, and knows which chains have an attempt
+// on its way from here so a click meanwhile does nothing.
 
 /**
  * Where a chain stands, by its latest attempt: on its way from here (`sending`); taken and
- * being sent (`going`); sent (`sent`); may have been sent (`maybe`); or failed (`failed`), when
- * another attempt can be made.
+ * being sent (`going`); sent (`sent`); may have been sent (`maybe`); or failed (`failed`).
  */
 export type SendAgainState = 'sending' | 'going' | 'sent' | 'maybe' | 'failed'
 
-/** The answer messages.send gives: new, or what the ID went as already. */
-export type SendAnswer =
-  'queued' | { already: 'send'; delivery: string | null } | { already: 'scheduled'; state: string }
-
-/** Where a message is, by its delivery state. */
+/** Where an attempt is, by its delivery state. */
 export function fromDelivery(delivery: string | null | undefined): Exclude<SendAgainState, 'sending'> {
   switch (delivery) {
+    case null:
     case undefined:
     case 'queued':
     case 'claimed':
@@ -69,93 +32,53 @@ export function fromDelivery(delivery: string | null | undefined): Exclude<SendA
   }
 }
 
-/** Where an attempt stands by the server's answer: a new send is on its way, not sent yet. */
-export function stateOf(answer: SendAnswer): Exclude<SendAgainState, 'sending'> {
-  if (answer === 'queued') return 'going'
-  if (answer.already === 'scheduled') return answer.state === 'scheduled' ? 'going' : 'failed'
-  return fromDelivery(answer.delivery)
+/** What the server says of a chain (messages.retryStates). */
+export interface RetryState {
+  root: string
+  latest: string | null
+  delivery: string | null
+  allowed: boolean
+  nextId: string | null
 }
 
-/**
- * The latest attempt for `original`, from how its links stand (`known`: client message ID to
- * state, from the list and the server) and which are on their way from this page, going on
- * past failed ones only. Null when none has been made.
- */
-export function latestAttempt(
-  original: string,
-  known: ReadonlyMap<string, SendAgainState>,
+/** A row's badge and whether it offers another attempt, from its chain's state. */
+export function againView(
+  state: RetryState | undefined,
   sending: ReadonlySet<string>,
-): { id: string; state: SendAgainState } | null {
-  let latest: { id: string; state: SendAgainState } | null = null
-  for (const id of chainOf(original)) {
-    const state = sending.has(id) ? 'sending' : known.get(id)
-    if (!state) break
-    latest = { id, state }
-    if (state !== 'failed') break
-  }
-  return latest
-}
-
-/** The next attempt's ID, if one may be made now: none yet, or the latest failed. */
-export function nextAttempt(
-  original: string,
-  known: ReadonlyMap<string, SendAgainState>,
-  sending: ReadonlySet<string>,
-): string | null {
-  const latest = latestAttempt(original, known, sending)
-  if (latest && latest.state !== 'failed') return null
-  const chain = chainOf(original)
-  const next = latest ? chain[chain.indexOf(latest.id) + 1] : chain[0]
-  return next ?? null
-}
-
-/**
- * Each row's chain: the original it belongs to, for every message that is one of a chain's
- * attempts; a message that isn't is its own original. So every row of a chain shows the same.
- */
-export function chainRoots(clientMessageIds: readonly string[]): Map<string, string> {
-  const roots = new Map<string, string>()
-  for (const id of clientMessageIds) for (const link of chainOf(id)) if (!roots.has(link)) roots.set(link, id)
-  // An attempt's own chain is part of its original's: map the links under it to the same root.
-  const rootOf = (id: string) => {
-    let root = id
-    for (let i = 0; i < MAX_ATTEMPTS + 1 && roots.has(root); i++) root = roots.get(root)!
-    return root
-  }
-  return new Map(clientMessageIds.map((id) => [id, rootOf(id)]))
+): { state: SendAgainState | undefined; canTry: boolean } {
+  if (!state) return { state: undefined, canTry: false }
+  if (sending.has(state.root)) return { state: 'sending', canTry: false }
+  return { state: state.latest ? fromDelivery(state.delivery) : undefined, canTry: state.allowed && !!state.nextId }
 }
 
 let sending: ReadonlySet<string> = new Set()
 const listeners = new Set<() => void>()
 
-function setSending(id: string, on: boolean) {
+function setSending(root: string, on: boolean) {
   const next = new Set(sending)
-  if (on) next.add(id)
-  else next.delete(id)
+  if (on) next.add(root)
+  else next.delete(root)
   sending = next
   for (const listener of listeners) listener()
 }
 
 /**
- * Makes the next attempt for `original` with `send`, given its ID, if one may be made now.
- * The attempt's state then comes from the list and the server, not from here: this page only
- * knows it's on its way until the server answers. If the call doesn't reach the server, the
- * same link can be tried again with the same ID, so one that did reach it isn't made twice.
+ * Makes the chain's next attempt with `send` (sealing for `state.nextId` and calling
+ * messages.sendAgain), unless the server doesn't allow one or one is on its way from here.
+ * Whether it was made is the server's answer; repeated clicks and other tabs make one.
  */
 export async function sendAgain(
-  original: string,
-  known: ReadonlyMap<string, SendAgainState>,
-  send: (id: string) => Promise<SendAnswer>,
-): Promise<SendAgainState | undefined> {
-  const id = nextAttempt(original, known, sending)
-  if (!id) return latestAttempt(original, known, sending)?.state
-  setSending(id, true)
+  state: RetryState | undefined,
+  send: (nextId: string) => Promise<{ created: boolean }>,
+): Promise<boolean> {
+  if (!state?.allowed || !state.nextId || sending.has(state.root)) return false
+  setSending(state.root, true)
   try {
-    return stateOf(await send(id))
+    return (await send(state.nextId)).created
   } catch {
-    return undefined
+    return false
   } finally {
-    setSending(id, false)
+    setSending(state.root, false)
   }
 }
 
@@ -164,5 +87,5 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener)
 }
 
-/** The attempts on their way from this page. */
+/** The chains with an attempt on its way from this page, by original. */
 export const useSendingAgain = () => useSyncExternalStore(subscribe, () => sending)
