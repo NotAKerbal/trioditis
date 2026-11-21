@@ -406,6 +406,7 @@ func (c *Connector) messagePlaintext(ctx context.Context, o *owner, eventType ev
 			}
 		}
 	}
+	plain.Previews = c.linkPreviews(ctx, o, msg.BeeperLinkPreviews)
 	return plain
 }
 
@@ -1245,8 +1246,8 @@ func longestFitting(s string, fits func(string) bool) string {
 
 // fitMessage cuts a message down until it seals within the backend's limit for a message
 // or edit, so it is stored rather than quarantined: first the formatted body goes, then
-// over-long attachment names, then the body is cut short, and last the mentions. Anything
-// cut is marked `truncated` in the plaintext.
+// over-long attachment names, then link previews, then the body is cut short, and last the
+// mentions. Anything cut is marked `truncated` in the plaintext.
 func fitMessage(plain *protocol.MessagePlaintext) *protocol.MessagePlaintext {
 	fits := func() bool { return sealedSize(plain) <= protocol.MaxMessageSealedBytes }
 	if fits() {
@@ -1256,6 +1257,11 @@ func fitMessage(plain *protocol.MessagePlaintext) *protocol.MessagePlaintext {
 	for i := range plain.Attachments {
 		plain.Attachments[i].Name = truncateUTF8(plain.Attachments[i].Name, maxNameBytes)
 	}
+	if fits() {
+		return plain
+	}
+	// The links are still in the body; a preview is only a nicer way to show them.
+	plain.Previews = nil
 	if fits() {
 		return plain
 	}

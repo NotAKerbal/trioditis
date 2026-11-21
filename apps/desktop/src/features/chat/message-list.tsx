@@ -17,6 +17,8 @@ import type { Message, Reaction } from '~/data/messages.ts'
 import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
+import { LinkCards } from './link-card.tsx'
+import { cardReplacesText, linkCards } from './link-preview.ts'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 import type { SendAgainState } from './send-again.ts'
 
@@ -221,9 +223,13 @@ export function MessageList(props: MessageListProps) {
           const files = (!m.deleted && m.body?.attachments) || []
           const text = m.body ? captionOf(m.body) : ''
           const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
+          const cards = !m.deleted && m.body ? linkCards(m.body, text) : []
+          // A message that is only a link the network previewed shows the card alone.
+          const shownText = cardReplacesText(cards, text) ? '' : text
           // Pictures on their own are shown without a bubble around them, the time over a corner.
           // A file or a player keeps its bubble, so the time never sits on its controls.
-          const bare = !m.deleted && files.length > 0 && files.every(isImage) && !text && !quoted && !m.replyTo
+          const bare =
+            !m.deleted && files.length > 0 && files.every(isImage) && !text && !cards.length && !quoted && !m.replyTo
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
           // Delivery once per run of the person's own, at its end; a message still going, edited or
           // in trouble shows its own.
@@ -315,7 +321,8 @@ export function MessageList(props: MessageListProps) {
                             className={bare ? undefined : 'my-1'}
                           />
                         ) : null}
-                        {text ? <Linked text={text} /> : null}
+                        {shownText ? <Linked text={shownText} /> : null}
+                        {cards.length ? <LinkCards cards={cards} network={props.network} self={m.self} /> : null}
                       </>
                     ) : (
                       'This message can’t be opened on this device.'
@@ -325,6 +332,16 @@ export function MessageList(props: MessageListProps) {
                     {meta && bare ? (
                       // Over the picture's corner, on a scrim so it reads on any picture.
                       <span className="absolute right-2 bottom-2 inline-flex rounded-full bg-scrim px-1.5 py-1 text-on-color">
+                        {meta}
+                      </span>
+                    ) : meta && cards.length ? (
+                      // Under a link's card, on its own short line: there's no last line of text to share.
+                      <span
+                        className={cn(
+                          'flex justify-end',
+                          m.self ? 'text-primary-foreground/90' : 'text-subtle-foreground',
+                        )}
+                      >
                         {meta}
                       </span>
                     ) : meta ? (

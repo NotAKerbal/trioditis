@@ -88,11 +88,30 @@ Each attachment is encrypted as a single `XChaCha20-Poly1305` blob (chunked stre
     }
   ],
   "mentions": ["<contact id>"],
+  "previews": [
+    {
+      "url": "https://example.com/page",
+      "title": "The page's title",
+      "description": "What the page says about itself",
+      "siteName": "Example",
+      "image": {
+        "mediaId": "...",
+        "mime": "image/jpeg",
+        "size": 23456,
+        "key": "...",
+        "nonce": "...",
+        "width": 1200,
+        "height": 630
+      }
+    }
+  ],
   "truncated": true
 }
 ```
 
-- `truncated` is set only when the bridge host had to trim an oversized message to stay within the 256 KiB sealed envelope limit (`html` dropped first, then `body` cut on a UTF-8 character boundary).
+- `previews` are the network's own previews of links in the message, made on the sender's device (WhatsApp, Signal, Telegram, Messenger, Instagram, LinkedIn, Slack and X send them). Up to three, each an `http`/`https` `url` with a title, description or picture; the picture is a media attachment like any other. Neither the bridge host nor a client fetches a link to make one: a link without a preview is drawn by the client from its address alone. When a message is too large, previews are dropped after `html` and before `body` is cut.
+
+- `truncated` is set only when the bridge host had to trim an oversized message to stay within the 256 KiB sealed envelope limit (`html` dropped first, then `previews`, then `body` cut on a UTF-8 character boundary).
 - Chat and contact metadata carry their avatar in an `avatar` attachment field. If an avatar hasn't changed and its temporary upload expired, the metadata sets `avatarUnchanged: true` so clients keep their cached copy.
 - A group's collage (the members whose pictures make its picture when it has none) is sealed apart from its metadata in a `chatCollage` event: kind `chat`, object ID `<portalId>/collage`, plaintext `{"ghosts": [...]}`, to the person only. Apart, because bridgev2 changes a chat's name, picture and members in one go and saves the chat after, so describing the chat again for its members could send a name or picture being replaced. It names up to four opaque ghost IDs, never the person's, those with a picture first, in a fixed order. Clients draw each from that contact's profile, so a member's new picture needs no new collage. The bridge host chooses again on joins and leaves, when a member's picture is set or removed, and at each start, and sends it only when the choice changed (the last one sent is kept as opaque IDs in `trioditis_collage`).
 - Readers preserve unknown fields so future writers can extend schemas cleanly.
