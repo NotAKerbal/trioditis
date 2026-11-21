@@ -1,7 +1,7 @@
 import { toast } from '@trioditis/ui/toast'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { useChat, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
+import { useChatActions, useOpenChat, type Chat, type ChatId } from '~/data/chats.ts'
 import { NOTHING_READ, readOnOpen } from '~/data/read-on-open.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
@@ -177,8 +177,11 @@ const seen = () => document.visibilityState === 'visible' && document.hasFocus()
 
 /** Marks the open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
 function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId) => Promise<unknown>) {
-  // The same object until the chat's row changes, so the effect runs once per change.
-  const chat = useChat(chatId)
+  // The same object until the chat's row changes, so the effect runs once per change. The
+  // sidebar's copy, shown while the server is asked, doesn't count: the chat is marked read on
+  // the server's answer, as it was before that copy was shown, never on a click alone.
+  const open = useOpenChat(chatId)
+  const chat = open.confirmed ? open.chat : undefined
   const visible = useSyncExternalStore(subscribeSeen, seen)
   const done = useRef(NOTHING_READ)
   useEffect(() => {

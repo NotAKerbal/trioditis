@@ -69,7 +69,9 @@ import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId
 import { canSignInToGoogle, GoogleSignInError, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
 import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
 import { Group } from '~/features/settings/layout.tsx'
+import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
+import { useSession } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
 
@@ -101,10 +103,25 @@ export function PeopleDialog({
   /** Opens a chat a card started, closing the window. */
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
+  const session = useSession()
   return (
     <Dialog open={!!view} onOpenChange={(open) => !open && onViewChange(undefined)}>
       <DialogContent className="flex h-[660px] w-[min(980px,calc(100vw-32px))]" aria-describedby={undefined}>
-        {view ? <People view={view} onViewChange={onViewChange} onOpenChat={onOpenChat} /> : null}
+        {/* A page of the address book the server couldn't answer takes down only this window,
+            which then tries again, asking afresh (usePages), rather than the whole app. */}
+        {view ? (
+          <RetryBoundary
+            offline={session.offline}
+            fallback={(say, retry) => (
+              <div className="flex min-w-0 flex-1 flex-col">
+                <DialogTitle className="sr-only">People</DialogTitle>
+                <LoadError say={say('Couldn’t load your people.')} onRetry={retry} />
+              </div>
+            )}
+          >
+            {(attempt) => <People view={view} retries={attempt} onViewChange={onViewChange} onOpenChat={onOpenChat} />}
+          </RetryBoundary>
+        ) : null}
       </DialogContent>
     </Dialog>
   )
@@ -124,15 +141,18 @@ function matches(card: PersonPlaintext, query: string) {
 
 function People({
   view,
+  retries,
   onViewChange,
   onOpenChat,
 }: {
   view: PeopleView
+  /** Retries so far after a page couldn't load (RetryBoundary): each asks afresh. */
+  retries: number
   onViewChange: (view: PeopleView | undefined) => void
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
-  const people = usePeople()
-  const contacts = useNetworkContacts()
+  const people = usePeople(retries)
+  const contacts = useNetworkContacts(retries)
   const actions = usePeopleActions(people)
   const syncContacts = useSyncContacts()
   const [query, setQuery] = useState('')

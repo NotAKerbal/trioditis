@@ -26,7 +26,8 @@ export function useChatContent(chat: Chat, attempt = 0) {
   const cancelledRows = useCancelledScheduled(chat.id)
   // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
   const pendingScheduled = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
-  const scheduledTexts = useScheduledTexts([...pendingScheduled, ...(cancelledRows ?? [])].map((s) => s._id))
+  const scheduledIds = [...pendingScheduled, ...(cancelledRows ?? [])].map((s) => s._id)
+  const scheduledTexts = useScheduledTexts(scheduledIds)
   return {
     ...page,
     serverReactions: reactions.reactions,
@@ -36,7 +37,12 @@ export function useChatContent(chat: Chat, attempt = 0) {
     scheduledTexts,
     /** Something shown alongside the messages is still on its way. */
     extrasPending:
-      reactions.pending || senders.pending || scheduledRows === undefined || cancelledRows === undefined,
+      reactions.pending ||
+      senders.pending ||
+      scheduledRows === undefined ||
+      cancelledRows === undefined ||
+      // A copy that can't be opened or fetched is there too, as null; only one on its way is missing.
+      scheduledIds.some((id) => !scheduledTexts.has(id)),
   }
 }
 

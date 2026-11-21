@@ -210,7 +210,11 @@ export function useOpenChat(chatId: ChatId | undefined): OpenChatState {
     // is the server not answering in time, as when every query is asked again at once after the
     // computer wakes: a chat already on screen stays open, with what it last showed, rather
     // than closing under the person.
-    if (error && (error instanceof ConvexError || !data)) return { chat: null, confirmed: true }
+    if (error && (error instanceof ConvexError || !data)) {
+      // Gone for good: its old row mustn't open it again, from history say, while asked anew.
+      if (error instanceof ConvexError) knownRows.delete(rowKey(session, chatId))
+      return { chat: null, confirmed: true }
+    }
     if (data) {
       remember(data as ChatRow, session)
       return { chat: toChat(data as ChatRow, session), confirmed: true }

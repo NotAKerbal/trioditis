@@ -14,10 +14,10 @@ import {
 import { sealJson, type Envelope } from '@trioditis/crypto'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
-import { useMutation } from 'convex/react'
+import { useMutation, usePaginatedQuery as useFreshPaginatedQuery, type PaginatedQueryArgs } from 'convex/react'
 // The cached hook keeps the address book's pages subscribed for a while after the People window
 // closes (main.tsx), so opening it again shows everyone at once, already up to date.
-import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
+import { usePaginatedQuery as useCachedPaginatedQuery } from 'convex-helpers/react/cache/hooks'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useAccounts } from '~/data/chats.ts'
 import { errorCode } from '~/lib/errors.ts'
@@ -70,6 +70,24 @@ const cardCache = new Map<string, PersonPlaintext | null>()
 const contactCache = new Map<string, ContactPlaintext | null>()
 const identifierCache = new Map<string, ContactIdentifiersPlaintext | null>()
 
+/**
+ * A list's pages, from the cache, or asked afresh on a retry (`attempt` above 0): the cached hook
+ * keeps a failed page, under the same key, for minutes, so asking it again the same way fails
+ * again. Convex's own hook asks under a new pagination ID each time (as useMessages does).
+ */
+function usePages<Q extends typeof api.people.list | typeof api.contacts.list | typeof api.contacts.identifiers>(
+  query: Q,
+  initialNumItems: number,
+  attempt: number,
+) {
+  const retrying = attempt > 0
+  // None of these lists takes arguments but its page.
+  const args = {} as PaginatedQueryArgs<Q>
+  const cached = useCachedPaginatedQuery(query, retrying ? 'skip' : args, { initialNumItems })
+  const fresh = useFreshPaginatedQuery(query, retrying ? args : 'skip', { initialNumItems })
+  return retrying ? fresh : cached
+}
+
 /** Keeps loading pages until there are none left: the address book is matched as a whole. */
 function useEveryPage(status: string, loadMore: (n: number) => void, pageSize: number) {
   useEffect(() => {
@@ -78,9 +96,9 @@ function useEveryPage(status: string, loadMore: (n: number) => void, pageSize: n
 }
 
 /** Every card, opened, or undefined until they've all loaded. Ones this device can't open are left out. */
-export function usePeople(): StoredPerson[] | undefined {
+export function usePeople(attempt = 0): StoredPerson[] | undefined {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.people.list, {}, { initialNumItems: 100 })
+  const { results, status, loadMore } = usePages(api.people.list, 100, attempt)
   useEveryPage(status, loadMore, 100)
   return useMemo(() => {
     if (status !== 'Exhausted') return undefined
@@ -100,11 +118,11 @@ export function usePeople(): StoredPerson[] | undefined {
 }
 
 /** Every contact on every network, opened with what the person's logins know them by, or undefined until loaded. */
-export function useNetworkContacts(): NetworkContact[] | undefined {
+export function useNetworkContacts(attempt = 0): NetworkContact[] | undefined {
   const session = useSession()
-  const contacts = usePaginatedQuery(api.contacts.list, {}, { initialNumItems: 500 })
+  const contacts = usePages(api.contacts.list, 500, attempt)
   useEveryPage(contacts.status, contacts.loadMore, 500)
-  const identifiers = usePaginatedQuery(api.contacts.identifiers, {}, { initialNumItems: 500 })
+  const identifiers = usePages(api.contacts.identifiers, 500, attempt)
   useEveryPage(identifiers.status, identifiers.loadMore, 500)
   return useMemo(() => {
     if (contacts.status !== 'Exhausted' || identifiers.status !== 'Exhausted') return undefined
