@@ -64,13 +64,11 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
-	// connectedBy holds, for each account a login completed, the login session that last
-	// did (networkid.UserLoginID → login session ID), so a cancelled attempt that finishes late
-	// doesn't log out the account a later attempt connected.
-	connectedBy sync.Map
 	// discarded holds the accounts cancelled logins connected, until settleDiscarded decides
 	// (login session ID → *discardedLogin).
 	discarded sync.Map
+	// messages serializes the attempts at one message, from handling to settling (messageLocks).
+	messages messageLocks
 	// browserSteps holds the login steps the sign-in browser submitted ("<login session
 	// ID>/<step ID>" → struct{}), for as long as the process runs: a paste of one that arrives
 	// later is dropped rather than refused.
@@ -135,6 +133,7 @@ func (c *Connector) Init(br *bridgev2.Bridge) {
 	// One connector per process: the patched bridgev2 tells it how each remote event's
 	// handling really ended (third_party/mautrix.patch).
 	bridgev2.RemoteEventDone = c.remoteEventDone
+	bridgev2.RemoteEventStart = c.messages.start
 }
 
 // Start runs after bridgev2 has upgraded its database and before any login connects, so a
@@ -147,6 +146,8 @@ func (c *Connector) Start(ctx context.Context) error { return c.RecoverInflight(
 // so without that a message whose second part failed would never get it; the parts already
 // journaled come again with the same event IDs and are applied once.
 func (c *Connector) remoteEventDone(evt bridgev2.RemoteEvent, res bridgev2.EventHandlingResult) {
+	// Last, once the outcome is settled and reported: the next attempt at the message goes then.
+	defer c.messages.done(evt)
 	messages, watched := handled.Messages(evt)
 	if !watched {
 		return
@@ -342,7 +343,7 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 		mapped = "LOGGED_OUT"
 		// The login that connected it is no longer what the account is: a cancelled re-pair of it
 		// later is logged out as any new account would be (settleDiscarded).
-		c.connectedBy.Delete(networkid.UserLoginID(state.RemoteID))
+		c.deactivated(ctx, networkid.UserLoginID(state.RemoteID))
 	default:
 		return nil
 	}

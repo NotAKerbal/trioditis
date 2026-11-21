@@ -267,7 +267,10 @@ after the cancel is reported as nothing more; the account it connected is logged
 unless it is one the person already had (signing in to it again), which is left as it was, or
 another of their attempts on the network connected it or is still going: the cancel was of
 that one attempt, not of the retry they kept. The backend applies the same rule to a late
-`complete` step or `loginState` for a cancelled login session.
+`complete` step or `loginState` for a cancelled login session. A logout put off for a retry
+is kept by the bridge host (`trioditis_discarded`) until it has finished, across restarts, and
+happens only while the account is still what that cancelled attempt connected, for the same
+person (`trioditis_activation`, cleared when the account is logged out).
 
 A step itself may also carry `expiresAt` (bridge host time, ms); both are optional and the
 backend takes either. The client also hides any code from a host not heard from in two minutes.

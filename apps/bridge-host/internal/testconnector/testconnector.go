@@ -473,6 +473,12 @@ func (n *Network) Incoming(loginID networkid.UserLoginID, chatID networkid.Porta
 // one text part per entry, with part IDs p0, p1, …. It returns the remote event bridgev2 was
 // given, so a test can follow its handling.
 func (n *Network) IncomingParts(loginID networkid.UserLoginID, chatID networkid.PortalID, senderID networkid.UserID, msgID networkid.MessageID, texts []string) (bridgev2.RemoteEvent, error) {
+	return n.IncomingPartsWith(loginID, chatID, senderID, msgID, texts, nil)
+}
+
+// IncomingPartsWith is IncomingParts, calling before with the remote event before it is
+// handed to bridgev2, as a network's handler would start watching it.
+func (n *Network) IncomingPartsWith(loginID networkid.UserLoginID, chatID networkid.PortalID, senderID networkid.UserID, msgID networkid.MessageID, texts []string, before func(bridgev2.RemoteEvent)) (bridgev2.RemoteEvent, error) {
 	ul, err := n.login(loginID)
 	if err != nil {
 		return nil, err
@@ -491,6 +497,9 @@ func (n *Network) IncomingParts(loginID networkid.UserLoginID, chatID networkid.
 			}
 			return converted, nil
 		},
+	}
+	if before != nil {
+		before(evt)
 	}
 	return evt, resultError(ul.QueueRemoteEvent(evt))
 }

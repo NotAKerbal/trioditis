@@ -215,7 +215,8 @@ failed part way, or that a stop cut off (`trioditis_inflight` lists the messages
 bridged), has its saved parts forgotten, so bridgev2 doesn't drop the redelivery as a
 duplicate of them and bridges it whole; the parts already journaled come again with the same
 event IDs and are applied once. A redelivery that arrives while the first attempt is still
-unsettled (its parts in flight) is refused rather than taken for a duplicate, an attempt that
+unsettled waits until it is settled (the attempts at one message go one at a time, from
+handling to settling), and is then bridged against what that attempt left, an attempt that
 ends after its handler stopped waiting is still settled, and the outcome is passed on only once
 the in-flight record is cleared. It is kept on purpose: a
 message can be decrypted only once, so without it a crash mid-message would lose that

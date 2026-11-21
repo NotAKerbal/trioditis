@@ -123,6 +123,14 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_discarded (session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, login_id TEXT NOT NULL)`,
 		})
 	}).
+	WithRaw(7, 8, 0, "Which login session connected each account", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// The account's current activation: the login session that last connected it, and for
+		// whom, until it is logged out. A cancelled login's account is logged out only while it is
+		// still that login's (connector, settleDiscarded), across restarts too.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_activation (login_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_id TEXT NOT NULL)`,
+		})
+	}).
 	Finish()
 
 // InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
@@ -160,6 +168,35 @@ func (s *Store) PutDiscarded(ctx context.Context, d DiscardedLogin) error {
 // DeleteDiscarded forgets a decision once made.
 func (s *Store) DeleteDiscarded(ctx context.Context, sessionID string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_discarded WHERE session_id=$1`, sessionID)
+	return err
+}
+
+// Activation is which login session last connected an account (by its network login ID),
+// and for whom.
+type Activation struct{ SessionID, UserID string }
+
+// PutActivation records that a login session connected an account, replacing the last.
+func (s *Store) PutActivation(ctx context.Context, loginID string, a Activation) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_activation (login_id, session_id, user_id) VALUES ($1, $2, $3)
+		 ON CONFLICT (login_id) DO UPDATE SET session_id=excluded.session_id, user_id=excluded.user_id`,
+		loginID, a.SessionID, a.UserID)
+	return err
+}
+
+// GetActivation is an account's current activation, or ErrNotFound once it was logged out.
+func (s *Store) GetActivation(ctx context.Context, loginID string) (Activation, error) {
+	var a Activation
+	err := s.DB.QueryRow(ctx, `SELECT session_id, user_id FROM trioditis_activation WHERE login_id=$1`, loginID).Scan(&a.SessionID, &a.UserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, ErrNotFound
+	}
+	return a, err
+}
+
+// DeleteActivation records that an account was logged out.
+func (s *Store) DeleteActivation(ctx context.Context, loginID string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_activation WHERE login_id=$1`, loginID)
 	return err
 }
 
