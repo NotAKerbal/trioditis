@@ -717,7 +717,7 @@ await convex.mutation(api.messages.send, {
 | `submitted`         | Sending, handed to the network                                                                                                                                                                                                                                            |
 | `sent`              | Sent (one tick)                                                                                                                                                                                                                                                           |
 | `delivered`         | Delivered (two ticks)                                                                                                                                                                                                                                                     |
-| `read`              | Read                                                                                                                                                                                                                                                                      |
+| `read`              | Read. Set by someone else's read receipt (`receipt` event) covering the message, as well as by `sendStatus`; never lowered after                                                                                                                                          |
 | `failed`            | Not sent. Offer **Retry** (a new send with a new `clientMessageId`) or **Delete** (`messages.discardSend`)                                                                                                                                                                |
 | `unknown`           | **May not have sent.** Trioditis never resends on its own, because the network may have it. Offer "Send again" (a new `clientMessageId`, which may duplicate) or "Discard" (`messages.discardSend({ clientMessageId })`). A late confirmation can still move it to `sent` |
 
@@ -1104,7 +1104,13 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
 
 1. **Done:** mentions and message requests come from the bridge host and are applied at
    ingest, and a new message wakes a snoozed chat. A read receipt from the person's phone
-   recounts unread and mentions after it.
+   recounts unread and mentions after it. The chat keeps how far the person has read
+   (`readSortKey`, from `chats.markRead` or their own receipt, only ever forward), so a
+   message that arrives late but sorts before it isn't counted unread, and an older receipt
+   doesn't bring counts back. Someone else's receipt marks the person's own messages up to it
+   `read` (at most 100 per receipt, newest first). Quarantined events are listed to admins
+   (`quarantine.list`: host, sequence, type, reason and time only) and dismissed with
+   `quarantine.dismiss({ ids })`.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
 3. **Done:** contacts queries (Contacts): for a page's senders, and every contact for the

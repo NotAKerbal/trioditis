@@ -224,7 +224,8 @@ Connector error details are logged locally by the bridge host only, without cont
 
 Events the backend can't apply are quarantined with a reason code (`missing_target`,
 `missing_chat`, `foreign_login`, `foreign_host`, `unknown_login_session`, `unknown_send`,
-`malformed_envelope`, `too_large`, `invalid_event`), never with their content.
+`malformed_envelope`, `too_large`, `unknown_chat_start`, `invalid_event`), never with their content.
+Admins see them in Admin settings → Networks, without whose they were, and can dismiss them.
 
 ## Logins
 

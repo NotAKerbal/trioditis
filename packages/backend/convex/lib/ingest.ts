@@ -245,7 +245,9 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 
   // Imported history neither notifies, counts as unread, nor reorders the inbox.
   if (event.historical) return
-  const fromSomeoneElse = !('self' in event.sender)
+  // A message that arrives late, but sorts at or before what the person has already read, was
+  // read with the rest: it doesn't count as unread or as a mention.
+  const fromSomeoneElse = !('self' in event.sender) && !readAlready(chat, fields.sortKey)
   await patchChat(ctx, chat, {
     lastMessageAt: Math.max(chat.lastMessageAt, event.networkTs),
     ...(fromSomeoneElse
@@ -365,10 +367,67 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
       networkTs: event.networkTs,
     })
   }
+  const read = await findMessage(ctx, event.userId, network, event.upToEventId)
+  // A receipt for a message this chat doesn't have says nothing about what's been read here.
+  if (!read || read.chatId !== chat._id) return
   // The person reading a chat elsewhere (on their phone) clears it here too, up to the
-  // message the receipt covers: a delayed receipt doesn't clear messages that came after it.
-  if (key === 'self')
-    await ctx.db.patch(chat._id, await unreadAfter(ctx, chat, event.userId, network, event.upToEventId))
+  // message the receipt covers: a delayed receipt doesn't clear messages that came after it,
+  // and one older than what they've already read here changes nothing.
+  if (key === 'self') {
+    if (readAlready(chat, read.sortKey)) return
+    await ctx.db.patch(chat._id, { ...(await unreadAfter(ctx, chat, read)), readSortKey: read.sortKey })
+    return
+  }
+  // Someone else reading the chat has read the person's own messages up to there.
+  await markOwnRead(ctx, chat, read)
+}
+
+/** Whether a message at `sortKey` is at or before the newest one the person has read. */
+export function readAlready(chat: Pick<Doc<'chats'>, 'readSortKey'>, sortKey: string) {
+  return chat.readSortKey !== undefined && sortKey <= chat.readSortKey
+}
+
+/**
+ * The most of the person's own messages one read receipt marks read. Each was marked by the
+ * receipt before it, so walking back stops at the first already read; a chat with more
+ * unmarked than this keeps the older ones as they were.
+ */
+const MAX_MARKED_READ = 100
+
+/**
+ * Marks the person's own messages at or before `read` as read, newest first, until one already
+ * is. Delivery only moves forward (`advance`); a copy still pending isn't on the network yet,
+ * so no receipt can cover it. It reads within the same budget as a recount.
+ */
+async function markOwnRead(ctx: MutationCtx, chat: Doc<'chats'>, read: Doc<'messages'>) {
+  /** Marks one message, if it's the person's own; false once one already read is reached. */
+  const mark = async (message: Doc<'messages'>) => {
+    if (!('self' in message.sender) || message.eventId.startsWith('pending:')) return true
+    if (message.delivery === 'read') return false
+    await ctx.db.patch(message._id, { delivery: advance(message.delivery, 'read') })
+    return true
+  }
+  if (!(await mark(read))) return
+  let before = read.sortKey
+  let seen = 1
+  let bytes = byteSize(read)
+  while (seen < MAX_MARKED_READ) {
+    const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), MAX_MARKED_READ - seen)
+    if (room < 1) return
+    const batch = await ctx.db
+      .query('messages')
+      .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).lt('sortKey', before))
+      .order('desc')
+      .take(room)
+    charge(ctx, batch)
+    for (const message of batch) {
+      bytes += byteSize(message)
+      if (!(await mark(message))) return
+    }
+    seen += batch.length
+    if (batch.length < room) return
+    before = batch.at(-1)!.sortKey
+  }
 }
 
 /**
@@ -379,15 +438,12 @@ const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
 
 /**
  * How many messages from other people, and how many of those mention the person, newer than
- * `eventId` the chat holds. It reads a few rows at a time, only as many as can't pass
+ * `read` the chat holds. It reads a few rows at a time, only as many as can't pass
  * `MAX_RECOUNT_BYTES` however large they are, and at most 100. If it can't see them all, the
  * chat keeps at least the counts it had: a receipt only ever clears what it was seen to cover.
  */
-async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, read: Doc<'messages'>) {
   const prior = { unreadCount: chat.unreadCount, mentionCount: chat.mentionCount ?? 0 }
-  const read = await findMessage(ctx, userId, network, eventId)
-  // A receipt for a message this chat doesn't have says nothing about what's been read here.
-  if (!read || read.chatId !== chat._id) return prior
   const atLeastPrior = (unread: number, mentions: number) => ({
     unreadCount: Math.max(unread, prior.unreadCount),
     mentionCount: Math.max(mentions, prior.mentionCount),
