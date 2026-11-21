@@ -7,6 +7,7 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { ownChat, requireMember } from './lib/access'
 import { newestMessageWhere } from './lib/bounded'
 import { patchChat } from './lib/chatView'
+import { readAlready } from './lib/ingest'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
 import { chatKind, chatView, envelope, network, storedLastMessage } from './validators'
@@ -280,18 +281,21 @@ export const markRead = mutation({
   returns: v.null(),
   handler: async (ctx, { chatId }) => {
     const chat = await ownForChange(ctx, chatId)
-    await patchChat(ctx, chat, {
-      unreadCount: 0,
-      mentionCount: 0,
-      markedUnread: false,
-      ...(chat.woke ? { woke: false, snoozedUntil: undefined } : {}),
-    })
     const latest = await newestMessageWhere(
       ctx,
       chat._id,
       (message) => !message.eventId.startsWith('pending:') && message.redactedAt === undefined,
       { maxRows: READ_SCAN, maxBytes: READ_SCAN_BYTES },
     )
+    await patchChat(ctx, chat, {
+      unreadCount: 0,
+      mentionCount: 0,
+      markedUnread: false,
+      ...(chat.woke ? { woke: false, snoozedUntil: undefined } : {}),
+      // What the person has now read, so a message that arrives late but sorts before it
+      // isn't counted as unread (lib/ingest.ts). It never moves back.
+      ...(latest && !readAlready(chat, latest.sortKey) ? { readSortKey: latest.sortKey } : {}),
+    })
     if (!latest) return null
     await queueCommand(ctx, {
       userId: chat.userId,

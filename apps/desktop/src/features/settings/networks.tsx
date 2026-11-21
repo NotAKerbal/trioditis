@@ -11,6 +11,7 @@ import { useState } from 'react'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Disclosure, Group, Heading, Loading } from './layout.tsx'
+import { QuarantineSection } from './quarantine-section.tsx'
 
 type Entry = FunctionReturnType<typeof api.networks.catalog>[number]
 
@@ -197,6 +198,7 @@ export function Networks() {
       ) : (
         <Loading failed={isError} />
       )}
+      <QuarantineSection />
     </>
   )
 }

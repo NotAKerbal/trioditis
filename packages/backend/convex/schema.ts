@@ -195,6 +195,12 @@ export default defineSchema({
     mentionCount: v.optional(v.number()),
     /** Marked unread by the person, whatever the count says. Trioditis-side only. */
     markedUnread: v.optional(v.boolean()),
+    /**
+     * The `sortKey` of the newest message the person is known to have read, here (mark read)
+     * or elsewhere (their own read receipt). It only moves forward, so a message that arrives
+     * late but sorts at or before it doesn't count as unread.
+     */
+    readSortKey: v.optional(v.string()),
     /** Hidden from the inbox until then, or until a new message wakes it. */
     snoozedUntil: v.optional(v.number()),
     woke: v.optional(v.boolean()),
@@ -550,7 +556,10 @@ export default defineSchema({
     userId: v.string(),
     reason: v.string(),
     at: v.number(),
-  }).index('by_host', ['hostId', 'seq']),
+  })
+    .index('by_host', ['hostId', 'seq'])
+    // Newest first, for the admin's list (quarantine.list).
+    .index('by_at', ['at']),
 
   auditLog: defineTable({
     actor: v.object({ kind: v.union(v.literal('user'), v.literal('agent'), v.literal('system')), id: v.string() }),
