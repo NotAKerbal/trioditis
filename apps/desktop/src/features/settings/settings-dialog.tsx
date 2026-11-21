@@ -17,7 +17,6 @@ import { Button } from '@trioditis/ui/button'
 import { Checkbox } from '@trioditis/ui/checkbox'
 import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { Input } from '@trioditis/ui/input'
-import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Segmented, SegmentedItem } from '@trioditis/ui/segmented'
 import { Switch } from '@trioditis/ui/switch'
 import { toast } from '@trioditis/ui/toast'
@@ -39,15 +38,8 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
-import {
-  networkName,
-  useAccounts,
-  useNetworkHealth,
-  useNetworks,
-  useServerInfo,
-  useSidebarLayout,
-} from '~/data/chats.ts'
+import { useRef, useState, useSyncExternalStore, type RefObject } from 'react'
+import { useSidebarLayout } from '~/data/chats.ts'
 import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { passkeysUnavailable } from '~/lib/desktop.ts'
@@ -64,8 +56,8 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
-import { LoginStepper } from './login-stepper.tsx'
+import { Group, Heading, Loading, Setting } from './layout.tsx'
+import { Accounts } from './accounts-section.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
 
@@ -329,209 +321,6 @@ function MiniSimple() {
       <MiniRow />
       <MiniRow />
     </div>
-  )
-}
-
-const ACCOUNT_STATE: Record<string, { text: string; warn?: boolean }> = {
-  CONNECTED: { text: 'Connected' },
-  CONNECTING: { text: 'Connecting…' },
-  TRANSIENT_DISCONNECT: { text: 'Reconnecting…', warn: true },
-  BAD_CREDENTIALS: { text: 'Signed out by the network. Reconnect it.', warn: true },
-  UNKNOWN_ERROR: { text: 'Something went wrong with this account.', warn: true },
-  LOGGED_OUT: { text: 'Logged out', warn: true },
-}
-
-// Why a disconnect didn't finish (`logoutError`): no bridge host took it within 10 minutes
-// (`expired`), or one took it but never confirmed (`timeout`). Either way it may still be connected.
-const LOGOUT_ERROR: Record<string, string> = {
-  expired: 'The server’s bridge didn’t pick up the disconnect, so it’s still connected. Try again.',
-  timeout: 'The server’s bridge never confirmed the disconnect, so it may still be connected. Try again.',
-}
-
-function Accounts({ connect }: { connect: boolean }) {
-  const session = useSession()
-  const networks = useNetworks()
-  const accounts = useAccounts()
-  const health = useNetworkHealth()
-  const server = useServerInfo()
-  const logout = useMutation(api.logins.logout)
-  const [connecting, setConnecting] = useState<{ network: string; flowId: string } | null>(null)
-  const [confirmRisk, setConfirmRisk] = useState<{ network: string; flowId: string } | null>(null)
-  // The networks to connect stay folded away until asked for, unless there's no account yet or
-  // the person came here to connect one ("Connect a network" in the menus).
-  const [browsing, setBrowsing] = useState<boolean | null>(connect || null)
-  // Back and forward can bring `connect` in or take it away while Accounts stays open.
-  useEffect(() => setBrowsing(connect || null), [connect])
-  const open = browsing ?? accounts?.length === 0
-
-  if (connecting)
-    return <LoginStepper network={connecting.network} flowId={connecting.flowId} onClose={() => setConnecting(null)} />
-
-  return (
-    <>
-      <Heading title="Accounts" />
-      {accounts?.length ? (
-        <Group title="Connected">
-          {accounts.map((a) => {
-            const state = ACCOUNT_STATE[a.state] ?? { text: a.state }
-            const bridgeDown = health?.find((h) => h.network === a.network)?.bridgeOnline === false
-            // A connected account needs no line under it; anything else does.
-            const note = a.logoutPending
-              ? 'Disconnecting…'
-              : a.logoutError
-                ? (LOGOUT_ERROR[a.logoutError] ?? 'It couldn’t be disconnected. Try again.')
-                : bridgeDown
-                  ? 'The server’s bridge for this network isn’t running.'
-                  : a.state === 'CONNECTED'
-                    ? null
-                    : state.text
-            return (
-              <div key={a._id} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
-                <NetworkBadge network={a.network} label={networkName(a.network)} size={26} />
-                <div className="min-w-0 flex-1">
-                  <div className="font-semibold">{networkName(a.network)}</div>
-                  {note ? (
-                    <div
-                      className={cn(
-                        'text-sm',
-                        state.warn || bridgeDown || a.logoutError ? 'text-warning' : 'text-muted-foreground',
-                      )}
-                    >
-                      {note}
-                    </div>
-                  ) : null}
-                </div>
-                {a.state === 'BAD_CREDENTIALS' || a.state === 'LOGGED_OUT' ? (
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      setConnecting({
-                        network: a.network,
-                        flowId: networks?.find((n) => n.network === a.network)?.flows[0]?.id ?? '',
-                      })
-                    }
-                  >
-                    Reconnect
-                  </Button>
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={a.logoutPending}
-                  onClick={() =>
-                    void logout({ networkAccountId: a._id }).then(
-                      () => toast(`Disconnecting ${networkName(a.network)}…`),
-                      (e: unknown) => toast(errorMessage(e, 'That account couldn’t be disconnected.')),
-                    )
-                  }
-                >
-                  Disconnect
-                </Button>
-              </div>
-            )
-          })}
-        </Group>
-      ) : null}
-
-      <Group>
-        <Disclosure open={open} onOpenChange={setBrowsing}>
-          Connect a network
-        </Disclosure>
-        {open && confirmRisk ? (
-          <div className="bg-warning-soft px-4 py-3.5 text-sm text-warning-ink last:rounded-b-xl">
-            <b className="font-semibold">
-              Connecting {networkName(confirmRisk.network)} uses your browser cookies or a token.
-            </b>{' '}
-            The network’s terms don’t allow that, and it can get the account banned.
-            <div className="mt-2.5 flex gap-2">
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => {
-                  setConnecting(confirmRisk)
-                  setConfirmRisk(null)
-                }}
-              >
-                I understand, connect
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmRisk(null)}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : null}
-        {open
-          ? (networks ?? []).flatMap((n) =>
-              n.flows.map((f) => (
-                <Button
-                  variant="bare"
-                  key={`${n.network}:${f.id}`}
-                  type="button"
-                  onClick={() =>
-                    n.termsRisk
-                      ? setConfirmRisk({ network: n.network, flowId: f.id })
-                      : setConnecting({ network: n.network, flowId: f.id })
-                  }
-                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left last:rounded-b-xl hover:bg-surface-2"
-                >
-                  <NetworkBadge network={n.network} label={n.name} size={26} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-semibold">{n.name}</span>
-                    <span className="block text-sm text-muted-foreground">
-                      {f.name}
-                      {n.maturity === 'stable' ? '' : n.maturity === 'experimental' ? ' · Experimental' : ' · Beta'}
-                    </span>
-                  </span>
-                </Button>
-              )),
-            )
-          : null}
-        {open && networks && networks.length === 0 ? (
-          <p className="px-4 py-3 text-sm text-muted-foreground">
-            {session.role === 'admin'
-              ? 'No networks are installed yet. Install them in Admin settings → Networks.'
-              : 'No networks are installed yet. An admin installs them.'}
-          </p>
-        ) : null}
-      </Group>
-      {server?.demo ? (
-        <Group>
-          <Setting title="Demo chats">
-            <DemoSeed />
-          </Setting>
-        </Group>
-      ) : null}
-    </>
-  )
-}
-
-/**
- * A demo server can fill an account with made-up chats, on accounts no bridge runs, to try the
- * app without connecting a real one. Shown only where server.info says it's a demo.
- */
-function DemoSeed() {
-  const session = useSession()
-  const seed = useAction(api.demo.seedForMe)
-  const [busy, setBusy] = useState(false)
-  return (
-    <Button
-      size="sm"
-      aria-label="Load demo chats"
-      loading={busy}
-      onClick={async () => {
-        setBusy(true)
-        try {
-          const { seeded } = await seed({ sessionId: session.sessionId })
-          toast(seeded ? 'Demo chats added.' : 'Your account already has the demo chats.')
-        } catch (e) {
-          if (sessionChanged(e)) return window.location.reload()
-          toast(errorMessage(e, 'This server doesn’t offer demo chats.'))
-        }
-        setBusy(false)
-      }}
-    >
-      Load
-    </Button>
   )
 }
 

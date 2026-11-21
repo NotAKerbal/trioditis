@@ -110,7 +110,17 @@ export function BottomBar({
                 />
               ))}
             </span>
-            {trouble.length ? <span className="text-warning">{trouble.length} offline</span> : null}
+            {/* "Offline" only when it is: a network with some accounts still connected is degraded. */}
+            {trouble.length ? (
+              <span className="text-warning">
+                {trouble.length}{' '}
+                {trouble.every((h) => h.status === 'offline')
+                  ? 'offline'
+                  : trouble.length === 1
+                    ? 'needs attention'
+                    : 'need attention'}
+              </span>
+            ) : null}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" side="top">

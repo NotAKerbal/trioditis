@@ -7,7 +7,8 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import type { FunctionReturnType } from 'convex/server'
 import { useMutation } from 'convex/react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import { bridgeLive, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Disclosure, Group, Heading, Loading } from './layout.tsx'
@@ -33,7 +34,23 @@ function accounts(count: number) {
  */
 export function Networks() {
   const session = useSession()
-  const { data: catalog, isError } = useQuery(convexQuery(api.networks.catalog, {}))
+  const { data: rows, isError } = useQuery(convexQuery(api.networks.catalog, {}))
+  // A bridge that stops heartbeating is judged down as time passes (bridge-liveness.ts).
+  const clock = useHeardClock()
+  const now = useNow()
+  const catalog = useMemo(
+    () =>
+      rows?.map((entry) => ({
+        ...entry,
+        bridgeOnline: bridgeLive(
+          entry.bridgeOnline,
+          entry.bridgeLastSeenAt,
+          entry.bridgeLastSeenAt == null ? undefined : clock.heardAt(entry.network, entry.bridgeLastSeenAt, now),
+          now,
+        ),
+      })),
+    [rows, clock, now],
+  )
   const install = useMutation(api.networks.install)
   const remove = useMutation(api.networks.remove)
   const [busy, setBusy] = useState<string | null>(null)
@@ -82,7 +99,7 @@ export function Networks() {
       entry.maturity === 'stable' ? null : entry.maturity === 'experimental' ? 'Experimental' : 'Beta',
       ...(entry.installed
         ? [
-            entry.bridgeOnline ? null : 'The server’s bridge for it isn’t running',
+            entry.bridgeOnline ? null : 'The server’s bridge for it isn’t responding',
             entry.accounts ? accounts(entry.accounts) : null,
           ]
         : entry.bridged

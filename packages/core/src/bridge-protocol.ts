@@ -170,6 +170,8 @@ export interface LoginStep {
      */
     expiresAt?: number
   }
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt?: number
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
   cookies?: {
     url: string

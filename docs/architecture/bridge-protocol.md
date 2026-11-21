@@ -266,6 +266,9 @@ whichever came first: a cancel after the login completed changes nothing, and a 
 after the cancel is reported as nothing more; the account it connected is logged back out,
 unless it is one the person already had (signing in to it again), which is left as it was.
 
+A step itself may also carry `expiresAt` (bridge host time, ms); both are optional and the
+backend takes either. The client also hides any code from a host not heard from in two minutes.
+
 What a person types or pastes into a login step (phone numbers, codes, cookies) is a
 credential. The client seals it to the bridge key, so the outbox never holds it in
 plaintext; the bridge host opens it, uses it and discards it. A `cookies` step's values

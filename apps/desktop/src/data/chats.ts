@@ -8,6 +8,7 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
 import { useMemo } from 'react'
+import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -264,8 +265,12 @@ export function useNetworks() {
   return useQuery(convexQuery(api.networks.list, {})).data
 }
 
+/** Each network's health, with its bridge judged again as time passes (data/bridge-liveness.ts). */
 export function useNetworkHealth() {
-  return useQuery(convexQuery(api.networks.health, {})).data
+  const rows = useQuery(convexQuery(api.networks.health, {})).data
+  const clock = useHeardClock()
+  const now = useNow()
+  return useMemo(() => (rows ? liveHealth(rows, clock, now) : rows), [rows, clock, now])
 }
 
 export function useAccounts() {

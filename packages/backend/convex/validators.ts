@@ -82,6 +82,8 @@ export const loginStep = v.object({
       expiresAt: v.optional(v.number()),
     }),
   ),
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt: v.optional(v.number()),
   fields: v.optional(
     v.array(
       v.object({
