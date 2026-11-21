@@ -50,15 +50,39 @@ function fromSaved(saved: Record<string, unknown>): Prefs {
 }
 
 /**
- * Choices made here that storage refused to save, laid over what's stored until a save goes
- * through: reading storage again mustn't bring back what the person just changed.
+ * Choices made here that storage refused to save, each with the stored value it was made over.
+ * One stands only while that stored value is unchanged: once another tab saves the preference,
+ * that newer choice wins and this one is dropped. And an unsaved choice of what notifications
+ * show can only show less than what's stored, never more: a stale tab can't bring previews
+ * back. It's never written as a side effect of saving another preference.
  */
-let unsaved: Partial<Prefs> = {}
+let pending: { [K in keyof Prefs]?: { value: Prefs[K]; over: string } } = {}
 
-/** The stored preferences, with this tab's unsaved choices; null when storage can't say. */
+const PRIVACY: Record<NotificationDetail, number> = { hidden: 0, sender: 1, message: 2 }
+const storedAs = (saved: Record<string, unknown>, key: string) => JSON.stringify(saved[key] ?? null)
+
+function withPending(saved: Record<string, unknown>): Prefs {
+  const stored = fromSaved(saved)
+  const out = { ...stored }
+  for (const key of Object.keys(pending) as (keyof Prefs)[]) {
+    const p = pending[key]!
+    if (storedAs(saved, key) !== p.over) {
+      delete pending[key]
+      continue
+    }
+    if (key === 'notificationDetail') {
+      const value = p.value as NotificationDetail
+      out.notificationDetail = PRIVACY[value] < PRIVACY[stored.notificationDetail] ? value : stored.notificationDetail
+    } else if (key === 'notifications') out.notifications = stored.notifications && (p.value as boolean)
+    else Object.assign(out, { [key]: p.value })
+  }
+  return out
+}
+
+/** The stored preferences, with this tab's unsaved choices where they stand; null when storage can't say. */
 function load(): Prefs | null {
   const saved = readSaved()
-  return saved ? { ...fromSaved(saved), ...unsaved } : null
+  return saved ? withPending(saved) : null
 }
 
 let prefs = load() ?? DEFAULTS
@@ -92,16 +116,21 @@ export function currentPrefs(): Prefs {
  * written back over with what this tab last heard.
  */
 export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
-  unsaved = { ...unsaved, [key]: value }
-  prefs = { ...(load() ?? prefs), [key]: value }
-  try {
-    localStorage.setItem(KEY, JSON.stringify(prefs))
-    // Everything this tab had unsaved went with it.
-    unsaved = {}
-    // index.html reads this key before first paint.
-    if (key === 'theme') localStorage.setItem('trioditis.theme', value as string)
-  } catch {
-    // Storage can be blocked or full; the choice still applies here until the page reloads.
+  const saved = readSaved()
+  if (!saved) {
+    // Storage can't be read: the choice applies here until the page reloads.
+    prefs = { ...prefs, [key]: value }
+  } else {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({ ...fromSaved(saved), [key]: value }))
+      delete pending[key]
+      // index.html reads this key before first paint.
+      if (key === 'theme') localStorage.setItem('trioditis.theme', value as string)
+    } catch {
+      // Storage refused (full, say): kept here over what was stored, while that stands.
+      pending = { ...pending, [key]: { value, over: storedAs(saved, key) } }
+    }
+    prefs = load() ?? { ...prefs, [key]: value }
   }
   if (key === 'theme') applyTheme()
   listeners.forEach((l) => l())
