@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	signal "go.mau.fi/mautrix-signal/pkg/connector"
 	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/devkeys"
@@ -29,7 +28,7 @@ func TestSignalConnectorConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sc := conn.(*signal.SignalConnector)
+	sc := conn.(*signalConnector)
 	if sc.Config.DeviceName != "Trioditis" {
 		t.Errorf("device name: got %q", sc.Config.DeviceName)
 	}

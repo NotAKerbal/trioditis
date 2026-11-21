@@ -237,7 +237,8 @@ Each network's page in `docs/networks/` lists exactly what its connector keeps; 
   keys (with each conversation's keys in `portal.metadata`).
 - **Message content, bounded:** Messenger's encrypted chats run on whatsmeow, so the same
   `whatsmeow_event_buffer` and sweep as WhatsApp apply. Signal's `signalmeow_event_buffer`
-  works the same way; the bridge host deletes rows past 35 days (Signal's server keeps
+  works the same way, its acknowledgement held back past bridgev2's handler limit in the same
+  way (docs/networks/signal.md); the bridge host deletes rows past 35 days (Signal's server keeps
   undelivered messages for 30), and deletes a history transfer's contacts once every chat
   in it has been imported. GroupMe keeps each message's text in
   its message metadata for edits; the bridge host clears it once GroupMe's edit window has
