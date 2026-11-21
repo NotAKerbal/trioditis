@@ -18,6 +18,8 @@ files:
   - electron/connect.html
   - electron/connect.css
   - electron/connect.js
+  # The window and taskbar icon main.ts loads on Linux and Windows.
+  - electron/icon.png
   - '!node_modules/**'
 npmRebuild: false
 asar: true
