@@ -4,8 +4,9 @@ import { Button } from '@trioditis/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { cn } from '@trioditis/ui/lib/utils'
 import { Download, FileIcon, Play } from 'lucide-react'
-import { useEffect, useRef, useState, type ComponentProps } from 'react'
-import { isAudio, isImage, isVideo, useMedia } from '~/data/media.ts'
+import { useState, type ComponentProps } from 'react'
+import { isAudio, isImage, isVideo, playable, saveMedia, useMedia } from '~/data/media.ts'
+import { useSession } from '~/lib/session.tsx'
 
 // A message's pictures and files, and avatars with their pictures, decrypted here (data/media.ts).
 
@@ -126,44 +127,64 @@ function Picture({ network, attachment }: { network: Network; attachment: Attach
             alt={name}
             className="max-h-[calc(100vh-160px)] max-w-[calc(100vw-80px)] rounded-[10px] object-contain"
           />
-          <SaveLink url={media.url} name={name} />
+          <SaveButton network={network} attachment={attachment} name={name} label="Save" />
         </DialogContent>
       </Dialog>
     </>
   )
 }
 
-/** Saves a decrypted file under its own name. */
-function SaveLink({ url, name }: { url: string; name: string }) {
+/** Saves a file under its own name, fetching and decrypting it again for the download. */
+function SaveButton({
+  network,
+  attachment,
+  name,
+  label,
+  className,
+}: {
+  network: Network
+  attachment: Attachment
+  name: string
+  label?: string
+  className?: string
+}) {
+  const session = useSession()
+  const [state, setState] = useState<'idle' | 'saving' | 'failed'>('idle')
+  const save = () => {
+    setState('saving')
+    saveMedia(session.userId, network, attachment, name).then(
+      () => setState('idle'),
+      () => setState('failed'),
+    )
+  }
   return (
-    <a
-      href={url}
-      download={name}
-      className="inline-flex items-center gap-1.5 text-sm text-primary-ink underline-offset-2 hover:underline"
+    <Button
+      variant="bare"
+      type="button"
+      aria-label={label ? undefined : `Save ${name}`}
+      title={state === 'failed' ? 'It couldn’t be saved. Try again.' : undefined}
+      disabled={state === 'saving'}
+      onClick={save}
+      className={cn(
+        'inline-flex items-center gap-1.5 text-sm hover:text-foreground disabled:opacity-50',
+        state === 'failed' ? 'text-danger' : label ? 'text-primary-ink' : 'text-muted-foreground',
+        className,
+      )}
     >
-      <Download className="size-3.5" /> Save
-    </a>
+      <Download className={label ? 'size-3.5' : 'size-4'} />
+      {label ? (state === 'failed' ? 'Try again' : state === 'saving' ? 'Saving…' : label) : null}
+    </Button>
   )
 }
 
 /**
- * Any other file: its name and size, and what can be done with it once it's fetched. Video and
- * sound play in place; anything else is saved.
+ * Any other file: its name and size, and what can be done with it. Video and sound small enough
+ * play in place when asked; anything else is saved.
  */
 function FileTile({ network, attachment }: { network: Network; attachment: Attachment }) {
-  const media = useMedia(network, attachment, false)
-  const playable = isVideo(attachment) || isAudio(attachment)
+  const canPlay = playable(attachment)
+  const media = useMedia(network, canPlay ? attachment : undefined, false)
   const name = attachment.name || (isVideo(attachment) ? 'Video' : isAudio(attachment) ? 'Audio' : 'File')
-  const saving = useRef(false)
-  const save = useRef<HTMLAnchorElement>(null)
-
-  // A file asked to be saved is saved once it's here.
-  useEffect(() => {
-    if (media.state === 'ready' && saving.current && !playable) {
-      saving.current = false
-      save.current?.click()
-    }
-  }, [media.state, playable])
 
   if (media.state === 'ready' && isVideo(attachment)) {
     return <video src={media.url} controls autoPlay className="max-h-[360px] max-w-[min(100%,480px)] rounded-[14px]" />
@@ -181,31 +202,25 @@ function FileTile({ network, attachment }: { network: Network; attachment: Attac
           {broken ? 'Couldn’t be opened' : media.state === 'loading' ? 'Opening…' : fileSize(attachment.size)}
         </span>
       </span>
-      {media.state === 'ready' ? (
-        <a
-          ref={save}
-          href={media.url}
-          download={name}
-          aria-label={`Save ${name}`}
-          className="text-muted-foreground hover:text-foreground"
-        >
-          <Download className="size-4" />
-        </a>
-      ) : (
+      {canPlay ? (
         <Button
           variant="bare"
           type="button"
-          aria-label={playable ? `Play ${name}` : `Save ${name}`}
+          aria-label={`Play ${name}`}
           title={broken ? 'Try again' : undefined}
           disabled={media.state === 'loading'}
-          onClick={() => {
-            saving.current = true
-            media.load()
-          }}
+          onClick={media.load}
           className="flex size-7 items-center justify-center rounded-full text-muted-foreground hover:text-foreground disabled:opacity-50"
         >
-          {playable ? <Play className="size-4" /> : <Download className="size-4" />}
+          <Play className="size-4" />
         </Button>
+      ) : (
+        <SaveButton
+          network={network}
+          attachment={attachment}
+          name={name}
+          className="size-7 justify-center rounded-full"
+        />
       )}
     </span>
   )

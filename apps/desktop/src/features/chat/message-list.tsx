@@ -12,6 +12,7 @@ import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply, SmilePlus } fr
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import { captionOf, summarize } from '~/data/last-message.ts'
+import { isImage } from '~/data/media.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
@@ -197,8 +198,9 @@ export function MessageList(props: MessageListProps) {
           const files = (!m.deleted && m.body?.attachments) || []
           const text = m.body ? captionOf(m.body) : ''
           const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
-          // A picture or file on its own is shown without a bubble around it.
-          const bare = !m.deleted && files.length > 0 && !text && !quoted && !m.replyTo
+          // Pictures on their own are shown without a bubble around them, the time over a corner.
+          // A file or a player keeps its bubble, so the time never sits on its controls.
+          const bare = !m.deleted && files.length > 0 && files.every(isImage) && !text && !quoted && !m.replyTo
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
           // Delivery once per run of the person's own, at its end; a message still going, edited or
           // in trouble shows its own.

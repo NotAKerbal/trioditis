@@ -148,8 +148,9 @@ export function createMediaHandler(options: MediaOptions) {
       response.writeHead(200, {
         'content-type': 'application/octet-stream',
         ...(length ? { 'content-length': length } : {}),
-        // Ciphertext, which never changes for a media ID; private, since the request was the person's.
-        'cache-control': 'private, max-age=604800, immutable',
+        // Never from a cache: each fetch is checked for its own person and token, and a browser's
+        // cache would hand one person's file to another signed in on it.
+        'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
       })
       upstream.on('error', () => response.destroy())

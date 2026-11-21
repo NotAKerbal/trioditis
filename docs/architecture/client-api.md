@@ -1039,15 +1039,16 @@ here.
      `401`): it is signed with `GATEWAY_SECRET` and names the person and the network's bridge
      hosts, and the gateway asks those hosts for the file (bridge-protocol.md, Media), each of
      which gives a person only their own. The answer is the ciphertext as
-     `application/octet-stream`, `private` and immutable for caching; a `404` means no host has
+     `application/octet-stream`, `no-store`, so no cache answers for the gateway's checks; a `404` means no host has
      it for this person, `502` a host failed, `503` too many files at once (retry after a
      second). The client decrypts it with `decryptMedia(ciphertext, key, nonce, userId,
-mediaId)` from `@trioditis/crypto` and keeps it only in memory. It gives a decrypted file
-     its own type only for pictures, video and sound (and SVG is not a picture here); anything
-     else is `application/octet-stream`, so a file never opens as a page on the app's origin.
-     A chat's or a contact's `avatar` is fetched the same way.
-   - The desktop app shows pictures up to 25 MiB in place, plays video and sound when asked,
-     and saves other files. A picture with no caption has its file name as its `body`, which
+mediaId)` from `@trioditis/crypto` and keeps it only in memory: it shows pictures, video and
+     sound (and SVG is not a picture here) from `data:` URLs, never a Blob, which the browser
+     may page to disk. A file becomes a Blob only when the person saves it, and then as
+     `application/octet-stream`, so it never opens as a page on the app's origin. A chat's or
+     a contact's `avatar` is fetched the same way.
+   - The desktop app shows pictures up to 25 MiB in place (trying again a few times when one
+     fails), plays video and sound up to 50 MiB when asked, and saves other files. A picture with no caption has its file name as its `body`, which
      is not shown as a caption.
    - **Upload (planned):** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
      URL for the encrypted file; the send's attachment names the returned `mediaId`, and

@@ -88,7 +88,7 @@ describe('GET /media/:id', () => {
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('ciphertext')
     expect(response.headers.get('content-type')).toBe('application/octet-stream')
-    expect(response.headers.get('cache-control')).toContain('private')
+    expect(response.headers.get('cache-control')).toBe('no-store')
     // Only the internal token and the person go to the host; nothing of the client's request.
     expect(host.seen[0]!.url).toBe(`/v1/media/${MEDIA_ID}`)
     expect(host.seen[0]!.headers!.authorization).toBe(`Bearer ${TOKEN}`)
