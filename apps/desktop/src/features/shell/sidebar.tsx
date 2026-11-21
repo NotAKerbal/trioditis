@@ -53,6 +53,7 @@ import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
+import { inFilter } from './filter-match.ts'
 import { searchScope } from './search-scope.ts'
 import { unreadIncomplete, type Count } from './unread-fill.ts'
 import { usePrefs } from '~/lib/prefs.ts'
@@ -328,13 +329,26 @@ export function Sidebar({
   shownRef.current = loaded ? shownIds : null
   chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
 
+  // The open chat as a list last had it, to judge against a new filter before its page loads.
+  const selectedChat = useRef<Chat | undefined>(undefined)
+  const seen = selectedId ? everything.find((c) => c.id === selectedId) : undefined
+  if (seen) selectedChat.current = seen
+  else if (selectedChat.current?.id !== selectedId) selectedChat.current = undefined
+
   // A view or filter change that hides the open chat closes it rather than opening another:
-  // opening a chat marks it read, and nobody asked to read it. Not while Unread is still
-  // filling: the open chat may be on a page still to come.
+  // opening a chat marks it read, and nobody asked to read it. Judged from the chat itself, as
+  // its page may be one still to come; a chat no list has had waits for Unread to fill.
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
   useEffect(() => {
-    if (!loaded || filling || lastFilterKey.current === filterKey) return
+    if (lastFilterKey.current === filterKey) return
+    const known = selectedChat.current
+    if (known) {
+      lastFilterKey.current = filterKey
+      if (!inFilter(known, { network, labelId, view: focused ? null : simpleShow })) onClose()
+      return
+    }
+    if (!loaded || filling) return
     lastFilterKey.current = filterKey
     if (selectedId && !shownIds.includes(selectedId)) onClose()
   })
@@ -623,7 +637,9 @@ function Drawer({
   const wasOpen = useRef(open)
   useEffect(() => {
     if (open) headRef.current?.focus({ preventScroll: true })
-    else if (wasOpen.current) rowRefs.current.get(wasOpen.current)?.focus({ preventScroll: true })
+    // Its own row, or the first one left if its section emptied while open.
+    else if (wasOpen.current)
+      (rowRefs.current.get(wasOpen.current) ?? rowRefs.current.values().next().value)?.focus({ preventScroll: true })
     wasOpen.current = open
   }, [open])
 

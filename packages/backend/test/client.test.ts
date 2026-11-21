@@ -266,6 +266,25 @@ describe('chat actions', () => {
     await t.finishInProgressScheduledFunctions()
     expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBe(Number.MAX_SAFE_INTEGER)
   })
+
+  it('ends the timed mutes set before mutes scheduled their own ends', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const now = Date.now()
+    const over = await aChat(t, 'user_a', 'over', { mutedUntil: now - 1 })
+    const later = await aChat(t, 'user_a', 'later', { mutedUntil: now + 60_000 })
+    const forever = await aChat(t, 'user_a', 'forever', { mutedUntil: Number.MAX_SAFE_INTEGER })
+    const mutedUntil = async (chatId: Id<'chats'>) => (await a.query(api.chats.get, { chatId })).mutedUntil
+    await t.mutation(internal.migrations.scheduleMuteEnds, {})
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(over)).toBeNull()
+    expect(await mutedUntil(later)).toBe(now + 60_000)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(later)).toBeNull()
+    expect(await mutedUntil(forever)).toBe(Number.MAX_SAFE_INTEGER)
+  })
 })
 
 describe('messages alongside the page', () => {
