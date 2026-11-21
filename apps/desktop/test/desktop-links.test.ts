@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { dotBitmap } from '../electron/badge.ts'
-import { invitationFrom, linkArgument } from '../electron/links.ts'
+import { googleAnswerFrom, googleSignInState, invitationFrom, linkArgument } from '../electron/links.ts'
 
 // desktop.ts reads the bridge off `window` when it loads; in a browser there is none.
 vi.stubGlobal('window', {})
@@ -87,5 +87,57 @@ describe('the Windows badge dot', () => {
     expect(at(16, 16)).toEqual([0x26, 0x26, 0xdc, 0xff])
     expect(at(0, 0)).toEqual([0, 0, 0, 0])
     expect(at(31, 31)).toEqual([0, 0, 0, 0])
+  })
+})
+
+describe('Google Contacts sign-in in the desktop app', () => {
+  const STATE = 'dabcdefghijklmnopqrstuvwxyz0123456'
+  const ACCESS = 'ya29.a0AfB_byC-abcdefghijklmnop'
+  const signIn = (over: Record<string, string> = {}) =>
+    `https://accounts.google.com/o/oauth2/v2/auth?${new URLSearchParams({
+      client_id: 'id.apps.googleusercontent.com',
+      redirect_uri: 'https://chat.example.com/google-contacts.html',
+      response_type: 'token',
+      scope: 'https://www.googleapis.com/auth/contacts.readonly',
+      state: STATE,
+      ...over,
+    })}`
+
+  it('opens only Google’s sign-in for contacts, answering to this server', () => {
+    expect(googleSignInState(signIn(), 'https://chat.example.com')).toBe(STATE)
+    expect(googleSignInState(signIn(), 'https://other.example.com')).toBeNull()
+    expect(googleSignInState(signIn({ scope: 'https://mail.google.com/' }), 'https://chat.example.com')).toBeNull()
+    expect(googleSignInState(signIn({ response_type: 'code' }), 'https://chat.example.com')).toBeNull()
+    expect(googleSignInState(signIn({ state: 'wabcdefghijklmnopqrstuvwxyz' }), 'https://chat.example.com')).toBeNull()
+    expect(
+      googleSignInState(
+        signIn().replace('accounts.google.com', 'accounts.google.com.evil.example'),
+        'https://chat.example.com',
+      ),
+    ).toBeNull()
+  })
+
+  it('reads the token or error a link carries back, and nothing else', () => {
+    expect(
+      googleAnswerFrom(`trioditis://chat.example.com/google-contacts#state=${STATE}&access_token=${ACCESS}`),
+    ).toEqual({ origin: 'https://chat.example.com', state: STATE, accessToken: ACCESS })
+    expect(googleAnswerFrom(`trioditis://localhost:5181/google-contacts#state=${STATE}&error=access_denied`)).toEqual({
+      origin: 'http://localhost:5181',
+      state: STATE,
+      error: 'access_denied',
+    })
+    expect(googleAnswerFrom(`trioditis://chat.example.com/invite#state=${STATE}&access_token=${ACCESS}`)).toBeNull()
+    expect(
+      googleAnswerFrom(`trioditis://chat.example.com/google-contacts?x=1#state=${STATE}&access_token=${ACCESS}`),
+    ).toBeNull()
+    expect(googleAnswerFrom(`trioditis://chat.example.com/google-contacts#state=bad&access_token=${ACCESS}`)).toBeNull()
+    expect(
+      googleAnswerFrom(
+        `trioditis://chat.example.com/google-contacts#state=${STATE}&access_token=${ACCESS}&state=${STATE}`,
+      ),
+    ).toBeNull()
+    expect(
+      googleAnswerFrom(`trioditis://chat.example.com/google-contacts#state=${STATE}&access_token=${ACCESS}&error=x`),
+    ).toBeNull()
   })
 })

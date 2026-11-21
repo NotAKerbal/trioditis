@@ -37,11 +37,14 @@ Pass `--yes` to skip the interactive confirmation prompt. Before stopping anythi
 2. It matches this install's Compose project name and server public keys (`BRIDGE_PUBLIC_KEY` and `AGENT_ACCESS_PUBLIC_KEY`).
 3. Your git checkout is at the commit recorded in `backup.info` (whose schema matches the backup's data).
 
-Restoring onto a **brand-new server**:
+Restoring onto a **brand-new server** (where `deploy/.env` does not exist yet):
 
 1. Clone the repository and check out the exact commit listed in `backup.info`.
-2. Import your previously exported keys (`deploy/trioditis keys import ~/trioditis-server-keys.env`).
-3. Run `deploy/trioditis restore <backup-dir>`, which restores all volumes and settings and reruns the installer.
+2. Restore with `--keys`, passing your previously exported key file—this imports the keys, restores all volumes and settings, and reruns the installer in one step:
+
+```sh
+deploy/trioditis restore --keys ~/trioditis-server-keys.env <backup-dir>
+```
 
 ## Managing the server's keys
 

@@ -7,6 +7,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
+import { ConvexError } from 'convex/values'
 import { useMemo } from 'react'
 import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
@@ -144,14 +145,19 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
 export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
   const session = useSession()
   // 'skip', not `enabled: false`: the Convex adapter subscribes to any query it's given.
-  const { data, isError } = useQuery({
+  const { data, error } = useQuery({
     ...convexQuery(api.chats.get, chatId ? { chatId } : 'skip'),
     retry: false,
   })
   return useMemo(() => {
-    if (!chatId || isError) return null
+    if (!chatId) return null
+    // A ConvexError is the server saying the chat is gone or not the person's. Any other error
+    // is the server not answering in time, as when every query is asked again at once after the
+    // computer wakes: a chat already on screen stays open, with what it last showed, rather
+    // than closing under the person.
+    if (error && (error instanceof ConvexError || !data)) return null
     return data ? toChat(data as ChatRow, session) : undefined
-  }, [chatId, data, isError, session])
+  }, [chatId, data, error, session])
 }
 
 export function useChatCounts() {

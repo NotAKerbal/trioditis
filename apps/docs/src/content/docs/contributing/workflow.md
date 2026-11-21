@@ -68,6 +68,17 @@ Only disable a rule for a single line with an inline explanation:
 - **No auto-retry after ambiguity:** Always surface the `unknown` delivery state rather than silently resending.
 - **Release notes:** User-visible changes add a short note under `release-notes/`, which the server updater surfaces in **Admin settings → Updates**.
 
+## Desktop releases
+
+A desktop release is tagged on a release merge commit on `main` (which matches what servers on the **Stable** update channel run):
+
+```sh
+git fetch origin && git tag v0.1.0 origin/main
+git push origin v0.1.0
+```
+
+Pushing a `v<version>` tag triggers `.github/workflows/desktop-release.yml`, building native installers on macOS (Apple Silicon and Intel, ad-hoc signed), Windows (`x64`), and Linux (`AppImage` and `.deb`) and publishing them with SHA-256 checksums to GitHub Releases. Pre-release tags (such as `v0.2.0-beta.1`) publish as GitHub prereleases without moving the `releases/latest` download links. Note that `electron-builder.yml` packages only the Electron shell and server picker—the web app comes directly from your Trioditis server.
+
 ## Repository layout
 
 ```
