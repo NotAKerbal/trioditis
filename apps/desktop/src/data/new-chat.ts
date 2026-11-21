@@ -52,6 +52,8 @@ export function identifierPrompt(network: Network): string | null {
 export function startError(code: ErrorCode | undefined, network: Network): string {
   const name = networkName(network)
   if (code === 'not_found') return `No one on ${name} has that number or username.`
+  if (code === 'invalid_identifier')
+    return `That isn’t a number or username ${name} takes. Check it, with the country code.`
   if (code === 'unsupported') return `${name} can’t start chats from here.`
   if (code === 'not_connected') return `Your ${name} account isn’t connected.`
   if (code === 'rate_limited') return `${name} is limiting new chats. Try again later.`

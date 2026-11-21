@@ -4,7 +4,8 @@
 //
 // Nothing here holds plaintext content. Journal payloads are protocol events whose content
 // fields are sealed envelopes. A queued command's payload is sealed to the bridge key and is
-// deleted once the command has run. Everything else is IDs, statuses and public keys.
+// deleted once the command has run, and a kept avatar reference is sealed to it too.
+// Everything else is IDs, statuses and public keys.
 package store
 
 import (
@@ -24,6 +25,7 @@ import (
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
 var upgrades = dbutil.BuildUpgradeTable().
@@ -97,6 +99,13 @@ var upgrades = dbutil.BuildUpgradeTable().
 			return err
 		}
 		return backfillReactionSenders(ctx, db)
+	}).
+	WithRaw(4, 5, 0, "Kept avatar references", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An avatar's upload lives minutes, its sealed copy far longer: the copy's reference,
+		// sealed to the bridge key, is what lets a later metadata change attach it again.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_avatar_ref (owner_user_id TEXT NOT NULL, avatar_uri TEXT NOT NULL, sealed TEXT NOT NULL, PRIMARY KEY (owner_user_id, avatar_uri))`,
+		})
 	}).
 	Finish()
 
@@ -789,4 +798,33 @@ func (s *Store) GetReaction(ctx context.Context, eventID string) (target, key st
 func (s *Store) DeleteReaction(ctx context.Context, eventID string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_reaction WHERE event_id=$1`, eventID)
 	return err
+}
+
+// PutAvatarRef keeps the sealed reference to an owner's copy of an avatar. The first one
+// stays: an avatar's content URI names one upload, whose copy for an owner never changes.
+func (s *Store) PutAvatarRef(ctx context.Context, ownerUserID, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_ref (owner_user_id, avatar_uri, sealed) VALUES ($1, $2, $3) ON CONFLICT (owner_user_id, avatar_uri) DO NOTHING`,
+		ownerUserID, avatarURI, string(payload))
+	return err
+}
+
+// AvatarRef is the sealed reference PutAvatarRef kept, or ErrNotFound.
+func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*seal.Envelope, error) {
+	var payload string
+	err := s.DB.QueryRow(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var env seal.Envelope
+	if err = json.Unmarshal([]byte(payload), &env); err != nil {
+		return nil, err
+	}
+	return &env, nil
 }

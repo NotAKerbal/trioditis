@@ -1044,7 +1044,8 @@ never sees it.
 
 The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
 already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
-on the network has that identifier), `unsupported`, `not_connected`, `rate_limited`,
+on the network has that identifier), `invalid_identifier` (it isn't written as a number or
+username the network takes), `unsupported`, `not_connected`, `rate_limited`,
 `network_rejected`, `timeout` (the network took over two minutes, or no host reported back), or
 `expired` (no bridge host took it in ten minutes; one that does later doesn't start it). Only
 the host the command went to can answer it.
@@ -1054,7 +1055,8 @@ packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google 
 contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
 Instagram, Slack and LinkedIn a contact; X a username. The bridge host passes a number on as digits with
 its `+` (Signal needs the country code) and a username without its `@`, checked against the
-network's own username grammar; anything else is `not_found` (it could be one of the
+network's own username grammar. A number's formatting (spaces, dashes, dots, brackets, `tel:`,
+`00` for `+`) is taken off first; anything else is `invalid_identifier` (it could be one of the
 connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
 host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
 chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric

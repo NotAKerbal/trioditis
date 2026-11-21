@@ -78,6 +78,8 @@ export const loginStep = v.object({
     v.object({
       type: v.union(v.literal('qr'), v.literal('code'), v.literal('emoji'), v.literal('nothing')),
       data: v.optional(v.string()),
+      /** When to stop showing the code (ms); the bridge host moves it on while it's good. */
+      expiresAt: v.optional(v.number()),
     }),
   ),
   fields: v.optional(

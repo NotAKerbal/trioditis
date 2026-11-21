@@ -688,8 +688,54 @@ var startTargets = map[string]struct{ contact, phone, username bool }{
 	"testnet":   {contact: true, phone: true, username: true},
 }
 
-// phonePattern is what a phone number looks like as people write one.
-var phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 ().-]{5,}[0-9]$`)
+// A phone number is 7 to 15 digits once its formatting is taken off (E.164 allows at most 15).
+const (
+	minPhoneDigits = 7
+	maxPhoneDigits = 15
+)
+
+// phoneSeparators are what people put between a number's digits, as typed or pasted from an
+// address book: spaces of every width, dashes of every length, dots, slashes and brackets.
+func phoneSeparator(r rune) bool {
+	switch r {
+	case ' ', '\t', '-', '.', '/', '(', ')', '[', ']',
+		'\u00a0', '\u2007', '\u2009', '\u200a', '\u202f', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2212':
+		return true
+	}
+	return false
+}
+
+// normalizePhone takes the formatting off what may be a phone number: a tel: prefix, separators,
+// and the 00 international prefix most of the world dials (taken as +). It returns the
+// digits, whether the number had its country code marked, and whether it was a phone number at
+// all (digits and formatting only). A national number (no + or 00) is left as it is: which
+// country it belongs to can't be told from the number.
+func normalizePhone(identifier string) (digits string, international, ok bool) {
+	s := strings.TrimSpace(identifier)
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "tel:"), "TEL:")
+	// "+44 (0)20 …": the bracketed 0 is the national prefix, dialled only from inside the
+	// country, so it goes when the country code is there.
+	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "00") {
+		s = strings.Replace(s, "(0)", "", 1)
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case (r == '+' || r == '\uff0b') && b.Len() == 0 && !international:
+			international = true
+		case phoneSeparator(r):
+		default:
+			return "", false, false
+		}
+	}
+	digits = b.String()
+	if !international && strings.HasPrefix(digits, "00") {
+		digits, international = digits[2:], true
+	}
+	return digits, international, digits != ""
+}
 
 // usernamePatterns are each network's own username grammar, after a leading @ is taken off:
 // anything else could be an internal ID the connector resolves another way (a Signal ACI, say).
@@ -702,27 +748,35 @@ var usernamePatterns = map[string]*regexp.Regexp{
 // internationalOnly are the networks that take a phone number only with its country code.
 var internationalOnly = map[string]bool{"signal": true}
 
+// countryCodeFirst are the networks that read a number without + as international anyway
+// (mautrix-whatsapp prefixes the digits with +). A number starting with 0 there is written the
+// national way, since no country code starts with 0: looking it up would ask about a different
+// number, so it is refused as written wrong.
+var countryCodeFirst = map[string]bool{"whatsapp": true}
+
 // canonicalIdentifier is the identifier as the network's connector gets it: a phone number as
 // digits with its leading + (never dots or spaces, which a connector could take for one of its
 // own IDs, as mautrix-gmessages does), or a username without its @. Empty if it's neither kind
-// the network takes.
+// the network takes; the person is told it isn't written in a way the network takes
+// (invalid_identifier), as against nobody on the network having it (not_found), which only
+// the network can say.
 func (c *Connector) canonicalIdentifier(identifier string) string {
 	targets := startTargets[c.Network]
-	if targets.phone && phonePattern.MatchString(identifier) {
-		plus := strings.HasPrefix(identifier, "+")
-		if !plus && internationalOnly[c.Network] {
+	if digits, plus, ok := normalizePhone(identifier); targets.phone && ok {
+		switch {
+		case len(digits) < minPhoneDigits || len(digits) > maxPhoneDigits:
 			return ""
-		}
-		digits := strings.Map(func(r rune) rune {
-			if r >= '0' && r <= '9' {
-				return r
-			}
-			return -1
-		}, identifier)
-		if plus {
+		case !plus && internationalOnly[c.Network]:
+			return ""
+		case !plus && countryCodeFirst[c.Network] && strings.HasPrefix(digits, "0"):
+			return ""
+		case plus && strings.HasPrefix(digits, "0"):
+			return ""
+		case plus:
 			return "+" + digits
+		default:
+			return digits
 		}
-		return digits
 	}
 	if pattern := usernamePatterns[c.Network]; targets.username && pattern != nil {
 		if name := strings.TrimPrefix(identifier, "@"); pattern.MatchString(name) {
@@ -781,7 +835,7 @@ func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, 
 		}
 		// Only the kinds the network's connector resolves safely; anything else is nobody here.
 		if identifier = c.canonicalIdentifier(identifier); identifier == "" {
-			return conflict(protocol.ErrNotFound, "the network doesn't start chats from that kind of identifier")
+			return conflict(protocol.ErrInvalidIdentifier, "that isn't a phone number or username the network takes")
 		}
 	}
 	if check {

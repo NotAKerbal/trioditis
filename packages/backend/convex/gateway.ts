@@ -99,6 +99,8 @@ export const ingest = mutation({
     hostId: v.string(),
     network,
     events: v.array(bridgeEvent),
+    /** The host's last heartbeat before it shuts down: it is offline from now. */
+    stopping: v.optional(v.boolean()),
   },
   returns: v.union(v.object({ ackedThrough: v.number() }), v.object({ expectedSeq: v.number() })),
   handler: async (ctx, args) => {
@@ -143,7 +145,10 @@ export const ingest = mutation({
       applied++
       meter.bytes += 2 * byteSize(event)
     }
-    await ctx.db.patch(host._id, { lastSeq, lastSeenAt: now })
+    // A host that says it is stopping is offline at once (never heard from, as far as being
+    // live goes), rather than once its heartbeats have gone stale.
+    const stopping = args.stopping === true && args.events.length === 0
+    await ctx.db.patch(host._id, { lastSeq, lastSeenAt: stopping ? 0 : now })
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
   },
 })

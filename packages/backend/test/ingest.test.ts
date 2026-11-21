@@ -93,6 +93,23 @@ describe('ingest', () => {
     expect(await ingest(t, [])).toEqual({ ackedThrough: 1 })
   })
 
+  it('takes a host that says it is stopping offline at once', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [message('e1')])
+    const lastSeen = () => t.run(async (ctx) => (await ctx.db.query('bridgeHosts').first())?.lastSeenAt)
+    expect(await lastSeen()).toBeGreaterThan(0)
+    expect(
+      await t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, ...HOST, events: [], stopping: true }),
+    ).toEqual({
+      ackedThrough: 1,
+    })
+    expect(await lastSeen()).toBe(0)
+    // The next heartbeat, from the host started again, brings it back.
+    await ingest(t, [])
+    expect(await lastSeen()).toBeGreaterThan(0)
+  })
+
   it('rejects plaintext content', async () => {
     seq = 0
     const t = setup()
