@@ -15,7 +15,7 @@ import {
   type WebContents,
 } from 'electron'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { dotBitmap } from './badge.ts'
 import { invitationFrom, linkArgument, PROTOCOL, type Invitation } from './links.ts'
@@ -575,6 +575,18 @@ app.on('open-url', (event, url) => {
   openLink(url)
 })
 
+/** The HTTP cache folders older versions left: the default session's and each server's. */
+async function removeOldHttpCaches() {
+  const data = app.getPath('userData')
+  const servers = await readdir(path.join(data, 'Partitions')).catch(() => [] as string[])
+  await Promise.all(
+    [
+      data,
+      ...servers.filter((name) => name.startsWith('server-')).map((name) => path.join(data, 'Partitions', name)),
+    ].map((dir) => rm(path.join(dir, 'Cache'), { recursive: true, force: true }).catch(() => undefined)),
+  )
+}
+
 // No HTTP cache anywhere, not only in the servers' sessions (partitionFor): the default session,
 // which shows the server picker, would otherwise keep one in the app's data folder too. It has to
 // be set before the app is ready.
@@ -599,8 +611,9 @@ if (!app.requestSingleInstanceLock()) {
     else showConnect()
   })
   void app.whenReady().then(async () => {
-    // What the default session cached before the switch above is cleared.
-    void session.defaultSession.clearCache()
+    // What older versions cached is deleted: with the cache off, Chromium's own clearCache()
+    // does nothing. Only once this instance holds the lock, so no other one is using it.
+    void removeOldHttpCaches()
     buildMenu()
     settings = await loadSettings()
     const asked = serverArgument()
