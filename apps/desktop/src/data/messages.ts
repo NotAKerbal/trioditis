@@ -215,6 +215,18 @@ export function useBridge(): { key: string | undefined; status: BridgeStatus } {
   return data?.publicKey ? { key: data.publicKey, status: 'ready' } : { key: undefined, status: 'missing' }
 }
 
+/**
+ * How the person's sends with these client message IDs stand, by ID, for the ones used
+ * (messages.sendStates): what sending a message again needs for attempts whose copies are gone.
+ */
+export function useSendStates(clientMessageIds: string[]) {
+  const { data } = useQuery({
+    ...convexQuery(api.messages.sendStates, { clientMessageIds }),
+    enabled: clientMessageIds.length > 0,
+  })
+  return data
+}
+
 export function useSendMutations() {
   return {
     send: useMutation(api.messages.send),

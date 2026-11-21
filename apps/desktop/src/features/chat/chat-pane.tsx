@@ -45,6 +45,7 @@ import {
   useReactions,
   useReactionToggle,
   useSendMutations,
+  useSendStates,
   useTyping,
   type Message,
 } from '~/data/messages.ts'
@@ -70,7 +71,17 @@ import { MessageList } from './message-list.tsx'
 import { draftSendId } from '~/data/saved-drafts.ts'
 import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
 import { restoreConflict } from './cancel-scheduled.ts'
-import { sendAgain, type SendAgainState } from './send-again.ts'
+import {
+  chainOf,
+  chainRoots,
+  fromDelivery,
+  latestAttempt,
+  nextAttempt,
+  sendAgain,
+  stateOf,
+  useSendingAgain,
+  type SendAgainState,
+} from './send-again.ts'
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
@@ -275,6 +286,24 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
 
   const byEvent = (eventId: string) => messages.find((m) => m.eventId === eventId)
 
+  // Sending again (send-again.ts): each of the person's sends belongs to a chain from its
+  // original, and every row of a chain shows where its latest attempt stands. How each attempt
+  // stands is its copy's delivery state in the list, or the server's for one not loaded or gone.
+  const own = messages.flatMap((m) => (m.clientMessageId ? [m] : []))
+  const roots = chainRoots(own.map((m) => m.clientMessageId!))
+  const troubled = [
+    ...new Set(
+      own.filter((m) => m.delivery === 'failed' || m.delivery === 'unknown').map((m) => roots.get(m.clientMessageId!)!),
+    ),
+  ]
+  // The server takes 100 IDs at a time: the most recent troubled chains, if there are more.
+  const askIds = troubled.slice(-Math.floor(100 / MAX_ASK)).flatMap((root) => chainOf(root).slice(0, MAX_ASK))
+  const serverStates = useSendStates(askIds)
+  const sendingAgain = useSendingAgain()
+  const known = new Map<string, SendAgainState>()
+  for (const s of serverStates ?? []) known.set(s.clientMessageId, stateOf(s.used))
+  for (const m of own) known.set(m.clientMessageId!, fromDelivery(m.delivery))
+
   const name = chat.name
   const muted = chat.muted
   const toggleArchived = () =>
@@ -450,17 +479,23 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
           onSendAgain={(m) => {
-            // One attempt per link of the chain, whatever the clicks: the person chose to risk a
-            // duplicate on the network, once each time (send-again.ts).
+            // One attempt per link of the chain, whatever the clicks and from whichever row: the
+            // person chose to risk a duplicate on the network, once each time (send-again.ts).
             const text = m.body?.body
             if (!text || !m.clientMessageId) return
-            const listed = new Map(
-              messages.flatMap((x) => (x.clientMessageId ? [[x.clientMessageId, x.delivery] as const] : [])),
-            )
-            void sendAgain(m.clientMessageId, listed, (id) => sendText(text, m.replyTo, id)).then((state) => {
+            const root = roots.get(m.clientMessageId) ?? m.clientMessageId
+            void sendAgain(root, known, (id) => sendText(text, m.replyTo, id)).then((state) => {
               const say = state ? SEND_AGAIN_SAYS[state] : undefined
               if (say) toast(say)
             })
+          }}
+          againOf={(m) => {
+            if (!m.clientMessageId) return { state: undefined, canTry: false }
+            const root = roots.get(m.clientMessageId) ?? m.clientMessageId
+            return {
+              state: latestAttempt(root, known, sendingAgain)?.state,
+              canTry: nextAttempt(root, known, sendingAgain) !== null,
+            }
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)
@@ -481,6 +516,9 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
                 (answer) => {
                   if (answer.outcome === 'sent') return toast(beatenBySend(answer.delivery))
                   if (answer.outcome === 'dismissed') return
+                  // Cancelled by an earlier call (another tab, or this pane before it was reopened):
+                  // that one put its text in the composer. This leaves it to an explicit Restore.
+                  if (!answer.first) return toast('Already cancelled. It’s kept below to restore or discard.')
                   // Cancelled: its copy stays on the server, listed below. The text is the one the
                   // server returned, not what this list showed.
                   const text = answer.copy
@@ -553,6 +591,9 @@ function replyStub(eventId: string): Message {
     delivery: undefined,
   }
 }
+
+/** How many attempts of each chain are asked of the server. */
+const MAX_ASK = 8
 
 /** What to say when sending again found its replacement's ID used already. */
 const SEND_AGAIN_SAYS: Partial<Record<SendAgainState, string>> = {
