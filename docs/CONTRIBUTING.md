@@ -251,8 +251,11 @@ recovery key in the app, or the passkey in a browser.
 
 Unsent drafts are kept across a reload in the browser's storage, each sealed to the person's
 own key (kind `draft`; apps/desktop/src/data/saved-drafts.ts), so nothing readable is stored.
-Reloading, closing the window or changing servers asks first only while a send is on its way,
-or if the browser refused to save a draft.
+Each chat's draft, sends still on their way and held messages are saved apart, so tabs don't
+overwrite each other's. A send's client message ID comes from its draft, so the same draft sent
+from two tabs, or again after a reload, is one message; a send under way when the page went
+comes back as a draft, never sent again on its own. Reloading, closing the window or changing
+servers asks first only while a send is on its way, or if the browser refused to save a draft.
 If the page crashes or stops responding, the app says so and offers to reload it; it logs
 only why (Chromium's reason and exit code), never the page's address.
 

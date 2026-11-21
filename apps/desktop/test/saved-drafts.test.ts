@@ -2,20 +2,32 @@ import { generateKeyPair, ready } from '@trioditis/crypto'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   adoptDraft,
+  allHeld,
+  allSending,
+  beginSend,
   clearSentDraft,
+  endSend,
   getDraft,
-  markDraftSent,
+  holdDraft,
+  onDraftSent,
   restoreDraft,
+  setDraftReply,
   setDraftText,
   takeDraft,
 } from '../src/data/drafts.ts'
 import {
-  draftChatOf,
   draftSendId,
-  loadDrafts,
-  parseEntry,
-  saveDraft,
+  draftWriter,
+  keyOf,
+  loadAll,
+  parseSent,
+  removeDraftIfOurs,
+  removeSending,
   savedDraftKey,
+  writeDraft,
+  writeHeld,
+  writeSending,
+  writeSent,
   type DraftStorage,
 } from '../src/data/saved-drafts.ts'
 
@@ -37,72 +49,120 @@ function memory(): DraftStorage & { data: Map<string, string> } {
 
 type Reply = { eventId: string; body: string }
 const draft = (text: string, id = 'id-1', reply: Reply | null = null) => ({ text, reply, id })
+const owner = () => ({ userId: 'u1', keyPair: generateKeyPair() })
 let n = 0
 const chat = () => `chat-${++n}`
 
 describe('drafts saved across a reload', () => {
   it('come back after a reload, text, reply and identity', () => {
     const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
-    saveDraft(storage, owner, 'c1', draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }))
-    expect(loadDrafts(storage, owner).get('c1')).toEqual(
+    const me = owner()
+    writeDraft(storage, me, 'c1', draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }))
+    expect(loadAll<Reply>(storage, me).drafts.get('c1')).toMatchObject(
       draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }),
     )
   })
 
   it('are stored sealed: no text, reply or plaintext of any kind on disk', () => {
     const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
-    saveDraft(
-      storage,
-      owner,
-      'c1',
-      draft('the secret plan', 'id-1', { eventId: 'wamid.HBgLreplytarget', body: 'quoted words' }),
-    )
+    const me = owner()
+    const secret = draft('the secret plan', 'id-1', { eventId: 'wamid.HBgLreplytarget', body: 'quoted words' })
+    writeDraft(storage, me, 'c1', secret)
+    writeSending(storage, me, 'c2', 'd_x', secret)
+    writeHeld(storage, me, 'c3', [secret])
     const raw = [...storage.data.values()].join()
-    expect(raw).not.toContain('secret')
-    expect(raw).not.toContain('quoted')
-    expect(raw).not.toContain('replytarget')
+    for (const word of ['secret', 'quoted', 'replytarget']) expect(raw).not.toContain(word)
   })
 
   it('open only for their owner’s key and their own chat', () => {
     const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
-    saveDraft(storage, owner, 'c1', draft('hi'))
-    expect(loadDrafts(storage, { userId: 'u1', keyPair: generateKeyPair() }).size).toBe(0)
-    // A saved draft moved to another chat's place doesn't open there.
+    const me = owner()
+    writeDraft(storage, me, 'c1', draft('hi'))
+    expect(loadAll(storage, owner()).drafts.size).toBe(0)
     storage.setItem(savedDraftKey('u1', 'c2'), storage.getItem(savedDraftKey('u1', 'c1'))!)
     storage.removeItem(savedDraftKey('u1', 'c1'))
-    expect(loadDrafts(storage, owner).size).toBe(0)
-  })
-
-  it('keep one entry per chat, so saving one chat never touches another', () => {
-    const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
-    saveDraft(storage, owner, 'c1', draft('from A'))
-    saveDraft(storage, owner, 'c2', draft('from B'))
-    expect([...loadDrafts(storage, owner).keys()].sort()).toEqual(['c1', 'c2'])
-    saveDraft(storage, owner, 'c1', null)
-    expect([...loadDrafts(storage, owner).keys()]).toEqual(['c2'])
-    expect(draftChatOf('u1', savedDraftKey('u1', 'c2'))).toBe('c2')
-    expect(draftChatOf('u2', savedDraftKey('u1', 'c2'))).toBeNull()
-  })
-
-  it('leave a note of the send that emptied one, and nothing to bring back', () => {
-    const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
-    saveDraft(storage, owner, 'c1', draft('hi'))
-    saveDraft(storage, owner, 'c1', null, 'd_sent')
-    expect(parseEntry(storage.getItem(savedDraftKey('u1', 'c1')))).toEqual({ v: 1, sent: 'd_sent' })
-    expect(loadDrafts(storage, owner).size).toBe(0)
+    expect(loadAll(storage, me).drafts.size).toBe(0)
   })
 
   it('treat a damaged entry as nothing saved', () => {
     const storage = memory()
-    const owner = { userId: 'u1', keyPair: generateKeyPair() }
     storage.setItem(savedDraftKey('u1', 'c1'), '{not json')
-    storage.setItem(savedDraftKey('u1', 'c2'), JSON.stringify({ v: 1, id: 'x', sealed: { nonsense: true } }))
-    expect(loadDrafts(storage, owner).size).toBe(0)
+    storage.setItem(savedDraftKey('u1', 'c2'), JSON.stringify({ v: 1, id: 'x', w: 'w', sealed: { nonsense: true } }))
+    expect(loadAll(storage, owner()).drafts.size).toBe(0)
+  })
+
+  it('tell each kind of entry apart, for this person only', () => {
+    expect(keyOf('u1', savedDraftKey('u1', 'c1'))).toMatchObject({ kind: 'draft', chatId: 'c1' })
+    expect(keyOf('u1', 'trioditis.draftSending.u1.c1.d_abc')).toEqual({
+      kind: 'draftSending',
+      chatId: 'c1',
+      sendId: 'd_abc',
+    })
+    expect(keyOf('u1', 'trioditis.draftSent.u1.c1')).toMatchObject({ kind: 'draftSent', chatId: 'c1' })
+    expect(keyOf('u2', savedDraftKey('u1', 'c1'))).toBeNull()
+  })
+})
+
+describe('a tab erasing a draft', () => {
+  it('removes only the saved draft it wrote or brought back, not another tab’s newer one', () => {
+    const storage = memory()
+    const me = owner()
+    // Tab B opened before tab A saved: B has seen no saved draft for the chat.
+    const seenByB: string | undefined = undefined
+    // A saves its draft.
+    const wA = writeDraft(storage, me, 'c1', draft('from A'))
+    // B types and erases in the same chat: its removal leaves A's draft.
+    expect(removeDraftIfOurs(storage, 'u1', 'c1', seenByB)).toBe(false)
+    expect(loadAll(storage, me).drafts.get('c1')?.text).toBe('from A')
+    // A erasing its own does remove it.
+    expect(draftWriter(storage, 'u1', 'c1')).toBe(wA)
+    expect(removeDraftIfOurs(storage, 'u1', 'c1', wA)).toBe(true)
+    expect(loadAll(storage, me).drafts.size).toBe(0)
+  })
+})
+
+describe('a send under way', () => {
+  it('is saved until it settles, and comes back from a reload as a draft that sends as the same', () => {
+    const a = chat()
+    setDraftText(a, 'see you at 7')
+    const taken = takeDraft<Reply>(a)!
+    const sendId = draftSendId(taken.id, taken.text, undefined)
+    beginSend(a, sendId, taken)
+    expect(allSending()).toEqual([[sendId, { ...taken, chatId: a }]])
+    // The page crashes before the server has it: what's saved is the send under way.
+    const storage = memory()
+    const me = owner()
+    writeSending(storage, me, a, sendId, taken)
+    const loaded = loadAll<Reply>(storage, me)
+    expect(loaded.sending).toEqual([{ chatId: a, sendId, draft: { text: 'see you at 7', reply: null, id: taken.id } }])
+    // Brought back as the same draft: sending it again is the same send ID, so it dedupes.
+    const back = loaded.sending[0]!.draft
+    expect(draftSendId(back.id, back.text, undefined)).toBe(sendId)
+    endSend(sendId, false)
+    expect(allSending()).toEqual([])
+  })
+
+  it('is announced when it goes, apart from whatever the composer holds by then', () => {
+    const a = chat()
+    const heard: string[] = []
+    const stop = onDraftSent((chatId, id) => heard.push(`${chatId}:${id}`))
+    setDraftText(a, 'one')
+    const taken = takeDraft<Reply>(a)!
+    beginSend(a, 'd_one', taken)
+    // A new draft started while the first was on its way.
+    setDraftText(a, 'two')
+    endSend('d_one', true)
+    stop()
+    expect(heard).toEqual([`${a}:d_one`])
+    expect(getDraft(a).text).toBe('two')
+  })
+
+  it('leaves a note other tabs and the next load read', () => {
+    const storage = memory()
+    writeSent(storage, 'u1', 'c1', 'd_one')
+    expect(parseSent(storage.getItem('trioditis.draftSent.u1.c1'))).toBe('d_one')
+    expect(loadAll(storage, owner()).sent.get('c1')).toBe('d_one')
+    removeSending(storage, 'u1', 'c1', 'd_one')
   })
 })
 
@@ -110,7 +170,6 @@ describe('a restored draft sent from two tabs', () => {
   it('is one send: both tabs work out the same client message ID', () => {
     const a = chat()
     const b = chat()
-    // Two tabs bring back the same saved draft.
     adoptDraft(a, 'see you at 7', null, 'saved-id')
     adoptDraft(b, 'see you at 7', null, 'saved-id')
     const takenA = takeDraft(a)!
@@ -157,6 +216,18 @@ describe('a draft’s identity', () => {
     expect(getDraft(a).id).not.toBe(first)
   })
 
+  it('is new once its text is cleared, though the reply stays', () => {
+    const a = chat()
+    setDraftReply(a, { eventId: 'e1', body: 'q' })
+    setDraftText(a, 'ok')
+    const first = getDraft(a).id
+    // Cleared, reply kept, and the same words typed again: a new message, not the same send.
+    setDraftText(a, '')
+    setDraftText(a, 'ok')
+    expect(getDraft(a).id).not.toBe(first)
+    expect(draftSendId(getDraft(a).id, 'ok', 'e1')).not.toBe(draftSendId(first, 'ok', 'e1'))
+  })
+
   it('comes back with a send that didn’t go, so trying again is the same send', () => {
     const a = chat()
     setDraftText(a, 'hi')
@@ -165,27 +236,31 @@ describe('a draft’s identity', () => {
     expect(getDraft(a).id).toBe(taken.id)
   })
 
-  it('records the send that emptied it, until something is typed again', () => {
-    const a = chat()
-    setDraftText(a, 'hi')
-    takeDraft(a)
-    markDraftSent(a, 'd_x')
-    expect(getDraft(a).sent).toBe('d_x')
-    setDraftText(a, 'next')
-    expect(getDraft(a).sent).toBeNull()
-    // Typed while the send was on its way: nothing to mark.
-    const b = chat()
-    setDraftText(b, 'one')
-    takeDraft(b)
-    setDraftText(b, 'two')
-    markDraftSent(b, 'd_y')
-    expect(getDraft(b)).toMatchObject({ text: 'two', sent: null })
-  })
-
   it('doesn’t replace what’s typed when a saved draft comes back', () => {
     const a = chat()
     setDraftText(a, 'typed here')
-    adoptDraft(a, 'saved', null, 'saved-id')
+    expect(adoptDraft(a, 'saved', null, 'saved-id')).toBe(false)
     expect(getDraft(a).text).toBe('typed here')
+  })
+})
+
+describe('a held message', () => {
+  it('waits for the composer to be free, never joining a draft that replies elsewhere', () => {
+    const a = chat()
+    setDraftReply(a, { eventId: 'e2', body: 'other' })
+    setDraftText(a, 'my reply to e2')
+    holdDraft<Reply>(a, { text: 'cancelled', reply: { eventId: 'e1', body: 'q' } })
+    expect(getDraft(a).text).toBe('my reply to e2')
+    expect(allHeld()).toEqual([[a, [{ text: 'cancelled', reply: { eventId: 'e1', body: 'q' } }]]])
+    // The draft goes: the held message takes its place, with its own reply.
+    takeDraft(a)
+    expect(getDraft<Reply>(a)).toMatchObject({ text: 'cancelled', reply: { eventId: 'e1' } })
+    expect(allHeld().filter(([c]) => c === a)).toEqual([])
+  })
+
+  it('goes straight into an empty composer, as the same draft when it has an identity', () => {
+    const a = chat()
+    holdDraft(a, { text: 'back', reply: null, id: 'kept-id' })
+    expect(getDraft(a)).toMatchObject({ text: 'back', id: 'kept-id' })
   })
 })
