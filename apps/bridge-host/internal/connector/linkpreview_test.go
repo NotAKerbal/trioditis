@@ -60,16 +60,30 @@ func TestLinkPreviewsKeepOnlyWebLinksWithSomethingToShow(t *testing.T) {
 		{MatchedURL: "javascript:alert(1)", LinkPreview: event.LinkPreview{Title: "x"}},
 		{MatchedURL: "mailto:a@b.test", LinkPreview: event.LinkPreview{Title: "x"}},
 		{MatchedURL: "https://empty.test"},
-		// The canonical address wins over the one written in the message.
-		{MatchedURL: "example.com/a", LinkPreview: event.LinkPreview{CanonicalURL: "https://www.example.com/a", Title: "Canonical"}},
+		// The address written in the message wins over the canonical one; the canonical one is
+		// kept when the network didn't say what was written.
+		{MatchedURL: "example.com/a", LinkPreview: event.LinkPreview{CanonicalURL: "https://www.example.com/a", Title: "Written"}},
+		{LinkPreview: event.LinkPreview{CanonicalURL: "https://www.example.com/b", Title: "Canonical"}},
 		// Written without a scheme.
 		{MatchedURL: "example.org", LinkPreview: event.LinkPreview{Title: "Schemeless"}},
+	}
+	got := c.linkPreviews(context.Background(), o, previews)
+	want := []string{"https://example.com/a", "https://www.example.com/b", "https://example.org"}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i, p := range got {
+		if p.URL != want[i] {
+			t.Errorf("preview %d: %+v", i, p)
+		}
+	}
+	previews = []*event.BeeperLinkPreview{
 		// An expired picture, and one that isn't a picture, are left out; the words stay.
 		{MatchedURL: "https://a.test", LinkPreview: event.LinkPreview{Title: "Gone", ImageURL: media.ContentURI("AAAAAAAAAAAAAAAAAAAAAA")}},
 		{MatchedURL: "https://b.test", LinkPreview: event.LinkPreview{Title: "PDF", ImageURL: file}},
 	}
-	got := c.linkPreviews(context.Background(), o, previews)
-	want := []string{"https://www.example.com/a", "https://example.org", "https://a.test"}
+	got = c.linkPreviews(context.Background(), o, previews)
+	want = []string{"https://a.test", "https://b.test"}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v", got)
 	}

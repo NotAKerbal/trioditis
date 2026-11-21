@@ -60,10 +60,12 @@ const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v
  * A network's preview, checked: the sealed message is the bridge host's word, and a client
  * opens only a web address.
  */
-function fromNetwork(p: LinkPreview): LinkCard | null {
+function fromNetwork(p: LinkPreview, written: Set<string>): LinkCard | null {
   if (!p || typeof p !== 'object') return null
   const url = webURL(p.url)
-  if (!url) return null
+  // A card opens only a link the message itself has: a preview can't bring in a destination
+  // of its own (a "Bank sign-in" card for somewhere else under a message linking the bank).
+  if (!url || !written.has(url.href)) return null
   // Whether it's a picture this app draws is up to the card (data/media.ts, isImage).
   const image =
     p.image &&
@@ -150,6 +152,34 @@ export function fromAddress(url: URL): { service: Service; detail?: string } {
   return { service: web, detail: last ? readable(last).slice(0, 120) || undefined : undefined }
 }
 
+// What may come before and after a link written without its scheme: a space, a bracket or
+// quote around it, or punctuation after it.
+const OPENERS = /^[("'[<]+/
+const CLOSERS_AFTER = /[.,:;!?'")\]}>]+$/
+
+/**
+ * The web addresses the text links to, as the browser writes them: its http and https links,
+ * and the words that read as a site with no scheme ("example.com/a"), which networks preview
+ * too. A word only counts as one when its host is names with dots ending in letters (so "1.5"
+ * isn't), and nothing a host can't have.
+ */
+export function writtenLinks(text: string): Set<string> {
+  const links = new Set<string>()
+  for (const part of linkParts(text)) {
+    const url = part.kind === 'link' ? webURL(part.href) : null
+    if (url) links.add(url.href)
+  }
+  for (const word of text.split(/\s+/)) {
+    const bare = word.replace(OPENERS, '').replace(CLOSERS_AFTER, '')
+    if (!bare || /^[a-z][a-z0-9+.-]*:/i.test(bare) || bare.includes('@')) continue
+    const host = bare.split(/[/?#]/)[0]!
+    if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/i.test(host)) continue
+    const url = webURL(`https://${bare}`)
+    if (url) links.add(url.href)
+  }
+  return links
+}
+
 /**
  * The cards a message shows under its text: the network's previews when it sent any, otherwise
  * one card for the first web link in the text (as iMessage does, so a message of many links
@@ -157,8 +187,9 @@ export function fromAddress(url: URL): { service: Service; detail?: string } {
  */
 export function linkCards(message: MessagePlaintext, text: string): LinkCard[] {
   const previews = Array.isArray(message.previews) ? message.previews : []
+  const written = writtenLinks(text)
   const cards = previews
-    .map(fromNetwork)
+    .map((p) => fromNetwork(p, written))
     .filter((c): c is LinkCard => c !== null)
     .slice(0, MAX_PREVIEWS)
   if (cards.length) return cards

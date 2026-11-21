@@ -66,10 +66,12 @@ func (c *Connector) linkPreviews(ctx context.Context, o *owner, previews []*even
 	return out
 }
 
-// previewURL is the address a preview is of: the page's own canonical address, or else the
-// link as it was written in the message. Only a web address is kept, since clients open it.
+// previewURL is the address a preview is of: the link as it was written in the message, or
+// else the page's own canonical address. The written one comes first because clients show a
+// card only for a link the message has, so a preview can't bring in a destination of its own.
+// Only a web address is kept, since clients open it.
 func previewURL(p *event.BeeperLinkPreview) string {
-	for _, candidate := range []string{p.CanonicalURL, p.MatchedURL} {
+	for _, candidate := range []string{p.MatchedURL, p.CanonicalURL} {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" || len(candidate) > maxPreviewURLBytes {
 			continue

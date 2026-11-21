@@ -1,6 +1,6 @@
 import type { MessagePlaintext } from '@trioditis/core'
 import { describe, expect, it } from 'vitest'
-import { cardReplacesText, fromAddress, linkCards } from '~/features/chat/link-preview.ts'
+import { cardReplacesText, fromAddress, linkCards, writtenLinks } from '~/features/chat/link-preview.ts'
 
 const message = (body: string, previews?: unknown[]): MessagePlaintext =>
   ({ type: 'text', body, ...(previews ? { previews } : {}) }) as MessagePlaintext
@@ -103,11 +103,34 @@ describe('a card standing in for the text', () => {
     const body = 'https://example.com/a'
     expect(cardReplacesText(linkCards(message(body), body), body)).toBe(false)
   })
-  it('keeps the text when the card goes somewhere else', () => {
-    const preview = (href: string) => linkCards(message('x', [{ url: href, title: 'T' }]), 'x')
-    expect(cardReplacesText(preview('https://example.com/a'), 'https://example.com/a#part-2')).toBe(false)
-    expect(cardReplacesText(preview('https://example.com/a'), 'http://example.com/a')).toBe(false)
-    expect(cardReplacesText(preview('https://example.com/a'), 'https://www.example.com/a')).toBe(false)
-    expect(cardReplacesText(preview('https://example.com/a'), 'https://example.com:8443/a')).toBe(false)
+  it('shows a preview only for a link the message has, never one of its own', () => {
+    const kinds = (body: string, href: string) =>
+      linkCards(message(body, [{ url: href, title: 'Bank sign-in' }]), body).map((c) => [c.kind, c.href])
+    // A preview for somewhere the message doesn't link: the card is the message's own link.
+    expect(kinds('https://bank.example/', 'https://other.example/')).toEqual([['address', 'https://bank.example/']])
+    expect(kinds('no links here', 'https://other.example/')).toEqual([])
+    // Not quite the written link: a section, another scheme, host or port.
+    for (const written of [
+      'https://example.com/a#part-2',
+      'http://example.com/a',
+      'https://www.example.com/a',
+      'https://example.com:8443/a',
+    ]) {
+      expect(kinds(written, 'https://example.com/a')[0]?.[0]).toBe('address')
+    }
+    // A link written without its scheme is one the message has.
+    expect(kinds('see example.com/a.', 'https://example.com/a')).toEqual([['preview', 'https://example.com/a']])
+    expect(kinds('(example.com)', 'https://example.com/')).toEqual([['preview', 'https://example.com/']])
+  })
+})
+
+describe('links written in a message', () => {
+  it('reads web links and sites written without a scheme, and nothing else', () => {
+    expect([...writtenLinks('see https://a.test/x, example.com/b and (www.c.test).')]).toEqual([
+      'https://a.test/x',
+      'https://example.com/b',
+      'https://www.c.test/',
+    ])
+    expect([...writtenLinks('mailto:a@b.test a@b.test javascript:x.y 1.5 word. localhost/x')]).toEqual([])
   })
 })
