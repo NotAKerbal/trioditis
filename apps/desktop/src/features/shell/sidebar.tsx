@@ -52,6 +52,7 @@ import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
+import { searchScope } from './search-scope.ts'
 import { usePrefs } from '~/lib/prefs.ts'
 
 /** What the sidebar asks the shell to do to a chat. The shell owns selection and auto-advance. */
@@ -162,13 +163,12 @@ export function Sidebar({
   const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
   const unloaded = searched.filter((l) => l.canLoadMore)
   const searchedAll = searched.every((l) => l.exhausted)
-  const searchLabel = !searchedAll
-    ? 'Results in loaded chats'
-    : focused
-      ? 'Results in all chats'
-      : simpleShow === 'inbox'
-        ? 'Results in the inbox'
-        : `Results in ${SIMPLE_SHOWS.find((v) => v.view === simpleShow)!.label.toLowerCase()}`
+  const searchLabel = searchScope({
+    searchedAll,
+    view: focused ? null : SIMPLE_SHOWS.find((v) => v.view === simpleShow)!.label,
+    network: network ? networkName(network) : undefined,
+    label: labelId ? (labels?.find((l) => l.id === labelId)?.name ?? 'a label') : undefined,
+  })
   const results = searching
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
@@ -338,7 +338,8 @@ export function Sidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-3">
-        {filterActive && !searching ? (
+        {/* Shown while searching too: the filters narrow the search, and Clear widens it. */}
+        {filterActive ? (
           <div className="mx-1 mt-1.5 mb-0.5 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
             Showing
             {!focused && simpleShow !== 'inbox' ? (
