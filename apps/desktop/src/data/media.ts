@@ -158,19 +158,21 @@ export type MediaState = { state: 'idle' | 'loading' | 'failed'; url?: undefined
 /**
  * A picture's, video's or sound's data: URL once it's decrypted. It loads by itself when `auto`
  * (the default: small pictures), trying again a few times if it fails, or after `load()` is
- * called, which also tries again after a failure.
+ * called, which also tries again after a failure. While `active` is false (a picture far
+ * offscreen), it holds nothing, so the URL can be let go.
  */
 export function useMedia(
   network: Network,
   attachment: Attachment | undefined,
   auto = attachment ? loadsByItself(attachment) : false,
+  active = true,
 ): MediaState & { load: () => void } {
   const session = useSession()
   const [asked, setAsked] = useState(0)
   const [state, setState] = useState<MediaState & { mediaId?: string }>({ state: 'idle' })
   const retries = useRef({ mediaId: '', count: 0 })
   const mediaId = attachment?.mediaId
-  const wanted = !!attachment && (auto || asked > 0)
+  const wanted = !!attachment && active && (auto || asked > 0)
   useEffect(() => {
     if (!attachment || !wanted) return setState({ state: 'idle' })
     let current = true

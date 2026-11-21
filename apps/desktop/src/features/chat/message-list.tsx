@@ -162,6 +162,8 @@ export function MessageList(props: MessageListProps) {
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={scroller}
+        // Pictures load as they come near this scroller's view (attachments.tsx).
+        data-scroll-root
         className={cn(
           'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
           // Messages that had to be fetched ease in; a chat shown from the cache is just there.

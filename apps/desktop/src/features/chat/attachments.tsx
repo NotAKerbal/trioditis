@@ -4,8 +4,8 @@ import { Button } from '@trioditis/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { cn } from '@trioditis/ui/lib/utils'
 import { Download, FileIcon, Play } from 'lucide-react'
-import { useState, type ComponentProps } from 'react'
-import { isAudio, isImage, isVideo, playable, saveMedia, useMedia } from '~/data/media.ts'
+import { useEffect, useState, type ComponentProps } from 'react'
+import { isAudio, isImage, isVideo, loadsByItself, playable, saveMedia, useMedia } from '~/data/media.ts'
 import { useSession } from '~/lib/session.tsx'
 
 // A message's pictures and files, and avatars with their pictures, decrypted here (data/media.ts).
@@ -31,14 +31,47 @@ function fileSize(bytes: number) {
 const MAX_W = 320
 const MAX_H = 320
 
-/** A picture's box before it loads: its own shape when the network said it, scaled to fit. */
+/** The shapes of pictures the network didn't give one for, once they've loaded here. */
+const loadedShapes = new Map<string, { width: number; height: number }>()
+
+/**
+ * A picture's box, before it loads and after: its own shape when the network said it (or it has
+ * loaded here before), scaled to fit, so a picture let go offscreen keeps its place in the list.
+ */
 function boxOf(a: Attachment) {
-  const w = a.width && a.width > 0 ? a.width : 0
-  const h = a.height && a.height > 0 ? a.height : 0
-  if (!w || !h) return { width: 240, height: 180 }
-  const scale = Math.min(1, MAX_W / w, MAX_H / h)
+  const known = a.width && a.height && a.width > 0 && a.height > 0 ? { width: a.width, height: a.height } : undefined
+  const shape = known ?? loadedShapes.get(a.mediaId)
+  if (!shape) return undefined
+  const scale = Math.min(1, MAX_W / shape.width, MAX_H / shape.height)
   // A very narrow or flat picture still gets a box that can be seen and clicked.
-  return { width: Math.max(64, Math.round(w * scale)), height: Math.max(64, Math.round(h * scale)) }
+  return {
+    width: Math.max(64, Math.round(shape.width * scale)),
+    height: Math.max(64, Math.round(shape.height * scale)),
+  }
+}
+const UNKNOWN_BOX = { width: 240, height: 180 }
+
+/**
+ * How far beyond the message list's edges a picture is loaded ahead, and kept. Further off, it's
+ * let go, so a long chat of pictures holds only those near the view (the cache in data/media.ts
+ * brings them back quickly).
+ */
+const NEAR_MARGIN = '1500px 0px'
+
+/** Whether an element is near the view of the scroller it's in (`data-scroll-root`). */
+function useNear() {
+  const [el, setEl] = useState<HTMLElement | null>(null)
+  const [near, setNear] = useState(false)
+  useEffect(() => {
+    if (!el) return
+    const observer = new IntersectionObserver((entries) => setNear(entries.some((e) => e.isIntersecting)), {
+      root: el.closest<HTMLElement>('[data-scroll-root]'),
+      rootMargin: NEAR_MARGIN,
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [el])
+  return [setEl, near] as const
 }
 
 export function Attachments({
@@ -64,21 +97,25 @@ export function Attachments({
 }
 
 function Picture({ network, attachment }: { network: Network; attachment: Attachment }) {
-  const media = useMedia(network, attachment)
+  const [ref, near] = useNear()
   const [open, setOpen] = useState(false)
+  // A picture too large to fetch by itself waits to be asked for.
+  const [asked, setAsked] = useState(false)
+  const wanted = loadsByItself(attachment) || asked
+  const media = useMedia(network, attachment, wanted, near || open)
   const box = boxOf(attachment)
   const name = attachment.name || 'Photo'
-  if (media.state === 'idle' || media.state === 'failed') {
-    // Too large to fetch without asking, or it didn't come.
+  if (!wanted || media.state === 'failed') {
     return (
       <Button
+        ref={ref}
         variant="bare"
         type="button"
-        onClick={media.load}
-        style={box}
+        onClick={() => (wanted ? media.load() : setAsked(true))}
+        style={box ?? UNKNOWN_BOX}
         className="flex flex-col items-center justify-center gap-0.5 rounded-[14px] bg-muted px-3 text-sm text-muted-foreground hover:text-foreground"
       >
-        {media.state === 'failed' ? (
+        {wanted ? (
           <>
             <span>The photo couldn’t be opened.</span>
             <span className="font-medium">Try again</span>
@@ -92,17 +129,19 @@ function Picture({ network, attachment }: { network: Network; attachment: Attach
   if (media.state !== 'ready') {
     return (
       <span
+        ref={ref}
         role="img"
-        aria-label={`${name}, loading`}
-        aria-busy="true"
-        style={box}
-        className="block animate-pulse rounded-[14px] bg-muted motion-reduce:animate-none"
+        aria-label={near ? `${name}, loading` : name}
+        aria-busy={near}
+        style={box ?? UNKNOWN_BOX}
+        className={cn('block rounded-[14px] bg-muted', near && 'animate-pulse motion-reduce:animate-none')}
       />
     )
   }
   return (
     <>
       <Button
+        ref={ref}
         variant="bare"
         type="button"
         onClick={() => setOpen(true)}
@@ -112,7 +151,11 @@ function Picture({ network, attachment }: { network: Network; attachment: Attach
         <img
           src={media.url}
           alt={name}
-          style={attachment.width && attachment.height ? box : { maxWidth: MAX_W, maxHeight: MAX_H }}
+          style={box ?? { maxWidth: MAX_W, maxHeight: MAX_H }}
+          onLoad={(e) => {
+            const { naturalWidth: width, naturalHeight: height } = e.currentTarget
+            if (!box && width && height) loadedShapes.set(attachment.mediaId, { width, height })
+          }}
           className="block object-cover"
         />
       </Button>

@@ -1048,7 +1048,7 @@ mediaId)` from `@trioditis/crypto` and keeps it only in memory: it shows picture
      `application/octet-stream`, so it never opens as a page on the app's origin. A chat's or
      a contact's `avatar` is fetched the same way.
    - The desktop app shows pictures up to 25 MiB in place (trying again a few times when one
-     fails), plays video and sound up to 50 MiB when asked, and saves other files. A picture with no caption has its file name as its `body`, which
+     fails), holding only those within about two screens of the view and letting the rest go, plays video and sound up to 50 MiB when asked, and saves other files. A picture with no caption has its file name as its `body`, which
      is not shown as a caption.
    - **Upload (planned):** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
      URL for the encrypted file; the send's attachment names the returned `mediaId`, and
