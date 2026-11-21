@@ -115,6 +115,8 @@ const _feedMatchesCore: SameShape<keyof Infer<typeof arrivalFeed>, keyof Arrival
  *
  * `clientMessageId` makes the send idempotent end to end: sending the same ID again does
  * nothing. Retrying a failed or unknown send uses a new ID, which the person chooses to do.
+ * Returns `queued` for a new send, or what the ID was used for already (`sent`, `scheduled`),
+ * so a client can say what happened rather than report a send that wasn't this one.
  */
 export const send = mutation({
   args: {
@@ -124,15 +126,16 @@ export const send = mutation({
     copy: envelope,
     replyTo: v.optional(v.string()),
   },
-  returns: v.null(),
+  returns: v.union(v.literal('queued'), v.literal('sent'), v.literal('scheduled')),
   handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
     // Sending the same message again does nothing, whatever has changed since.
-    if (await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)) return null
+    const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
+    if (used) return used
     await checkSend(ctx, chat, input)
     await queueSend(ctx, chat, input)
-    return null
+    return 'queued' as const
   },
 })
 

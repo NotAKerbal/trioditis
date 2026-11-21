@@ -5,4 +5,4 @@ Fixed: Clicking Retry or Send again more than once sends one copy only, and the 
 New: Unsent drafts come back after a reload, kept in your browser sealed to your own key.
 Fixed: Search says which network or label filter it's limited to, and a cancelled scheduled reply comes back as a reply.
 New: Rename, recolour and delete labels from a chat's details.
-Security: Notifications say only that a message came unless you choose to show the sender or text, and every tab follows that choice.
+New: Choose what notifications show (the sender and message, the sender only, or nothing), and turning them off or down holds in every tab.

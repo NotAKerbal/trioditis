@@ -6,8 +6,8 @@ import { useSyncExternalStore } from 'react'
 export type Theme = 'system' | 'light' | 'dark'
 
 /**
- * What a notification shows. The system can keep notifications in its history, on disk and
- * outside the sealing, so it shows neither sender nor text unless the person chooses to.
+ * What a notification shows: the sender and the message unless the person chooses less. The
+ * system can keep notifications in its history, outside the sealing (AGENTS.md).
  */
 export type NotificationDetail = 'hidden' | 'sender' | 'message'
 
@@ -25,7 +25,7 @@ const DEFAULTS: Prefs = {
   previews: true,
   networkBadges: true,
   notifications: true,
-  notificationDetail: 'hidden',
+  notificationDetail: 'message',
 }
 const KEY = 'trioditis.prefs'
 const DETAILS: NotificationDetail[] = ['hidden', 'sender', 'message']
@@ -45,14 +45,20 @@ function fromSaved(saved: Record<string, unknown>): Prefs {
   const known = Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
   const loaded = { ...DEFAULTS, ...known } as Prefs
   // A value this version doesn't know shows the least, never more than was chosen.
-  if (!DETAILS.includes(loaded.notificationDetail)) loaded.notificationDetail = DEFAULTS.notificationDetail
+  if (!DETAILS.includes(loaded.notificationDetail)) loaded.notificationDetail = 'hidden'
   return loaded
 }
 
-/** The stored preferences; null when storage can't say, so what this tab holds stands. */
+/**
+ * Choices made here that storage refused to save, laid over what's stored until a save goes
+ * through: reading storage again mustn't bring back what the person just changed.
+ */
+let unsaved: Partial<Prefs> = {}
+
+/** The stored preferences, with this tab's unsaved choices; null when storage can't say. */
 function load(): Prefs | null {
   const saved = readSaved()
-  return saved ? fromSaved(saved) : null
+  return saved ? { ...fromSaved(saved), ...unsaved } : null
 }
 
 let prefs = load() ?? DEFAULTS
@@ -86,13 +92,16 @@ export function currentPrefs(): Prefs {
  * written back over with what this tab last heard.
  */
 export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
+  unsaved = { ...unsaved, [key]: value }
   prefs = { ...(load() ?? prefs), [key]: value }
   try {
     localStorage.setItem(KEY, JSON.stringify(prefs))
+    // Everything this tab had unsaved went with it.
+    unsaved = {}
     // index.html reads this key before first paint.
     if (key === 'theme') localStorage.setItem('trioditis.theme', value as string)
   } catch {
-    // Storage can be blocked; the choice still applies until the page reloads.
+    // Storage can be blocked or full; the choice still applies here until the page reloads.
   }
   if (key === 'theme') applyTheme()
   listeners.forEach((l) => l())

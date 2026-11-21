@@ -229,12 +229,12 @@ forward and open the server picker, each checked in the main process. Opening th
 changes nothing by itself: the person still types the address, and the picker checks it.
 
 Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
-the desktop app; a browser asks first (Settings → Notifications). The system can keep them in
-its notification history, outside the sealing, so by default they say only that a message
-came. Settings → Notifications → Show adds who sent it (the chat's name; a group's own name,
-until member names exist), or who and what they said; never the network. Each tab reads the
-choice from storage again when a notification is due, so turning them off or down in one tab
-holds in every other.
+the desktop app; a browser asks first (Settings → Notifications). They show who sent the
+message (the chat's name; a group's own name, until member names exist) and what it says,
+never the network. The system can keep them in its notification history, outside the
+sealing: a deliberate exception (AGENTS.md). Settings → Notifications → Show offers less:
+the sender only, or nothing but that a message came. Each tab reads the choice from storage
+again when a notification is due, so turning them off or down in one tab holds in every other.
 The unread badge is a count on the Mac's Dock and on Linux launchers that show one (Ubuntu's
 dock does, for an installed app), and a red dot on the app's Windows taskbar button.
 
@@ -251,8 +251,11 @@ recovery key in the app, or the passkey in a browser.
 
 Unsent drafts are kept across a reload in the browser's storage, each sealed to the person's
 own key (kind `draft`; apps/desktop/src/data/saved-drafts.ts), so nothing readable is stored.
-Reloading, closing the window or changing servers asks first only while a send is on its way,
-or if the browser refused to save a draft.
+Each chat's draft, sends still on their way and held messages are saved apart, so tabs don't
+overwrite each other's. A send's client message ID comes from its draft, so the same draft sent
+from two tabs, or again after a reload, is one message; a send under way when the page went
+comes back as a draft, never sent again on its own. Reloading, closing the window or changing
+servers asks first only while a send is on its way, or if the browser refused to save a draft.
 If the page crashes or stops responding, the app says so and offers to reload it; it logs
 only why (Chromium's reason and exit code), never the page's address.
 

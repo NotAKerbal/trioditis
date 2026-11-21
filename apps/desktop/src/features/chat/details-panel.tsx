@@ -7,7 +7,7 @@ import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import { useMutation } from 'convex/react'
 import { Ban, Plus, Trash2 } from 'lucide-react'
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore, type RefObject } from 'react'
 import {
   networkName,
   useChatActions,
@@ -28,15 +28,28 @@ export function DetailsPanel({
   chat,
   act,
   onClose,
+  returnFocus,
 }: {
   chat: Chat
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
   onClose: () => void
+  /** The button that opened it, where focus goes back when the sheet closes. */
+  returnFocus: RefObject<HTMLButtonElement | null>
 }) {
   const actions = useChatActions()
   const labels = useLabels()
   const [managing, setManaging] = useState(false)
   const wide = useWide()
+  // The sheet goes by unmounting, when Radix may not get to put focus back: do it here.
+  useEffect(() => {
+    if (wide) return
+    const back = returnFocus.current
+    return () => {
+      requestAnimationFrame(() => {
+        if (!document.activeElement || document.activeElement === document.body) back?.focus()
+      })
+    }
+  }, [wide, returnFocus])
   const on = new Set(chat.row.labelIds)
   const toggleLabel = (id: LabelId) => {
     const next = on.has(id) ? chat.row.labelIds.filter((l) => l !== id) : [...chat.row.labelIds, id]
@@ -137,6 +150,10 @@ export function DetailsPanel({
       <DialogContent
         closeLabel="Close chat details"
         aria-describedby={undefined}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          returnFocus.current?.focus()
+        }}
         className="top-0 right-0 left-auto h-full max-h-none w-[min(100%,360px)] translate-x-0 translate-y-0 overflow-y-auto rounded-none pt-12 max-sm:w-full"
       >
         <DialogTitle className="sr-only">Chat details</DialogTitle>

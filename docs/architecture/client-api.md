@@ -838,7 +838,7 @@ can’t be sent.` · `That message can’t be reacted to.`
 
 | Function            | Arguments                                                              | Returns                                                                                                           |
 | ------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `null` if that `clientMessageId` was already used                                            |
+| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `sent` / `scheduled`: what that `clientMessageId` was already used for                       |
 | `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                           |
 | `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled, to show what each says; open like a pending copy |
 | `scheduled.cancel`  | `scheduledId`                                                          | `null`. Cancels one still scheduled, or dismisses one that failed                                                 |

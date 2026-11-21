@@ -647,7 +647,7 @@ describe('scheduled sends', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const chatId = await aChat(t, 'user_a', 'p')
-    const scheduledId = (await scheduleOne(a, chatId, 1, 30 * 60 * 1000))!
+    const scheduledId = (await scheduleOne(a, chatId, 1, 30 * 60 * 1000)) as Id<'scheduledSends'>
     expect(await a.query(api.scheduled.list, { chatId })).toMatchObject([{ clientMessageId: id(1) }])
     expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([
       { _id: scheduledId, copy: sealed('c1') },
@@ -668,8 +668,8 @@ describe('scheduled sends', () => {
     const a = await signIn(t, 'user_a')
     const b = await signIn(t, 'user_b')
     const chatId = await aChat(t, 'user_a', 'p')
-    const firstId = (await scheduleOne(a, chatId, 1, 60_000))!
-    const second = (await scheduleOne(a, chatId, 2, 60_000))!
+    const firstId = (await scheduleOne(a, chatId, 1, 60_000)) as Id<'scheduledSends'>
+    const second = (await scheduleOne(a, chatId, 2, 60_000)) as Id<'scheduledSends'>
     await expect(b.mutation(api.scheduled.cancel, { scheduledId: firstId })).rejects.toThrow(/doesn’t exist/)
     expect(await b.query(api.scheduled.copies, { scheduledIds: [firstId] })).toEqual([])
     await a.mutation(api.scheduled.cancel, { scheduledId: firstId })
@@ -679,7 +679,26 @@ describe('scheduled sends', () => {
     await t.finishInProgressScheduledFunctions()
     const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
     expect(commands.map((c) => c.clientMessageId)).toEqual([id(2)])
-    expect(await scheduleOne(a, chatId, 2, 60_000)).toBeNull()
+    expect(await scheduleOne(a, chatId, 2, 60_000)).toBe('sent')
+  })
+
+  it('says what an ID already went as, so a second tab can tell its send from the first', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const send = (n: number) =>
+      a.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(n),
+        forBridge: sealed(`b${n}`),
+        copy: sealed(`c${n}`),
+      })
+    expect(await send(3)).toBe('queued')
+    expect(await send(3)).toBe('sent')
+    expect(await scheduleOne(a, chatId, 3, 60_000)).toBe('sent')
+    expect(typeof (await scheduleOne(a, chatId, 4, 60_000))).toBe('string')
+    expect(await scheduleOne(a, chatId, 4, 60_000)).toBe('scheduled')
+    expect(await send(4)).toBe('scheduled')
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {
@@ -687,7 +706,7 @@ describe('scheduled sends', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const chatId = await aChat(t, 'user_a', 'p')
-    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000))!
+    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000)) as Id<'scheduledSends'>
     await t.run(async (ctx) => await ctx.db.patch(chatId, { deleted: true, view: 'deleted' }))
     vi.advanceTimersByTime(61_000)
     await t.finishInProgressScheduledFunctions()

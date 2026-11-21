@@ -1,15 +1,17 @@
 import { digest, sealJson, type Envelope, type KeyPair } from '@trioditis/crypto'
 import { tryOpen } from '~/lib/sealed.ts'
 
-// Unsent drafts, kept across a reload in this browser's storage, each sealed to the person's own
-// identity key (kind `draft`, object ID the chat's ID; sealing.md). What's stored is ciphertext,
-// the chat IDs that have a draft, and each draft's random identity: nothing readable. The text,
-// and the message it replies to, open only with the key this device unlocks. A draft saved by
-// another account, or for another key, doesn't open, and is left out.
+// Unsent text, kept across a reload in this browser's storage, each piece sealed to the person's
+// own identity key (kind `draft`, object ID the chat's ID; sealing.md). What's stored is
+// ciphertext, the chat IDs that have something kept, random identities and client message IDs:
+// nothing readable. Text, and the message it replies to, open only with the key this device
+// unlocks; anything saved by another account, or for another key, doesn't open, and is left out.
 //
-// Each chat has its own entry, so tabs saving different chats never touch each other's. When a
-// draft is sent its entry becomes a note of the send (`sent`, its client message ID), so other
-// tabs holding the same draft empty theirs rather than send it again.
+// Each chat has entries of its own, so tabs saving different chats never touch each other's:
+//   trioditis.draft.<user>.<chat>              its draft, with who wrote it (`w`)
+//   trioditis.draftSending.<user>.<chat>.<id>  a send or schedule under way, until it settles
+//   trioditis.draftHeld.<user>.<chat>          messages waiting for the composer to be free
+//   trioditis.draftSent.<user>.<chat>          the last draft sent from it, by client message ID
 
 export interface SavedDraft<Reply> {
   text: string
@@ -18,19 +20,7 @@ export interface SavedDraft<Reply> {
   id: string
 }
 
-/** A chat's entry: its sealed draft, or the send that took it. */
-export type DraftEntry = { v: 1; id: string; sealed: Envelope } | { v: 1; sent: string }
-
-const prefix = (userId: string) => `trioditis.draft.${userId}.`
-/** Where one chat's draft is kept: per account, so a sign-in as someone else never sees it. */
-export const savedDraftKey = (userId: string, chatId: string) => `${prefix(userId)}${chatId}`
-
-/** The chat a storage key keeps a draft for, if it's one of this person's. */
-export function draftChatOf(userId: string, key: string | null): string | null {
-  return key?.startsWith(prefix(userId)) ? key.slice(prefix(userId).length) || null : null
-}
-
-interface Owner {
+export interface Owner {
   userId: string
   keyPair: KeyPair
 }
@@ -44,18 +34,25 @@ export interface DraftStorage {
   removeItem(key: string): void
 }
 
-/** A stored entry, or null if it's missing or isn't one. */
-export function parseEntry(value: string | null): DraftEntry | null {
-  try {
-    const entry = JSON.parse(value ?? 'null') as Record<string, unknown> | null
-    if (!entry || entry.v !== 1) return null
-    if (typeof entry.sent === 'string') return { v: 1, sent: entry.sent }
-    if (typeof entry.id === 'string' && entry.sealed && typeof entry.sealed === 'object')
-      return { v: 1, id: entry.id, sealed: entry.sealed as Envelope }
-    return null
-  } catch {
-    return null
+type Kind = 'draft' | 'draftSending' | 'draftHeld' | 'draftSent'
+const prefix = (kind: Kind, userId: string) => `trioditis.${kind}.${userId}.`
+export const savedDraftKey = (userId: string, chatId: string) => `${prefix('draft', userId)}${chatId}`
+const sendingKey = (userId: string, chatId: string, sendId: string) =>
+  `${prefix('draftSending', userId)}${chatId}.${sendId}`
+const heldKey = (userId: string, chatId: string) => `${prefix('draftHeld', userId)}${chatId}`
+const sentKey = (userId: string, chatId: string) => `${prefix('draftSent', userId)}${chatId}`
+
+/** What a storage key keeps for this person: its kind and chat (and send), or null. */
+export function keyOf(userId: string, key: string | null) {
+  for (const kind of ['draftSending', 'draftHeld', 'draftSent', 'draft'] as const) {
+    const p = prefix(kind, userId)
+    if (!key?.startsWith(p)) continue
+    const rest = key.slice(p.length)
+    if (kind !== 'draftSending') return rest ? { kind, chatId: rest, sendId: '' } : null
+    const dot = rest.lastIndexOf('.')
+    return dot > 0 ? { kind, chatId: rest.slice(0, dot), sendId: rest.slice(dot + 1) } : null
   }
+  return null
 }
 
 /**
@@ -68,42 +65,123 @@ export function draftSendId(id: string, text: string, replyEventId: string | und
   return `d_${digest(`trioditis/draft-send/v1/${id}\n${replyEventId ?? ''}\n${text.trim()}`)}`
 }
 
-/** The drafts saved for this person that open with their key, by chat ID. */
-export function loadDrafts<Reply>(storage: DraftStorage, owner: Owner): Map<string, SavedDraft<Reply>> {
-  const out = new Map<string, SavedDraft<Reply>>()
-  const keys: string[] = []
-  for (let i = 0; i < storage.length; i++) keys.push(storage.key(i) ?? '')
-  for (const key of keys) {
-    const chatId = draftChatOf(owner.userId, key)
-    if (!chatId) continue
-    const entry = parseEntry(storage.getItem(key))
-    if (!entry || !('sealed' in entry)) continue
-    const draft = tryOpen<{ text: unknown; reply?: Reply }>(entry.sealed, owner.keyPair, 'draft', owner.userId, chatId)
-    if (draft && typeof draft.text === 'string')
-      out.set(chatId, { text: draft.text, reply: draft.reply ?? null, id: entry.id })
+function json(value: string | null): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(value ?? 'null') as unknown
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
   }
-  return out
+}
+
+const seal = (value: unknown, owner: Owner, chatId: string) =>
+  sealJson(value, [{ publicKey: owner.keyPair.publicKey }], {
+    kind: 'draft',
+    ownerUserId: owner.userId,
+    objectId: chatId,
+  })
+const open = <T>(sealed: unknown, owner: Owner, chatId: string) =>
+  sealed && typeof sealed === 'object'
+    ? tryOpen<T>(sealed as Envelope, owner.keyPair, 'draft', owner.userId, chatId)
+    : null
+
+/** Which write a stored draft is, so a tab removes only one it wrote or read itself. */
+export const draftWriter = (storage: DraftStorage, userId: string, chatId: string): string | null => {
+  const w = json(storage.getItem(savedDraftKey(userId, chatId)))?.w
+  return typeof w === 'string' ? w : null
+}
+
+/** Saves a chat's draft; returns this write's mark (`w`), to know it again. Throws if storage refuses. */
+export function writeDraft<Reply>(storage: DraftStorage, owner: Owner, chatId: string, draft: SavedDraft<Reply>) {
+  const w = crypto.randomUUID()
+  const sealed = seal({ text: draft.text, reply: draft.reply }, owner, chatId)
+  storage.setItem(savedDraftKey(owner.userId, chatId), JSON.stringify({ v: 1, id: draft.id, w, sealed }))
+  return w
 }
 
 /**
- * Saves one chat's draft: sealed if it has something in it; else the send that emptied it, if
- * one did; else nothing, removing what was there. Throws if storage refuses.
+ * Removes a chat's saved draft, but only the one `w` names: what this tab wrote or brought back.
+ * Another tab's newer draft for the chat stays. Says whether it went.
  */
-export function saveDraft<Reply>(
+export function removeDraftIfOurs(storage: DraftStorage, userId: string, chatId: string, w: string | undefined) {
+  if (!w || draftWriter(storage, userId, chatId) !== w) return false
+  storage.removeItem(savedDraftKey(userId, chatId))
+  return true
+}
+
+export function writeSending<Reply>(
   storage: DraftStorage,
   owner: Owner,
   chatId: string,
-  draft: SavedDraft<Reply> | null,
-  sent: string | null = null,
+  sendId: string,
+  draft: SavedDraft<Reply>,
 ) {
-  const key = savedDraftKey(owner.userId, chatId)
-  if (draft && (draft.text.trim() || draft.reply)) {
-    const sealed = sealJson({ text: draft.text, reply: draft.reply }, [{ publicKey: owner.keyPair.publicKey }], {
-      kind: 'draft',
-      ownerUserId: owner.userId,
-      objectId: chatId,
-    })
-    storage.setItem(key, JSON.stringify({ v: 1, id: draft.id, sealed } satisfies DraftEntry))
-  } else if (sent) storage.setItem(key, JSON.stringify({ v: 1, sent } satisfies DraftEntry))
-  else storage.removeItem(key)
+  const sealed = seal({ text: draft.text, reply: draft.reply }, owner, chatId)
+  storage.setItem(sendingKey(owner.userId, chatId, sendId), JSON.stringify({ v: 1, id: draft.id, sealed }))
+}
+
+export const removeSending = (storage: DraftStorage, userId: string, chatId: string, sendId: string) =>
+  storage.removeItem(sendingKey(userId, chatId, sendId))
+
+/** Saves a chat's held messages (none removes them). */
+export function writeHeld<Reply>(
+  storage: DraftStorage,
+  owner: Owner,
+  chatId: string,
+  list: { text: string; reply: Reply | null; id?: string }[],
+) {
+  const key = heldKey(owner.userId, chatId)
+  if (!list.length) return storage.removeItem(key)
+  storage.setItem(key, JSON.stringify({ v: 1, sealed: seal(list, owner, chatId) }))
+}
+
+/** Notes that `sendId` took the chat's draft, for other tabs and the next load. */
+export const writeSent = (storage: DraftStorage, userId: string, chatId: string, sendId: string) =>
+  storage.setItem(sentKey(userId, chatId), JSON.stringify({ v: 1, sent: sendId }))
+
+/** The send a stored sent note names, if `value` is one. */
+export function parseSent(value: string | null): string | null {
+  const entry = json(value)
+  return entry?.v === 1 && typeof entry.sent === 'string' ? entry.sent : null
+}
+
+export interface Loaded<Reply> {
+  drafts: Map<string, SavedDraft<Reply> & { w: string }>
+  sending: { chatId: string; sendId: string; draft: SavedDraft<Reply> }[]
+  held: Map<string, { text: string; reply: Reply | null; id?: string }[]>
+  sent: Map<string, string>
+}
+
+/** Everything saved for this person that opens with their key. */
+export function loadAll<Reply>(storage: DraftStorage, owner: Owner): Loaded<Reply> {
+  const out: Loaded<Reply> = { drafts: new Map(), sending: [], held: new Map(), sent: new Map() }
+  const keys: string[] = []
+  for (let i = 0; i < storage.length; i++) keys.push(storage.key(i) ?? '')
+  for (const key of keys) {
+    const at = keyOf(owner.userId, key)
+    if (!at) continue
+    const value = storage.getItem(key)
+    if (at.kind === 'draftSent') {
+      const sent = parseSent(value)
+      if (sent) out.sent.set(at.chatId, sent)
+      continue
+    }
+    const entry = json(value)
+    if (entry?.v !== 1) continue
+    if (at.kind === 'draftHeld') {
+      const list = open<{ text: string; reply: Reply | null; id?: string }[]>(entry.sealed, owner, at.chatId)
+      if (Array.isArray(list))
+        out.held.set(
+          at.chatId,
+          list.filter((d) => typeof d?.text === 'string'),
+        )
+      continue
+    }
+    const opened = open<{ text: unknown; reply?: Reply }>(entry.sealed, owner, at.chatId)
+    if (!opened || typeof opened.text !== 'string' || typeof entry.id !== 'string') continue
+    const draft = { text: opened.text, reply: opened.reply ?? null, id: entry.id }
+    if (at.kind === 'draftSending') out.sending.push({ chatId: at.chatId, sendId: at.sendId, draft })
+    else if (typeof entry.w === 'string') out.drafts.set(at.chatId, { ...draft, w: entry.w })
+  }
+  return out
 }

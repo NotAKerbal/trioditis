@@ -48,8 +48,10 @@ import {
 } from '~/data/messages.ts'
 import {
   appendToDraft,
+  beginSend,
+  endSend,
   getDraft,
-  markDraftSent,
+  holdDraft,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -104,9 +106,8 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
-  // As of now, for a send again that finishes later.
-  const messagesRef = useRef(messages)
-  messagesRef.current = messages
+  // Where focus goes back to when the details sheet closes.
+  const detailsButton = useRef<HTMLButtonElement>(null)
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for
   // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
   const serverReactions = useReactions(
@@ -155,7 +156,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     }
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
-      await send({ chatId: chat.id, clientMessageId, ...sealed, ...(reply ? { replyTo: reply } : {}) })
+      return await send({ chatId: chat.id, clientMessageId, ...sealed, ...(reply ? { replyTo: reply } : {}) })
     } catch (e) {
       toast(errorMessage(e, 'That message couldn’t be sent.'))
       throw e
@@ -172,11 +173,20 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     // The draft's own send ID: the same draft sent again, from another tab or after a reload,
     // is the same send (saved-drafts.ts).
     const clientMessageId = draftSendId(taken.id, taken.text, taken.reply?.eventId)
+    // Saved as under way until the server has it, so a crash meanwhile loses nothing.
+    beginSend(chatId, clientMessageId, taken)
     // Put the text and reply back if the send didn't reach the server, keeping anything newer.
     await whileSending(() =>
       sendText(taken.text, taken.reply?.eventId, clientMessageId).then(
-        () => markDraftSent(chatId, clientMessageId),
-        () => restoreDraft(chatId, taken.text, taken.reply, taken.id),
+        (outcome) => {
+          endSend(clientMessageId, true)
+          // The same draft went already, from another tab or before a reload: say so.
+          if (outcome !== 'queued') toast(alreadyWent(outcome))
+        },
+        () => {
+          endSend(clientMessageId, false)
+          restoreDraft(chatId, taken.text, taken.reply, taken.id)
+        },
       ),
     )
   }
@@ -194,20 +204,26 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     // it comes back, ahead of anything typed since, only if it doesn't go.
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
+    const clientMessageId = draftSendId(taken.id, taken.text, taken.reply?.eventId)
+    beginSend(chatId, clientMessageId, taken)
     await whileSending(async () => {
       try {
-        const clientMessageId = draftSendId(taken.id, taken.text, taken.reply?.eventId)
         const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
-        await schedule({
+        const outcome = await schedule({
           chatId,
           clientMessageId,
           sendAt,
           ...sealed,
           ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
         })
-        markDraftSent(chatId, clientMessageId)
-        toast(`Scheduled for ${formatWhen(sendAt)}`)
+        endSend(clientMessageId, true)
+        toast(
+          outcome === 'sent' || outcome === 'scheduled'
+            ? alreadyWent(outcome as 'sent' | 'scheduled')
+            : `Scheduled for ${formatWhen(sendAt)}`,
+        )
       } catch (e) {
+        endSend(clientMessageId, false)
         restoreDraft(chatId, taken.text, taken.reply, taken.id)
         toast(errorMessage(e, 'That message couldn’t be scheduled.'))
       }
@@ -364,6 +380,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
             <Button
               variant="ghost"
               size="icon"
+              ref={detailsButton}
               aria-label="Chat details"
               aria-pressed={details}
               className={cn(details && 'bg-primary-soft text-primary')}
@@ -393,18 +410,8 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
             // duplicate on the network, once (send-again.ts).
             const text = m.body?.body
             if (text && m.clientMessageId)
-              void sendAgain(
-                m.clientMessageId,
-                (id) => sendText(text, m.replyTo, id),
-                async (id) => {
-                  // A mutation resolves once its query results are here; give React a frame to
-                  // show them before looking for the copy.
-                  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-                  return messagesRef.current.some((x) => x.clientMessageId === id)
-                },
-              ).then((state) => {
-                if (state === 'used')
-                  toast('That message was sent again before, and the copy discarded. Nothing more was sent.')
+              void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id)).then((state) => {
+                if (state === 'used') toast('That message was sent again already. Nothing more was sent.')
               })
           }}
           onDiscard={(m) => {
@@ -432,10 +439,11 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
                   if (body === null || body === undefined) return toast('Discarded. It won’t be sent.')
                   // A reply goes back as one, to the message it answered, even one not loaded.
                   const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo)) : null
-                  // The draft changed while the cancel went: keep its reply, and say this one's went.
+                  // The draft changed while the cancel went, to a reply elsewhere: never merged
+                  // under it. Kept, sealed, until the composer is free (drafts.ts holdDraft).
                   if (restoreConflict(getDraft<Message>(chat.id), replyTo)) {
-                    appendToDraft(chat.id, body)
-                    return toast('Cancelled. Its text was added below your draft, which replies to another message.')
+                    holdDraft(chat.id, { text: body, reply })
+                    return toast('Cancelled. It comes back to the composer once your draft is sent or cleared.')
                   }
                   toast(
                     appendToDraft(chat.id, body, reply)
@@ -459,7 +467,9 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
           disabled={composerBlocked(chat.row, bridge.status)}
         />
       </main>
-      {details ? <DetailsPanel chat={chat} act={act} onClose={() => setDetails(false)} /> : null}
+      {details ? (
+        <DetailsPanel chat={chat} act={act} onClose={() => setDetails(false)} returnFocus={detailsButton} />
+      ) : null}
     </>
   )
 }
@@ -483,4 +493,11 @@ function replyStub(eventId: string): Message {
     clientMessageId: undefined,
     delivery: undefined,
   }
+}
+
+/** What to say when a draft's send ID had gone already: it wasn't sent or scheduled again. */
+function alreadyWent(outcome: 'sent' | 'scheduled') {
+  return outcome === 'sent'
+    ? 'That message was already sent, from another tab or before a reload. It wasn’t sent again.'
+    : 'That message is already scheduled, from another tab or before a reload. It wasn’t sent again.'
 }

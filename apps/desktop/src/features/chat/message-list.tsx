@@ -587,7 +587,7 @@ function DeliveryProblem({
       <span className="font-medium text-muted-foreground">Sent again</span>
     ) : again === 'used' ? (
       <span className="font-medium" role="alert">
-        Already sent again once, and that copy was discarded
+        Already sent again
       </span>
     ) : (
       <Button
