@@ -73,3 +73,34 @@ describe('notification preferences', () => {
     expect(currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
   })
 })
+
+describe('two tabs changing preferences', () => {
+  it('keep one tab’s opt-out when a stale tab changes something else', async () => {
+    // Both tabs open with previews on.
+    stored.set(KEY, JSON.stringify({ notifications: true, notificationDetail: 'message' }))
+    const a = await freshTab()
+    const b = await freshTab()
+    // A turns notifications off; B hasn't heard yet and changes its theme.
+    a.setPref('notifications', false)
+    a.setPref('notificationDetail', 'hidden')
+    b.setPref('theme', 'dark')
+    expect(JSON.parse(stored.get(KEY)!)).toMatchObject({
+      notifications: false,
+      notificationDetail: 'hidden',
+      theme: 'dark',
+    })
+    expect(b.currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
+  })
+
+  it('never turn previews back on from defaults when storage can’t be read', async () => {
+    const tab = await freshTab()
+    tab.setPref('notifications', false)
+    const blocked = () => {
+      throw new Error('blocked')
+    }
+    vi.stubGlobal('localStorage', { getItem: blocked, setItem: blocked })
+    expect(tab.currentPrefs().notifications).toBe(false)
+    tab.setPref('theme', 'light')
+    expect(tab.currentPrefs()).toMatchObject({ notifications: false, theme: 'light' })
+  })
+})

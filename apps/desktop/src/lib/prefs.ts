@@ -30,21 +30,32 @@ const DEFAULTS: Prefs = {
 const KEY = 'trioditis.prefs'
 const DETAILS: NotificationDetail[] = ['hidden', 'sender', 'message']
 
-function load(): Prefs {
+/** What's stored, as it is now; null if storage can't be read or holds something unreadable. */
+function readSaved(): Record<string, unknown> | null {
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Record<string, unknown>
-    // Only today's preferences: one that's gone (notificationContent, say) isn't kept or saved.
-    const known = Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
-    const loaded = { ...DEFAULTS, ...known } as Prefs
-    // A value this version doesn't know shows the least, never more than was chosen.
-    if (!DETAILS.includes(loaded.notificationDetail)) loaded.notificationDetail = DEFAULTS.notificationDetail
-    return loaded
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') as unknown
+    return saved && typeof saved === 'object' && !Array.isArray(saved) ? (saved as Record<string, unknown>) : null
   } catch {
-    return DEFAULTS
+    return null
   }
 }
 
-let prefs = load()
+function fromSaved(saved: Record<string, unknown>): Prefs {
+  // Only today's preferences: one that's gone (notificationContent, say) isn't kept or saved.
+  const known = Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
+  const loaded = { ...DEFAULTS, ...known } as Prefs
+  // A value this version doesn't know shows the least, never more than was chosen.
+  if (!DETAILS.includes(loaded.notificationDetail)) loaded.notificationDetail = DEFAULTS.notificationDetail
+  return loaded
+}
+
+/** The stored preferences; null when storage can't say, so what this tab holds stands. */
+function load(): Prefs | null {
+  const saved = readSaved()
+  return saved ? fromSaved(saved) : null
+}
+
+let prefs = load() ?? DEFAULTS
 const listeners = new Set<() => void>()
 
 /**
@@ -53,7 +64,8 @@ const listeners = new Set<() => void>()
  */
 function reload() {
   const next = load()
-  if (JSON.stringify(next) === JSON.stringify(prefs)) return
+  // Storage that can't be read says nothing: an opt-out held here is never undone by defaults.
+  if (!next || JSON.stringify(next) === JSON.stringify(prefs)) return
   prefs = next
   applyTheme()
   listeners.forEach((l) => l())
@@ -68,8 +80,13 @@ export function currentPrefs(): Prefs {
   return prefs
 }
 
+/**
+ * Changes one preference. It's laid over what's stored now, not this tab's copy, which may be
+ * stale: another tab's change a moment ago (notifications turned off, say) is kept, never
+ * written back over with what this tab last heard.
+ */
 export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
-  prefs = { ...prefs, [key]: value }
+  prefs = { ...(load() ?? prefs), [key]: value }
   try {
     localStorage.setItem(KEY, JSON.stringify(prefs))
     // index.html reads this key before first paint.
