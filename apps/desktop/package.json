@@ -4,6 +4,7 @@
   "private": true,
   "description": "Trioditis: your chat networks in one place",
   "author": "Trioditis contributors",
+  "homepage": "https://trioditis.app",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist-electron/main.js",
