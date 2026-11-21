@@ -32,29 +32,38 @@ async function detectHints() {
 }
 
 // The files for this system that will run on this computer, or null if that can't be known.
-// More than one means the browser can't tell which, and the visitor chooses.
+// More than one means the browser can't tell which, and the visitor chooses. The system
+// versions follow the requirements on the page: Electron 44 and later need macOS 13 and
+// Windows 10.
 function fittingFiles(os, files, hints, agent, touchPoints) {
+  const version = parseInt(hints.platformVersion, 10)
   if (os === 'mac') {
-    // Chromium says which processor a Mac has; Safari and Firefox don't.
+    // Chromium gives the macOS version. Safari's user agent stops at 10.15, but Safari 18 and
+    // later don't run on macOS 12; Firefox's says nothing that helps.
+    const safari = /Version\/(\d+)[\d.]* Safari\//.exec(agent)
+    const supported = hints.platformVersion ? version >= 13 : Boolean(safari) && Number(safari[1]) >= 18
+    if (!supported) return null
+    // Chromium also says which processor a Mac has; Safari doesn't.
     const match = files.filter((file) => file.dataset.arch === hints.architecture)
     return match.length ? match : files
   }
   if (os === 'windows') {
-    // The installer is x64. 32-bit Windows can't run it, nor can Windows 10 on Arm; Windows 11
-    // (platform version 13 or later) runs it on Arm by emulation.
+    // Chromium's platform version is 1 to 10 for Windows 10 and 13 or later for 11, and 0 for
+    // anything older. The installer is x64: 32-bit Windows can't run it, nor can Windows 10 on
+    // Arm, though Windows 11 runs it on Arm by emulation.
+    const nt = /Windows NT (\d+)/.exec(agent)
+    const supported = hints.platformVersion ? version >= 1 : Boolean(nt) && Number(nt[1]) >= 10
     const is64 = hints.bitness ? hints.bitness === '64' : /Win64|WOW64/.test(agent)
-    if (!is64) return null
-    if (hints.architecture === 'arm' && !(parseInt(hints.platformVersion, 10) >= 13)) return null
+    if (!supported || !is64) return null
+    if (hints.architecture === 'arm' && !(version >= 13)) return null
     return files
   }
   if (os === 'linux') {
-    // Chrome on an Android tablet in desktop mode reports Linux on x86_64, so a touch screen
-    // rules it out. Chromium's user agent always says x86_64, whatever the processor.
+    // Only Chromium can be believed here: its user agent and Firefox's both say x86_64 whatever
+    // the processor. Chrome on an Android tablet in desktop mode reports Linux on x86_64 too, so
+    // a touch screen rules it out.
     if (touchPoints > 0) return null
-    const isX64 = hints.architecture
-      ? hints.architecture === 'x86' && hints.bitness === '64'
-      : /x86_64|amd64/.test(agent)
-    return isX64 ? files : null
+    return hints.architecture === 'x86' && hints.bitness === '64' ? files : null
   }
   return null
 }
@@ -79,4 +88,4 @@ async function showPick() {
   pick.hidden = false
 }
 
-showPick()
+void showPick()
