@@ -135,8 +135,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      # The desktop app is released from the commit Stable servers run (main, the Stable
-      # channel's branch), so a desktop version and the web app it opens are the same code.
+      # The desktop app is released from main, the Stable channel's branch, so a desktop version
+      # is the same code as the web app Stable servers serve once they've updated to it.
       - name: The tag is on main
         env:
           GH_TOKEN: ${{ github.token }}
