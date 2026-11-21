@@ -174,5 +174,11 @@ describe('a contact’s account', () => {
       a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(50), ghostId: 'g_erin' }),
     ).rejects.toThrow(/another of your accounts/)
     await a.mutation(api.newChats.start, { networkAccountId, requestId: requestId(51), ghostId: 'g_erin' })
+    // Once the other account's login sends the contact too, its chat can start there as well.
+    await ingest(t, [
+      { type: 'loginState', state: 'CONNECTED', loginId: 'login_other' },
+      { type: 'contact', ghostId: 'g_erin', sealed: sealed('erin2'), loginId: 'login_other' },
+    ])
+    await a.mutation(api.newChats.start, { networkAccountId: other, requestId: requestId(52), ghostId: 'g_erin' })
   })
 })

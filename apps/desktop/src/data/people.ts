@@ -104,7 +104,7 @@ export function useNetworkContacts(): NetworkContact[] | undefined {
           network: r.network,
           ghostId: r.ghostId,
           profile,
-          ...(r.networkAccountId ? { networkAccountId: r.networkAccountId } : {}),
+          ...(r.networkAccountIds ? { networkAccountIds: r.networkAccountIds } : {}),
           ...(ids?.size ? { identifiers: [...ids] } : {}),
         },
       ]

@@ -143,12 +143,11 @@ export function chatOptions(
     if (!START_TARGETS[link.network]?.contact) continue
     const contact = byContact.get(contactKey(link))
     const label = contact?.profile.name || 'Contact'
-    // On the account that sent the contact, and no other: its ID can belong to that login. One
-    // sent before contacts named their account could be on any of them, so each is offered.
+    // On an account that sent the contact, and no other: its ID can belong to that login. One
+    // sent before contacts named their accounts could be on any of them, so each is offered.
     const onNetwork = accounts.filter((a) => a.network === link.network)
-    const candidates = contact?.networkAccountId
-      ? onNetwork.filter((a) => a.networkAccountId === contact.networkAccountId)
-      : onNetwork
+    const sent = contact?.networkAccountIds
+    const candidates = sent?.length ? onNetwork.filter((a) => sent.includes(a.networkAccountId)) : onNetwork
     candidates.forEach((account, i) =>
       out.push({
         network: link.network,

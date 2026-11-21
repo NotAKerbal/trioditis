@@ -57,8 +57,8 @@ export const list = query({
       network,
       ghostId: v.string(),
       sealedProfile: envelope,
-      /** The account a chat with them starts on (newChats.start). */
-      networkAccountId: v.optional(v.id('networkAccounts')),
+      /** The accounts a chat with them can start on (newChats.start). */
+      networkAccountIds: v.optional(v.array(v.id('networkAccounts'))),
     }),
   ),
   handler: async (ctx, { paginationOpts }) => {
@@ -71,11 +71,11 @@ export const list = query({
       ...result,
       page: result.page
         .filter((contact) => !retired(contact))
-        .map(({ network, ghostId, sealedProfile, accountId }) => ({
+        .map(({ network, ghostId, sealedProfile, accountIds }) => ({
           network,
           ghostId,
           sealedProfile,
-          ...(accountId ? { networkAccountId: accountId } : {}),
+          ...(accountIds?.length ? { networkAccountIds: accountIds } : {}),
         })),
     }
   },

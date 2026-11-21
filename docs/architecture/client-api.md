@@ -1058,8 +1058,8 @@ network's own username grammar; anything else is `not_found` (it could be one of
 connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
 host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
 chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
-IDs and X's only screen names, so those are left out. A contact's chat starts only on the account
-that sent the contact (`contacts.list` gives its `networkAccountId`; `newChats.start` refuses another),
+IDs and X's only screen names, so those are left out. A contact's chat starts only on an account
+that has sent the contact (`contacts.list` gives their `networkAccountIds`; `newChats.start` refuses another),
 since some networks' contact IDs belong to one login. The desktop app offers a card's linked
 contacts first, then its numbers on networks that take them, then its usernames on their own
 network, on the first account there. A `ghostId` must be one of the person's contacts on that

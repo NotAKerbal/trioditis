@@ -450,6 +450,9 @@ async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type
   })
 }
 
+/** The most accounts one contact records (contacts.accountIds). */
+const MAX_CONTACT_ACCOUNTS = 10
+
 async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'contact' }>, network: Network) {
   const existing = await ctx.db
     .query('contacts')
@@ -461,15 +464,20 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     .query('networkAccounts')
     .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', loginId))
     .unique()
-  const accountId = account?.userId === event.userId ? account._id : undefined
-  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed, accountId })
+  const known = existing?.accountIds ?? []
+  // Every account that has sent the contact, newest last, so a chat can start on any of them.
+  const accountIds =
+    account?.userId === event.userId && !known.includes(account._id)
+      ? [...known, account._id].slice(-MAX_CONTACT_ACCOUNTS)
+      : known
+  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed, accountIds })
   else
     await ctx.db.insert('contacts', {
       userId: event.userId,
       network,
       ghostId: event.ghostId,
       sealedProfile: event.sealed,
-      ...(accountId ? { accountId } : {}),
+      ...(accountIds.length ? { accountIds } : {}),
     })
 }
 
