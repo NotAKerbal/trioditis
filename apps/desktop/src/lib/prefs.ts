@@ -59,7 +59,12 @@ function fromSaved(saved: Record<string, unknown>): Prefs {
 let pending: { [K in keyof Prefs]?: { value: Prefs[K]; over: string } } = {}
 
 const PRIVACY: Record<NotificationDetail, number> = { hidden: 0, sender: 1, message: 2 }
-const storedAs = (saved: Record<string, unknown>, key: string) => JSON.stringify(saved[key] ?? null)
+/** A preference's stored value as it reads, absent being its default: what "changed" compares. */
+const storedAs = (saved: Record<string, unknown>, key: keyof Prefs) => JSON.stringify(fromSaved(saved)[key])
+
+/** Only the preferences someone chose, as stored: saving one never writes the rest's defaults. */
+const chosen = (saved: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(saved).filter(([key]) => Object.hasOwn(DEFAULTS, key)))
 
 function withPending(saved: Record<string, unknown>): Prefs {
   const stored = fromSaved(saved)
@@ -122,7 +127,7 @@ export function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
     prefs = { ...prefs, [key]: value }
   } else {
     try {
-      localStorage.setItem(KEY, JSON.stringify({ ...fromSaved(saved), [key]: value }))
+      localStorage.setItem(KEY, JSON.stringify({ ...chosen(saved), [key]: value }))
       delete pending[key]
       // index.html reads this key before first paint.
       if (key === 'theme') localStorage.setItem('trioditis.theme', value as string)
