@@ -1217,7 +1217,8 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
    (`readSortKey`, from `chats.markRead` or their own receipt, only ever forward), so a
    message that arrives late but sorts before it isn't counted unread, and an older receipt
    doesn't bring counts back. Someone else's receipt marks the person's own messages up to it
-   `read` (at most 100 per receipt, newest first). Quarantined events are listed to admins
+   `read`: every one since the last such receipt (`theirReadSortKey`), 100 per transaction
+   with the rest scheduled, and one that arrives late behind it is `read` on arrival. Quarantined events are listed to admins
    (`quarantine.list`: host, sequence, type, reason and time only) and dismissed with
    `quarantine.dismiss({ ids })`.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so

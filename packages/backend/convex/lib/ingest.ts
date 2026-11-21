@@ -234,12 +234,22 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   const pending = clientMessageId ? await findPersonsCopy(ctx, event.userId, clientMessageId) : null
   // Either way the chat's pointer to its newest message is kept: an echo keeps the pending
   // copy's ID but can change its time, and so its place.
+  // The person's own message that arrives after someone's read receipt covering its place was
+  // read with the rest.
+  const readByThem =
+    'self' in event.sender && chat.theirReadSortKey !== undefined && fields.sortKey <= chat.theirReadSortKey
   if (pending && send && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
-    await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, 'sent') })
+    await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, readByThem ? 'read' : 'sent') })
     await settleSend(ctx, send, 'sent')
     charge(ctx, await noteMessage(ctx, chat, { ...pending, ...fields }))
   } else {
-    const messageId = await ctx.db.insert('messages', { userId: event.userId, chatId: chat._id, network, ...fields })
+    const messageId = await ctx.db.insert('messages', {
+      userId: event.userId,
+      chatId: chat._id,
+      network,
+      ...fields,
+      ...(readByThem ? { delivery: 'read' as const } : {}),
+    })
     charge(ctx, await noteMessage(ctx, chat, { _id: messageId, ...fields }))
   }
 
@@ -378,8 +388,11 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     await ctx.db.patch(chat._id, { ...(await unreadAfter(ctx, chat, read)), readSortKey: read.sortKey })
     return
   }
-  // Someone else reading the chat has read the person's own messages up to there.
-  await markOwnRead(ctx, chat, read)
+  // Someone else reading the chat has read the person's own messages up to there. Those up to
+  // an earlier receipt were marked by it, or as they arrived (applyMessage).
+  if (chat.theirReadSortKey !== undefined && read.sortKey <= chat.theirReadSortKey) return
+  await ctx.db.patch(chat._id, { theirReadSortKey: read.sortKey })
+  await markOwnReadRange(ctx, chat._id, chat.theirReadSortKey ?? null, read.sortKey)
 }
 
 /** Whether a message at `sortKey` is at or before the newest one the person has read. */
@@ -387,46 +400,45 @@ export function readAlready(chat: Pick<Doc<'chats'>, 'readSortKey'>, sortKey: st
   return chat.readSortKey !== undefined && sortKey <= chat.readSortKey
 }
 
-/**
- * The most of the person's own messages one read receipt marks read. Each was marked by the
- * receipt before it, so walking back stops at the first already read; a chat with more
- * unmarked than this keeps the older ones as they were.
- */
+/** The most messages one pass of `markOwnReadRange` looks through, before carrying on later. */
 const MAX_MARKED_READ = 100
 
 /**
- * Marks the person's own messages at or before `read` as read, newest first, until one already
- * is. Delivery only moves forward (`advance`); a copy still pending isn't on the network yet,
- * so no receipt can cover it. It reads within the same budget as a recount.
+ * Marks the person's own messages after `after` (exclusive; from the start when null) and up to
+ * `upTo` read, oldest first. Every one in the range is looked at, even past one already read: a
+ * message can arrive late among ones read before it. Delivery only moves forward (`advance`); a
+ * copy still pending isn't on the network yet, so no receipt can cover it. It reads at most 100
+ * rows within the same budget as a recount, then schedules the rest
+ * (`messages.markOwnReadRange`).
  */
-async function markOwnRead(ctx: MutationCtx, chat: Doc<'chats'>, read: Doc<'messages'>) {
-  /** Marks one message, if it's the person's own; false once one already read is reached. */
-  const mark = async (message: Doc<'messages'>) => {
-    if (!('self' in message.sender) || message.eventId.startsWith('pending:')) return true
-    if (message.delivery === 'read') return false
-    await ctx.db.patch(message._id, { delivery: advance(message.delivery, 'read') })
-    return true
-  }
-  if (!(await mark(read))) return
-  let before = read.sortKey
-  let seen = 1
-  let bytes = byteSize(read)
+export async function markOwnReadRange(ctx: MutationCtx, chatId: Id<'chats'>, after: string | null, upTo: string) {
+  let from = after
+  let seen = 0
+  let bytes = 0
   while (seen < MAX_MARKED_READ) {
     const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), MAX_MARKED_READ - seen)
-    if (room < 1) return
+    if (room < 1) break
     const batch = await ctx.db
       .query('messages')
-      .withIndex('by_chat_sort', (q) => q.eq('chatId', chat._id).lt('sortKey', before))
-      .order('desc')
+      .withIndex('by_chat_sort', (q) => {
+        const chat = q.eq('chatId', chatId)
+        return (from === null ? chat : chat.gt('sortKey', from)).lte('sortKey', upTo)
+      })
       .take(room)
     charge(ctx, batch)
     for (const message of batch) {
       bytes += byteSize(message)
-      if (!(await mark(message))) return
+      if (!('self' in message.sender) || message.eventId.startsWith('pending:')) continue
+      if (message.delivery === 'read') continue
+      await ctx.db.patch(message._id, { delivery: advance(message.delivery, 'read') })
     }
     seen += batch.length
     if (batch.length < room) return
-    before = batch.at(-1)!.sortKey
+    from = batch.at(-1)!.sortKey
+  }
+  // Rows are left in the range, or may be: the rest is marked in its own transaction.
+  if (from !== upTo) {
+    await ctx.scheduler.runAfter(0, internal.messages.markOwnReadRange, { chatId, after: from, upTo })
   }
 }
 
