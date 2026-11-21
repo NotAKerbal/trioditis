@@ -241,6 +241,8 @@ for (const dir of ['apps/desktop/public', 'apps/site']) {
   write(`${dir}/apple-touch-icon.png`, png(icon, 180))
 }
 write('apps/desktop/electron/icon.png', png(icon, 512))
+// The project site's link preview.
+write('apps/site/social-card.png', png(card, 1200))
 
 // The connect page's policy allows no images, so its icon is drawn inline. It is formatted the way
 // Prettier would, so running this again leaves the page unchanged.
