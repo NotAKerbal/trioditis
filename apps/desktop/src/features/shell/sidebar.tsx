@@ -36,6 +36,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from '
 import {
   networkName,
   useChatCounts,
+  useChat,
   useChats,
   useLabels,
   useNetworks,
@@ -180,14 +181,16 @@ export function Sidebar({
   if (focused && labelId) read.sort((a, b) => b.row.lastMessageAt - a.row.lastMessageAt)
 
   // Unread lists every unread chat with nothing to click: the inbox loads page after page until
-  // the server's count of them is met (unread-fill.ts). Counted as the server counts, so the
-  // chat kept under Unread after opening it doesn't stand in for one still to load.
+  // the server's count of them is met (unread-fill.ts). Counted as the server counts, from what
+  // is stored rather than this device's clock (a timed mute is cleared by a write when it ends),
+  // and without the chat kept under Unread after opening it, so neither stands in for one still
+  // to load.
   const filling =
     focused &&
     inbox !== undefined &&
     unreadIncomplete({
       more: main.canLoadMore || main.loading,
-      loadedUnread: inbox.filter((c) => c.hasUnread && !c.muted).length,
+      loadedUnread: inbox.filter((c) => c.hasUnread && c.row.mutedUntil === null).length,
       count: counts?.inbox,
     })
   const loadInbox = useRef(main.loadMore)
@@ -329,28 +332,17 @@ export function Sidebar({
   shownRef.current = loaded ? shownIds : null
   chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
 
-  // The open chat as a list last had it, to judge against a new filter before its page loads.
-  const selectedChat = useRef<Chat | undefined>(undefined)
-  const seen = selectedId ? everything.find((c) => c.id === selectedId) : undefined
-  if (seen) selectedChat.current = seen
-  else if (selectedChat.current?.id !== selectedId) selectedChat.current = undefined
-
   // A view or filter change that hides the open chat closes it rather than opening another:
-  // opening a chat marks it read, and nobody asked to read it. Judged from the chat itself, as
-  // its page may be one still to come; a chat no list has had waits for Unread to fill.
+  // opening a chat marks it read, and nobody asked to read it. Judged from the open chat as the
+  // server has it now (the same subscription the chat pane uses), not from the lists: its page
+  // may be one still to come, and a row a list kept may be out of date.
+  const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
   useEffect(() => {
-    if (lastFilterKey.current === filterKey) return
-    const known = selectedChat.current
-    if (known) {
-      lastFilterKey.current = filterKey
-      if (!inFilter(known, { network, labelId, view: focused ? null : simpleShow })) onClose()
-      return
-    }
-    if (!loaded || filling) return
+    if (lastFilterKey.current === filterKey || openChat === undefined) return
     lastFilterKey.current = filterKey
-    if (selectedId && !shownIds.includes(selectedId)) onClose()
+    if (openChat && !inFilter(openChat, { network, labelId, view: focused ? null : simpleShow })) onClose()
   })
 
   const currentLabel = labels?.find((l) => l.id === labelId)
@@ -529,7 +521,14 @@ export function Sidebar({
             </Empty>
           )}
         </div>
-        {drawer ? <Drawer sections={sections} open={sheet} onOpen={setSheet} /> : null}
+        {drawer ? (
+          <Drawer
+            sections={sections}
+            open={sheet}
+            onOpen={setSheet}
+            onFocusLost={() => searchRef.current?.focus({ preventScroll: true })}
+          />
+        ) : null}
       </div>
     </>
   )
@@ -616,10 +615,13 @@ function Drawer({
   sections,
   open,
   onOpen,
+  onFocusLost,
 }: {
   sections: Section[]
   open: SectionKey | null
   onOpen: (key: SectionKey | null) => void
+  /** Closing left no row to focus: every section emptied while the sheet was open. */
+  onFocusLost: () => void
 }) {
   // The section on the sheet: kept while it slides away, so it doesn't empty mid-motion, then
   // dropped, so a closed sheet loads nothing.
@@ -637,9 +639,12 @@ function Drawer({
   const wasOpen = useRef(open)
   useEffect(() => {
     if (open) headRef.current?.focus({ preventScroll: true })
-    // Its own row, or the first one left if its section emptied while open.
-    else if (wasOpen.current)
-      (rowRefs.current.get(wasOpen.current) ?? rowRefs.current.values().next().value)?.focus({ preventScroll: true })
+    // Its own row, or the first one left if its section emptied while open, or else Search.
+    else if (wasOpen.current) {
+      const row = rowRefs.current.get(wasOpen.current) ?? rowRefs.current.values().next().value
+      if (row) row.focus({ preventScroll: true })
+      else onFocusLost()
+    }
     wasOpen.current = open
   }, [open])
 

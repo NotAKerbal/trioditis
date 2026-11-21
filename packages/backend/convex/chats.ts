@@ -238,7 +238,6 @@ export const counts = query({
   handler: async (ctx) => {
     const member = await requireMember(ctx)
     const userId = member.userId
-    const now = Date.now()
     const scan = 4 * COUNT_CAP
     const inbox = await ctx.db
       .query('chats')
@@ -251,10 +250,10 @@ export const counts = query({
       .take(COUNT_CAP + 1)
     const capped = (n: number, partial: boolean) => ({ count: Math.min(n, COUNT_CAP), more: n > COUNT_CAP || partial })
     const scannedAll = inbox.length < scan
+    // Muted as stored, not by the clock: a query isn't run again as time passes, and a timed mute
+    // is cleared by a write when it ends (`muteEnded`), so the count and the client agree.
     const unread = inbox.filter(
-      (chat) =>
-        (chat.unreadCount > 0 || chat.markedUnread === true) &&
-        !(chat.mutedUntil !== undefined && chat.mutedUntil > now),
+      (chat) => (chat.unreadCount > 0 || chat.markedUnread === true) && chat.mutedUntil === undefined,
     ).length
     return {
       inbox: capped(unread, !scannedAll),
