@@ -554,6 +554,10 @@ function DeliveryProblem({
   const sendAgain = (label: string) =>
     again === 'sent' ? (
       <span className="font-medium text-muted-foreground">Sent again</span>
+    ) : again === 'used' ? (
+      <span className="font-medium" role="alert">
+        Already sent again once, and that copy was discarded
+      </span>
     ) : (
       <Button
         variant="link"

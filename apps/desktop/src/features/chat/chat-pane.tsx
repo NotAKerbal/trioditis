@@ -25,7 +25,7 @@ import {
   Pin,
   PinOff,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   networkName,
   useChat,
@@ -100,6 +100,9 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
   const session = useSession()
   const actions = useChatActions()
   const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
+  // As of now, for a send again that finishes later.
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for
   // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
   const serverReactions = useReactions(
@@ -378,7 +381,20 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
             // One replacement per message, whatever the clicks: the person chose to risk a
             // duplicate on the network, once (send-again.ts).
             const text = m.body?.body
-            if (text && m.clientMessageId) void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id))
+            if (text && m.clientMessageId)
+              void sendAgain(
+                m.clientMessageId,
+                (id) => sendText(text, m.replyTo, id),
+                async (id) => {
+                  // A mutation resolves once its query results are here; give React a frame to
+                  // show them before looking for the copy.
+                  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+                  return messagesRef.current.some((x) => x.clientMessageId === id)
+                },
+              ).then((state) => {
+                if (state === 'used')
+                  toast('That message was sent again before, and the copy discarded. Nothing more was sent.')
+              })
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)

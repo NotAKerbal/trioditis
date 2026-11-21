@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { ready } from '@trioditis/crypto'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { againState, replacementId, sendAgain } from '../src/features/chat/send-again.ts'
+
+beforeAll(ready)
 
 const VALID = /^[A-Za-z0-9_-]{16,64}$/
 const original = '0123456789abcdef0123456789abcdef'
+const listed = async () => true
 
 describe('a replacement send’s ID', () => {
   it('is the same every time for the same message, and one the server takes', () => {
@@ -11,19 +15,18 @@ describe('a replacement send’s ID', () => {
     expect(replacementId(original)).toMatch(VALID)
   })
 
-  it('counts up for a replacement’s own replacement, staying short', () => {
-    expect(replacementId(original)).toBe(`${original}-a1`)
-    expect(replacementId(`${original}-a1`)).toBe(`${original}-a2`)
-    let id = original
-    for (let i = 0; i < 500; i++) id = replacementId(id)
-    expect(id).toBe(`${original}-a500`)
-    expect(id).toMatch(VALID)
-  })
-
-  it('stays within 64 characters for the longest ID', () => {
-    const long = 'x'.repeat(64)
-    expect(replacementId(long)).toMatch(VALID)
-    expect(replacementId(long)).toHaveLength(64)
+  it('is never another send’s ID: not a suffix of it, nor cut short', () => {
+    // Before, `x-a1`'s replacement was `x-a2`, an ID another send could have had, and long IDs
+    // were cut so two could share one.
+    expect(replacementId(`${original}-a1`)).not.toBe(`${original}-a2`)
+    const long1 = `${'x'.repeat(63)}1`
+    const long2 = `${'x'.repeat(63)}2`
+    expect(replacementId(long1)).not.toBe(replacementId(long2))
+    expect(replacementId(long1)).toMatch(VALID)
+    // A replacement's own replacement is as short, and different again.
+    const twice = replacementId(replacementId(original))
+    expect(twice).toMatch(VALID)
+    expect(twice).not.toBe(replacementId(original))
   })
 })
 
@@ -35,32 +38,44 @@ describe('sending again', () => {
       sent.push(id)
       return new Promise<void>((resolve) => (finish = resolve))
     }
-    const first = sendAgain('aaaaaaaaaaaaaaaa1', send)
-    void sendAgain('aaaaaaaaaaaaaaaa1', send)
-    void sendAgain('aaaaaaaaaaaaaaaa1', send)
-    expect(sent).toEqual(['aaaaaaaaaaaaaaaa1-a1'])
+    const first = sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    void sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    void sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    expect(sent).toEqual([replacementId('aaaaaaaaaaaaaaaa1')])
     finish()
-    await first
-    await sendAgain('aaaaaaaaaaaaaaaa1', send)
-    expect(sent).toEqual(['aaaaaaaaaaaaaaaa1-a1'])
+    expect(await first).toBe('sent')
+    await sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    expect(sent).toHaveLength(1)
   })
 
   it('can be tried again after a failure, with the same ID', async () => {
     const sent: string[] = []
-    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => {
-      sent.push(id)
-      throw new Error('offline')
-    })
-    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => {
-      sent.push(id)
-    })
-    expect(sent).toEqual(['bbbbbbbbbbbbbbbb1-a1', 'bbbbbbbbbbbbbbbb1-a1'])
+    await sendAgain(
+      'bbbbbbbbbbbbbbbb1',
+      async (id) => {
+        sent.push(id)
+        throw new Error('offline')
+      },
+      listed,
+    )
+    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => void sent.push(id), listed)
+    expect(sent).toEqual([replacementId('bbbbbbbbbbbbbbbb1'), replacementId('bbbbbbbbbbbbbbbb1')])
+  })
+
+  it('says so, rather than “Sent again”, when the server had the ID and no copy came', async () => {
+    expect(
+      await sendAgain(
+        'cccccccccccccccc1',
+        async () => undefined,
+        async () => false,
+      ),
+    ).toBe('used')
   })
 
   it('counts a replacement in the list as sent, from whichever tab sent it', () => {
     const none = new Map()
     expect(againState(original, none, new Set([original]))).toBeUndefined()
-    expect(againState(original, none, new Set([original, `${original}-a1`]))).toBe('sent')
+    expect(againState(original, none, new Set([original, replacementId(original)]))).toBe('sent')
     expect(againState(original, new Map([[original, 'sending']]), new Set())).toBe('sending')
     expect(againState(undefined, none, new Set())).toBeUndefined()
   })

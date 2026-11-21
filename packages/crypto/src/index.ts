@@ -69,6 +69,11 @@ export function generateKeyPair(): KeyPair {
   return { publicKey, privateKey }
 }
 
+/** BLAKE2b-256 of `text` (UTF-8), base64url: 43 characters, for IDs derived from others. */
+export function digest(text: string): string {
+  return toBase64Url(sodium.crypto_generichash(32, sodium.from_string(text), null))
+}
+
 /** The first 16 bytes of BLAKE2b-256 of the public key, base64url. */
 export function keyId(publicKey: Uint8Array): string {
   return toBase64Url(sodium.crypto_generichash(32, publicKey, null).subarray(0, KEY_ID_BYTES))
