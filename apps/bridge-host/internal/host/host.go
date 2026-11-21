@@ -232,6 +232,9 @@ func (h *Host) Start(ctx context.Context) error {
 	if err = h.Connector.RecoverCommands(ctx); err != nil {
 		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)
 	}
+	if err = h.Connector.SettleDiscardedAtStart(ctx); err != nil {
+		return fmt.Errorf("host: failed to settle cancelled logins' accounts: %w", err)
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	h.done = make(chan struct{})

@@ -130,7 +130,8 @@ func TestALateFailureStillReportsItsMessages(t *testing.T) {
 		time.Sleep(40 * time.Millisecond)
 		cancel() // the handler stops waiting (the host is stopping)
 		time.Sleep(20 * time.Millisecond)
-		messages, _ := handled.Finished(remoteFor{msg}, false)
+		messages, _ := handled.Messages(remoteFor{msg})
+		handled.Finished(remoteFor{msg}, false)
 		got <- messages
 	}()
 	WrapAck(a)(func(any) bool {

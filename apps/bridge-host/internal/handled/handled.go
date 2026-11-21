@@ -122,21 +122,38 @@ func NoteMessage(remote any, message Message) bool {
 	return true
 }
 
-// Finished reports how bridgev2's handling of remote ended, and returns the messages noted for
-// it, and whether a handler was watching it.
-func Finished(remote any, succeeded bool) ([]Message, bool) {
+// Messages returns the messages noted for remote, and whether a handler is watching it. The
+// connector settles them (clears their in-flight record, or undoes their saved parts) before it
+// reports the outcome, so a handler never acknowledges a message whose record is still there.
+func Messages(remote any) ([]Message, bool) {
 	h := find(remote)
 	if h == nil {
 		return nil, false
+	}
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	return append([]Message(nil), h.messages...), true
+}
+
+// Finished reports how bridgev2's handling of remote ended. The event stays watched until
+// then, even after its handler stopped waiting, so a handling that ends late is still settled.
+func Finished(remote any, succeeded bool) {
+	h := find(remote)
+	if h == nil {
+		return
 	}
 	h.lock.Lock()
 	if !h.done {
 		h.done, h.succeeded = true, succeeded
 		close(h.finished)
 	}
-	messages := append([]Message(nil), h.messages...)
 	h.lock.Unlock()
-	// The handler may have stopped waiting already; nothing more comes for this event.
 	forget(h)
-	return messages, true
+}
+
+// Done reports whether the event's outcome has been reported, and whether it succeeded.
+func (h *Handling) Done() (done, succeeded bool) {
+	h.lock.Lock()
+	defer h.lock.Unlock()
+	return h.done, h.succeeded
 }

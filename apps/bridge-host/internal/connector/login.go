@@ -20,6 +20,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
 // loginSession is one run of a network's login flow, driven by loginStart, loginSubmit and
@@ -467,6 +468,11 @@ func (s *loginSession) discardCompleted(step *bridgev2.LoginStep) {
 	if p == nil || p.UserLogin == nil || s.existing[p.UserLoginID] {
 		return
 	}
+	ctx := context.WithoutCancel(s.c.Bridge.BackgroundCtx)
+	// Kept first, so a restart before it is decided decides it then (SettleDiscardedAtStart).
+	if err := s.c.Store.PutDiscarded(ctx, store.DiscardedLogin{SessionID: s.id, UserID: s.userID, LoginID: string(p.UserLoginID)}); err != nil {
+		s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Keeping a cancelled login's account to log out failed")
+	}
 	s.c.discarded.Store(s.id, &discardedLogin{sessionID: s.id, userID: s.userID, loginID: p.UserLoginID, login: p.UserLogin})
 	s.c.settleDiscarded(s.userID)
 }
@@ -476,7 +482,29 @@ func (s *loginSession) discardCompleted(step *bridgev2.LoginStep) {
 type discardedLogin struct {
 	sessionID, userID string
 	loginID           networkid.UserLoginID
-	login             *bridgev2.UserLogin
+	// login is the account bridgev2 loaded, or nil for one kept from before a restart, which
+	// is looked up when it is logged out.
+	login *bridgev2.UserLogin
+}
+
+// SettleDiscardedAtStart decides the accounts cancelled logins connected that were still
+// waiting when the host last stopped. Every login in progress then is over now (RecoverLogins
+// ends them), so none is left to wait for: each is logged out, unless it was disconnected
+// meanwhile. It runs once bridgev2 has loaded the logins.
+func (c *Connector) SettleDiscardedAtStart(ctx context.Context) error {
+	kept, err := c.Store.Discarded(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list cancelled logins' accounts: %w", err)
+	}
+	users := map[string]bool{}
+	for _, d := range kept {
+		c.discarded.LoadOrStore(d.SessionID, &discardedLogin{sessionID: d.SessionID, userID: d.UserID, loginID: networkid.UserLoginID(d.LoginID)})
+		users[d.UserID] = true
+	}
+	for userID := range users {
+		c.settleDiscarded(userID)
+	}
+	return nil
 }
 
 // settleDiscarded decides, for each account a cancelled login of userID's connected, whether
@@ -485,27 +513,42 @@ type discardedLogin struct {
 // runs when a cancelled login completes and again whenever one of the person's logins ends,
 // so a decision put off for a retry is made once the retry settles, whichever way.
 func (c *Connector) settleDiscarded(userID string) {
+	ctx := context.WithoutCancel(c.Bridge.BackgroundCtx)
 	going := false
 	c.logins.Range(func(_, raw any) bool {
 		going = raw.(*loginSession).userID == userID
 		return !going
 	})
+	decided := func(key any, d *discardedLogin) {
+		c.discarded.Delete(key)
+		if err := c.Store.DeleteDiscarded(ctx, d.sessionID); err != nil {
+			c.Log.Err(err).Str("login_session_id", d.sessionID).Msg("Forgetting a decided cancelled login failed; it is decided again at the next start")
+		}
+	}
 	c.discarded.Range(func(key, raw any) bool {
 		d := raw.(*discardedLogin)
 		if d.userID != userID {
 			return true
 		}
 		if by, ok := c.connectedBy.Load(d.loginID); ok && by != d.sessionID {
-			c.discarded.Delete(key)
+			decided(key, d)
 			return true
 		}
 		if going {
 			c.Log.Info().Str("login_session_id", d.sessionID).Msg("A cancelled login's account waits for another login to settle")
 			return true
 		}
-		c.discarded.Delete(key)
+		decided(key, d)
+		login := d.login
+		if login == nil {
+			login = c.Bridge.GetCachedUserLoginByID(d.loginID)
+		}
+		if login == nil {
+			// Disconnected meanwhile: nothing left to log out.
+			return true
+		}
 		c.Log.Info().Str("login_session_id", d.sessionID).Msg("A login completed after it was cancelled; logging the new account out")
-		logoutDiscarded(c.Bridge.BackgroundCtx, d.login)
+		logoutDiscarded(c.Bridge.BackgroundCtx, login)
 		return true
 	})
 }

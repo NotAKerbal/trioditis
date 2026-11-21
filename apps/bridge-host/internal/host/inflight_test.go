@@ -34,6 +34,7 @@ func init() {
 func TestAMessageCutOffPartWayIsBridgedWholeWhenSentAgain(t *testing.T) {
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, t.TempDir(), gw)
+	defer h.host.Stop()
 	h.login("alice", "alice-parts")
 	const login = networkid.UserLoginID("alice-parts")
 	ctx := context.Background()
@@ -128,5 +129,69 @@ func TestAMessageCutOffPartWayIsBridgedWholeWhenSentAgain(t *testing.T) {
 	}
 	if parts("whole") != 2 {
 		t.Fatal("the redelivery after a stop wasn't bridged")
+	}
+
+	// A redelivery while the first attempt is still bridging the message (its parts in
+	// flight; it may yet fail and undo them): bridgev2 takes it for a duplicate, and it is
+	// refused rather than acknowledged in that attempt's place.
+	if err = h.host.Store.PutInflight(ctx, store.InflightMessage{Receiver: string(login), MessageID: "whole"}); err != nil {
+		t.Fatal(err)
+	}
+	watch = handled.Begin(partsKey("whole"))
+	if _, err = h.net.IncomingParts(login, "family", "peer-family", "whole", []string{"whole one", "whole two"}); err != nil {
+		t.Fatal(err)
+	}
+	if done, succeeded := watch.Done(); !done || succeeded {
+		t.Fatalf("a redelivery of a message still in flight: done %v, succeeded %v; want refused", done, succeeded)
+	}
+	// Once that attempt settles, a redelivery is the duplicate it is.
+	if err = h.host.Store.DeleteInflight(ctx, store.InflightMessage{Receiver: string(login), MessageID: "whole"}); err != nil {
+		t.Fatal(err)
+	}
+	watch = handled.Begin(partsKey("whole"))
+	if _, err = h.net.IncomingParts(login, "family", "peer-family", "whole", []string{"whole one", "whole two"}); err != nil {
+		t.Fatal(err)
+	}
+	if done, succeeded := watch.Done(); !done || !succeeded {
+		t.Fatalf("a settled message's redelivery: done %v, succeeded %v; want taken as a duplicate", done, succeeded)
+	}
+}
+
+// The outcome is reported only once the message's in-flight record is gone, so a stop just
+// after the acknowledgement can't have the next start undo a message the network won't send
+// again; and a late failure, after the handler stopped waiting, still undoes its parts.
+func TestAMessageIsSettledBeforeItsOutcomeIsReported(t *testing.T) {
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, t.TempDir(), gw)
+	defer h.host.Stop()
+	h.login("alice", "alice-order")
+	const login = networkid.UserLoginID("alice-order")
+	ctx := context.Background()
+	watch := handled.Begin(partsKey("ordered"))
+	recordGone := make(chan bool, 1)
+	go func() {
+		<-watch.Finished()
+		inflight, err := h.host.Store.IsInflight(ctx, store.InflightMessage{Receiver: string(login), MessageID: "ordered"})
+		recordGone <- err == nil && !inflight
+	}()
+	if _, err := h.net.IncomingParts(login, "family", "peer-family", "ordered", []string{"ordered one", "ordered two"}); err != nil {
+		t.Fatal(err)
+	}
+	if !<-recordGone {
+		t.Fatal("the outcome was reported while the in-flight record was still there")
+	}
+
+	// The handler gave up waiting (Begin without a waiter that ends it), and the handling fails
+	// afterwards: its parts are still undone.
+	remote, err := h.net.IncomingParts(login, "family", "peer-family", "late", []string{"late one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handled.Begin(partsKey("late"))
+	handled.NoteMessage(remote, handled.Message{Receiver: string(login), ID: "late"})
+	bridgev2.RemoteEventDone(remote, bridgev2.EventHandlingResultFailed)
+	saved, err := h.host.Bridge.DB.Message.GetAllPartsByID(ctx, login, "late")
+	if err != nil || len(saved) != 0 {
+		t.Fatalf("a late failure left %d parts (%v)", len(saved), err)
 	}
 }

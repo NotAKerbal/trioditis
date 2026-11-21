@@ -47,9 +47,13 @@ func (a *Acker) Handle(key any, next func() bool) bool {
 	start := time.Now()
 	ok := next()
 	if time.Since(start) < a.Limit {
-		// Handled in full while the handler waited (or never handed to bridgev2 at all).
+		// Handled in full while the handler waited (or never handed to bridgev2 at all). An
+		// outcome reported meanwhile stands over what bridgev2 answered: a redelivery bridgev2
+		// took for a duplicate of a message still being bridged is reported failed (connector,
+		// remoteEventDone), so it isn't acknowledged in that attempt's place.
+		done, succeeded := h.Done()
 		h.Forget()
-		return ok
+		return ok && (!done || succeeded)
 	}
 	defer h.End()
 	if !ok {
@@ -59,17 +63,16 @@ func (a *Acker) Handle(key any, next func() bool) bool {
 	defer deadline.Stop()
 	select {
 	case <-h.Finished():
-		if !h.Succeeded() {
+		if _, succeeded := h.Done(); !succeeded {
 			a.Log.Warn().Msg("An event handled in the background failed; leaving it unacknowledged")
 			return false
 		}
 		return true
 	case <-deadline.C:
-		// Not acknowledged, so the network sends it again; the copy that arrives is bridged
-		// (or deduplicated, if this one got to the journal meanwhile).
+		// Not acknowledged, so the network sends it again. The event stays watched (End), so a
+		// handling that ends later is still settled; until it is, the redelivery is refused
+		// rather than taken for a duplicate.
 		a.Log.Warn().Msg("An event handled in the background didn't finish in time; leaving it unacknowledged")
-		// A handling that ends later is cleaned up at the next start (RecoverInflight).
-		h.Forget()
 		return false
 	case <-a.Ctx.Done():
 		return false
