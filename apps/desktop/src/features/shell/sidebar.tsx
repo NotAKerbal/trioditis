@@ -27,6 +27,7 @@ import {
   Inbox,
   Search,
   UserPlus,
+  Users,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -62,6 +63,7 @@ interface SidebarProps {
   onOpen: (chat: Chat) => void
   onClose: () => void
   onAction: (action: SidebarAction) => void
+  onPeople: () => void
   /**
    * Kept up to date with the on-screen order, for actions taken outside the sidebar; null
    * while the list is still loading, when there's nothing to compare against.
@@ -78,7 +80,16 @@ const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
   { view: 'blocked', label: 'Blocked', icon: <Ban /> },
 ]
 
-export function Sidebar({ selectedId, openedUnreadId, onOpen, onClose, onAction, shownRef, chatsRef }: SidebarProps) {
+export function Sidebar({
+  selectedId,
+  openedUnreadId,
+  onOpen,
+  onClose,
+  onAction,
+  onPeople,
+  shownRef,
+  chatsRef,
+}: SidebarProps) {
   const [layout] = useSidebarLayout()
   const prefs = usePrefs()
   const [query, setQuery] = useState('')
@@ -246,6 +257,9 @@ export function Sidebar({ selectedId, openedUnreadId, onOpen, onClose, onAction,
             aria-label="Search chats"
           />
         </InputGroup>
+        <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
+          <Users className="size-[17px]" />
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button

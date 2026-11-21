@@ -82,6 +82,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'typing',
   'chat',
   'contact',
+  'contactIdentifiers',
   'loginState',
   'loginStep',
   'sendStatus',

@@ -91,4 +91,15 @@ export interface ContactPlaintext {
   [extra: string]: unknown
 }
 
+/**
+ * What one of the person's own logins knows a contact by, as URIs: `tel:+15551234567`,
+ * `mailto:a@b.c`, `telegram:alice`. Sealed apart from the profile, since what each login can
+ * see of a contact differs.
+ */
+export interface ContactIdentifiersPlaintext {
+  identifiers: string[]
+}
+
 export * from './client.ts'
+export * from './people.ts'
+export * from './vcard.ts'

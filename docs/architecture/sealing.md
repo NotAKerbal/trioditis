@@ -62,20 +62,22 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`. The object ID
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`, `person`. The object ID
 for each:
 
-| Object                              | Kind       | Object ID                   |
-| ----------------------------------- | ---------- | --------------------------- |
-| A message                           | `message`  | its `eventId`               |
-| An edit                             | `message`  | the edit's own `eventId`    |
-| The person's pending copy of a send | `message`  | its `clientMessageId`       |
-| Chat metadata                       | `chat`     | `portalId`                  |
-| A contact                           | `contact`  | `ghostId`                   |
-| A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
-| Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
-| A file                              | `media`    | its `mediaId`               |
-| A label (name and colour)           | `label`    | its `labelKey`              |
+| Object                              | Kind       | Object ID                         |
+| ----------------------------------- | ---------- | --------------------------------- |
+| A message                           | `message`  | its `eventId`                     |
+| An edit                             | `message`  | the edit's own `eventId`          |
+| The person's pending copy of a send | `message`  | its `clientMessageId`             |
+| Chat metadata                       | `chat`     | `portalId`                        |
+| A contact                           | `contact`  | `ghostId`                         |
+| What a login knows a contact by     | `contact`  | `<ghostId>/identifiers/<loginId>` |
+| A `send` or `edit` command          | `outbound` | its `clientMessageId`             |
+| Login input                         | `outbound` | `<loginSessionId>/<stepId>`       |
+| A file                              | `media`    | its `mediaId`                     |
+| A label (name and colour)           | `label`    | its `labelKey`                    |
+| An address book card                | `person`   | its `personKey`                   |
 
 ## Recipients
 
@@ -85,6 +87,7 @@ for each:
 | Message the person sent from Trioditis (their stored copy) | Same as above                                                                          |
 | Outbound send (`outbound`)                                 | The bridge key only                                                                    |
 | Draft                                                      | The owner's identity key only                                                          |
+| Label or address book card                                 | The owner's identity key only                                                          |
 
 **Granting** an agent access to a chat's history: the person's device unseals each
 message's content key and re-seals it to the agent-access key, adding a `keys` entry.

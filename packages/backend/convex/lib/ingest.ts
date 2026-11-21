@@ -465,6 +465,35 @@ async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     })
 }
 
+/**
+ * What one of the person's logins knows a contact by, sealed to them apart from the profile
+ * (kind `contact`, object ID `<ghostId>/identifiers/<loginId>`), so a profile update, which
+ * every member with the contact gets, leaves it as it is. Each login's replaces only its own,
+ * and it needs no profile first.
+ */
+async function applyContactIdentifiers(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'contactIdentifiers' }>,
+  network: Network,
+) {
+  const existing = await ctx.db
+    .query('contactIdentifiers')
+    .withIndex('by_contact', (q) =>
+      q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId).eq('loginId', event.loginId),
+    )
+    .unique()
+  charge(ctx, existing)
+  if (existing) await ctx.db.patch(existing._id, { sealed: event.sealed })
+  else
+    await ctx.db.insert('contactIdentifiers', {
+      userId: event.userId,
+      network,
+      ghostId: event.ghostId,
+      loginId: event.loginId,
+      sealed: event.sealed,
+    })
+}
+
 async function applyLoginState(
   ctx: MutationCtx,
   event: Extract<BridgeEventDoc, { type: 'loginState' }>,
@@ -631,7 +660,9 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
   if ('sealed' in event) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     const limit =
-      event.type === 'chat' || event.type === 'contact' ? MAX_METADATA_SEALED_BYTES : MAX_INCOMING_SEALED_BYTES
+      event.type === 'chat' || event.type === 'contact' || event.type === 'contactIdentifiers'
+        ? MAX_METADATA_SEALED_BYTES
+        : MAX_INCOMING_SEALED_BYTES
     if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')
   }
   await assertLoginOwner(ctx, event, origin)
@@ -654,6 +685,8 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
       return await applyChat(ctx, event, network)
     case 'contact':
       return await applyContact(ctx, event, network)
+    case 'contactIdentifiers':
+      return await applyContactIdentifiers(ctx, event, network)
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':

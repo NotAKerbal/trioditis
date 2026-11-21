@@ -7,6 +7,8 @@ import { listTime } from './format.ts'
 
 export type UpdateStatus = FunctionReturnType<typeof api.updates.status>
 export type Channel = UpdateStatus['channel']
+export type ReleaseNote = NonNullable<NonNullable<UpdateStatus['updater']>['installed']>['notes'][number]
+export type ReleaseLabel = ReleaseNote['label']
 
 /** The updater reports every ten minutes; after this long without a word, it's taken as stopped. */
 export const UPDATER_STALE_MS = 25 * 60 * 1000
@@ -18,6 +20,24 @@ export const CHANNELS: { id: Channel; name: string; about: string }[] = [
 
 export const channelName = (channel: Channel) => CHANNELS.find((c) => c.id === channel)!.name
 
+/** Release notes' labels, in the order they're shown. */
+export const RELEASE_LABELS: { id: ReleaseLabel; name: string }[] = [
+  { id: 'new', name: 'New' },
+  { id: 'improved', name: 'Improved' },
+  { id: 'fixed', name: 'Fixed' },
+  { id: 'security', name: 'Security' },
+  { id: 'internal', name: 'Internal' },
+]
+
+/** Release notes grouped by label, in RELEASE_LABELS' order, each keeping the order it came in. */
+export function groupNotes(notes: ReleaseNote[]) {
+  return RELEASE_LABELS.map(({ id, name }) => ({
+    label: id,
+    name,
+    texts: notes.filter((n) => n.label === id).map((n) => n.text),
+  })).filter((group) => group.texts.length > 0)
+}
+
 export type UpdateView =
   /** The server has no updater: it's updated by hand on the server. */
   | { kind: 'off' }
@@ -25,7 +45,14 @@ export type UpdateView =
   /** A request the updater hasn't taken up yet. */
   | { kind: 'waiting'; request: 'check' | 'update' }
   | { kind: 'failed'; message: string }
-  | { kind: 'available'; commit: string; committedAt: number; subject: string; behind: number }
+  | {
+      kind: 'available'
+      commit: string
+      committedAt: number
+      subject: string
+      behind: number
+      notes: ReleaseNote[]
+    }
   | { kind: 'current'; checkedAt: number }
   /** The server runs commits the channel doesn't have (it was on nightly, say), so it stays put. */
   | { kind: 'ahead'; ahead: number; behind: number }
@@ -41,11 +68,26 @@ export function updateView(status: UpdateStatus): UpdateView {
   const latest = updater?.latest
   if (!latest || latest.channel !== status.channel) return { kind: 'unchecked' }
   if (latest.ahead > 0) return { kind: 'ahead', ahead: latest.ahead, behind: latest.behind }
-  if (latest.behind > 0) {
+  // An offer of the commit the server now runs is one it has just installed, reported before
+  // the updater looked again.
+  if (latest.behind > 0 && latest.commit !== updater?.current?.commit) {
     const { commit, committedAt, subject, behind } = latest
-    return { kind: 'available', commit, committedAt, subject, behind }
+    return { kind: 'available', commit, committedAt, subject, behind, notes: latest.notes ?? [] }
   }
   return { kind: 'current', checkedAt: latest.checkedAt }
+}
+
+/**
+ * The release notes of the update that put this server on the version it runs, if the updater
+ * installed it: what's new. Empty once the server moves on, or was updated by hand. The deployed
+ * functions' version decides where it's known, since an install by hand with the updater off
+ * leaves the updater's last report behind.
+ */
+export function whatsNew(status: UpdateStatus): ReleaseNote[] {
+  const installed = status.updater?.installed
+  const deployed = status.version && status.version !== 'unknown' ? status.version : undefined
+  const running = deployed ?? runningVersion(status)?.commit
+  return installed && installed.to === running ? installed.notes : []
 }
 
 /** Whether the updater has gone quiet: it may be stopped, or the server down. */

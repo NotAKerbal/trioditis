@@ -28,6 +28,12 @@ export interface NetworkInfo {
   reactions: boolean
 }
 
+/**
+ * The networks `contacts.sync` works on: those where a contact's ID can be their phone number,
+ * which the person's own chats with them carry. Mirrors the bridge host's numberIDNetworks.
+ */
+export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp']
+
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   whatsapp: {

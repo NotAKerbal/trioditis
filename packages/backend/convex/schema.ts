@@ -36,6 +36,13 @@ export default defineSchema({
      * removed and made again.
      */
     backupRevision: v.optional(v.number()),
+    /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
+    peopleCount: v.optional(v.number()),
+    /**
+     * Goes up with every change to the address book. Each write names the one it was made
+     * from, so two devices can't both link one contact to different cards.
+     */
+    peopleRevision: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
 
@@ -120,6 +127,8 @@ export default defineSchema({
     logoutCommandId: v.optional(v.id('outbox')),
     /** Why the last logout didn't happen. */
     logoutError: v.optional(errorCode),
+    /** When the person last asked for this login's contact list (contacts.sync). */
+    contactsSyncedAt: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
     .index('by_login', ['network', 'loginId']),
@@ -220,6 +229,18 @@ export default defineSchema({
     createdAt: v.number(),
   }).index('by_user', ['userId']),
 
+  /**
+   * The person's address book: one card per person they know, which can link that person's
+   * contacts on several networks. Everything on a card is sealed to the person (kind `person`,
+   * object ID `personKey`, which the client chooses before sealing); see client-api.md, People.
+   */
+  people: defineTable({
+    userId: v.string(),
+    personKey: v.string(),
+    sealed: envelope,
+    updatedAt: v.number(),
+  }).index('by_user', ['userId', 'personKey']),
+
   chatLabels: defineTable({
     userId: v.string(),
     chatId: v.id('chats'),
@@ -305,6 +326,19 @@ export default defineSchema({
     ghostId: v.string(),
     sealedProfile: envelope,
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
+
+  /**
+   * What one of the person's logins knows a contact by (contactIdentifiers events), sealed to
+   * the person. Its own table, one row per login and contact, so it never waits on the
+   * contact's profile and two logins never overwrite each other.
+   */
+  contactIdentifiers: defineTable({
+    userId: v.string(),
+    network: storedNetwork,
+    ghostId: v.string(),
+    loginId: v.string(),
+    sealed: envelope,
+  }).index('by_contact', ['userId', 'network', 'ghostId', 'loginId']),
 
   messages: defineTable({
     userId: v.string(),

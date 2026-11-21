@@ -188,6 +188,7 @@ export const bridgeEvent = v.union(
     isRequest: v.optional(v.boolean()),
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
+  v.object({ ...base, type: v.literal('contactIdentifiers'), ghostId: v.string(), sealed: envelope }),
   v.object({
     ...base,
     type: v.literal('loginState'),
@@ -251,6 +252,7 @@ export const commandPayload = v.union(
   v.object({ type: v.literal('loginSubmit'), loginSessionId: v.string(), stepId: v.string() }),
   v.object({ type: v.literal('loginCancel'), loginSessionId: v.string() }),
   v.object({ type: v.literal('logout') }),
+  v.object({ type: v.literal('syncContacts') }),
   v.object({
     type: v.literal('backfill'),
     portalId: v.string(),
@@ -289,6 +291,23 @@ export const updateRequest = v.object({
 /** A commit of this repository, as the updater reports it. */
 export const commitInfo = v.object({ commit: v.string(), committedAt: v.number() })
 
+/**
+ * One line of a release note: what a change does for the people using the server, with its
+ * label. Each pull request writes its own (release-notes/, docs/CONTRIBUTING.md), and the
+ * updater collects those an update brings.
+ */
+export const releaseNote = v.object({
+  label: v.union(
+    v.literal('new'),
+    v.literal('improved'),
+    v.literal('fixed'),
+    v.literal('security'),
+    v.literal('internal'),
+  ),
+  text: v.string(),
+})
+export type ReleaseNote = Infer<typeof releaseNote>
+
 /** What the updater on the host last said. */
 export const updaterReport = v.object({
   seenAt: v.number(),
@@ -310,10 +329,17 @@ export const updaterReport = v.object({
       commit: v.string(),
       committedAt: v.number(),
       subject: v.string(),
+      /** The release notes of the commits it has that `current` doesn't. */
+      notes: v.optional(v.array(releaseNote)),
       behind: v.number(),
       ahead: v.number(),
       checkedAt: v.number(),
     }),
   ),
+  /**
+   * The last update that went in, from commit `from` to `to`, when (`at`), and its release
+   * notes: what admins see as what's new while the server still runs `to`.
+   */
+  installed: v.optional(v.object({ from: v.string(), to: v.string(), at: v.number(), notes: v.array(releaseNote) })),
 })
 export type UpdaterReport = Infer<typeof updaterReport>

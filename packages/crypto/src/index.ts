@@ -12,7 +12,7 @@ export async function ready(): Promise<void> {
 
 export const ENVELOPE_VERSION = 1
 
-export type SealKind = 'message' | 'chat' | 'contact' | 'draft' | 'outbound' | 'media' | 'label'
+export type SealKind = 'message' | 'chat' | 'contact' | 'draft' | 'outbound' | 'media' | 'label' | 'person'
 
 /** The row a sealed object belongs to. Bound into the ciphertext as associated data. */
 export interface SealContext {
