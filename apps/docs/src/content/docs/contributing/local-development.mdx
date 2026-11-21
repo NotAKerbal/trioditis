@@ -1,0 +1,105 @@
+---
+title: Local Development
+description: Run a full local Trioditis instance per git worktree with pnpm dev—no Docker or Convex account required.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components'
+
+You can run the complete Trioditis stack locally—Convex backend, gateway, bridge host, sign-in browser, and web app—without Docker or a Convex cloud account.
+
+## Prerequisites
+
+- **Node.js 24+**
+- **pnpm 12** (`corepack enable` activates the pinned version automatically)
+- **Go 1.27** (on `PATH` or in `~/.local/go`) for building and testing `apps/bridge-host`
+- _(Optional)_ **Chromium / Chrome** (`CHROMIUM_PATH` or on `PATH`) for testing website-login networks via the local sign-in browser; without it, those networks fall back to manual cookie paste.
+
+## Quick start
+
+<Steps>
+  1. **Clone and install** from the repository root (always use `pnpm`):
+
+     ```sh
+     git clone https://github.com/NotAKerbal/trioditis.git
+     cd trioditis
+     pnpm install
+     ```
+
+2.  **Start the local stack:**
+
+    ```sh
+    pnpm dev
+    ```
+
+    On first run, `pnpm dev` creates an isolated local Convex deployment in `packages/backend/.convex/local`, generates checkout-local secrets and X25519 keys into `.data/dev.env` (mode `0600`), builds the Go bridge host and sign-in browser launcher, seeds the admin test account, and launches the backend, gateway, WhatsApp bridge host, and web app.
+
+3.  **Sign in** at the printed URL (`http://localhost:5180` for the main checkout) with the dev admin credentials:
+
+    - **Email:** `tester@trioditis.test`
+    - **Password:** `trioditis-dev-tester`
+
+4.  **Connect a network or seed demo data:**
+
+         - For a real network, open **Admin settings → Networks** to install WhatsApp (or any network passed to `--network`), then link your account in Settings.
+         - For instant sealed sample chats with no bridge host or real accounts, run `pnpm dev --demo` instead and load demo data from Settings.
+
+    </Steps>
+
+## Useful commands
+
+Run all commands from the repository root:
+
+| Command                     | Description                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                  | Starts local backend, gateway, WhatsApp bridge host, sign-in browser, and web app                     |
+| `pnpm dev --network signal` | Runs with another network's bridge host (comma-separated, e.g. `whatsapp,signal`)                     |
+| `pnpm dev --demo`           | Runs in demo-only mode with sealed sample chats and no bridge host                                    |
+| `pnpm dev --setup`          | Prepares the checkout's backend, bridge host, and test account, then exits                            |
+| `pnpm dev --setup --reset`  | Wipes this checkout's local backend and bridge logins, then re-initializes cleanly                    |
+| `pnpm docs:dev`             | Runs the documentation site locally (`apps/docs`)                                                     |
+| `pnpm docs:build`           | Builds the static documentation site (`apps/docs/dist`)                                               |
+| `pnpm check`                | Runs the full CI check suite locally (`typecheck`, `lint`, `test`, `test:scripts`, Go `vet` & `test`) |
+| `pnpm typecheck`            | Type-checks all TypeScript workspaces                                                                 |
+| `pnpm lint`                 | Runs `oxlint` (including Convex and design system rules)                                              |
+| `pnpm test`                 | Runs TypeScript unit and Convex tests (no external services needed)                                   |
+| `pnpm build`                | Builds every package and app                                                                          |
+
+:::note[First run with Signal]
+Signal's bridge host links `libsignal` built from Rust source, so the first run with `--network signal` takes several minutes to compile.
+:::
+
+## One isolated instance per branch
+
+Every checkout—the main clone and every git worktree—claims its own numbered slot in `~/.local/state/trioditis/slots/<n>.lock`, giving each branch dedicated ports, database state, and secrets so multiple branches run side by side without conflicts:
+
+| Service                   | Slot 0 (main checkout) | Slot `n` (worktree)      |
+| ------------------------- | ---------------------- | ------------------------ |
+| Web app                   | `5180`                 | `5180 + n`               |
+| Convex API / HTTP actions | `4210`, `4211`         | `4210 + 2n`, `4211 + 2n` |
+| Gateway                   | `8700`                 | `8700 + 10n`             |
+| Bridge host (WhatsApp)    | `8702`                 | `8702 + 10n`             |
+
+`pnpm dev` enforces strict isolation guards so it never accidentally touches a remote or sibling Convex deployment: it strips `CONVEX_*` environment variables, inspects `.env`/`.env.local`, rejects symlinks pointing outside the checkout, and passes secrets via stdin rather than CLI arguments.
+
+<Aside type="note" title="Network binding in dev">
+  The gateway, bridge hosts, and sign-in browser launcher bind to `127.0.0.1` only. Convex's local backend binds all
+  interfaces (a CLI limitation), so use a host firewall when developing on untrusted shared networks. Set `HOST=0.0.0.0`
+  if you intentionally want to reach the Vite dev server from another device on your LAN.
+</Aside>
+
+## Resetting local data
+
+Before the first release, schema changes may not include migrations for pre-release dev data. If `convex dev` refuses a schema push or you want a clean slate, stop `pnpm dev` and run:
+
+```sh
+pnpm dev --setup --reset
+```
+
+This deletes `packages/backend/.convex/local`, `packages/backend/.env.local`, and `.data/bridge-*` while preserving your checkout's port slot and secrets. To forget only one network's bridge login, delete `.data/bridge-<network>`.
+
+## Troubleshooting
+
+- **"Every slot is taken":** Another program holds the port range. Check listeners with `ss -ltn` (Linux) or `lsof -iTCP -sTCP:LISTEN` (macOS). Removing old worktrees frees their slots.
+- **"This backend already has an admin who isn't the test account":** Sign in as that admin, or run `pnpm dev --setup --reset`.
+- **"Bridge host won't build":** Confirm Go 1.27 is installed on `PATH` or at `~/.local/go/bin/go`.
+- **Leftover lock guard file:** If a `pnpm dev` process was hard-killed while releasing a lock, verify no `pnpm dev` is running for that checkout, remove the guard file named in the error, and retry.
