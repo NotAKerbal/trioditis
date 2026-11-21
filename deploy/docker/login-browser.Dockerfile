@@ -14,8 +14,17 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
+# DEBIAN_SNAPSHOT (a snapshot.debian.org time, such as 20261101T000000Z) pins the Debian
+# packages below to that day, to build the same image again; unset, they are the newest, with
+# their security fixes. install.sh passes the one deploy/.env sets.
+ARG DEBIAN_SNAPSHOT=
 # Fonts, so sign-in pages draw their text and emoji rather than boxes.
-RUN apt-get update \
+RUN if [ -n "$DEBIAN_SNAPSHOT" ]; then \
+    printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuites: bookworm bookworm-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\nTypes: deb\nURIs: http://snapshot.debian.org/archive/debian-security/%s\nSuites: bookworm-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+      "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" >/etc/apt/sources.list.d/debian.sources \
+    && echo 'Acquire::Check-Valid-Until "false";' >/etc/apt/apt.conf.d/99snapshot; \
+  fi \
+  && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl chromium fonts-liberation fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/login-browser /usr/local/bin/login-browser

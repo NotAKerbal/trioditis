@@ -64,6 +64,9 @@ Options (each one is kept for later reruns):
                        docs/deploy.md, Updates)
   --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
                        goes to a log). Not kept for reruns
+  --without-backup     Upgrade even though this version changes the database images and
+                       there's no backup from the version installed now (docs/deploy.md,
+                       Upgrade). Not kept for reruns
 EOF
 }
 
@@ -72,6 +75,7 @@ unset -v mode port host bind proxy_url trusted domain networks telegram_api_id t
 local_flag=0
 new_server_keys=0
 setup_link=1
+without_backup=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks | --telegram-api-id | --telegram-api-hash)
@@ -93,6 +97,7 @@ while [ $# -gt 0 ]; do
     --updater) updater=1 ;;
     --no-updater) updater=0 ;;
     --no-setup-link) setup_link=0 ;;
+    --without-backup) without_backup=1 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -490,6 +495,39 @@ fi
 bridge_hosts=()
 for network in "${network_list[@]}"; do bridge_hosts+=("$network-1=http://bridge-$network:8611"); done
 
+# The database images, before any setting is saved or anything is built. Postgres opens only
+# data from its own major version, and the bundle doesn't upgrade it in place, so another major
+# version stops the install here. A new Postgres or Convex backend image changes the data in
+# place on its first start (the backend migrates its database), which the older images can't
+# read, so going back afterwards needs a backup from before: such an upgrade runs only with a
+# backup made at the version installed now (the updater makes one before every update), or
+# when asked to with --without-backup.
+image_of() { sed -n "s|^ *image: \($1[^ ]*\)\$|\1|p" "$here/compose/compose.yml" | head -1; }
+postgres_image=$(image_of postgres:)
+backend_image=$(image_of ghcr.io/convex/convex-backend:)
+postgres_major=${postgres_image#postgres:}
+postgres_major=${postgres_major%%[.-]*}
+if [ "$existing_install" = 1 ] && docker volume inspect "${project}_postgres" >/dev/null 2>&1; then
+  data_major=$(docker run --rm --log-driver none -v "${project}_postgres:/v:ro" --entrypoint cat "$socat_image" /v/PG_VERSION 2>/dev/null || true)
+  if [[ "$data_major" =~ ^[0-9]+$ ]] && [ "$data_major" != "$postgres_major" ]; then
+    die "This version runs Postgres $postgres_major, and this install's database is from Postgres $data_major, which it can't open: the bundle doesn't upgrade Postgres in place. Check out the version you had and run this again, or restore a backup made with Postgres $postgres_major."
+  fi
+  changed_images=''
+  for service in postgres backend; do
+    container=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service" 2>/dev/null | head -1 || true)
+    [ -n "$container" ] || continue
+    running_image=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)
+    if [ "$service" = postgres ]; then wanted=$postgres_image; else wanted=$backend_image; fi
+    [ -z "$running_image" ] || [ "$running_image" = "$wanted" ] || changed_images="$changed_images $service"
+  done
+  installed_version=$(get TRIODITIS_VERSION)
+  last_backup_version=$(sed -n 's/^version=\([0-9a-f]*\)$/\1/p' "$here/.last-backup" 2>/dev/null || true)
+  if [ -n "$changed_images" ] && [ "$without_backup" = 0 ] &&
+    { [ -z "$installed_version" ] || [ "$last_backup_version" != "$installed_version" ]; }; then
+    die "This version changes the database images ($(echo $changed_images | sed 's/ /, /g')), which change the data in place, and there's no backup from the version installed now to go back to. Back up first (deploy/trioditis backup <directory>), then run this again; or, to go on without one, run it with --without-backup."
+  fi
+fi
+
 set_var \
   INSTALL_MODE "$mode" \
   INSTALL_DOMAIN "$domain" \
@@ -552,6 +590,9 @@ keep_or TRIODITIS_INTERNAL_TOKEN "$(secret 32)"
 keep_or LOGIN_BROWSER_TOKEN "$(secret 32)"
 keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
 keep_or UPDATER_SECRET "$(secret 32)"
+# Encrypts the backups (deploy/trioditis backup), and, like the private keys, is never in one:
+# deploy/trioditis keys export keeps it with them.
+keep_or BACKUP_KEY "$(secret 32)"
 
 # Compose reads COMPOSE_FILE and COMPOSE_PROFILES from deploy/.env, relative to the compose
 # directory, so it runs from there.
@@ -598,9 +639,11 @@ if [ "${#new_pairs[@]}" -gt 0 ]; then
   unset -v keys public_key private_key
 fi
 
-# Caddy serves it (as another user), so it's world-readable; written like deploy/.env.
-mkdir -p "$here/runtime"
+# Caddy serves it (as another user), so it's world-readable; written like deploy/.env. Checked
+# before anything is made, so a symlink there never leads mkdir elsewhere.
 [ ! -L "$here/runtime" ] || die "deploy/runtime is a symlink; it must be a directory of this checkout."
+[ ! -e "$here/runtime" ] || [ -d "$here/runtime" ] || die "deploy/runtime isn't a directory; it must be a directory of this checkout."
+mkdir -p "$here/runtime"
 write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
 # The commit the functions are deployed from (deploy-functions.sh reads it).
@@ -612,7 +655,10 @@ write_file "$here/runtime/version" "$version" 644
 # first build.
 with_signal=0
 [[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
-docker build -q --build-arg "WITH_SIGNAL=$with_signal" -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
+# DEBIAN_SNAPSHOT in deploy/.env, if the operator set one, pins the Debian packages to that day
+# (docs/deploy.md, Building the same images again); compose.yml passes it to the sign-in browser.
+docker build -q --build-arg "WITH_SIGNAL=$with_signal" --build-arg "DEBIAN_SNAPSHOT=$(get DEBIAN_SNAPSHOT)" \
+  -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
@@ -715,6 +761,25 @@ if [ "$mode" = local ] && [ -n "$proxy_url" ] && [ -z "$trusted" ]; then
       set_var CADDY_TRUSTED_PROXIES "$ranges"
       ;;
   esac
+fi
+
+# After a restore (deploy/trioditis restore), before anything that sends starts: the restored
+# backup is a moment in the past, so every send it holds as still on its way may have gone out
+# since. The functions are deployed, then every such send is made `unknown` rather than sent
+# again (deploy/scripts/settle-restore.mjs). deploy/.restore-settle stays until that's done, so a
+# run that stops partway settles them on the next one.
+if [ -e "$here/.restore-settle" ]; then
+  backup_at=$(sed -n 's/^backup_at=\([0-9]\{1,16\}\)$/\1/p' "$here/.restore-settle")
+  [ -n "$backup_at" ] || die "deploy/.restore-settle isn't one a restore wrote. Run the restore again."
+  say "Settling the sends the restored backup holds, before anything can send them"
+  compose stop gateway >/dev/null 2>&1 || true
+  if ! compose run --rm --no-deps -T functions >/dev/null; then
+    compose logs --no-log-prefix --tail 20 functions >&2 || true
+    die "Deploying the functions after the restore failed (above). Fix the cause and run this again."
+  fi
+  compose run --rm --no-deps -T -e "RESTORE_BACKUP_AT=$backup_at" --entrypoint node functions deploy/scripts/settle-restore.mjs ||
+    die "Settling the restored sends failed (above), so nothing that sends was started. Fix the cause and run this again."
+  rm -f "$here/.restore-settle"
 fi
 
 say "Deploying the functions and starting the server"
@@ -834,8 +899,17 @@ updater's log: journalctl $([ "$(id -u)" = 0 ] || echo '--user ')-u trioditis-up
 EOF
 else
   cat <<EOF
-Upgrade: update this checkout (git pull), then run deploy/install/install.sh again. It keeps
-these settings; pass an option only to change one. Or let admins update from the app: run
-this again with --updater.
+Upgrade: back up (deploy/trioditis backup <directory>), update this checkout (git pull), then
+run deploy/install/install.sh again. It keeps these settings; pass an option only to change
+one. Or let admins update from the app: run this again with --updater.
+EOF
+fi
+# The app's update channel is Stable (main) until an admin chooses; a checkout from dev is
+# ahead of it, and the updater would leave it where it is.
+if [ "$updater" = 1 ] && ! git -C "$root" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null &&
+  git -C "$root" merge-base --is-ancestor HEAD refs/remotes/origin/dev 2>/dev/null; then
+  cat <<EOF
+This checkout is from dev, ahead of the Stable channel (main) the app starts on: choose
+Nightly in Admin settings → Updates to keep it updated.
 EOF
 fi

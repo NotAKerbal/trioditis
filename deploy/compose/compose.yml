@@ -327,6 +327,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/login-browser.Dockerfile
+      # Debian's packages from one day of snapshot.debian.org, if deploy/.env sets one.
+      args:
+        DEBIAN_SNAPSHOT: ${DEBIAN_SNAPSHOT:-}
     image: ${COMPOSE_PROJECT_NAME:-trioditis}/login-browser:local
     environment:
       LOGIN_BROWSER_TOKEN: ${LOGIN_BROWSER_TOKEN:?run install.sh first}

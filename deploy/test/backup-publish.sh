@@ -1,7 +1,8 @@
 #!/bin/sh
-# A backup is published whole or not at all, and without the server's private keys: a cold
-# backup (nothing running) works and starts nothing, and its secrets.env and archive hold
-# neither private key; one whose name is taken (by a file, a directory or a symlink) goes to
+# A backup is published whole or not at all, encrypted, and without the server's keys: a cold
+# backup (nothing running) works and starts nothing, its archive and secrets.env are encrypted
+# with BACKUP_KEY (and open with it), and neither holds a private key or the backup key; one
+# with no BACKUP_KEY is refused before anything is made; one whose name is taken (by a file, a directory or a symlink) goes to
 # the next free name and leaves what was there alone; one whose rename silently does nothing
 # (a stub mv that exits 0) fails instead of reporting success; one interrupted (SIGINT to
 # its process group, as Ctrl-C sends) while the archive is streaming, or after it reserved
@@ -29,26 +30,56 @@ fill postgres 'echo 17 >/v/PG_VERSION'
 
 # Published entries in $backups, hidden ones (unpublished work) included.
 entries() { ls -A "$backups"; }
+# The published backup's secrets.env, decrypted to a file of its own; nothing if there's none.
+secrets_of() {
+  encrypted=$(find "$backups" -mindepth 2 -name secrets.env.enc | head -1)
+  [ -n "$encrypted" ] || return 0
+  decrypt "$encrypted" >"$root/secrets.of" && echo "$root/secrets.of"
+}
+
+# No BACKUP_KEY (an install from before backups were encrypted, until the installer runs
+# again): refused before anything is made.
+cp "$root/deploy/.env" "$root/env.with-key"
+grep -v '^BACKUP_KEY=' "$root/env.with-key" >"$root/deploy/.env"
+rm -rf "${backups:?}"
+trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+cp "$root/env.with-key" "$root/deploy/.env"
+[ "$status" != 0 ] && grep -q "has no BACKUP_KEY" "$root/out" && [ ! -e "$backups" ] &&
+  check ok "without a BACKUP_KEY it's refused before anything is made" ||
+  { check fail "without a BACKUP_KEY it's refused before anything is made"; cat "$root/out" >&2; }
+mkdir -p "$backups"
 
 if trioditis backup "$backups" >"$root/out" 2>&1; then status=0; else status=$?; fi
 [ "$status" = 0 ] && check ok "a cold backup succeeds" || { check fail "a cold backup succeeds"; cat "$root/out" >&2; }
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] &&
   check ok "it starts nothing" || check fail "it starts nothing"
 backup=$(find "$backups" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | head -1)
-[ -n "$backup" ] && [ "$(stat -c %a "$backup")" = 700 ] && [ "$(stat -c %a "$backup/archive.tgz")" = 600 ] &&
-  [ "$(stat -c %a "$backup/secrets.env")" = 600 ] &&
-  check ok "it's one 0700 directory holding archive.tgz and secrets.env, both 0600" ||
-  check fail "it's one 0700 directory holding archive.tgz and secrets.env, both 0600"
+[ -n "$backup" ] && [ "$(stat -c %a "$backup")" = 700 ] && [ "$(stat -c %a "$backup/archive.enc")" = 600 ] &&
+  [ "$(stat -c %a "$backup/secrets.env.enc")" = 600 ] && [ "$(stat -c %a "$backup/backup.info")" = 600 ] &&
+  [ "$(ls -A "$backup" | sort | tr '\n' ' ')" = "archive.enc backup.info secrets.env.enc " ] &&
+  check ok "it's one 0700 directory holding archive.enc, secrets.env.enc and backup.info, all 0600" ||
+  check fail "it's one 0700 directory holding archive.enc, secrets.env.enc and backup.info, all 0600"
+# Both files are the encryption's (its header, not gzip's or a setting), and open with the key.
+for file in archive.enc secrets.env.enc; do
+  [ "$(head -c 19 "$backup/$file")" = trioditis-backup-v1 ] && decrypt "$backup/$file" >/dev/null &&
+    check ok "$file is encrypted, and opens with BACKUP_KEY" || check fail "$file is encrypted, and opens with BACKUP_KEY"
+done
+grep -qx 'format=2' "$backup/backup.info" && grep -qx "project=$project" "$backup/backup.info" &&
+  check ok "backup.info names the format and project" || check fail "backup.info names the format and project"
+decrypt "$backup/secrets.env.enc" >"$root/secrets.plain"
 # The .env's lines for the listed names, which is everything but the two private keys here.
 expected=$(while IFS= read -r line; do
   grep -qxF "${line%%=*}" "$repo/deploy/install/env-names" && echo "$line"
 done <"$root/deploy/.env" | sort)
-[ "$(sort "$backup/secrets.env")" = "$expected" ] &&
-  grep -q '^BRIDGE_PUBLIC_KEY=test-BRIDGE_PUBLIC_KEY$' "$backup/secrets.env" &&
-  check ok "secrets.env is deploy/.env without the private keys" || check fail "secrets.env is deploy/.env without the private keys"
-docker run --rm --log-driver none -i --entrypoint sh "$tool" -c '
-  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e "$1" -e "$2" /x' sh "$bk" "$ak" <"$backup/archive.tgz" &&
-  check ok "the archive holds neither private key" || check fail "the archive holds neither private key"
+[ "$(sort "$root/secrets.plain")" = "$expected" ] &&
+  grep -q '^BRIDGE_PUBLIC_KEY=test-BRIDGE_PUBLIC_KEY$' "$root/secrets.plain" && ! grep -qF "$(private_value BACKUP_KEY)" "$root/secrets.plain" &&
+  check ok "secrets.env is deploy/.env without the private keys and the backup key" ||
+  check fail "secrets.env is deploy/.env without the private keys and the backup key"
+decrypt "$backup/archive.enc" | docker run --rm --log-driver none -i --entrypoint sh "$tool" -c '
+  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e "$1" -e "$2" -e "$3" /x && grep -q "^created [0-9]" /x/trioditis-backup.manifest &&
+    grep -q "^postgres 17$" /x/trioditis-backup.manifest' sh "$bk" "$ak" "$(private_value BACKUP_KEY)" &&
+  check ok "the archive holds no key, and its manifest says when and which Postgres" ||
+  check fail "the archive holds no key, and its manifest says when and which Postgres"
 [ "$(entries | wc -l)" = 1 ] && check ok "nothing else is left in the directory" || check fail "nothing else is left in the directory"
 
 # Every name it could take for the next two minutes is taken already: in turn by a file, a
@@ -67,7 +98,7 @@ done
 before_taken=$(find "$backups" -mindepth 1 | sort | while read -r entry; do stat -c '%n %F %s' "$entry"; done)
 trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
 taken=$(find "$backups" -mindepth 1 -maxdepth 1 -type d -name '*-2' | head -1)
-[ "$status" = 0 ] && [ -n "$taken" ] && [ -f "$taken/archive.tgz" ] && [ -f "$taken/secrets.env" ] &&
+[ "$status" = 0 ] && [ -n "$taken" ] && [ -f "$taken/archive.enc" ] && [ -f "$taken/secrets.env.enc" ] &&
   check ok "a taken name moves the backup to the next one" || check fail "a taken name moves the backup to the next one"
 [ "$(find "$backups" -mindepth 1 ! -path "$taken" ! -path "$taken/*" | sort | while read -r entry; do stat -c '%n %F %s' "$entry"; done)" = "$before_taken" ] &&
   [ "$(cat "$root/outside")" = outside ] &&
@@ -226,7 +257,7 @@ copy_with_stub() {
   rm -f "$root/stub/$1"
 }
 copy_with_stub grep '*"-qx POSTGRES_PASSWORD"*' 'exit 2'
-secrets=$(find "$backups" -mindepth 2 -name secrets.env | head -1)
+secrets=$(secrets_of)
 [ "$status" = 0 ] && [ -n "$secrets" ] && [ "$(sed -n 's/^POSTGRES_PASSWORD=//p' "$secrets")" = "$password" ] &&
   check ok "a grep that fails on a setting's name doesn't leave it out" ||
   { check fail "a grep that fails on a setting's name doesn't leave it out"; cat "$root/out" >&2; }
@@ -268,7 +299,7 @@ backup_with() {
   rm -rf "${backups:?}"/*
   { cat "$root/env.good"; printf '%s\n' "$@"; } >"$root/deploy/.env"
   trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
-  secrets=$(find "$backups" -mindepth 2 -name secrets.env | head -1)
+  secrets=$(secrets_of)
 }
 no_private_in() { [ -n "$1" ] && ! grep -qF -e "$bk" -e "$ak" "$1"; }
 backup_with "# BRIDGE_PRIVATE_KEY=$bk" '' 'OPERATOR_NOTE=keep-me'
@@ -291,11 +322,12 @@ fill bridge-whatsapp 'head -c 600000000 /dev/urandom >/v/big'
 # A background job starts with SIGINT ignored, which a terminal's Ctrl-C doesn't: reset here.
 setsid env --default-signal=INT "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 &
 for _ in $(seq 600); do
-  part=$(find "$backups" -path '*/.*/archive.tgz' -size +1M 2>/dev/null | head -1)
+  part=$(find "$backups" -path '*/.*/archive.enc' -size +1M 2>/dev/null | head -1)
   [ -z "$part" ] || break
   sleep 0.1
 done
-streaming=$(pgrep -f "^docker run --rm --init --name $project-backup" | head -1)
+# (docker may be on PATH as a wrapper that runs /usr/bin/docker, as under sg.)
+streaming=$(pgrep -f "^(/usr/bin/)?docker run --rm --init --name $project-backup" | head -1)
 if [ -n "$part" ] && [ -n "$streaming" ]; then
   /bin/kill -s INT -- "-$(ps -o pgid= -p "$streaming" | tr -d ' ')"
   wait || true

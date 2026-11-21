@@ -9,6 +9,7 @@ import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
 import { browserStepOpen } from './logins'
+import { sendScheduled } from './scheduled'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -276,8 +277,11 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
  * handed out whose acceptance was never confirmed may have reached the bridge host:
  * `unknown`, and the person decides. (The bridge host itself won't send after `notAfter`.)
  */
-async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
-  const delivery = command.state === 'queued' ? 'failed' : 'unknown'
+async function expire(
+  ctx: MutationCtx,
+  command: Doc<'outbox'>,
+  delivery: 'failed' | 'unknown' = command.state === 'queued' ? 'failed' : 'unknown',
+) {
   await ctx.db.patch(command._id, {
     state: 'expired',
     leaseUntil: undefined,
@@ -637,5 +641,68 @@ export const redeemSigninTicket = mutation({
       return null
     }
     return { loginSessionId: row.loginSessionId, userId: row.userId, hostId: row.hostId, stepId: row.stepId }
+  },
+})
+
+const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired'] as const
+const restorePhase = v.union(...RESTORE_PHASES.map((phase) => v.literal(phase)))
+/** Rows one call of `settleAfterRestore` handles; each is bounded like an expiry. */
+const RESTORE_BATCH = 20
+
+/**
+ * Run once after `deploy/trioditis restore`, before the gateway starts (docs/deploy.md,
+ * Restore). A backup is a moment in the past, and the server ran on after it, so a send the
+ * backup holds as still on its way may have gone out since. None is sent again: each becomes
+ * `unknown`, and the person decides. In order, one batch a call, until `phase` is null:
+ * scheduled messages whose time has come by now become sends (and so `unknown`); queued and
+ * claimed commands expire as `unknown`; accepted ones are settled as `unknown`, as if overdue;
+ * and a send the backend expired as `failed` when it started (its deadline came after
+ * `backupAt`, so it may have gone in the meantime) is `unknown` too. Logins, logouts and new
+ * chats waiting on a command end as if it expired. Safe to run again.
+ */
+export const settleAfterRestore = internalMutation({
+  args: {
+    backupAt: v.number(),
+    phase: v.optional(restorePhase),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  returns: v.object({ phase: v.union(restorePhase, v.null()), cursor: v.union(v.string(), v.null()) }),
+  handler: async (ctx, { backupAt, phase = 'scheduled', cursor = null }) => {
+    const now = Date.now()
+    const next = (more: boolean, nextCursor: string | null) =>
+      more ? { phase, cursor: nextCursor } : { phase: RESTORE_PHASES[RESTORE_PHASES.indexOf(phase) + 1] ?? null, cursor: null }
+    if (phase === 'scheduled') {
+      const page = await ctx.db.query('scheduledSends').paginate({ cursor, numItems: RESTORE_BATCH })
+      for (const row of page.page) if (row.state === 'scheduled' && row.sendAt <= now) await sendScheduled(ctx, row)
+      return next(!page.isDone, page.continueCursor)
+    }
+    if (phase === 'queued' || phase === 'claimed') {
+      // Each leaves the index as it expires, so the next call starts from the front again.
+      const rows = await ctx.db
+        .query('outbox')
+        .withIndex('by_state', (q) => q.eq('state', phase))
+        .take(RESTORE_BATCH)
+      for (const command of rows) await expire(ctx, command, 'unknown')
+      return next(rows.length === RESTORE_BATCH, null)
+    }
+    if (phase === 'dispatched') {
+      // A settled command has no `expiresAt`, so it leaves this range too.
+      const rows = await ctx.db
+        .query('outbox')
+        .withIndex('by_expiry', (q) => q.eq('state', 'dispatched').gte('expiresAt', 0))
+        .take(RESTORE_BATCH)
+      for (const command of rows) await settle(ctx, command)
+      return next(rows.length === RESTORE_BATCH, null)
+    }
+    const page = await ctx.db
+      .query('outbox')
+      .withIndex('by_expiry', (q) => q.eq('state', 'expired').gte('expiresAt', backupAt))
+      .paginate({ cursor, numItems: RESTORE_BATCH })
+    for (const command of page.page) {
+      if (command.delivery !== 'failed' || command.lastError !== 'expired') continue
+      await ctx.db.patch(command._id, { delivery: 'unknown' })
+      await markCopy(ctx, command, 'unknown')
+    }
+    return next(!page.isDone, page.continueCursor)
   },
 })

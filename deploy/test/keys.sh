@@ -1,7 +1,8 @@
 #!/bin/sh
-# `keys export` writes the server's keys to a new 0600 file, never over anything and never
-# inside the checkout; `keys import` puts the private keys back into a deploy/.env that has
-# only the public ones (as a backup's secrets.env does), and refuses a pair that isn't this
+# `keys export` writes the server's keys (both pairs, and the backup key) to a new 0600 file,
+# never over anything and never inside the checkout; `keys import` puts the private keys and
+# the backup key back into a deploy/.env that has only the public ones (as a backup's
+# secrets.env does), and refuses a pair that isn't this
 # server's: one whose public key differs, or whose private key isn't the private half of the
 # saved public key (mixed pairs), and any private key not exactly 32 bytes of canonical
 # unpadded base64url (a trailing word or space, padding, 31 or 33 bytes, other characters),
@@ -32,8 +33,10 @@ no_key_in() { ! grep -qF -e "$(key BRIDGE_PRIVATE_KEY)" -e "$(key AGENT_ACCESS_P
 trioditis keys export "$backups/keys" >"$root/out" 2>&1 && status=0 || status=$?
 [ "$status" = 0 ] && [ "$(stat -c %a "$backups/keys")" = 600 ] &&
   [ "$(grep -cE '^(BRIDGE|AGENT_ACCESS)_(PUBLIC|PRIVATE)_KEY=.' "$backups/keys")" = 4 ] &&
-  check ok "export writes the four keys to a new 0600 file" || check fail "export writes the four keys to a new 0600 file"
-no_key_in "$root/out" && check ok "export prints no key" || check fail "export prints no key"
+  grep -qx "BACKUP_KEY=$(private_value BACKUP_KEY)" "$backups/keys" &&
+  check ok "export writes the four keys and the backup key to a new 0600 file" ||
+  check fail "export writes the four keys and the backup key to a new 0600 file"
+no_key_in "$root/out" && ! grep -qF "$(private_value BACKUP_KEY)" "$root/out" && check ok "export prints no key" || check fail "export prints no key"
 
 echo keep >"$backups/taken"
 trioditis keys export "$backups/taken" >"$root/out" 2>&1 && status=0 || status=$?
@@ -42,8 +45,10 @@ trioditis keys export "$backups/taken" >"$root/out" 2>&1 && status=0 || status=$
 trioditis keys export "$root/deploy/keys" >"$root/out" 2>&1 && status=0 || status=$?
 [ "$status" != 0 ] && [ ! -e "$root/deploy/keys" ] && check ok "export refuses the checkout" || check fail "export refuses the checkout"
 
-# As after a lost server: deploy/.env is a backup's secrets.env, without the private keys.
-grep -vE '^(BRIDGE|AGENT_ACCESS)_PRIVATE_KEY=' "$env_file" >"$root/secrets.env"
+# As after a lost server: deploy/.env is a backup's secrets.env, without the private keys or
+# the backup key.
+backup_key=$(private_value BACKUP_KEY)
+grep -vE '^(BRIDGE_PRIVATE_KEY|AGENT_ACCESS_PRIVATE_KEY|BACKUP_KEY)=' "$env_file" >"$root/secrets.env"
 cp "$root/secrets.env" "$env_file"
 # A pair from another server: the same file, another bridge public key.
 sed 's/^BRIDGE_PUBLIC_KEY=.*/BRIDGE_PUBLIC_KEY=another-server/' "$backups/keys" >"$backups/foreign"
@@ -88,9 +93,11 @@ done
 trioditis keys import "$backups/keys" >"$root/out" 2>&1 && status=0 || status=$?
 [ "$status" = 0 ] && grep -qx "BRIDGE_PRIVATE_KEY=$(key BRIDGE_PRIVATE_KEY)" "$env_file" &&
   grep -qx "AGENT_ACCESS_PRIVATE_KEY=$(key AGENT_ACCESS_PRIVATE_KEY)" "$env_file" &&
-  [ "$(grep -vE '^(BRIDGE|AGENT_ACCESS)_PRIVATE_KEY=' "$env_file")" = "$(cat "$root/secrets.env")" ] &&
+  grep -qx "BACKUP_KEY=$backup_key" "$env_file" &&
+  [ "$(grep -vE '^(BRIDGE_PRIVATE_KEY|AGENT_ACCESS_PRIVATE_KEY|BACKUP_KEY)=' "$env_file")" = "$(cat "$root/secrets.env")" ] &&
   [ "$(stat -c %a "$env_file")" = 600 ] &&
-  check ok "import adds the private keys and changes nothing else" || check fail "import adds the private keys and changes nothing else"
+  check ok "import adds the private keys and the backup key, and changes nothing else" ||
+  check fail "import adds the private keys and the backup key, and changes nothing else"
 no_key_in "$root/out" && check ok "import prints no key" || check fail "import prints no key"
 
 finish
