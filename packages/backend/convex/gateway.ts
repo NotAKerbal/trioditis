@@ -670,7 +670,9 @@ export const settleAfterRestore = internalMutation({
   handler: async (ctx, { backupAt, phase = 'scheduled', cursor = null }) => {
     const now = Date.now()
     const next = (more: boolean, nextCursor: string | null) =>
-      more ? { phase, cursor: nextCursor } : { phase: RESTORE_PHASES[RESTORE_PHASES.indexOf(phase) + 1] ?? null, cursor: null }
+      more
+        ? { phase, cursor: nextCursor }
+        : { phase: RESTORE_PHASES[RESTORE_PHASES.indexOf(phase) + 1] ?? null, cursor: null }
     if (phase === 'scheduled') {
       const page = await ctx.db.query('scheduledSends').paginate({ cursor, numItems: RESTORE_BATCH })
       for (const row of page.page) if (row.state === 'scheduled' && row.sendAt <= now) await sendScheduled(ctx, row)

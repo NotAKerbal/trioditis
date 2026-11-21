@@ -41,7 +41,12 @@ async function ready() {
 }
 
 async function send(as: Awaited<ReturnType<typeof signIn>>, chatId: Id<'chats'>, n: number) {
-  await as.mutation(api.messages.send, { chatId, clientMessageId: id(n), forBridge: sealed(`b${n}`), copy: sealed(`c${n}`) })
+  await as.mutation(api.messages.send, {
+    chatId,
+    clientMessageId: id(n),
+    forBridge: sealed(`b${n}`),
+    copy: sealed(`c${n}`),
+  })
 }
 
 async function claim(t: T, limit = 1) {
@@ -70,11 +75,14 @@ async function settle(t: T, backupAt: number) {
   let cursor: string | null = null
   let calls = 0
   while (phase !== null) {
-    const result: { phase: Phase | null; cursor: string | null } = await t.mutation(internal.gateway.settleAfterRestore, {
-      backupAt,
-      phase,
-      cursor,
-    })
+    const result: { phase: Phase | null; cursor: string | null } = await t.mutation(
+      internal.gateway.settleAfterRestore,
+      {
+        backupAt,
+        phase,
+        cursor,
+      },
+    )
     phase = result.phase
     cursor = result.cursor
     calls++

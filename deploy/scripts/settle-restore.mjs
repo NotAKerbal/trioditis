@@ -28,7 +28,9 @@ try {
   // so that stops the restore rather than being skipped.
   const functions = await client.query(makeFunctionReference('_system/cli/modules:apiSpec'), {})
   if (!functions.some((fn) => fn.identifier === 'gateway.js:settleAfterRestore')) {
-    console.error("settle-restore: this backend's functions can't settle a restore's sends (no gateway:settleAfterRestore)")
+    console.error(
+      "settle-restore: this backend's functions can't settle a restore's sends (no gateway:settleAfterRestore)",
+    )
     process.exit(1)
   }
   let phase = 'scheduled'

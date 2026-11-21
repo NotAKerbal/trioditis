@@ -87,6 +87,7 @@ if (mode === 'encrypt') {
     }
   }
   if (key === null) fail("this isn't an encrypted Trioditis backup file, or it's cut short")
-  if (buffer.length < TAG) fail("the file doesn't decrypt with this BACKUP_KEY: it's another install's, damaged, or cut short")
+  if (buffer.length < TAG)
+    fail("the file doesn't decrypt with this BACKUP_KEY: it's another install's, damaged, or cut short")
   await write(open(key, index, true, buffer))
 }

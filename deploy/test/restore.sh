@@ -188,6 +188,24 @@ run restore --yes "$backups/older"
   { check fail "an older unencrypted backup restores, with a warning"; cat "$root/out" >&2; }
 rm -rf "$backups/older" "$root/installs" "$root/deploy/.restore-settle"
 
+# Volumes that don't come out as the manifest says (an older backup whose manifest is wrong):
+# the server as it was is put back, and the restore fails.
+mkdir -m 700 "$backups/wrong"
+decrypt "$b1/secrets.env.enc" >"$backups/wrong/secrets.env"
+# shellcheck disable=SC2016 # expanded in the container
+decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
+  mkdir /x && cd /x && tar -xzf - &&
+  sed -i "s/^\(volume [^ ]*_bridge-whatsapp [0-9]*\) [0-9]*$/\1 999999/" trioditis-backup.manifest &&
+  tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/wrong/archive.tgz"
+fill bridge-whatsapp 'echo five >/v/a'
+before_wrong=$(contents)
+run restore --yes "$backups/wrong"
+[ "$status" != 0 ] && [ "$(contents)" = "$before_wrong" ] && grep -q "Nothing was restored: the server is as it was" "$root/out" &&
+  [ ! -e "$root/deploy/.restore-settle" ] &&
+  check ok "volumes that don't match the manifest put the server back as it was" ||
+  { check fail "volumes that don't match the manifest put the server back as it was"; cat "$root/out" >&2; }
+rm -rf "$backups/wrong" "$root/installs"
+
 # From a version this checkout descends from, when asked.
 git_ checkout -q main
 fill bridge-whatsapp 'echo four >/v/a'
