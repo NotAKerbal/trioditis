@@ -237,6 +237,8 @@ export const cancel = mutation({
   returns: v.union(
     v.object({
       outcome: v.literal('cancelled'),
+      /** This call is the one that cancelled it; false for a repeat, which changes nothing. */
+      first: v.boolean(),
       clientMessageId: v.string(),
       copy: v.union(v.null(), envelope),
       replyTo: v.union(v.null(), v.string()),
@@ -255,10 +257,12 @@ export const cancel = mutation({
       await deletePayload(ctx, row._id)
       return { outcome: 'dismissed' as const }
     }
-    if (row.state === 'scheduled') await ctx.db.patch(row._id, { state: 'cancelled', cancelledAt: Date.now() })
+    const first = row.state === 'scheduled'
+    if (first) await ctx.db.patch(row._id, { state: 'cancelled', cancelledAt: Date.now() })
     const payload = row.forgottenAt ? null : await payloadOf(ctx, row._id)
     return {
       outcome: 'cancelled' as const,
+      first,
       clientMessageId: row.clientMessageId,
       copy: payload?.copy ?? null,
       replyTo: row.replyTo ?? null,

@@ -792,6 +792,9 @@ await convex.mutation(api.messages.send, {
   `{ already: 'scheduled', state }` (`scheduled`, `cancelled` or `failed`; one that has gone
   out is a send). A client should keep the text of one that was cancelled or failed, since it
   never went, and send it again only with a new ID.
+- `api.messages.sendStates({ clientMessageIds })`, at most 100, answers the same for each ID
+  already used, `[{ clientMessageId, used }]`, leaving out unused ones: how a send stands even
+  once its copy is gone from the chat.
 - The send appears in `messages.list` at once as the pending copy, and the network's echo
   replaces it in place.
 
@@ -845,15 +848,15 @@ can’t be sent.` · `That message can’t be reacted to.`
 
 ### Scheduled sends
 
-| Function              | Arguments                                                              | Returns                                                                                                                                                                                |
-| --------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scheduled.create`    | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or what that `clientMessageId` was already used for, as `messages.send` says it                                                                                      |
-| `scheduled.list`      | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                                                                                                |
-| `scheduled.copies`    | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled or cancelled and not forgotten; open like a pending copy                                                               |
-| `scheduled.cancel`    | `scheduledId`                                                          | What happened: `{ outcome: 'cancelled', clientMessageId, copy, replyTo }`, `{ outcome: 'sent', delivery }` (how that send stands now) or, for a failed one, `{ outcome: 'dismissed' }` |
-| `scheduled.cancelled` | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, replyTo, cancelledAt }]`: cancelled ones not forgotten yet. No content                                                                               |
-| `scheduled.forget`    | `scheduledId`                                                          | `null`. Deletes a cancelled one's copies, when the person discards it                                                                                                                  |
-| `scheduled.sendNow`   | `scheduledId`                                                          | `null`                                                                                                                                                                                 |
+| Function              | Arguments                                                              | Returns                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduled.create`    | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or what that `clientMessageId` was already used for, as `messages.send` says it                                                                                             |
+| `scheduled.list`      | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                                                                                                       |
+| `scheduled.copies`    | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled or cancelled and not forgotten; open like a pending copy                                                                      |
+| `scheduled.cancel`    | `scheduledId`                                                          | What happened: `{ outcome: 'cancelled', first, clientMessageId, copy, replyTo }`, `{ outcome: 'sent', delivery }` (how that send stands now) or, for a failed one, `{ outcome: 'dismissed' }` |
+| `scheduled.cancelled` | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, replyTo, cancelledAt }]`: cancelled ones not forgotten yet. No content                                                                                      |
+| `scheduled.forget`    | `scheduledId`                                                          | `null`. Deletes a cancelled one's copies, when the person discards it                                                                                                                         |
+| `scheduled.sendNow`   | `scheduledId`                                                          | `null`                                                                                                                                                                                        |
 
 Seal it exactly as for `messages.send`. At `sendAt` (within a year: 365 days) it becomes an
 ordinary send in its chat, on its network, with its 24-hour deadline starting then. A person
@@ -868,7 +871,8 @@ ones are shown at once; dismissing some brings the rest into view.
 Cancelling is decided on the server. `scheduled.cancel` answers `cancelled`, or `sent` with the
 send's delivery state when its time or Send now came first; never infer it from the row leaving
 `scheduled.list`. A cancelled one keeps its sealed copy, returned with the answer (and again if
-`cancel` is asked again), and is listed in `scheduled.cancelled` until `scheduled.forget`, which
+`cancel` is asked again, with `first` false: only the call that cancelled it has `first` true,
+so only that one should put its text in a composer), and is listed in `scheduled.cancelled` until `scheduled.forget`, which
 the client calls only when the person discards it. Restoring its text to the composer copies
 it into an ordinary new draft and leaves the row as it is, so it can be restored again; nothing
 is forgotten by itself, except one not discarded within 30 days. Forgotten ones are kept,
