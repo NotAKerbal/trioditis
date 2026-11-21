@@ -14,6 +14,7 @@ import {
   type MenuItemConstructorOptions,
   type WebContents,
 } from 'electron'
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -515,6 +516,22 @@ function openLink(link: string | undefined) {
   }
 }
 
+/**
+ * Whether the system hands trioditis:// links to an app. On Linux, Electron only counts the
+ * package's own `trioditis.desktop`, but an AppImage's desktop integration registers it under a
+ * name of its own (`appimagekit_<id>-trioditis.desktop`), so any handler counts: another copy
+ * of the app passes the link on to this one, which holds the single-instance lock.
+ */
+async function takesLinks(): Promise<boolean> {
+  if (app.isDefaultProtocolClient(PROTOCOL)) return true
+  if (process.platform !== 'linux') return false
+  return new Promise((resolve) =>
+    execFile('xdg-mime', ['query', 'default', `x-scheme-handler/${PROTOCOL}`], { timeout: 5000 }, (error, stdout) =>
+      resolve(!error && /\.desktop\s*$/.test(stdout)),
+    ),
+  )
+}
+
 /** How long a Google Contacts sign-in is waited on before the page is told it timed out. */
 const GOOGLE_WAIT_MS = 10 * 60_000
 
@@ -539,7 +556,7 @@ function answerGoogle(answer: GoogleAnswer) {
 // Google Contacts' sign-in, opened in the system's browser: only Google's page asking to read
 // contacts for this server (googleSignInState), and only from the window the person is using.
 // Answers with the token once Google's answer comes back, or an error.
-ipcMain.handle('desktop:google-sign-in', (event, target: unknown) => {
+ipcMain.handle('desktop:google-sign-in', async (event, target: unknown) => {
   if (!fromServerPage(event) || !serverWindow?.isFocused() || typeof target !== 'string') return { error: 'refused' }
   const origin = serverOrigin!
   const state = googleSignInState(target, origin)
@@ -547,7 +564,7 @@ ipcMain.handle('desktop:google-sign-in', (event, target: unknown) => {
   // Google's answer comes back as a trioditis:// link, which only reaches an app the system
   // has as the scheme's handler: not a development run, or an AppImage run without desktop
   // integration. The page then shows how to import a file instead of waiting on nothing.
-  if (!app.isDefaultProtocolClient(PROTOCOL)) return { error: 'unavailable' }
+  if (!(await takesLinks())) return { error: 'unavailable' }
   // A newer sign-in replaces one still waiting: the person closed that browser tab, say.
   googleWaiting?.finish({ error: 'superseded' })
   return new Promise<{ accessToken?: string; error?: string }>((resolve) => {
