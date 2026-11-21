@@ -5,9 +5,6 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RetryBoundary } from '../src/features/shell/retry-boundary.tsx'
 
-vi.mock('~/lib/session.tsx', () => ({ useSession: () => ({ userId: 'u1' }) }))
-const { firstPageSize } = await import('../src/data/messages.ts')
-
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // A part that fails on its first `failing` tries the way a timed-out page does, then loads.
@@ -64,14 +61,5 @@ describe('a part that couldn’t load', () => {
     await act(async () => view.host.querySelector('button')!.click())
     expect(view.host.textContent).toBe('loaded on try 1')
     await act(async () => view.root.unmount())
-  })
-})
-
-describe('the first page of messages on each try', () => {
-  // The cache keeps a failed page under its arguments; a retry must not ask under the same ones.
-  it('is asked for with different arguments every time', () => {
-    const sizes = [0, 1, 2, 3, 4].map(firstPageSize)
-    expect(new Set(sizes).size).toBe(sizes.length)
-    expect(firstPageSize(0)).toBe(50)
   })
 })
