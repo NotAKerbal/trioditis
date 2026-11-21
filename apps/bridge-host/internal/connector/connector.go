@@ -50,6 +50,9 @@ type Options struct {
 	SendTimeout time.Duration
 	// Signin, if set, runs cookie login steps in the sign-in browser.
 	Signin *signin.Launcher
+	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
+	// before checking them; five seconds if zero.
+	DescribeSettle time.Duration
 }
 
 // Connector implements bridgev2.MatrixConnector.

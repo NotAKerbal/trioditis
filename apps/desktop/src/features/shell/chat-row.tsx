@@ -12,8 +12,8 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { AlarmClock, Archive, ArchiveRestore, Bell, BellOff, Check, Pin } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { networkName, type Chat } from '~/data/chats.ts'
-import { useDraft } from '~/data/drafts.ts'
+import { membersOf, networkName, type Chat } from '~/data/chats.ts'
+import { useFirstDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { ChatAvatar } from '~/features/chat/chat-avatar.tsx'
@@ -45,7 +45,8 @@ export function ChatRow({
   actions: RowActions
 }) {
   const prefs = usePrefs()
-  const draft = useDraft(chat.id).text
+  const members = membersOf(chat)
+  const draft = useFirstDraft(members.map((m) => m.id)).text
   const line = rowPreview({
     previews: prefs.previews,
     draft,
@@ -80,6 +81,12 @@ export function ChatRow({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span className={cn('truncate', unread ? 'font-semibold' : 'font-medium')}>{chat.name}</span>
+            {/* A conversation's other networks; the avatar's badge is the first's. */}
+            {prefs.networkBadges && members.length > 1
+              ? members
+                  .slice(1)
+                  .map((m) => <NetworkBadge key={m.id} network={m.network} label={networkName(m.network)} size={13} />)
+              : null}
             {chat.row.pinned ? <Pin aria-label="Pinned" className="size-3 shrink-0 text-subtle-foreground" /> : null}
             {chat.muted ? <BellOff aria-label="Muted" className="size-3 shrink-0 text-subtle-foreground" /> : null}
             {chat.row.woke ? (
