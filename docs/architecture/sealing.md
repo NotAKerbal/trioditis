@@ -79,6 +79,7 @@ for each:
 | A file                              | `media`    | its `mediaId`                     |
 | A label (name and colour)           | `label`    | its `labelKey`                    |
 | An address book card                | `person`   | its `personKey`                   |
+| An unsent draft, kept in a browser  | `draft`    | its chat's `_id`                  |
 
 ## Recipients
 

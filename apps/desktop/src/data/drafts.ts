@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react'
 
-// Drafts live in memory only, per chat: they're plaintext, so they never touch the disk. They're
-// kept here, not in a chat pane, so a send or schedule that finishes after the person left the
-// chat and came back changes the draft they're looking at, never a copy of it.
+// Drafts live in memory, per chat, and are kept across a reload only sealed to the person's own
+// key (saved-drafts.ts): plaintext never touches the disk. They're kept here, not in a chat
+// pane, so a send or schedule that finishes after the person left the chat and came back
+// changes the draft they're looking at, never a copy of it.
 //
 // Sending and scheduling both take the text out of the draft when they start, so it can't go
 // out twice, and what's typed meanwhile is a new draft of its own. Only if one doesn't go does
@@ -41,6 +42,14 @@ export function hasDrafts() {
   if (inFlight > 0) return true
   for (const draft of store.values()) if (draft.text.trim() || draft.reply) return true
   return false
+}
+
+/** Whether a send or schedule is on its way, its text out of the draft and not yet stored. */
+export const sendsInFlight = () => inFlight > 0
+
+/** Every chat's draft that has something in it. */
+export function allDrafts<Reply>(): [string, Draft<Reply>][] {
+  return ([...store] as [string, Draft<Reply>][]).filter(([, d]) => d.text.trim() || d.reply)
 }
 
 export function getDraft<Reply>(chatId: string): Draft<Reply> {
@@ -84,10 +93,12 @@ export function appendToDraft<Reply>(chatId: string, text: string, reply: Reply 
   return !!now.text.trim()
 }
 
-function subscribe(listener: () => void) {
+/** Calls `listener` after every change to any draft. */
+export function subscribeDrafts(listener: () => void) {
   listeners.add(listener)
   return () => listeners.delete(listener)
 }
+const subscribe = subscribeDrafts
 
 /** A chat's draft, kept up to date with every change, from wherever it came. */
 export function useDraft<Reply>(chatId: string): Draft<Reply> {

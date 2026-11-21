@@ -247,8 +247,10 @@ adding a passkey all require. On Windows the system asks, so they work. Sign-in,
 Settings → Keys and devices say so; use the password or recovery key in the app, or the
 passkey in a browser.
 
-Unsent drafts live only in the page's memory, so reloading, closing the window or changing
-servers with one open asks first.
+Unsent drafts are kept across a reload in the browser's storage, each sealed to the person's
+own key (kind `draft`; apps/desktop/src/data/saved-drafts.ts), so nothing readable is stored.
+Reloading, closing the window or changing servers asks first only while a send is on its way,
+or if the browser refused to save a draft.
 
 ### Starting over
 
