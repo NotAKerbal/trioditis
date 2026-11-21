@@ -18,7 +18,15 @@ import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { dotBitmap } from './badge.ts'
-import { invitationFrom, linkArgument, PROTOCOL, type Invitation } from './links.ts'
+import {
+  googleAnswerFrom,
+  googleSignInState,
+  invitationFrom,
+  linkArgument,
+  PROTOCOL,
+  type GoogleAnswer,
+  type Invitation,
+} from './links.ts'
 import {
   isExternalAllowed,
   normalizeServer,
@@ -493,12 +501,62 @@ async function openInvitation(link: Invitation) {
   if (error) showConnect(error)
 }
 
-/** A link from the system: an invitation is opened, anything else just shows the app. */
+/**
+ * A link from the system: an invitation is opened, Google's answer goes to the page waiting on
+ * it, and anything else just shows the app.
+ */
 function openLink(link: string | undefined) {
   const invitation = link ? invitationFrom(link) : null
+  const google = link && !invitation ? googleAnswerFrom(link) : null
   if (invitation) void openInvitation(invitation)
-  else if (started) reveal(serverWindow ?? connectWindow)
+  else {
+    if (google) answerGoogle(google)
+    if (started) reveal(serverWindow ?? connectWindow)
+  }
 }
+
+/** How long a Google Contacts sign-in is waited on before the page is told it timed out. */
+const GOOGLE_WAIT_MS = 10 * 60_000
+
+/**
+ * The Google Contacts sign-in the server's page is waiting on, one at a time: it happens in the
+ * system's browser, which hands Google's answer back as a `trioditis://` link (links.ts).
+ */
+let googleWaiting: {
+  state: string
+  origin: string
+  finish: (answer: { accessToken?: string; error?: string }) => void
+} | null = null
+
+/** Gives Google's answer to the page that asked for it: the same server, with the same state. */
+function answerGoogle(answer: GoogleAnswer) {
+  const waiting = googleWaiting
+  if (!waiting || waiting.state !== answer.state || waiting.origin !== answer.origin || serverOrigin !== answer.origin)
+    return
+  waiting.finish(answer.accessToken ? { accessToken: answer.accessToken } : { error: answer.error ?? 'failed' })
+}
+
+// Google Contacts' sign-in, opened in the system's browser: only Google's page asking to read
+// contacts for this server (googleSignInState), and only from the window the person is using.
+// Answers with the token once Google's answer comes back, or an error.
+ipcMain.handle('desktop:google-sign-in', (event, target: unknown) => {
+  if (!fromServerPage(event) || !serverWindow?.isFocused() || typeof target !== 'string') return { error: 'refused' }
+  const origin = serverOrigin!
+  const state = googleSignInState(target, origin)
+  if (!state) return { error: 'refused' }
+  // A newer sign-in replaces one still waiting: the person closed that browser tab, say.
+  googleWaiting?.finish({ error: 'superseded' })
+  return new Promise<{ accessToken?: string; error?: string }>((resolve) => {
+    const finish = (answer: { accessToken?: string; error?: string }) => {
+      clearTimeout(timer)
+      if (googleWaiting?.state === state) googleWaiting = null
+      resolve(answer)
+    }
+    const timer = setTimeout(() => finish({ error: 'timeout' }), GOOGLE_WAIT_MS)
+    googleWaiting = { state, origin, finish }
+    void shell.openExternal(target)
+  })
+})
 
 ipcMain.on('connect:cancel', (event) => {
   if (!fromConnectPage(event) || !serverWindow || committing) return

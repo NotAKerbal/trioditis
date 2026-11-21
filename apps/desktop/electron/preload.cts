@@ -21,5 +21,10 @@ if (window.location.protocol === 'file:') {
       if (navigator.userActivation.isActive) ipcRenderer.send('desktop:change-server')
     },
     platform: process.platform,
+    // Google Contacts' sign-in, in the system's browser; also only straight after a click.
+    googleSignIn: (url: string): Promise<{ accessToken?: string; error?: string }> =>
+      navigator.userActivation.isActive
+        ? ipcRenderer.invoke('desktop:google-sign-in', url)
+        : Promise.resolve({ error: 'refused' }),
   })
 }

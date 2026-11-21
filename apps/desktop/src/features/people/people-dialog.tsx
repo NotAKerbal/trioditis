@@ -19,7 +19,7 @@ import {
 } from '@trioditis/core'
 import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
-import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@trioditis/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@trioditis/ui/dropdown-menu'
 import { Input, InputGroup } from '@trioditis/ui/input'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
@@ -28,6 +28,7 @@ import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import {
   ArrowLeft,
+  Contact,
   Download,
   Link2,
   MessageSquare,
@@ -64,6 +65,9 @@ import {
 import { fromHandleField, toHandleField, type HandleField } from '~/features/people/handles.ts'
 import { emptyReport, importSummary, partlyImported } from '~/features/people/import-report.ts'
 import { usePage } from '~/features/people/paging.ts'
+import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId } from '~/data/google-contacts.ts'
+import { canSignInToGoogle, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
+import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
 import { Group, Loading } from '~/features/settings/layout.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
@@ -132,6 +136,8 @@ function People({
   const syncContacts = useSyncContacts()
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [googleGuide, setGoogleGuide] = useState(false)
+  const googleClientId = useGoogleClientId()
   const fileRef = useRef<HTMLInputElement>(null)
 
   const sorted = useMemo(
@@ -183,14 +189,22 @@ function People({
     return asked
   }
 
-  async function importFile(file: File) {
+  /**
+   * Saves cards read from a file or from Google. Everything the import has to change to save a
+   * card is counted, and said at the end. `read` gives the cards, and how many photos it
+   * already couldn't read.
+   */
+  async function importCards(
+    read: () => Promise<{ cards: PersonPlaintext[]; unreadablePhotos?: number }>,
+    empty: string,
+  ) {
     setBusy(true)
-    const failure = 'That file couldn’t be imported.'
+    const failure = 'Those contacts couldn’t be imported.'
     try {
-      const cards = parseContactsFile(await file.text())
-      if (!cards.length) return toast('No contacts were found in that file.')
-      // Everything the import has to change to save a card is counted, and said at the end.
+      const { cards, unreadablePhotos = 0 } = await read()
+      if (!cards.length) return toast(empty)
       const report = emptyReport()
+      report.unreadablePhotos = unreadablePhotos
       const ready: PersonPlaintext[] = []
       for (const card of cards) {
         if (card.photo) {
@@ -221,10 +235,34 @@ function People({
       if (sessionChanged(err)) window.location.reload()
       else if (err instanceof PartlySaved)
         toast(partlyImported(err.written, err.total, errorMessage(err.reason, failure)))
+      else if (err instanceof GoogleRefused) toast(err.message)
       else toast(err instanceof TooLarge ? `${err.message} Nothing was imported.` : errorMessage(err, failure))
     } finally {
       setBusy(false)
     }
+  }
+
+  const importFile = (file: File) =>
+    importCards(async () => ({ cards: parseContactsFile(await file.text()) }), 'No contacts were found in that file.')
+
+  /**
+   * Reads the person's contacts straight from Google, where an admin has set it up; otherwise
+   * says how to export them to a file. Signing in starts here, in the click, so the browser
+   * lets its window open.
+   */
+  function importGoogle() {
+    if (!googleClientId || !canSignInToGoogle()) return setGoogleGuide(true)
+    signInToGoogle(googleClientId).then(
+      (token) =>
+        void importCards(async () => {
+          const cards = await readGoogleContacts(token)
+          return { cards, unreadablePhotos: await fetchGooglePhotos(cards) }
+        }, 'There are no contacts in that Google account.'),
+      (err: unknown) => {
+        const problem = googleSignInProblem(err)
+        if (problem) toast(problem)
+      },
+    )
   }
 
   async function remove(person: StoredPerson) {
@@ -281,6 +319,9 @@ function People({
               <DropdownMenuItem onSelect={() => fileRef.current?.click()}>
                 <Upload /> Import contacts…
               </DropdownMenuItem>
+              <DropdownMenuItem disabled={googleClientId === undefined} onSelect={importGoogle}>
+                <Contact /> Import from Google…
+              </DropdownMenuItem>
               {syncContacts.available ? (
                 <DropdownMenuItem onSelect={() => void sync()}>
                   <RefreshCw /> Sync phone numbers
@@ -303,6 +344,14 @@ function People({
               const file = e.target.files?.[0]
               e.target.value = ''
               if (file) void importFile(file)
+            }}
+          />
+          <GoogleGuide
+            open={googleGuide}
+            onOpenChange={setGoogleGuide}
+            onChooseFile={() => {
+              setGoogleGuide(false)
+              fileRef.current?.click()
             }}
           />
         </div>
@@ -466,13 +515,6 @@ function ContactLine({ contact, children }: { contact: NetworkContact; children?
 }
 
 /** An identifier as people write it: a number or address without its scheme, a username with @. */
-function shownIdentifier(raw: string) {
-  const id = parseIdentifier(raw)
-  if (!id) return raw
-  if (id.kind !== 'username') return id.value
-  return id.service.endsWith('-internal') ? '' : `@${id.value}`
-}
-
 function PersonDetail({
   person,
   byContact,
@@ -851,6 +893,42 @@ function Suggestions({
   )
 }
 
+/**
+ * How to bring Google Contacts in without a live connection: export them from Google as a
+ * vCard file, then import that. Shown where no admin has set up Google sign-in.
+ */
+function GoogleGuide({
+  open,
+  onOpenChange,
+  onChooseFile,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onChooseFile: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[min(440px,calc(100vw-32px))] p-6">
+        <DialogTitle className="text-md">Import from Google</DialogTitle>
+        <DialogDescription className="mt-2 text-sm text-muted-foreground">
+          In Google Contacts, choose Export, then vCard, and import the file it saves.
+        </DialogDescription>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => window.open('https://contacts.google.com/', '_blank', 'noopener,noreferrer')}
+          >
+            Open Google Contacts
+          </Button>
+          <Button variant="primary" onClick={onChooseFile}>
+            Choose file…
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Says how many more a long list has, and shows them when asked. */
 function ShowMore({ more, onClick, className }: { more: number; onClick: () => void; className?: string }) {
   if (!more) return null
@@ -874,55 +952,62 @@ function Unsorted({
 }) {
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState<NetworkContact[] | null>(null)
-  const page = usePage(groups)
+  const [query, setQuery] = useState('')
+  const rows = useMemo(() => groups.map(unsortedRow), [groups])
+  const found = useMemo(() => rows.filter((r) => rowMatches(r, query)), [rows, query])
+  const page = usePage(found, query)
   if (!groups.length) return <p className="text-sm text-muted-foreground">Every contact is in People.</p>
   return (
     <>
+      <InputGroup className="mb-5" icon={<Search className="size-4 shrink-0" />}>
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search"
+          aria-label="Search contacts not in People"
+        />
+      </InputGroup>
       <Group
         title="Not in People"
         action={
-          <Button
-            size="sm"
-            loading={busy}
-            onClick={async () => {
-              setBusy(true)
-              await onCreate(groups)
-              setBusy(false)
-            }}
-          >
-            Add all
-          </Button>
+          found.length ? (
+            <Button
+              size="sm"
+              loading={busy}
+              onClick={async () => {
+                setBusy(true)
+                await onCreate(found.map((r) => r.contacts))
+                setBusy(false)
+              }}
+            >
+              {/* A search narrows what's added to the contacts it found. */}
+              {query.trim() ? `Add ${found.length.toLocaleString()}` : 'Add all'}
+            </Button>
+          ) : undefined
         }
       >
-        {page.shown.map((group) => (
-          <div key={group.map(contactKey).join(' ')} className="flex min-h-[52px] items-center gap-3 px-4 py-2">
+        {page.shown.map((row) => (
+          <div key={row.contacts.map(contactKey).join(' ')} className="flex min-h-[52px] items-center gap-3 px-4 py-2">
             <span className="flex gap-1">
-              {group.map((c) => (
+              {row.contacts.map((c) => (
                 <NetworkBadge key={contactKey(c)} network={c.network} label={networkName(c.network)} size={18} />
               ))}
             </span>
             <div className="min-w-0 flex-1">
-              <div className="truncate font-medium">{cardFromContacts(group).name || 'Unknown'}</div>
-              <div className="truncate text-sm text-muted-foreground">
-                {[
-                  ...new Set(
-                    group.flatMap((c) => [...(c.identifiers ?? []), c.profile.handle ?? ''].map(shownIdentifier)),
-                  ),
-                ]
-                  .filter(Boolean)
-                  .join(', ')}
-              </div>
+              <div className="truncate font-medium">{row.name || 'Unknown'}</div>
+              <div className="truncate text-sm text-muted-foreground">{row.details.join(', ')}</div>
             </div>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setAdding(group)}>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setAdding(row.contacts)}>
               Add to…
             </Button>
-            <Button size="sm" disabled={busy} onClick={() => void onCreate([group])}>
+            <Button size="sm" disabled={busy} onClick={() => void onCreate([row.contacts])}>
               Add
             </Button>
           </div>
         ))}
         <ShowMore more={page.more} onClick={page.showMore} className="mx-4 mb-2" />
       </Group>
+      {found.length ? null : <p className="px-1 text-sm text-muted-foreground">No one matches.</p>}
       <ChoosePerson
         open={!!adding}
         onOpenChange={(open) => !open && setAdding(null)}

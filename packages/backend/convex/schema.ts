@@ -131,6 +131,18 @@ export default defineSchema({
   }).index('by_network', ['network']),
 
   /**
+   * Google Contacts (google.ts), in one row (`key: 'contacts'`): the OAuth client ID an admin
+   * set up in Google Cloud, which people's apps sign in to Google with to read their contacts
+   * themselves. A client ID isn't a secret: Google shows it on every sign-in page.
+   */
+  serverGoogle: defineTable({
+    key: v.literal('contacts'),
+    clientId: v.string(),
+    updatedAt: v.number(),
+    updatedBy: v.string(),
+  }).index('by_key', ['key']),
+
+  /**
    * Better Auth's rate limits, one token bucket per key (see rateLimits.ts). `key` is a
    * SHA-256, never the client address or email it was made from. A row whose bucket has
    * refilled (`fullAt` passed) means the same as no row, and is pruned.
