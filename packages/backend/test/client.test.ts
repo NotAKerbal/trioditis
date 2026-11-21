@@ -733,9 +733,16 @@ describe('scheduled sends', () => {
       sendAt: Date.now() + 60_000,
     })) as Id<'scheduledSends'>
     const cancelled = await a.mutation(api.scheduled.cancel, { scheduledId })
-    expect(cancelled).toEqual({ outcome: 'cancelled', clientMessageId: id(5), copy: sealed('c5'), replyTo: null })
-    // Asked again (an answer lost on the way): the same, copy included.
-    expect(await a.mutation(api.scheduled.cancel, { scheduledId })).toEqual(cancelled)
+    expect(cancelled).toEqual({
+      outcome: 'cancelled',
+      first: true,
+      clientMessageId: id(5),
+      copy: sealed('c5'),
+      replyTo: null,
+    })
+    // Asked again (an answer lost on the way, or another tab): the same copy, but not first, so
+    // only the call that cancelled it puts its text in a composer.
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId })).toEqual({ ...cancelled, first: false })
     expect(await a.query(api.scheduled.cancelled, { chatId })).toMatchObject([{ _id: scheduledId, replyTo: null }])
     expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([
       { _id: scheduledId, copy: sealed('c5') },
@@ -803,6 +810,30 @@ describe('scheduled sends', () => {
     await t.mutation(internal.scheduled.forgetOldCancelled, {})
     expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
     expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+  })
+
+  it('says how each of some client message IDs stands, the copy gone or not, leaving out unused ones', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await a.mutation(api.messages.send, { chatId, clientMessageId: id(11), forBridge: sealed('b'), copy: sealed('c') })
+    await t.run(async (ctx) => {
+      for (const table of ['messages', 'outbox'] as const) {
+        const row = await ctx.db
+          .query(table)
+          .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(11)))
+          .first()
+        await ctx.db.patch(row!._id, { delivery: 'failed' })
+      }
+    })
+    // Its copy deleted from the chat: the outbox still says it failed.
+    await a.mutation(api.messages.discardSend, { clientMessageId: id(11) })
+    expect(await a.query(api.messages.sendStates, { clientMessageIds: [id(11), id(12)] })).toEqual([
+      { clientMessageId: id(11), used: { already: 'send', delivery: 'failed' } },
+    ])
+    // Another person's IDs are theirs alone.
+    const b = await signIn(t, 'user_b')
+    expect(await b.query(api.messages.sendStates, { clientMessageIds: [id(11)] })).toEqual([])
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {

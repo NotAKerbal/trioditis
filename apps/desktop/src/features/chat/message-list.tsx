@@ -18,7 +18,7 @@ import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
-import { againState, useSendAgainStates, type SendAgainState } from './send-again.ts'
+import type { SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
@@ -63,6 +63,8 @@ interface MessageListProps {
   onReact: (m: Message, key: string) => void
   /** Makes the next attempt to send it again (send-again.ts). */
   onSendAgain: (m: Message) => void
+  /** Where sending it again stands for this row's chain, and whether another attempt may be made. */
+  againOf: (m: Message) => { state: SendAgainState | undefined; canTry: boolean }
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
   /** Cancels it, putting its text (when here) and reply back in the composer. */
@@ -174,9 +176,7 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
-  const sentAgain = useSendAgainStates()
   // Each of the person's sends in the list, by client message ID: how sending again stands.
-  const listed = new Map(messages.flatMap((m) => (m.clientMessageId ? [[m.clientMessageId, m.delivery] as const] : [])))
   let lastDay = ''
 
   return (
@@ -370,7 +370,7 @@ export function MessageList(props: MessageListProps) {
                   {m.self ? (
                     <DeliveryProblem
                       m={m}
-                      again={againState(m.clientMessageId, sentAgain, listed)}
+                      again={props.againOf(m)}
                       onSendAgain={props.onSendAgain}
                       onDiscard={props.onDiscard}
                     />
@@ -621,6 +621,13 @@ function DeliveryIcon({ delivery }: { delivery: Message['delivery'] }) {
   }
 }
 
+const AGAIN_SAYS: Record<Exclude<SendAgainState, 'sending'>, string> = {
+  going: 'Being sent again',
+  sent: 'Sent again',
+  maybe: 'May have been sent again',
+  failed: 'Sending again failed',
+}
+
 /** A send that failed or may not have gone, with what the person can do about it. */
 function DeliveryProblem({
   m,
@@ -629,35 +636,31 @@ function DeliveryProblem({
   onDiscard,
 }: {
   m: Message
-  /** Its one replacement: on its way, or gone. Either way it isn't offered again. */
-  again: SendAgainState | undefined
+  /** Where sending it again stands, the same on every row of its chain. */
+  again: { state: SendAgainState | undefined; canTry: boolean }
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
 }) {
-  const sendAgain = (label: string) =>
-    again === 'sent' || again === 'going' || again === 'maybe' ? (
-      <span className="font-medium text-muted-foreground" role={again === 'maybe' ? 'alert' : undefined}>
-        {again === 'sent' ? 'Sent again' : again === 'going' ? 'Being sent again' : 'May have been sent again'}
-      </span>
-    ) : again === 'failed' ? (
-      <>
-        <span className="font-medium">Sending again failed</span>
+  const { state, canTry } = again
+  const sendAgain = (label: string) => (
+    <>
+      {state === 'sending' ? (
+        <span className="font-medium text-muted-foreground" aria-busy>
+          Sending…
+        </span>
+      ) : state ? (
+        <span className="font-medium text-muted-foreground" role={state === 'maybe' ? 'alert' : undefined}>
+          {AGAIN_SAYS[state]}
+        </span>
+      ) : null}
+      {/* Another attempt only when none was made or the latest failed: from any row of the chain. */}
+      {canTry ? (
         <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
           {label}
         </Button>
-      </>
-    ) : (
-      <Button
-        variant="link"
-        size="sm"
-        className="h-auto text-xs"
-        disabled={again === 'sending'}
-        aria-busy={again === 'sending'}
-        onClick={() => onSendAgain(m)}
-      >
-        {again === 'sending' ? 'Sending…' : label}
-      </Button>
-    )
+      ) : null}
+    </>
+  )
   if (m.delivery === 'failed')
     return (
       <span className="mx-2.5 mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-danger">

@@ -140,6 +140,29 @@ export const send = mutation({
   },
 })
 
+const MAX_SEND_STATES = 100
+
+/**
+ * What some of the person's client message IDs were used for and where each stands, as
+ * `messages.send` would answer for them: the ones not used yet are left out. For sending a
+ * message again, whose attempts' copies may be gone from the chat (discarded) while their
+ * outbox rows, and so their states, are kept.
+ */
+export const sendStates = query({
+  args: { clientMessageIds: v.array(v.string()) },
+  returns: v.array(v.object({ clientMessageId: v.string(), used: alreadyUsed })),
+  handler: async (ctx, { clientMessageIds }) => {
+    const member = await requireMember(ctx)
+    if (clientMessageIds.length > MAX_SEND_STATES) throw new ConvexError(`Ask for at most ${MAX_SEND_STATES} at once.`)
+    const out = []
+    for (const clientMessageId of new Set(clientMessageIds)) {
+      const used = await clientMessageIdUsed(ctx, member.userId, clientMessageId)
+      if (used) out.push({ clientMessageId, used })
+    }
+    return out
+  },
+})
+
 /**
  * Discards a send whose outcome is unknown or that failed: the person decided not to risk a
  * duplicate. Its pending copy is removed; the outbox row stays for the record.
