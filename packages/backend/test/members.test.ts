@@ -3,6 +3,8 @@ import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
 import { SETUP_TOKEN, sealed, setup, signIn, installNetworks } from './setup'
 
+const firstPage = { numItems: 50, cursor: null }
+
 describe('accounts', () => {
   const reserve = (t: ReturnType<typeof setup>, email: string, tokenHash?: string) =>
     t.mutation(internal.members.reserveAdmission, { email, ...(tokenHash ? { tokenHash } : {}) })
@@ -39,7 +41,7 @@ describe('accounts', () => {
     expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
     await expect(
       admin.mutation(api.members.revokeInvitation, {
-        invitationId: (await admin.query(api.members.invitations, {}))[0]!._id,
+        invitationId: (await admin.query(api.members.invitations, { paginationOpts: firstPage })).page[0]!._id,
       }),
     ).rejects.toThrow(/right now/)
     expect(
@@ -47,9 +49,10 @@ describe('accounts', () => {
     ).toEqual({ admitted: true })
     expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
 
-    const invitations = await admin.query(api.members.invitations, {})
-    expect(invitations[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
-    expect(invitations[0]).not.toHaveProperty('tokenHash')
+    // Joined, the invitation leaves the list: the person is a member now.
+    expect((await admin.query(api.members.invitations, { paginationOpts: firstPage })).page).toEqual([])
+    const accepted = await t.run(async (ctx) => await ctx.db.query('invitations').collect())
+    expect(accepted[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
     expect(await t.query(internal.members.isMember, { userId: 'sam' })).toBe(true)
   })
 
