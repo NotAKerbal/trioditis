@@ -40,20 +40,58 @@ export function retryDelay(attempt: number): number {
 
 /** Better Auth's session store, the one `authClient.useSession()` and the Convex provider read. */
 export interface SessionStore {
-  get(): { data: unknown; error: unknown; refetch: () => Promise<void> }
+  get(): {
+    data: unknown
+    error: unknown
+    isPending?: boolean
+    isRefetching?: boolean
+    refetch: () => Promise<void>
+  }
 }
+
+/** Not an answer: the store's fetch was cut short (another took its place) and is still under way. */
+const STILL_ASKING = { status: 'pending' }
 
 /**
  * Asks for the session through the provider's own store (`authClient.$store.atoms.session`), not a
  * side request: so an answer that comes after failures reaches the Convex provider too, which then
- * fetches its token and signs the page in without a reload.
+ * fetches its token and signs the page in without a reload. A store still fetching (its `data` is
+ * null meanwhile) or holding an error is no answer.
  */
 export function askThrough(store: SessionStore) {
   return async () => {
     await store.get().refetch()
-    const { data, error } = store.get()
-    return { data, error }
+    const { data, error, isPending, isRefetching } = store.get()
+    return { data, error: error ?? (isPending || isRefetching ? STILL_ASKING : null) }
   }
+}
+
+/**
+ * A wait that ends early when `subscribe`'s wake fires (the browser coming online, Convex's
+ * connection coming back), so the session is asked about as soon as the server can answer, not
+ * up to 30s later.
+ */
+export function wakeableSleep(subscribe: (wake: () => void) => () => void) {
+  return (ms: number) =>
+    new Promise<void>((resolve) => {
+      let unsubscribe = () => {}
+      const done = () => {
+        clearTimeout(timer)
+        unsubscribe()
+        resolve()
+      }
+      const timer = setTimeout(done, ms)
+      unsubscribe = subscribe(done)
+    })
+}
+
+/**
+ * How long to wait, once Better Auth says the browser is signed in but Convex still isn't, before
+ * starting the provider afresh (`attempt` times so far): its token was asked for while the server
+ * was away and came back empty, and it won't ask again for the same session. Longer each time.
+ */
+export function reauthDelay(attempt: number): number {
+  return 3_000 + retryDelay(attempt)
 }
 
 /**
