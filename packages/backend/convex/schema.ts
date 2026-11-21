@@ -367,7 +367,9 @@ export default defineSchema({
 
   /**
    * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
-   * then the bridge-readable copy waits here, and is deleted when it goes out or is cancelled.
+   * then the sealed copies wait in `scheduledPayloads`, deleted when it goes out. A cancelled
+   * one keeps them, so its text can go back to the person's composer, until they're done with
+   * it (`scheduled.forget`, `forgottenAt` set) or 30 days pass.
    */
   scheduledSends: defineTable({
     userId: v.string(),
@@ -378,14 +380,19 @@ export default defineSchema({
     state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled'), v.literal('failed')),
     replyTo: v.optional(v.string()),
     createdAt: v.number(),
+    cancelledAt: v.optional(v.number()),
+    /** A cancelled one whose copies are gone: restored to the composer, discarded, or expired. */
+    forgottenAt: v.optional(v.number()),
   })
     .index('by_user', ['userId', 'state', 'sendAt'])
     .index('by_chat', ['chatId', 'state'])
-    .index('by_clientMessageId', ['userId', 'clientMessageId']),
+    .index('by_clientMessageId', ['userId', 'clientMessageId'])
+    .index('by_cancelled', ['state', 'cancelledAt']),
 
   /**
    * A scheduled message's sealed copies, kept apart so listing and counting scheduled
-   * messages never reads them. Deleted when the message goes out or is cancelled.
+   * messages never reads them. Deleted when the message goes out, or when a cancelled one is
+   * forgotten.
    */
   scheduledPayloads: defineTable({
     scheduledId: v.id('scheduledSends'),

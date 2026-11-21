@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, components } from '../convex/_generated/api'
+import { api, components, internal } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { chatViewOf } from '../convex/lib/chatView'
 import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T, installNetworks } from './setup'
@@ -702,17 +702,76 @@ describe('scheduled sends', () => {
     expect(typeof (await scheduleOne(a, chatId, 4, 60_000))).toBe('string')
     expect(await scheduleOne(a, chatId, 4, 60_000)).toEqual({ already: 'scheduled', state: 'scheduled' })
     expect(await send(4)).toEqual({ already: 'scheduled', state: 'scheduled' })
-    // A send whose copy was discarded: used, with no copy to say how it went.
+    // It failed, and its copy was then discarded: the outbox still says how it went.
     await t.run(async (ctx) => {
       const copy = await ctx.db
         .query('messages')
         .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(3)))
         .first()
       await ctx.db.patch(copy!._id, { delivery: 'failed' })
+      const command = await ctx.db
+        .query('outbox')
+        .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(3)))
+        .first()
+      await ctx.db.patch(command!._id, { delivery: 'failed' })
     })
     expect(await send(3)).toEqual({ already: 'send', delivery: 'failed' })
     await a.mutation(api.messages.discardSend, { clientMessageId: id(3) })
-    expect(await send(3)).toEqual({ already: 'send', delivery: null })
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'failed' })
+  })
+
+  it('keeps a cancelled message’s copy until it’s forgotten, and says when Send now won', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await a.mutation(api.scheduled.create, {
+      chatId,
+      clientMessageId: id(5),
+      forBridge: sealed('b5'),
+      copy: sealed('c5'),
+      sendAt: Date.now() + 60_000,
+    })) as Id<'scheduledSends'>
+    const cancelled = await a.mutation(api.scheduled.cancel, { scheduledId })
+    expect(cancelled).toEqual({ outcome: 'cancelled', clientMessageId: id(5), copy: sealed('c5'), replyTo: null })
+    // Asked again (an answer lost on the way): the same, copy included.
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId })).toEqual(cancelled)
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toMatchObject([{ _id: scheduledId, replyTo: null }])
+    expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([
+      { _id: scheduledId, copy: sealed('c5') },
+    ])
+    // Its time comes: a cancelled one isn't sent.
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toEqual([])
+    // Forgotten once its text is saved in the composer: listed no more, its copy gone.
+    await a.mutation(api.scheduled.forget, { scheduledId })
+    await a.mutation(api.scheduled.forget, { scheduledId })
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+    // Send now came first: the cancel says so, and changes nothing.
+    const other = (await scheduleOne(a, chatId, 6, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.sendNow, { scheduledId: other })
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId: other })).toEqual({ outcome: 'sent' })
+  })
+
+  it('forgets a cancelled message nobody restored after 30 days', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await scheduleOne(a, chatId, 7, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.cancel, { scheduledId })
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toHaveLength(1)
+    // Cancelled 30 days ago and a moment.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(scheduledId, { cancelledAt: Date.now() - 30 * 24 * 60 * 60 * 1000 - 1 })
+    })
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {

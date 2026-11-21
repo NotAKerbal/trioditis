@@ -25,8 +25,9 @@ export interface SendInput {
 
 /**
  * What a `clientMessageId` was already used for, as `messages.send` and `scheduled.create`
- * return it when it was: a send, with its copy's delivery state (null once that copy was
- * discarded), or a scheduled send that hasn't gone out, with where it stands.
+ * return it when it was: a send, with its delivery state (the copy's, or the outbox's once
+ * that copy was discarded; null only for a send from before the outbox kept it), or a
+ * scheduled send that hasn't gone out, with where it stands.
  */
 export const alreadyUsed = v.union(
   v.object({ already: v.literal('send'), delivery: v.union(v.null(), deliveryState) }),
@@ -55,7 +56,8 @@ export async function clientMessageIdUsed(
       .query('messages')
       .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
       .first()
-    return { already: 'send', delivery: copy ? (copy.delivery ?? null) : null }
+    // A discarded copy's state is still the outbox's: it's kept in step with the copy.
+    return { already: 'send', delivery: copy?.delivery ?? sent.delivery ?? null }
   }
   const scheduled = await ctx.db
     .query('scheduledSends')

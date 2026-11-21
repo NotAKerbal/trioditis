@@ -9,11 +9,20 @@ import { envelope } from './validators'
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
 // the time comes it becomes an ordinary send, and its 24-hour deadline starts then. Until then
 // the sealed copies wait in `scheduledPayloads`, apart from the metadata so listing never reads
-// them, and are deleted once the message goes out, is cancelled, or fails because its chat is
-// gone. A failed one stays listed, so the person sees it didn't go, until they dismiss it.
+// them, and are deleted once the message goes out. A failed one stays listed, so the person
+// sees it didn't go, until they dismiss it.
+//
+// Cancelling is the server's to decide: `cancel` says whether it was cancelled or had gone
+// already, and a cancelled one keeps its sealed copy, listed in `cancelled`, until the client
+// has put its text back in the composer, saved, or the person discards it (`forget`). So a
+// crash or reload in between loses nothing, and nothing has to be kept on the device. Cancelled
+// ones not forgotten are forgotten after CANCELLED_KEEP_MS.
 
 const MAX_AHEAD_MS = 365 * 24 * 60 * 60 * 1000
 const MAX_SCHEDULED = 500
+/** How long a cancelled message's copy waits to be restored or discarded. */
+export const CANCELLED_KEEP_MS = 30 * 24 * 60 * 60 * 1000
+const FORGET_BATCH = 200
 
 const scheduledRow = v.object({
   _id: v.id('scheduledSends'),
@@ -93,7 +102,8 @@ export const copies = query({
     const out = []
     for (const scheduledId of scheduledIds) {
       const row = await ctx.db.get(scheduledId)
-      if (!row || row.userId !== member.userId || row.state !== 'scheduled') continue
+      if (!row || row.userId !== member.userId) continue
+      if (row.state !== 'scheduled' && !(row.state === 'cancelled' && !row.forgottenAt)) continue
       const payload = await payloadOf(ctx, scheduledId)
       if (payload) out.push({ _id: scheduledId, copy: payload.copy })
     }
@@ -173,15 +183,119 @@ export async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>
   })
 }
 
-/** Cancels a scheduled message, or dismisses one that failed. */
+/**
+ * A cancelled message the person hasn't restored or discarded yet, in one chat or all: its
+ * text is in `copies`. No content.
+ */
+export const cancelled = query({
+  args: { chatId: v.optional(v.id('chats')) },
+  returns: v.array(
+    v.object({
+      _id: v.id('scheduledSends'),
+      chatId: v.id('chats'),
+      clientMessageId: v.string(),
+      replyTo: v.union(v.null(), v.string()),
+      cancelledAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, { chatId }) => {
+    const member = await requireMember(ctx)
+    if (chatId) await ownChat(ctx, member.userId, chatId)
+    const rows = chatId
+      ? await ctx.db
+          .query('scheduledSends')
+          .withIndex('by_chat', (q) => q.eq('chatId', chatId).eq('state', 'cancelled'))
+          .take(MAX_SCHEDULED)
+      : await ctx.db
+          .query('scheduledSends')
+          .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('state', 'cancelled'))
+          .take(MAX_SCHEDULED)
+    return rows
+      .filter((row) => !row.forgottenAt)
+      .map((row) => ({
+        _id: row._id,
+        chatId: row.chatId,
+        clientMessageId: row.clientMessageId,
+        replyTo: row.replyTo ?? null,
+        cancelledAt: row.cancelledAt ?? row.createdAt,
+      }))
+  },
+})
+
+/**
+ * Cancels a scheduled message, or dismisses one that failed. The answer is what happened:
+ * `cancelled`, with its sealed copy (kind `message`, object ID `clientMessageId`) and the
+ * message it replies to, kept until `forget`; or `sent` if its time, or Send now, came first.
+ * Cancelling one already cancelled answers the same again, so a retry after a lost answer still
+ * gets its text. A failed one is dismissed: its copies go at once, and the answer is `dismissed`.
+ */
 export const cancel = mutation({
+  args: { scheduledId: v.id('scheduledSends') },
+  returns: v.union(
+    v.object({
+      outcome: v.literal('cancelled'),
+      clientMessageId: v.string(),
+      copy: v.union(v.null(), envelope),
+      replyTo: v.union(v.null(), v.string()),
+    }),
+    v.object({ outcome: v.literal('sent') }),
+    v.object({ outcome: v.literal('dismissed') }),
+  ),
+  handler: async (ctx, { scheduledId }) => {
+    const row = await ownScheduled(ctx, scheduledId)
+    if (row.state === 'sent') return { outcome: 'sent' as const }
+    if (row.state === 'failed') {
+      await ctx.db.patch(row._id, { state: 'cancelled', cancelledAt: Date.now(), forgottenAt: Date.now() })
+      await deletePayload(ctx, row._id)
+      return { outcome: 'dismissed' as const }
+    }
+    if (row.state === 'scheduled') await ctx.db.patch(row._id, { state: 'cancelled', cancelledAt: Date.now() })
+    const payload = row.forgottenAt ? null : await payloadOf(ctx, row._id)
+    return {
+      outcome: 'cancelled' as const,
+      clientMessageId: row.clientMessageId,
+      copy: payload?.copy ?? null,
+      replyTo: row.replyTo ?? null,
+    }
+  },
+})
+
+/**
+ * Lets a cancelled message's copies go: once its text is saved in the composer, or the person
+ * discards it. Forgetting one already forgotten does nothing.
+ */
+export const forget = mutation({
   args: { scheduledId: v.id('scheduledSends') },
   returns: v.null(),
   handler: async (ctx, { scheduledId }) => {
     const row = await ownScheduled(ctx, scheduledId)
-    if (row.state !== 'scheduled' && row.state !== 'failed') throw new ConvexError('That message has already gone out.')
-    await ctx.db.patch(row._id, { state: 'cancelled' })
+    if (row.state !== 'cancelled') throw new ConvexError('Only a cancelled message can be discarded.')
+    if (row.forgottenAt) return null
+    await ctx.db.patch(row._id, { forgottenAt: Date.now() })
     await deletePayload(ctx, row._id)
+    return null
+  },
+})
+
+/** Forgets cancelled messages nobody restored or discarded within CANCELLED_KEEP_MS. */
+export const forgetOldCancelled = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const rows = await ctx.db
+      .query('scheduledSends')
+      .withIndex('by_cancelled', (q) => q.eq('state', 'cancelled').lt('cancelledAt', Date.now() - CANCELLED_KEEP_MS))
+      .take(FORGET_BATCH)
+    let forgot = 0
+    for (const row of rows) {
+      if (row.forgottenAt) continue
+      await ctx.db.patch(row._id, { forgottenAt: Date.now() })
+      await deletePayload(ctx, row._id)
+      forgot++
+    }
+    // More to do than one batch: carry on straight after.
+    if (rows.length === FORGET_BATCH && forgot > 0)
+      await ctx.scheduler.runAfter(0, internal.scheduled.forgetOldCancelled, {})
     return null
   },
 })
