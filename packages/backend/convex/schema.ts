@@ -221,6 +221,8 @@ export default defineSchema({
      */
     last: v.optional(v.union(v.null(), storedLastMessage)),
     unreadCount: v.number(),
+    /** One more with every message counted unread (`ChatRow.unreadRev`). */
+    unreadRev: v.optional(v.number()),
     pinned: v.boolean(),
     archived: v.boolean(),
     mutedUntil: v.optional(v.number()),

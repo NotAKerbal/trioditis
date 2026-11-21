@@ -606,6 +606,23 @@ describe('read watermark and receipts', () => {
     expect(await chat(t)).toMatchObject({ unreadCount: 1, mentionCount: 0 })
   })
 
+  it('moves the unread revision on with every message counted, so a repeated count still differs', async () => {
+    seq = 0
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await ingest(t, [message('e1', { networkTs: 1_000 }), message('e5', { networkTs: 5_000 })])
+    const chatId = (await chat(t))._id
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 2, unreadRev: 2 })
+    await a.mutation(api.chats.markRead, { chatId })
+    // The person's own message, then a late one that sorts behind it but after what was read.
+    await ingest(t, [own('o7', 7_000), message('e6', { networkTs: 6_000 })])
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 1, unreadRev: 3 })
+    await a.mutation(api.chats.markRead, { chatId })
+    // Another after the mark: the count is 1 again, the revision isn't.
+    await ingest(t, [message('e8', { networkTs: 8_000 })])
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 1, unreadRev: 4 })
+  })
+
   it('doesn’t count a late message from before the person’s own receipt', async () => {
     seq = 0
     const t = setup()

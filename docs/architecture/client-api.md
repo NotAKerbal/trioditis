@@ -605,6 +605,7 @@ A `ChatRow` (type in `@trioditis/core`):
 | `kind`                                       | `dm`, `group`, `channel`, `space`                                                                                                                   |
 | `sealedMeta`                                 | Name, topic and avatar: open with kind `chat`, object ID `portalId`. `null` until described. Plaintext is `ChatPlaintext`; honour `avatarUnchanged` |
 | `unreadCount`, `mentionCount`                | Unread messages, and how many of those mention the person (flagged by the bridge host)                                                              |
+| `unreadRev`                                  | One more with every message counted unread, so two answers with the same count can be told apart                                                    |
 | `markedUnread`                               | The person marked it unread                                                                                                                         |
 | `pinned`, `archived`, `blocked`, `isRequest` | As named                                                                                                                                            |
 | `mutedUntil`                                 | `null`, a time, or `Number.MAX_SAFE_INTEGER` for "until I unmute"                                                                                   |
