@@ -37,9 +37,6 @@ const collageScan = 256
 type collageChange struct {
 	// group says the chat is a group, for one bridgev2 hasn't saved yet.
 	group bool
-	// ghost's picture has just been set (pictured) or removed, and may not be saved yet.
-	ghost    networkid.UserID
-	pictured bool
 }
 
 // refreshCollage chooses a chat's collage again and sends it if it changed. A direct chat's is
@@ -68,7 +65,7 @@ func (c *Connector) refreshCollage(ctx context.Context, roomID id.RoomID, change
 	}
 	var ghosts []string
 	if group {
-		if ghosts, err = c.collage(ctx, o, change); err != nil {
+		if ghosts, err = c.collage(ctx, o); err != nil {
 			return err
 		}
 	}
@@ -115,7 +112,7 @@ func (c *Connector) refreshCollageOrLog(ctx context.Context, roomID id.RoomID, c
 
 // collage is the chat's collage as clients take it: the chosen members' opaque ghost IDs, the
 // IDs their contacts are under.
-func (c *Connector) collage(ctx context.Context, o *owner, change collageChange) ([]string, error) {
+func (c *Connector) collage(ctx context.Context, o *owner) ([]string, error) {
 	members, err := c.Store.Members(ctx, string(o.roomID))
 	if err != nil {
 		return nil, err
@@ -132,8 +129,10 @@ func (c *Connector) collage(ctx context.Context, o *owner, change collageChange)
 	// what it knows of the person changes as it connects, while this runs on any goroutine.
 	isSelf := func(ghostID networkid.UserID) bool { return ghostID == networkid.UserID(o.login) }
 	hasPicture := func(ghostID networkid.UserID) (bool, error) {
-		if change.ghost != "" && ghostID == change.ghost {
-			return change.pictured, nil
+		// A picture set or removed in this process, which bridgev2 saves only after: two members'
+		// changes at once must each see the other's.
+		if pictured, ok := c.pictures.Load(ghostID); ok {
+			return pictured.(bool), nil
 		}
 		// As saved: another goroutine may be changing the cached ghost.
 		ghost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghostID)
@@ -187,11 +186,13 @@ func chooseCollage(ghosts []networkid.UserID, isSelf func(networkid.UserID) bool
 // picture changed is in: one who got a picture can take the place of a member without one, and
 // one who lost theirs can give way.
 func (c *Connector) pictureChanged(ctx context.Context, ghost networkid.UserID, pictured bool, rooms []string) {
+	// Before choosing: a choice another member's change makes meanwhile sees this one too.
+	c.pictures.Store(ghost, pictured)
 	for _, room := range rooms {
 		if strings.HasPrefix(room, "contacts:") || strings.HasPrefix(room, "numbers:") {
 			continue
 		}
-		c.refreshCollageOrLog(ctx, id.RoomID(room), collageChange{ghost: ghost, pictured: pictured})
+		c.refreshCollageOrLog(ctx, id.RoomID(room), collageChange{})
 	}
 }
 

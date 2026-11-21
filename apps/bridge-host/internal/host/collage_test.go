@@ -2,7 +2,9 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +108,19 @@ func TestAGroupsCollageFollowsItsMembersPictures(t *testing.T) {
 		t.Fatal(err)
 	}
 	lastCollage(t, h, "once the picture is gone", portalID, first)
+	// Two members' pictures arriving at once both count, though bridgev2 saves each only after.
+	var wg sync.WaitGroup
+	for _, n := range []int{3, 4} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := h.net.SetPicture(ctx, testconnector.CrowdMember(chat, n), []byte(fmt.Sprintf("picture %d", n))); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	lastCollage(t, h, "with two pictures set at once", portalID, []string{m[3], m[4], m[1], m[2]})
 	if n := gw.count(isChat(portalID)); n != chats {
 		t.Fatalf("choosing the collage described the chat again (%d chat events, was %d)", n, chats)
 	}
