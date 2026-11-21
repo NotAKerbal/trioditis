@@ -13,7 +13,7 @@ import {
   wrapIdentityKey,
 } from '@trioditis/crypto'
 import { hashPassword, verifyPassword } from 'better-auth/crypto'
-import { api, components } from '../convex/_generated/api'
+import { api, components, internal } from '../convex/_generated/api'
 import { setup, signIn, type T } from './setup'
 
 beforeAll(ready)
@@ -190,5 +190,91 @@ describe('resetting a forgotten password', { timeout: 60_000 }, () => {
     })
     expect(await t.query(api.account.resetInfo, { token: second.token })).toBeNull()
     await expect(t.mutation(api.account.resetChallenge, { token: second.token })).rejects.toThrow(/expired/)
+  })
+
+  it('ends every session, however many, and moves the credential version', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    const s = await sam(t, { withKey: false })
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 450; i++) {
+        await ctx.runMutation(components.betterAuth.adapter.create, {
+          input: {
+            model: 'session',
+            data: {
+              token: `extra-${i}`,
+              userId: s.userId,
+              expiresAt: Date.now() + 60_000,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          },
+        })
+      }
+    })
+    const { token } = await admin.mutation(api.members.issuePasswordReset, { userId: s.userId })
+    await t.action(api.account.resetPassword, { token, newAuthPassword: 'auth:new password!!' })
+    const left = await t.run(async (ctx) => {
+      const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: 'session',
+        where: [{ field: 'userId', value: s.userId }],
+        paginationOpts: { cursor: null, numItems: 10 },
+      })) as { page: unknown[] }
+      return page.length
+    })
+    expect(left).toBe(0)
+    expect(await t.query(internal.account.credentialVersionFor, { email: 'sam@x.test' })).toBe(1)
+  })
+})
+
+describe('a password sign-in racing a reset', () => {
+  async function session(t: T, userId: string) {
+    return await t.run(async (ctx) => {
+      const row = (await ctx.runMutation(components.betterAuth.adapter.create, {
+        input: {
+          model: 'session',
+          data: {
+            token: 'racing',
+            userId,
+            expiresAt: Date.now() + 60_000,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      })) as { _id: string }
+      return row._id
+    })
+  }
+  const exists = (t: T, id: string) =>
+    t.run(
+      async (ctx) =>
+        (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+          model: 'session',
+          where: [{ field: '_id', value: id }],
+        })) !== null,
+    )
+
+  it('keeps its session when the password didn’t change while it was checked', async () => {
+    const t = setup()
+    const s = await sam(t, { withKey: false })
+    const noted = await t.query(internal.account.credentialVersionFor, { email: 'Sam@X.test ' })
+    const id = await session(t, s.userId)
+    expect(await t.mutation(internal.account.fenceNewSession, { sessionId: id, userId: s.userId, noted })).toBe(true)
+    expect(await exists(t, id)).toBe(true)
+  })
+
+  it('ends the session of a sign-in that checked the old password before a reset committed', async () => {
+    const t = setup()
+    const admin = await signIn(t, 'admin', 'admin')
+    const s = await sam(t, { withKey: false })
+    // The sign-in notes the version, then checks the old password...
+    const noted = await t.query(internal.account.credentialVersionFor, { email: 'sam@x.test' })
+    // ...the reset commits meanwhile...
+    const { token } = await admin.mutation(api.members.issuePasswordReset, { userId: s.userId })
+    await t.action(api.account.resetPassword, { token, newAuthPassword: 'auth:new password!!' })
+    // ...and only then does the sign-in's session get made.
+    const id = await session(t, s.userId)
+    expect(await t.mutation(internal.account.fenceNewSession, { sessionId: id, userId: s.userId, noted })).toBe(false)
+    expect(await exists(t, id)).toBe(false)
   })
 })

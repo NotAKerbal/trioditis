@@ -214,6 +214,20 @@ Their network accounts are logged out and their logins in progress ended, throug
 host, as removing a network does. Their stored chats and messages stay, sealed to a key nobody
 else holds. An admin can't remove themselves, and the last admin can't be removed.
 
+What finishes later is fenced on membership meanwhile:
+
+- **Agents.** An agent request approved just before the removal can still be traded for a
+  token, but every MCP call checks the token's person is still a member: one who isn't gets a
+  401, and the connection is revoked.
+- **Sends.** `gateway.claimCommands` hands a bridge host nothing of someone who isn't a member
+  but their logouts and login cancels. Their other commands are settled as if they ran out of
+  time: a send never handed over becomes `failed`, one that may have gone out becomes
+  `unknown`. Neither is sent again.
+- **Logouts.** `api.members.removedCleanup` lists removed people whose network accounts aren't
+  confirmed logged out yet: `{ userId, email, removedAt, accounts, pending, failed }`. A logout
+  that ran out of time is queued again by itself; one a bridge host refused can be tried again
+  with `api.members.retryCleanup({ userId, sessionId? })`, which answers `{ queued, left }`.
+
 Errors: `You can’t remove yourself. Ask another admin.` · `That person isn’t a member of this
 server.` · `The server’s last admin can’t be removed.`
 
@@ -240,6 +254,11 @@ passwordParams }`, or `null` for an account that never set its key up.
    sign-in credential and the password backup in one transaction, uses the link up and ends
    every session the account has. An account with no key sends neither `newWrap` nor `proof`.
    Then sign in with the new password.
+
+A reset, like `account.changePassword`, moves the account's credential version. A password
+sign-in notes the version before its password is checked, and the session it makes is ended at
+once if the version moved meanwhile: the sign-in fails with `401` and code `PASSWORD_CHANGED`.
+So a sign-in with the old password that races a reset never keeps a session.
 
 Errors: `This reset link has expired or was already used. Ask your admin for a new one.` ·
 `Open your key with your recovery key first.` · `Your password changed meanwhile. Open the

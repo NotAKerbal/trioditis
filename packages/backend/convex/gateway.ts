@@ -41,6 +41,8 @@ const MAX_CLAIMS = 20
  * the next sweep.
  */
 const MAX_EXPIRIES = 20
+/** What still goes out for someone no longer a member: what tears their network accounts down. */
+const TEARDOWN = new Set(['logout', 'loginCancel'])
 /**
  * The index lookups one claim may make beyond its two scans, kept well under Convex's
  * 4,096 ranges per transaction. A claim that runs out stops early; the next sweep goes on.
@@ -431,6 +433,18 @@ export const claimCommands = mutation({
       const current = liveByNetwork.get(host.network)
       if (!current || host.lastSeenAt > current.lastSeenAt) liveByNetwork.set(host.network, host)
     }
+    const members = new Map<string, boolean>()
+    async function stillMember(userId: string) {
+      if (!members.has(userId)) {
+        lookups += 1
+        const member = await ctx.db
+          .query('members')
+          .withIndex('by_userId', (q) => q.eq('userId', userId))
+          .unique()
+        members.set(userId, member !== null)
+      }
+      return members.get(userId)!
+    }
     const loginHosts = new Map<string, string | undefined>()
     async function hostFor(command: Doc<'outbox'>) {
       if (command.hostId) return liveHosts.get(command.hostId)
@@ -530,6 +544,18 @@ export const claimCommands = mutation({
     for (const command of candidates) {
       if (claimed.length >= take || lookups >= MAX_LOOKUPS) break
       if (command.expiresAt !== undefined && command.expiresAt <= now) {
+        if (expired < MAX_EXPIRIES) {
+          lookups += 3
+          await expire(ctx, command)
+          expired++
+        }
+        continue
+      }
+      // A removed member's commands never reach a bridge host, but for the logouts and login
+      // cancels that tear their accounts down. Each is settled as if it ran out of time: a send
+      // never handed over fails, and one that may have gone out (claimed before, lease lapsed)
+      // becomes `unknown`. Neither is sent again.
+      if (!TEARDOWN.has(command.payload.type) && !(await stillMember(command.userId))) {
         if (expired < MAX_EXPIRIES) {
           lookups += 3
           await expire(ctx, command)

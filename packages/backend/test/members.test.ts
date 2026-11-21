@@ -163,6 +163,8 @@ describe('privacy between people', () => {
 
   it('gives an agent only its own person’s networks', async () => {
     const t = setup()
+    await signIn(t, 'user_a')
+    await signIn(t, 'user_b')
     await t.run(async (ctx) => {
       for (const userId of ['user_a', 'user_b']) {
         await ctx.db.insert('networkAccounts', {

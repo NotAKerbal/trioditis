@@ -1,4 +1,4 @@
-import { McpServer, createTool } from '@convex-dev/mcp'
+import { McpServer, createTool, type McpUser, type ToolCtx } from '@convex-dev/mcp'
 import type { GenericCtx } from '@convex-dev/better-auth'
 import { NETWORK_INFO } from '@trioditis/core'
 import { ConvexError, v } from 'convex/values'
@@ -68,6 +68,12 @@ export const networksForUser = internalQuery({
   args: { userId: v.string() },
   returns: v.array(networkAccount),
   handler: async (ctx, { userId }) => {
+    // Checked again here, in the read itself: nothing of a former member's is answered.
+    const member = await ctx.db
+      .query('members')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .unique()
+    if (!member) return []
     const live = await liveNetworks(ctx, Date.now())
     const accounts = await ctx.db
       .query('networkAccounts')
@@ -92,7 +98,23 @@ export const networksForUser = internalQuery({
   },
 })
 
-export const mcp: McpServer<string> = new McpServer<string>(components.mcp, {
+/**
+ * The MCP server, which also checks on every call that the token's person is still a member. A
+ * member removed after approving an agent, or between approving it and the agent trading its
+ * code for a token (which the component does on its own), gets no access: the call is refused as
+ * unauthenticated and the connection revoked.
+ */
+class MembersOnlyMcpServer extends McpServer<string> {
+  override async authenticate(ctx: ToolCtx, request: Request): Promise<McpUser<string> | null> {
+    const user = await super.authenticate(ctx, request)
+    if (!user) return null
+    if (await ctx.runQuery(internal.members.isMember, { userId: user.userId })) return user
+    await ctx.runMutation(components.mcp.grants.revoke, { userId: user.userId, grantId: user.connectionId })
+    return null
+  }
+}
+
+export const mcp: McpServer<string> = new MembersOnlyMcpServer(components.mcp, {
   name: 'trioditis',
   title: 'Trioditis',
   version: '0.0.0',
