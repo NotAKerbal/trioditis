@@ -48,9 +48,7 @@
         <h1>Download Trioditis</h1>
         <p class="lead">Your Trioditis server in its own window, with notifications and an unread badge.</p>
         <!-- download.js fills this in for the visitor's system, from the links below. -->
-        <div class="actions" id="pick" hidden>
-          <a class="button primary" id="pick-main"></a>
-        </div>
+        <div class="actions" id="pick" hidden></div>
         <p class="status">
           It connects to a Trioditis server, which also works in any browser. <a href="/#self-host">Run your own</a>
         </p>
@@ -60,24 +58,24 @@
         <h2 id="all-downloads">All downloads</h2>
         <!--
           Each link is to the latest release's file of that name (apps/desktop/electron-builder.yml).
-          The first link in each system is the one download.js offers at the top.
+          download.js offers the ones that fit the visitor's computer at the top, labelled by data-button.
         -->
         <div class="platforms">
           <div class="platform" data-os="mac" data-name="macOS">
             <h3>macOS</h3>
-            <p class="req">macOS 12 or later</p>
+            <p class="req">macOS 13 or later</p>
             <div class="files">
               <a
                 class="file"
                 data-arch="arm"
-                data-pick="Apple silicon"
+                data-button="Download for Apple silicon Mac"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-arm64.dmg"
                 ><span>Apple silicon</span><span class="kind">.dmg</span></a
               >
               <a
                 class="file"
                 data-arch="x86"
-                data-pick="Intel"
+                data-button="Download for Intel Mac"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-x64.dmg"
                 ><span>Intel</span><span class="kind">.dmg</span></a
               >
@@ -89,10 +87,11 @@
           </div>
           <div class="platform" data-os="windows" data-name="Windows">
             <h3>Windows</h3>
-            <p class="req">Windows 10 or later</p>
+            <p class="req">Windows 10 or later, x64</p>
             <div class="files">
               <a
                 class="file"
+                data-button="Download for Windows"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-windows-x64.exe"
                 ><span>Installer</span><span class="kind">.exe</span></a
               >
@@ -107,13 +106,13 @@
             <div class="files">
               <a
                 class="file"
-                data-pick=".deb"
+                data-button="Download .deb"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-amd64.deb"
                 ><span>Debian, Ubuntu</span><span class="kind">.deb</span></a
               >
               <a
                 class="file"
-                data-pick="AppImage"
+                data-button="Download AppImage"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-x86_64.AppImage"
                 ><span>Other distributions</span><span class="kind">AppImage</span></a
               >

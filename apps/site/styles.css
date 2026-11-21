@@ -54,6 +54,11 @@
   box-sizing: border-box;
 }
 
+/* Classes that set display would otherwise show an element the page has hidden. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   scroll-behavior: smooth;
   -webkit-text-size-adjust: 100%;

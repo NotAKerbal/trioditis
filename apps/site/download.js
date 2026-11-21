@@ -1,6 +1,6 @@
-// The download page's button for the visitor's own system. It's built from that system's links
-// in the list below it, so the file names live in one place, and it stays hidden where the system
-// can't be told or has no desktop app, leaving the full list.
+// The download page's buttons for the visitor's own system. They're built from that system's
+// links in the list below them, so the file names live in one place. Where the browser doesn't
+// say enough to know an installer will run, they stay hidden and the full list is the choice.
 
 function detectOs() {
   const platform = navigator.userAgentData?.platform
@@ -22,15 +22,41 @@ function detectOs() {
   return null
 }
 
-// Only Chromium browsers say which processor a Mac has. Elsewhere this is null and the page
-// offers Apple silicon first, with Intel beside it.
-async function detectArch() {
+// Only Chromium browsers give these; elsewhere they're all missing and the user agent decides.
+async function detectHints() {
   try {
-    const values = await navigator.userAgentData?.getHighEntropyValues(['architecture'])
-    return values?.architecture || null
+    return (await navigator.userAgentData?.getHighEntropyValues(['architecture', 'bitness', 'platformVersion'])) ?? {}
   } catch {
-    return null
+    return {}
   }
+}
+
+// The files for this system that will run on this computer, or null if that can't be known.
+// More than one means the browser can't tell which, and the visitor chooses.
+function fittingFiles(os, files, hints, agent, touchPoints) {
+  if (os === 'mac') {
+    // Chromium says which processor a Mac has; Safari and Firefox don't.
+    const match = files.filter((file) => file.dataset.arch === hints.architecture)
+    return match.length ? match : files
+  }
+  if (os === 'windows') {
+    // The installer is x64. 32-bit Windows can't run it, nor can Windows 10 on Arm; Windows 11
+    // (platform version 13 or later) runs it on Arm by emulation.
+    const is64 = hints.bitness ? hints.bitness === '64' : /Win64|WOW64/.test(agent)
+    if (!is64) return null
+    if (hints.architecture === 'arm' && !(parseInt(hints.platformVersion, 10) >= 13)) return null
+    return files
+  }
+  if (os === 'linux') {
+    // Chrome on an Android tablet in desktop mode reports Linux on x86_64, so a touch screen
+    // rules it out. Chromium's user agent always says x86_64, whatever the processor.
+    if (touchPoints > 0) return null
+    const isX64 = hints.architecture
+      ? hints.architecture === 'x86' && hints.bitness === '64'
+      : /x86_64|amd64/.test(agent)
+    return isX64 ? files : null
+  }
+  return null
 }
 
 async function showPick() {
@@ -38,27 +64,19 @@ async function showPick() {
   const platform = os && document.querySelector(`.platform[data-os="${os}"]`)
   if (!platform) return
 
-  let files = [...platform.querySelectorAll('.file')]
-  if (os === 'mac') {
-    const arch = await detectArch()
-    const match = files.find((file) => file.dataset.arch === arch)
-    if (match) files = [match, ...files.filter((file) => file !== match)]
-  }
-  const [first, ...others] = files
+  const all = [...platform.querySelectorAll('.file')]
+  const files = fittingFiles(os, all, await detectHints(), navigator.userAgent, navigator.maxTouchPoints)
+  if (!files) return
 
-  const main = document.getElementById('pick-main')
-  const variant = files.length > 1 ? ` (${first.dataset.pick})` : ''
-  main.textContent = `Download for ${platform.dataset.name}${variant}`
-  main.href = first.href
-
-  for (const file of others) {
-    const other = document.createElement('a')
-    other.className = 'button'
-    other.href = file.href
-    other.textContent = file.dataset.pick
-    main.parentElement.append(other)
+  const pick = document.getElementById('pick')
+  for (const file of files) {
+    const button = document.createElement('a')
+    button.className = 'button primary'
+    button.href = file.href
+    button.textContent = file.dataset.button
+    pick.append(button)
   }
-  main.parentElement.hidden = false
+  pick.hidden = false
 }
 
 showPick()
