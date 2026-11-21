@@ -1,5 +1,6 @@
+import type { Person, PersonPlaintext } from '@trioditis/core'
 import { describe, expect, it } from 'vitest'
-import { importPlanner } from '../src/data/people.ts'
+import { importPlanner, saveInCalls } from '../src/data/people.ts'
 
 describe('importing in calls', () => {
   it('leaves an entry already written out of later plans, so a card deleted meanwhile stays deleted', () => {
@@ -37,5 +38,65 @@ describe('importing in calls', () => {
     planner.written([x.personKey])
     const rest = planner.plan([{ ...x2, card: replanned[1]!.card }, y2])
     expect(rest.map((p) => [p.personKey, p.card.name, p.card.note])).toEqual([[y.personKey, 'Ann', 'from file']])
+  })
+
+  it('writes a card again when another device’s change puts a pending entry on it', async () => {
+    const phone = '+15550000001'
+    // X is entry 0's card by UID; Y has the number entry C (the last) is found by.
+    let store: Person[] = [
+      { personKey: 'person-x-00000000', card: { name: 'Cat', uid: 'u0' } },
+      { personKey: 'person-y-00000000', card: { name: 'Cat', phones: [{ value: phone }] } },
+    ]
+    const file: PersonPlaintext[] = [
+      { name: 'Cat', uid: 'u0', note: 'from file' },
+      // Enough new people that C's card goes in a second call.
+      ...Array.from({ length: 99 }, (_, i) => ({ name: `New ${i}` })),
+      { name: 'Cat', phones: [{ value: phone }], org: 'Acme' },
+    ]
+    const planner = importPlanner(file)
+    let revision = 0
+    let calls = 0
+    const stale = new Error('people_changed')
+    const put = async (batch: Person[], at: number) => {
+      calls++
+      if (at !== revision) throw stale
+      if (calls === 2) {
+        // Before the second call lands, another device moves the number from Y to X.
+        store = store.map((p) =>
+          p.personKey === 'person-x-00000000'
+            ? { ...p, card: { ...p.card, phones: [{ value: phone }] } }
+            : p.personKey === 'person-y-00000000'
+              ? { ...p, card: { name: 'Cat' } }
+              : p,
+        )
+        revision++
+        throw stale
+      }
+      const byKey = new Map(store.map((p) => [p.personKey, p]))
+      for (const p of batch) byKey.set(p.personKey, p)
+      store = [...byKey.values()]
+      return ++revision
+    }
+    const attempt = async (write: (people: readonly Person[], revision: number) => Promise<void>) => {
+      for (let i = 0; ; i++) {
+        try {
+          return await write(store, revision)
+        } catch (err) {
+          if (err !== stale || i >= 4) throw err
+        }
+      }
+    }
+    const written = await saveInCalls(
+      { attempt, put, fit: async (cards) => [...cards] },
+      planner.plan,
+      planner.written,
+      { skipWritten: false },
+    )
+    const x = store.find((p) => p.personKey === 'person-x-00000000')!.card
+    // C landed on X, which the first call had already written, and X kept entry 0's note.
+    expect(x).toMatchObject({ name: 'Cat', uid: 'u0', note: 'from file', org: 'Acme', phones: [{ value: phone }] })
+    expect(store.filter((p) => p.card.name === 'Cat')).toHaveLength(2)
+    expect(written).toBe(100)
+    expect(planner.unwritten()).toEqual([])
   })
 })

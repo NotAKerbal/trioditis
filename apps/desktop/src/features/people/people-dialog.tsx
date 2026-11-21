@@ -209,9 +209,12 @@ function People({
         ready.push(fit.card)
       }
       const planner = importPlanner(ready)
-      report.written = await actions.saveMany(planner.plan, planner.written)
+      // The planner tracks what's written by entry: a card written once can be where a later
+      // entry belongs after another device's change, so it isn't left out of later plans.
+      report.written = await actions.saveMany(planner.plan, planner.written, { skipWritten: false })
+      report.notImported = planner.unwritten().map(cardTitle)
       report.ambiguous = planner.ambiguous().map(cardTitle)
-      report.unchanged = !report.written && !report.ambiguous.length
+      report.unchanged = !report.written && !report.ambiguous.length && !report.notImported.length
       toast(importSummary(report))
       onViewChange('suggested')
     } catch (err) {

@@ -16,6 +16,8 @@ export interface ImportReport {
   cutNotes: string[]
   /** The names on entries left out because each matched more than one person here. */
   ambiguous: string[]
+  /** The names on entries that weren't written, though the import finished. */
+  notImported: string[]
 }
 
 export const emptyReport = (): ImportReport => ({
@@ -25,6 +27,7 @@ export const emptyReport = (): ImportReport => ({
   droppedPhotos: 0,
   cutNotes: [],
   ambiguous: [],
+  notImported: [],
 })
 
 const people = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'person' : 'people'}`
@@ -57,6 +60,14 @@ export function importSummary(report: ImportReport): string {
       rest.length
         ? `${first} and ${people(rest.length)} more weren’t imported: each matches more than one person here.`
         : `${first} wasn’t imported: they match more than one person here.`,
+    )
+  }
+  if (report.notImported.length) {
+    const [first, ...rest] = report.notImported
+    lines.push(
+      rest.length
+        ? `${first} and ${people(rest.length)} more weren’t imported. Import the file again to add them.`
+        : `${first} wasn’t imported. Import the file again to add them.`,
     )
   }
   return lines.join(' ')
