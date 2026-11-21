@@ -782,7 +782,12 @@ await convex.mutation(api.messages.send, {
 
 - Each sealed object is at most 64 KiB.
 - The same `clientMessageId` again does nothing, so retrying a call that may have failed is
-  safe.
+  safe. `messages.send` returns `'queued'` for a new send; for an ID already used it returns
+  what it was used for and where that stands, and sends nothing:
+  `{ already: 'send', delivery }` (the copy's delivery state, `null` once it was discarded) or
+  `{ already: 'scheduled', state }` (`scheduled`, `cancelled` or `failed`; one that has gone
+  out is a send). A client should keep the text of one that was cancelled or failed, since it
+  never went, and send it again only with a new ID.
 - The send appears in `messages.list` at once as the pending copy, and the network's echo
   replaces it in place.
 
@@ -838,7 +843,7 @@ can’t be sent.` · `That message can’t be reacted to.`
 
 | Function            | Arguments                                                              | Returns                                                                                                           |
 | ------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `sent` / `scheduled`: what that `clientMessageId` was already used for                       |
+| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or what that `clientMessageId` was already used for, as `messages.send` says it                 |
 | `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                           |
 | `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled, to show what each says; open like a pending copy |
 | `scheduled.cancel`  | `scheduledId`                                                          | `null`. Cancels one still scheduled, or dismisses one that failed                                                 |

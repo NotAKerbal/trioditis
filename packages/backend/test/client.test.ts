@@ -679,7 +679,9 @@ describe('scheduled sends', () => {
     await t.finishInProgressScheduledFunctions()
     const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
     expect(commands.map((c) => c.clientMessageId)).toEqual([id(2)])
-    expect(await scheduleOne(a, chatId, 2, 60_000)).toBe('sent')
+    expect(await scheduleOne(a, chatId, 2, 60_000)).toMatchObject({ already: 'send' })
+    // A cancelled one says so: its text never went, so the client keeps it.
+    expect(await scheduleOne(a, chatId, 1, 60_000)).toEqual({ already: 'scheduled', state: 'cancelled' })
   })
 
   it('says what an ID already went as, so a second tab can tell its send from the first', async () => {
@@ -694,11 +696,23 @@ describe('scheduled sends', () => {
         copy: sealed(`c${n}`),
       })
     expect(await send(3)).toBe('queued')
-    expect(await send(3)).toBe('sent')
-    expect(await scheduleOne(a, chatId, 3, 60_000)).toBe('sent')
+    // The copy's delivery as it stands: queued until the gateway has it.
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'queued' })
+    expect(await scheduleOne(a, chatId, 3, 60_000)).toEqual({ already: 'send', delivery: 'queued' })
     expect(typeof (await scheduleOne(a, chatId, 4, 60_000))).toBe('string')
-    expect(await scheduleOne(a, chatId, 4, 60_000)).toBe('scheduled')
-    expect(await send(4)).toBe('scheduled')
+    expect(await scheduleOne(a, chatId, 4, 60_000)).toEqual({ already: 'scheduled', state: 'scheduled' })
+    expect(await send(4)).toEqual({ already: 'scheduled', state: 'scheduled' })
+    // A send whose copy was discarded: used, with no copy to say how it went.
+    await t.run(async (ctx) => {
+      const copy = await ctx.db
+        .query('messages')
+        .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(3)))
+        .first()
+      await ctx.db.patch(copy!._id, { delivery: 'failed' })
+    })
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'failed' })
+    await a.mutation(api.messages.discardSend, { clientMessageId: id(3) })
+    expect(await send(3)).toEqual({ already: 'send', delivery: null })
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {
