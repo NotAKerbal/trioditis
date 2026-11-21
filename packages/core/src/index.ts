@@ -1,7 +1,21 @@
 // Types shared by every Trioditis package: networks, delivery states and the sealed message
 // plaintext. The bridge host ↔ gateway wire types are in ./bridge-protocol.ts.
 
-export const NETWORKS = ['whatsapp', 'signal', 'gmessages', 'telegram', 'meta', 'instagram', 'discord', 'fake'] as const
+export const NETWORKS = [
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'telegram',
+  'meta',
+  'instagram',
+  'discord',
+  'slack',
+  'groupme',
+  'gvoice',
+  'linkedin',
+  'twitter',
+  'bluesky',
+] as const
 export type Network = (typeof NETWORKS)[number]
 
 export type Maturity = 'stable' | 'beta' | 'experimental'
@@ -37,6 +51,11 @@ export interface Attachment {
   width?: number
   height?: number
   durationMs?: number
+  /**
+   * The file arrived but the bridge host couldn't store it: `mediaId`, `key` and `nonce` are
+   * empty and there is nothing to fetch. The rest says what the file was.
+   */
+  failed?: boolean
 }
 
 /** A message's sealed content. See docs/architecture/sealing.md, Message plaintext. */
@@ -64,6 +83,16 @@ export interface ChatPlaintext {
   [extra: string]: unknown
 }
 
+/**
+ * A network account's own metadata, from its `loginState` events: kind `account`, object ID its
+ * `loginId`, sealed to the owner only. `hint` tells it apart from their other accounts on the
+ * network (its phone number or username); the login ID can't, being a keyed hash.
+ */
+export interface AccountPlaintext {
+  hint?: string
+  [extra: string]: unknown
+}
+
 export interface ContactPlaintext {
   name?: string
   handle?: string
@@ -77,4 +106,16 @@ export interface ContactPlaintext {
   [extra: string]: unknown
 }
 
+/**
+ * What one of the person's own logins knows a contact by, as URIs: `tel:+15551234567`,
+ * `mailto:a@b.c`, `telegram:alice`. Sealed apart from the profile, since what each login can
+ * see of a contact differs.
+ */
+export interface ContactIdentifiersPlaintext {
+  identifiers: string[]
+}
+
 export * from './client.ts'
+export * from './people.ts'
+export * from './vcard.ts'
+export * from './google.ts'

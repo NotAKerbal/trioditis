@@ -1,8 +1,8 @@
 // Creates the admin account with the installer's setup token, as the app's setup screen does:
 // the password the server gets is derived from the one given (authPassword), so the account
-// signs in from the app and from apps/gateway/scripts/e2e-fake.ts. For installs whose web app
-// isn't built in yet. Run by `deploy/trioditis create-admin <email>`, inside the node image,
-// with the password in TRIODITIS_ADMIN_PASSWORD; it prints no secret.
+// signs in from the app. For installs whose web app isn't built in yet. Run by
+// `deploy/trioditis create-admin <email>`, inside the node image, with the password in
+// TRIODITIS_ADMIN_PASSWORD; it prints no secret.
 //
 // It goes straight to the backend's HTTP actions, where Caddy sends /api/auth/*, so it works
 // the same in every mode (a domain install's Caddy only answers HTTPS for its name).

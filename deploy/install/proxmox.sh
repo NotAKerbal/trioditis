@@ -5,7 +5,9 @@
 #
 #   bash proxmox.sh                       # VM 9100, 2 cores, 8 GiB, 64 GiB disk
 #   bash proxmox.sh --lxc --id 9101       # an unprivileged LXC with nesting, instead
-#   bash proxmox.sh --storage local-zfs --bridge vmbr1 --networks whatsapp,fake
+#   bash proxmox.sh --storage local-zfs --bridge vmbr1 --networks whatsapp,signal
+#
+# --networks limits the bridge hosts the server runs, as install.sh's does (default all).
 #
 # A VM's cloud-init setup goes in a snippet on --snippets storage (default local), which
 # must allow the snippets content type.
@@ -25,7 +27,7 @@ disk=64
 storage=local-lvm
 snippets=local
 bridge=vmbr0
-networks=whatsapp
+networks=all
 repo=https://github.com/NotAKerbal/trioditis.git
 ref=dev
 ssh_key=${SSH_KEY:-$HOME/.ssh/id_ed25519.pub}
@@ -46,7 +48,7 @@ while [ $# -gt 0 ]; do
     --repo) repo=$2; shift ;;
     --ref) ref=$2; shift ;;
     --ssh-key) ssh_key=$2; shift ;;
-    -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift

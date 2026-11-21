@@ -1,8 +1,7 @@
 #!/bin/sh
 # Reads `docker compose config` on stdin and fails, naming each, if a port is published that
-# shouldn't be: only Caddy's are, plus the fake network's test endpoint (bridge-fake, --e2e)
-# on this machine's loopback. The Convex ports (3210, 3211) never are, by any service: the
-# backend trusts the client address Caddy gives it, so nothing may reach it but Caddy.
+# shouldn't be: only Caddy's are. The Convex ports (3210, 3211) never are, by any service:
+# the backend trusts the client address Caddy gives it, so nothing may reach it but Caddy.
 # Run by install.sh, and by deploy/test/ports.sh for every combination of compose files.
 awk '
   /^services:/ { in_services = 1; next }
@@ -20,7 +19,6 @@ awk '
       s = owner[i]; t = target[i]; h = host_ip[i]
       if (t == "3210" || t == "3211") { print s " publishes the Convex port " t; bad = 1 }
       else if (s == "caddy") continue
-      else if (s == "bridge-fake" && h == "127.0.0.1") continue
       else { print s " publishes port " t (h == "" ? "" : " on " h); bad = 1 }
     }
     exit bad

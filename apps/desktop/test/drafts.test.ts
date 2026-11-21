@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { appendToDraft, getDraft, restoreDraft, setDraftReply, setDraftText, takeDraft } from '../src/data/drafts.ts'
 
 let n = 0
@@ -8,7 +8,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
   it('takes a draft once: what was taken can’t be taken again', () => {
     const a = chat()
     setDraftText(a, 'happy birthday')
-    expect(takeDraft(a)).toEqual({ text: 'happy birthday', reply: null })
+    expect(takeDraft(a)).toMatchObject({ text: 'happy birthday', reply: null })
     // A second schedule, or a send, finds nothing to send.
     expect(takeDraft(a)).toBeNull()
   })
@@ -24,7 +24,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
     // A doesn't go and comes back; then B's schedule succeeds, leaving it out of the composer.
     restoreDraft(a, sent.text, sent.reply)
     expect(getDraft(a).text).toBe('A')
-    expect(takeDraft(a)).toEqual({ text: 'A', reply: null })
+    expect(takeDraft(a)).toMatchObject({ text: 'A', reply: null })
   })
 
   it('keeps text typed after a schedule began, even across leaving the chat and coming back', () => {
@@ -44,7 +44,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '  first  ')
     setDraftReply(a, { id: 'm1' })
     const taken = takeDraft<{ id: string }>(a)
-    expect(taken).toEqual({ text: 'first', reply: { id: 'm1' } })
+    expect(taken).toMatchObject({ text: 'first', reply: { id: 'm1' } })
     expect(getDraft(a)).toMatchObject({ text: '', reply: null })
     setDraftText(a, 'second')
     setDraftReply(a, { id: 'm2' })
@@ -67,6 +67,20 @@ describe('drafts, wherever the action that changes them finishes', () => {
     expect(getDraft(a).text).toBe('cancelled\nanother')
   })
 
+  it('puts a cancelled reply’s target back with its text, unless a reply is set already', () => {
+    const a = chat()
+    appendToDraft(a, 'see you then', { eventId: 'e1' })
+    expect(getDraft(a)).toMatchObject({ text: 'see you then', reply: { eventId: 'e1' } })
+    // The reply chosen since is the newer choice.
+    appendToDraft(a, 'and this', { eventId: 'e2' })
+    expect(getDraft(a).reply).toEqual({ eventId: 'e1' })
+    // A cancelled message that wasn't a reply leaves the reply alone.
+    const b = chat()
+    setDraftReply(b, { eventId: 'e3' })
+    appendToDraft(b, 'plain')
+    expect(getDraft(b).reply).toEqual({ eventId: 'e3' })
+  })
+
   it('only ever raises the revision, even through an empty draft', () => {
     const a = chat()
     setDraftText(a, 'x')
@@ -74,5 +88,28 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '')
     setDraftText(a, 'x')
     expect(getDraft(a).rev).toBeGreaterThan(before)
+  })
+})
+
+describe('what a reload would lose', () => {
+  it('counts a taken draft until its send settles, failure and restore included', async () => {
+    // A fresh store: the tests above leave drafts in theirs.
+    vi.resetModules()
+    const drafts = await import('../src/data/drafts.ts')
+    expect(drafts.hasDrafts()).toBe(false)
+    drafts.setDraftText('a', 'on its way')
+    const taken = drafts.takeDraft('a')!
+    let fail!: (e: Error) => void
+    const sending = drafts.whileSending(() =>
+      new Promise<void>((_, reject) => (fail = reject)).catch(() => drafts.restoreDraft('a', taken.text, taken.reply)),
+    )
+    // The text is in neither the draft nor the server yet.
+    expect(drafts.getDraft('a').text).toBe('')
+    expect(drafts.hasDrafts()).toBe(true)
+    fail(new Error('offline'))
+    await sending
+    expect(drafts.getDraft('a').text).toBe('on its way')
+    drafts.setDraftText('a', '')
+    expect(drafts.hasDrafts()).toBe(false)
   })
 })

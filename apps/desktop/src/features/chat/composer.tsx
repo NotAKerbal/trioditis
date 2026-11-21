@@ -7,7 +7,6 @@ import {
   DropdownMenuTrail,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
-import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
 import { Clock, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
@@ -52,11 +51,11 @@ export function Composer({
   return (
     <div className="mx-3.5 mb-3.5 shrink-0 rounded-[14px] bg-surface shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] focus-within:shadow-[0_0_0_1px_var(--accent-ring),0_0_0_4px_var(--accent-soft)]">
       {replyTo ? (
-        <div className="mx-2 mt-2 flex items-center gap-2 rounded-[9px] bg-surface-2 px-2.5 py-1.5 text-sm text-muted-foreground">
+        <div className="mx-2 mt-2 flex items-center gap-2 rounded-[9px] bg-surface-2 py-1 pr-1 pl-2.5 text-sm text-muted-foreground">
           <Reply className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            Replying to <b className="font-semibold text-foreground">{replyTo.self ? 'yourself' : 'their message'}</b>:{' '}
-            {replyTo.body?.body}
+          <span className="min-w-0 flex-1 truncate border-l-[3px] border-primary pl-2">
+            <span className="sr-only">Replying to </span>
+            {replyTo.body?.body || 'a message'}
           </span>
           <Button variant="ghost" size="icon-sm" aria-label="Cancel reply" onClick={onCancelReply}>
             <X className="size-3.5" />
@@ -72,7 +71,7 @@ export function Composer({
           rows={1}
           value={draft}
           disabled={!!disabled}
-          placeholder={disabled ?? 'Write a message'}
+          placeholder={disabled ?? `Message on ${networkName(network)}`}
           aria-label="Message"
           onChange={(e) => onDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -116,9 +115,6 @@ export function Composer({
         >
           <SendHorizontal className="size-[17px]" />
         </Button>
-      </div>
-      <div className="flex items-center gap-1.5 px-3 pb-2 text-xs text-subtle-foreground">
-        <NetworkBadge network={network} label={networkName(network)} size={14} /> {networkName(network)}
       </div>
     </div>
   )

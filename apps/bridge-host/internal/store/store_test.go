@@ -142,3 +142,46 @@ func TestNestedTransactionsJoin(t *testing.T) {
 		t.Fatalf("expected one event, got %d", last)
 	}
 }
+
+// Reactions indexed before senders were kept get theirs from bridgev2's records when the
+// store is upgraded, so a reaction bridgev2 later replaces is still known to be theirs.
+func TestBackfillsReactionSenders(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	// The columns of bridgev2's reaction table the backfill reads.
+	if _, err := s.DB.Exec(ctx, `CREATE TABLE reaction (mxid TEXT NOT NULL, sender_mxid TEXT NOT NULL, sender_id TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct{ eventID, senderMXID, senderID string }{
+		{"$mine", string(ids.UserMXID("alice")), "alice-on-the-network"},
+		{"$theirs", string(ids.GhostMXID("bob")), "bob"},
+		{"$puppeted", "@someone:elsewhere", "carol"},
+	} {
+		if err := s.PutReaction(ctx, r.eventID, "$target", "👍", ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(ctx, `INSERT INTO reaction (mxid, sender_mxid, sender_id) VALUES ($1, $2, $3)`, r.eventID, r.senderMXID, r.senderID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One bridgev2 no longer has keeps its empty sender.
+	if err := s.PutReaction(ctx, "$gone", "$target", "👍", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillReactionSenders(ctx, s.DB); err != nil {
+		t.Fatal(err)
+	}
+	for eventID, want := range map[string]string{"$mine": "self", "$theirs": "ghost:bob", "$puppeted": "ghost:carol", "$gone": ""} {
+		if got, err := s.ReactionSender(ctx, eventID); err != nil || got != want {
+			t.Errorf("%s: sender %q (%v), want %q", eventID, got, err, want)
+		}
+	}
+}
+
+// A new install has no bridgev2 tables when the store is first upgraded.
+func TestBackfillWithoutBridgeTables(t *testing.T) {
+	s := openStore(t)
+	if err := backfillReactionSenders(context.Background(), s.DB); err != nil {
+		t.Fatal(err)
+	}
+}

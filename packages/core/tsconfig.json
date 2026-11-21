@@ -1,4 +1,4 @@
 {
-  "extends": "@trioditis/config/tsconfig.base.json",
-  "include": ["src"]
+  "extends": "@trioditis/config/tsconfig.node.json",
+  "include": ["src", "test"]
 }

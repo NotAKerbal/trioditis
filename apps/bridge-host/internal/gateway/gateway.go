@@ -212,6 +212,25 @@ func (p *Pusher) Run(ctx context.Context) {
 			p.sleep(ctx, min(idleWait, HeartbeatInterval-time.Since(lastContact)))
 		}
 	}
+	p.sayStopping()
+}
+
+// stoppingTimeout bounds the last heartbeat, so a gateway that doesn't answer can't hold up
+// the host's shutdown.
+const stoppingTimeout = 3 * time.Second
+
+// sayStopping sends a last heartbeat marked stopping, so the host shows offline at once rather
+// than two minutes after its heartbeats stop. It is best effort: if it doesn't arrive, the
+// missed heartbeats say the same, later. Nothing in the journal goes with it; what wasn't
+// acknowledged is sent when the host starts again.
+func (p *Pusher) sayStopping() {
+	ctx, cancel := context.WithTimeout(context.Background(), stoppingTimeout)
+	defer cancel()
+	batch := p.batch(nil)
+	batch.Stopping = true
+	if _, err := p.Client.PostEvents(ctx, batch); err != nil {
+		p.Log.Debug().Str("error_type", fmt.Sprintf("%T", err)).Msg("The gateway didn't get the stopping heartbeat")
+	}
 }
 
 func (p *Pusher) sleep(ctx context.Context, d time.Duration) {

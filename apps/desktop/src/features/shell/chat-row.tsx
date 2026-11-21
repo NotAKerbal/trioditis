@@ -1,4 +1,3 @@
-import { Avatar } from '@trioditis/ui/avatar'
 import { Badge } from '@trioditis/ui/badge'
 import { Button } from '@trioditis/ui/button'
 import {
@@ -17,6 +16,7 @@ import { networkName, type Chat } from '~/data/chats.ts'
 import { useDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
+import { MediaAvatar } from '~/features/chat/attachments.tsx'
 import { usePrefs } from '~/lib/prefs.ts'
 import { rowPreview } from './row-preview.ts'
 
@@ -68,7 +68,9 @@ export function ChatRow({
             'bg-surface shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] [--avatar-ring:var(--surface)] hover:bg-surface',
         )}
       >
-        <Avatar
+        <MediaAvatar
+          network={chat.network}
+          picture={chat.avatar}
           name={chat.name}
           size={40}
           shape={chat.row.kind === 'dm' ? 'circle' : 'square'}

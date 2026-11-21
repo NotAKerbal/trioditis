@@ -60,11 +60,11 @@ once before any sealing or password derivation.
 
 ### Server settings that matter to the client
 
-| Convex env                             | Must be                                                                                                                                                                                                                   |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                           |
-| (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up) |
-| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `1` and `fake` on preview and nightly deployments, for `demo.seedForMe`. `TRIODITIS_DEMO=1` alone turns invitations off                                                                                                   |
+| Convex env                             | Must be                                                                                                                                                                                                                            |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SITE_URL`                             | Exactly the origin the browser uses for the app, and so for auth. Better Auth refuses other origins and passkeys register to it                                                                                                    |
+| (static JWKS)                          | Not supported yet: Convex refuses to deploy an auth config that reads an unset variable. A server that can't reach its own public address routes it to itself instead, as the self-hosted bundle does (Phase 1 follow-up)          |
+| `TRIODITIS_DEMO`, `TRIODITIS_NETWORKS` | `TRIODITIS_DEMO=1` and no `TRIODITIS_NETWORKS` on preview and nightly deployments, for `demo.seedForMe`. `TRIODITIS_DEMO=1` alone turns invitations off. `TRIODITIS_NETWORKS` lists the networks the server runs a bridge host for |
 
 ## Passwords
 
@@ -91,17 +91,20 @@ follow-up: there is no email change yet).
 A server has no open sign-up. Every account starts from an invitation, and the first one,
 the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 
-| What                | How                                                                                                                                                                           |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members |
-| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                |
-| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
-| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                           |
-| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
-| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
-| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
-| Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
+| What                | How                                                                                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members          |
+| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                         |
+| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                              |
+| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                                    |
+| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404                     |
+| Forgotten password  | An admin's reset link and the recovery key: see Resetting a forgotten password below                                                                                                   |
+| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                                |
+| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member            |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                |
+| Invitations (admin) | `api.members.invitations({ paginationOpts })` pages through the invitations nobody has joined with yet, newest first, without tokens. `api.members.revokeInvitation({ invitationId })` |
+| Members (admin)     | `api.members.list({ paginationOpts })` pages through the members, oldest first: `{ userId, role, createdAt, name, email, you }`                                                        |
+| Remove (admin)      | `api.members.removeMember({ userId, sessionId? })`. See Removing a member below                                                                                                        |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
 `INVITE_REQUIRED`.
@@ -190,17 +193,88 @@ then lose the race for it; without the per-address limit, one address can. A pas
 isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
 and buckets that have refilled are deleted every ten minutes.
 
-Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
+### Members and invitations (admins)
+
+`members.list` and `members.invitations` are paginated queries (`usePaginatedQuery`): a server with many members or
+invitations shows them all, a page at a time, rather than only the newest hundred.
+
+Errors: `Only an admin can do that.` (`invite`, `invitations`, `list`, `revokeInvitation`,
+`removeMember`, `issuePasswordReset`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
 invitation can’t be revoked.` · `Someone is signing up with that invitation right now. Try
 again in a few minutes.`
+
+### Removing a member
+
+`members.removeMember` takes a member off the server in one transaction: their membership
+goes (so every member function refuses them at once), with their Better Auth sessions,
+password credential, passkeys and user (so the email can be invited again, as a new account),
+their key backups, key challenges and reset links, and every agent connection they approved.
+Their network accounts are logged out and their logins in progress ended, through the bridge
+host, as removing a network does. Their stored chats and messages stay, sealed to a key nobody
+else holds. An admin can't remove themselves, and the last admin can't be removed.
+
+What finishes later is fenced on membership meanwhile:
+
+- **Agents.** An agent request approved just before the removal can still be traded for a
+  token, but every MCP call checks the token's person is still a member: one who isn't gets a
+  401, and the connection is revoked.
+- **Sends.** `gateway.claimCommands` hands a bridge host nothing of someone who isn't a member
+  but their logouts and login cancels. Their other commands are settled as if they ran out of
+  time: a send never handed over becomes `failed`, one that may have gone out becomes
+  `unknown`. Neither is sent again.
+- **Logouts.** `api.members.removedCleanup({ paginationOpts })` pages through removed people
+  whose network accounts aren't confirmed logged out yet, newest first: `{ userId, email,
+removedAt, accounts, pending, failed }`. Only cleanups still active are read, however many
+  have finished. An account of theirs that reports in after the removal (a login that finished,
+  or a logged-out account reconnecting) is logged out at once and makes their cleanup active
+  again. A logout that ran out of time is queued again by itself; one a bridge host refused can
+  be tried again with `api.members.retryCleanup({ userId, sessionId? })`, which answers
+  `{ queued, left }`.
+
+Errors: `You can’t remove yourself. Ask another admin.` · `That person isn’t a member of this
+server.` · `The server’s last admin can’t be removed.`
+
+### Resetting a forgotten password
+
+Sign-in takes a password derived from the person's own, and their identity key is wrapped by
+it, so neither the server nor an admin can sign anyone in or open their messages. A reset
+needs two things: a link an admin makes, and the person's recovery key.
+
+1. An admin calls `api.members.issuePasswordReset({ userId, sessionId? })` (Settings →
+   Members → Reset password), which returns `{ token, expiresAt }` once, and shares
+   `/reset#token=…`. It works for a day, once; a newer one replaces it. It isn't for the
+   admin's own account. A locked-out admin, or a server's only admin, gets one from the
+   deployment's command line: `npx convex run members:issuePasswordResetFor '{"email": "…"}'`.
+2. Signed out, the reset page calls `api.account.resetInfo({ token })`: `{ userId, email,
+key }`, or `null` for a link that no longer works. `key` is `{ kid, publicKey, recovery,
+passwordParams }`, or `null` for an account that never set its key up.
+3. It opens the key with the recovery key (`unwrapIdentityKey` of `key.recovery`), wraps it
+   with the new password (fresh `newPasswordParams()`, never weaker than `passwordParams`),
+   proves it holds the key with `api.account.resetChallenge({ token })` (a sealed box, as
+   `keys.challenge` gives), and derives the new sign-in password with `authPassword` and
+   `email`.
+4. `api.account.resetPassword({ token, newAuthPassword, newWrap, proof })` changes the
+   sign-in credential and the password backup in one transaction, uses the link up and ends
+   every session the account has. An account with no key sends neither `newWrap` nor `proof`.
+   Then sign in with the new password.
+
+A reset, like `account.changePassword`, moves the account's credential version. A password
+sign-in notes the version before its password is checked, and the session it makes is ended at
+once if the version moved meanwhile: the sign-in fails with `401` and code `PASSWORD_CHANGED`.
+So a sign-in with the old password that races a reset never keeps a session.
+
+Errors: `This reset link has expired or was already used. Ask your admin for a new one.` ·
+`Open your key with your recovery key first.` · `Your password changed meanwhile. Open the
+reset link again.` · `That new password isn’t allowed.` · `Change your own password in
+Settings → Keys and devices.`
 
 ## Keys
 
 The person's **identity key pair** is what everything is sealed to. The private key exists
 only on their devices. So a new device can get it, the server keeps it **wrapped**: by the
-password, by the **recovery key**, and later by a passkey. The server can't unwrap any of
-them.
+password, by the **recovery key**, and by any passkey that offers WebAuthn's PRF extension.
+The server can't unwrap any of them.
 
 `api.keys.identity` returns `{ state, publicKey, kid, backups }`. What to do for each
 `state`:
@@ -209,7 +283,7 @@ them.
 | ------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `none`        | No identity key yet                                  | First-device setup, below                                                                                                                                                                                               |
 | `needsBackup` | A key, but not both a password and a recovery backup | On a device that has the key: make the missing backups and call `keys.setup` with a proof. On a device that doesn't: say "finish setup on the device you first used". Connecting networks is blocked until this is done |
-| `ready`       | Key and both backups                                 | On a new device, unlock with the password or the recovery key                                                                                                                                                           |
+| `ready`       | Key and both backups                                 | On a new device, unlock with the password, the recovery key or a passkey backup                                                                                                                                         |
 
 ### First device
 
@@ -238,6 +312,12 @@ await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
   bytes, or a low-order X25519 point), in `keys.challenge` and in `keys.setup`.
 - `keys.setup` is complete only when both backups exist. Repeating it with the same key then
   does nothing; a different key for an account that has one is refused.
+- It returns `{ kid, stored }`: `stored` is the backups this call stored (`password`,
+  `recovery`), decided in the transaction that writes them. Two devices finishing setup at
+  once both succeed, but only one stores its recovery key; the other's `stored` leaves
+  `recovery` out. An empty `stored` can also mean an earlier try of the same call stored
+  them and its answer was lost, so compare the recovery backup's `ct` before telling the
+  person their recovery key didn't take.
 - For a key that exists without its backups (`needsBackup`), get the proof from
   `keys.challenge({})` (below).
 
@@ -277,7 +357,8 @@ const pair = unwrapIdentityKey(
 
 A wrong password throws `SealError`. "Use your recovery key instead" does the same with the
 `recovery` backup and `decodeRecoveryKey(text)` as the wrapping key; `decodeRecoveryKey`
-forgives case, spaces, dashes and look-alike letters, and its checksum catches typos.
+forgives case, spaces, dashes and look-alike letters, and its checksum catches typos. A
+passkey backup opens with `passkeyKey(prfOutput)` as the wrapping key (Passkeys, below).
 
 ### A new recovery key, or a passkey
 
@@ -295,10 +376,89 @@ passkey backup removed and made again gets a new one, so a device still holding 
 revision is refused. A passkey backup needs `credentialId` (base64url, at most 512
 characters) and a 32-byte `prfSalt` (base64url); a person can have at most 10.
 
+### Passkeys
+
+A passkey signs in (`authClient.signIn.passkey()`), and one whose authenticator offers
+WebAuthn's **PRF** extension can also unlock the identity key, so a new device needs no
+password. The PRF output for an input is a secret only that passkey can produce; it never
+leaves the device. `passkeyKey(output)` (packages/crypto) turns it into a wrapping key, and the
+key is wrapped with it as a `passkey` backup for that credential:
+
+```ts
+await ready()
+const first = passkeyPrfSalt() // the PRF input; the same everywhere (below)
+const { data, error, webauthn } = await authClient.passkey.addPasskey({
+  extensions: { prf: { eval: { first } } },
+  returnWebAuthnResponse: true,
+}) // with the page's session in x-trioditis-session-id (Key writes are bound to the page's session)
+if (error || !webauthn) return // cancelled, or refused (a 409 sessionChanged: reload)
+const output = webauthn.clientExtensionResults.prf?.results?.first
+// No output: the passkey signs in, but makes no backup yet (see below).
+if (!output) return
+const context = { userId, kid, kind: 'passkey' } as const
+const wrappingKey = passkeyKey(new Uint8Array(output))
+const wrap = wrapIdentityKey(identity.privateKey, wrappingKey, context)
+// Open it again before sending, as for every backup: the server can't check a wrap.
+unwrapIdentityKey(wrap, wrappingKey, context, identity.publicKey)
+await convex.mutation(api.keys.putBackup, {
+  kind: 'passkey',
+  ...wrap,
+  credentialId: webauthn.response.id,
+  prfSalt: toBase64Url(first),
+  proof,
+  expectedRevision: 0,
+  sessionId,
+})
+```
+
+- **The PRF input is fixed**: `passkeyPrfSalt()`, a constant 32 bytes, for every person and
+  passkey. Signing in doesn't know whose passkey it is until the server answers, so only an
+  input known in advance can be evaluated in the sign-in touch itself. Pass it to
+  `signIn.passkey({ extensions: { prf: { eval: { first } } }, returnWebAuthnResponse: true })`,
+  and the same touch that signs in gives the output that opens the key. The input needn't be
+  secret or unique: each credential's PRF is keyed by its own secret, so each passkey still
+  gives its own wrapping key. Each backup keeps the input it was made with (`prfSalt`); a
+  backup with another input is opened by asking its passkey again, with `evalByCredential`.
+- **Not every authenticator gives the output when the passkey is made.** Some give it only
+  when the passkey is next used, and some (or the browser) not at all. Without it, the passkey
+  still signs in; offer to make its backup later with a `navigator.credentials.get()` naming
+  that credential (`allowCredentials`) and the input (`prf.evalByCredential`). That ceremony
+  goes nowhere near the server: only the output matters, and only the device uses it.
+- **Unlocking with a passkey** on a new device: from the sign-in touch's output if it came with
+  one and the backup for that credential used the same input, or else with a
+  `navigator.credentials.get()` naming this key's passkey backups and their inputs. The
+  credential that answered picks the backup. A passkey backup opens without its passkey being
+  registered for sign-in: it's the output that opens it.
+- **A passkey backup is only for a passkey on the account.** `keys.putBackup` with
+  `kind: 'passkey'` is refused (`That passkey isn’t on your account any more…`) unless
+  `credentialId` is a passkey Better Auth has for the signed-in person, checked in the same
+  transaction as the write: so a backup is never made for another account's credential, nor
+  lands after its passkey was removed.
+- **Listing**: `api.keys.passkeys({ sessionId })` returns the person's passkeys as
+  `{ credentialId, name, createdAt, backedUp }[]`, where `credentialId` matches a backup's.
+  Use it rather than Better Auth's `/passkey/list-user-passkeys`, which answers for whoever the
+  cookie signs in as by now.
+- **Removing**: `api.keys.removePasskey({ credentialId, proof, sessionId })` removes the
+  passkey's backups and its sign-in credential in one transaction, so nothing is left half
+  removed. A credential no longer registered just loses its backups. Better Auth's own
+  `/passkey/delete-passkey` removes only the sign-in credential; don't use it.
+- **One passkey ceremony at a time, in the whole browser.** Better Auth keeps the challenge
+  of a sign-in or a registration in one cookie every tab shares, so a second ceremony under
+  way at once would replace the other's challenge and make both fail; and the registration
+  header is the page's. The desktop app holds a Web Lock (`trioditis-passkey-ceremony`) for
+  each whole sign-in or registration and refuses a second one, in any tab, while it's held.
+  (Unlocking with a passkey makes no request, so it takes no lock.)
+- **A recent sign-in.** Better Auth adds a passkey only for a session made in the last day
+  (`SESSION_NOT_FRESH` otherwise): say to sign in again.
+- **Known gap:** the session check (Key writes are bound to the page's session) runs before
+  Better Auth stores the credential, in a separate step. A sign-out of that same session in
+  another tab in the instant between them can let the credential land just after the session
+  ended. It still lands on the same account, made by that person's own authenticator.
+
 ### Key writes are bound to the page's session
 
 `keys.challenge`, `keys.setup`, `keys.putBackup`, `keys.removePasskeyBackup`,
-`account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
+`keys.removePasskey`, `keys.passkeys` (a query), `account.changePassword`, `logins.start`, `labels.create`, `demo.seedForMe`,
 `preferences.set`, `members.invite` and `mcp.authorize` (the agent consent page's approval)
 take an optional `sessionId`: pass the `sessionId` from
 `members.me` that the page opened with. Tabs share the Convex client, so another tab
@@ -338,12 +498,15 @@ createAuthClient({
   plugins: [convexClient(), passkeyClient()],
   fetchOptions: {
     onRequest: (context) => {
-      if (context.url.toString().includes('/passkey/') && pageSessionId)
-        context.headers.set('x-trioditis-session-id', pageSessionId)
+      if (REGISTRATION_PATHS.some((path) => String(context.url).includes(path)) && registeringAs)
+        context.headers.set('x-trioditis-session-id', registeringAs)
     },
   },
 })
 ```
+
+The desktop app sets `registeringAs` only while it adds a passkey (`asSession` in
+apps/desktop/src/lib/auth-client.ts).
 
 Without the header nothing is checked, as before.
 
@@ -423,7 +586,7 @@ wakes it.
 
 ### The list
 
-`api.chats.list({ view?, network?, labelId?, paginationOpts })` returns a page
+`api.chats.list({ view?, network?, labelId?, order?, paginationOpts })` returns a page
 `{ page: ChatRow[], isDone, continueCursor }` (use `usePaginatedQuery`; default `inbox`).
 The list is the view's pinned chats, most recent first, then the rest, most recent first,
 paged as one list: pins that don't fit on the first page carry on to the next, and none is
@@ -432,8 +595,10 @@ left out. A page holds at most 50 chats (`numItems` above 50 counts as 50) and r
 `endCursor` range (as `usePaginatedQuery` does) isn't limited by `numItems`; it holds at
 most 51 chats, and when it reaches that it ends early with `pageStatus: 'SplitRequired'`
 and a `splitCursor`, which `usePaginatedQuery` uses to split it. With `network`, only that
-network's chats, in the same order. With `labelId`, the chats with that label in the view,
-in the order they were labelled, pinned or not.
+network's chats, in the same order. With `order: 'recent'`, the view's chats most recent
+first, pinned or not, paged the same way (the Focused sidebar's inbox). With `labelId`, the
+chats with that label in the view, in the order they were labelled, pinned or not, whatever
+`order` says.
 
 A `ChatRow` (type in `@trioditis/core`):
 
@@ -444,6 +609,7 @@ A `ChatRow` (type in `@trioditis/core`):
 | `kind`                                       | `dm`, `group`, `channel`, `space`                                                                                                                   |
 | `sealedMeta`                                 | Name, topic and avatar: open with kind `chat`, object ID `portalId`. `null` until described. Plaintext is `ChatPlaintext`; honour `avatarUnchanged` |
 | `unreadCount`, `mentionCount`                | Unread messages, and how many of those mention the person (flagged by the bridge host)                                                              |
+| `unreadRev`                                  | One more with every message counted unread, so two answers with the same count can be told apart                                                    |
 | `markedUnread`                               | The person marked it unread                                                                                                                         |
 | `pinned`, `archived`, `blocked`, `isRequest` | As named                                                                                                                                            |
 | `mutedUntil`                                 | `null`, a time, or `Number.MAX_SAFE_INTEGER` for "until I unmute"                                                                                   |
@@ -553,11 +719,12 @@ Alongside the page:
 
 - `api.messages.reactions({ chatId, messageIds })`, at most 100 IDs, returns
   `{ [messageId]: [{ key, senderKey }] }`: active reactions only, at most 100 per message
-  (a message with more shows its first 100). `senderKey` is `self` or `ghost:<ghostId>`.
+  (a message with more shows its first 100, plus up to 20 of the person's own that those
+  left out, so they can always take theirs away). `senderKey` is `self` or `ghost:<ghostId>`.
   It never reads the messages themselves, and reads at most 8 MiB of reactions, going
   through the IDs in order, so it answers a prefix of `messageIds`:
   - **The first ID is always answered** unless it is a deleted message: one message's
-    reactions (at most 100 rows of at most 4 KiB) always fit. So a first ID missing from
+    reactions (at most 120 rows of at most 4 KiB) always fit. So a first ID missing from
     the answer is a deleted message, and the client can move past it.
   - A later ID is missing either because it is a deleted message or because the 8 MiB ran
     out before it. To tell which, ask again starting from that ID: then it's first.
@@ -568,6 +735,29 @@ Alongside the page:
 - `api.messages.typing({ chatId })` returns `[{ senderKey, expiresAt }]` for rows still
   live when it ran. Hide a row once `expiresAt` passes: queries don't rerun just because
   time passes.
+
+### Arrivals
+
+`api.messages.arrivals({})` is what notifications watch. It returns an `ArrivalFeed` from
+`@trioditis/core`, `{ latest, arrivals }`:
+
+- `arrivals`: the newest messages from other people, by when the server stored them (not
+  network time), at most ten, each `{ arrivedAt, message, chat }`. `message` is a
+  `LastMessage`, opened the same way, with `sealed` null when it's too large to show;
+  `chat` is the chat's `ChatRow`. Imported history, the person's own messages, deleted ones
+  and chats outside the inbox are left out. It looks through at most 50 live messages and
+  8 MiB of them to find the ten. Muting is the client's to check (`mutedUntil`), since a
+  query doesn't rerun when a mute runs out.
+- `latest`: when the newest live message of any kind arrived, the person's own included, or
+  null if none has. It doesn't move when a chat changes view.
+
+Keep `latest` from the first answer as a cursor and notify for arrivals after it, moving it
+on with each answer. So opening the app announces nothing, and an old message that comes
+into view later, its chat brought back from the archive, doesn't notify. `arrivedAt` is when
+the storing mutation started, not when it committed, so a message can appear after a newer
+one with an earlier time: count arrivals up to ten seconds behind the cursor too, once each
+(apps/desktop `newArrivals`). More than ten arriving between two answers notify only for the
+newest ten.
 
 ### Sending
 
@@ -596,7 +786,27 @@ await convex.mutation(api.messages.send, {
 
 - Each sealed object is at most 64 KiB.
 - The same `clientMessageId` again does nothing, so retrying a call that may have failed is
-  safe.
+  safe. `messages.send` returns `'queued'` for a new send; for an ID already used it returns
+  what it was used for and where that stands, and sends nothing:
+  `{ already: 'send', delivery }` (the copy's delivery state, `null` once it was discarded) or
+  `{ already: 'scheduled', state }` (`scheduled`, `cancelled` or `failed`; one that has gone
+  out is a send). A client should keep the text of one that was cancelled or failed, since it
+  never went, and send it again only with a new ID.
+- **Sending again** is decided by the server. Every attempt is a link in a chain from the
+  original send; its outbox row records the original and the attempt before it.
+  `api.messages.retryStates({ clientMessageIds })`, at most 100 IDs of any sends in chains,
+  returns `[{ clientMessageId, state }]` with `state` `{ root, latest, delivery, allowed,
+nextId }`: the original, the latest attempt and its delivery state, and whether another may be
+  made now, with its client message ID. Every send of a chain gets the same answer. The first
+  attempt is allowed when the original failed or may not have gone; a later one only when the
+  latest attempt failed and every other send in the chain, the original included, failed too.
+  One that turns out to have gone ends the chain, and the answer then shows it as `latest`.
+  Attempt IDs start `rt_`: `messages.send` and `scheduled.create` refuse them. To make it, seal the text for
+  `nextId` exactly as for `messages.send` and call `api.messages.sendAgain({ clientMessageId,
+nextId, forBridge, copy, replyTo? })` with any send of the chain. It returns
+  `{ created, state }`: made only if it's still allowed and `nextId` is still the next one, so
+  repeated clicks, other tabs and stale pages make one attempt per link. Nothing is ever sent
+  again on its own.
 - The send appears in `messages.list` at once as the pending copy, and the network's echo
   replaces it in place.
 
@@ -608,7 +818,7 @@ await convex.mutation(api.messages.send, {
 | `submitted`         | Sending, handed to the network                                                                                                                                                                                                                                            |
 | `sent`              | Sent (one tick)                                                                                                                                                                                                                                                           |
 | `delivered`         | Delivered (two ticks)                                                                                                                                                                                                                                                     |
-| `read`              | Read                                                                                                                                                                                                                                                                      |
+| `read`              | Read. Set by someone else's read receipt (`receipt` event) covering the message, as well as by `sendStatus`; never lowered after                                                                                                                                          |
 | `failed`            | Not sent. Offer **Retry** (a new send with a new `clientMessageId`) or **Delete** (`messages.discardSend`)                                                                                                                                                                |
 | `unknown`           | **May not have sent.** Trioditis never resends on its own, because the network may have it. Offer "Send again" (a new `clientMessageId`, which may duplicate) or "Discard" (`messages.discardSend({ clientMessageId })`). A late confirmation can still move it to `sent` |
 
@@ -626,15 +836,39 @@ replied to.` · `Only a message that failed or may not have sent can be discarde
 message reached the network, so it can’t be discarded here.` · `Ask for at most 100
 messages’ reactions at once.` (`reactions`)
 
+### Reacting
+
+`api.messages.react({ chatId, messageId, key, remove? })` asks the bridge host to add the
+person's reaction `key` to a message, or with `remove: true` to take it away. The message must
+be in that chat, have reached the network and not be deleted. `key` is one emoji (or a
+network's short name for one): 1 to 64 characters, with no spaces or control characters. Send
+the emoji as picked; the bridge host compares keys without variation selectors, so taking
+away a reaction works with the stored key too.
+
+Nothing is stored until the bridge host's echo, a `reaction` or `reactionRemove` event, so
+`messages.reactions` changes only then. A network that allows one reaction per person (most
+do) replaces the old one, and the bridge host reports the old one's removal. The command has
+a 10-minute deadline: one that hasn't reached the bridge host by then isn't sent, and it is
+never sent again. The desktop app shows the person's choice at once and goes back to what the
+server says if no echo comes within 30 seconds (`apps/desktop/src/data/reaction-toggle.ts`).
+
+A network without reactions (`NETWORK_INFO[network].reactions` is false: Google Voice,
+Bluesky) refuses it, and the client offers none there.
+
+Errors: `That chat doesn’t exist.` · `<Network> doesn’t have reactions.` · `That reaction
+can’t be sent.` · `That message can’t be reacted to.`
+
 ### Scheduled sends
 
-| Function            | Arguments                                                              | Returns                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `null` if that `clientMessageId` was already used                                            |
-| `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                           |
-| `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled, to show what each says; open like a pending copy |
-| `scheduled.cancel`  | `scheduledId`                                                          | `null`. Cancels one still scheduled, or dismisses one that failed                                                 |
-| `scheduled.sendNow` | `scheduledId`                                                          | `null`                                                                                                            |
+| Function              | Arguments                                                              | Returns                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduled.create`    | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or what that `clientMessageId` was already used for, as `messages.send` says it                                                                                             |
+| `scheduled.list`      | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                                                                                                       |
+| `scheduled.copies`    | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled or cancelled and not forgotten; open like a pending copy                                                                      |
+| `scheduled.cancel`    | `scheduledId`                                                          | What happened: `{ outcome: 'cancelled', first, clientMessageId, copy, replyTo }`, `{ outcome: 'sent', delivery }` (how that send stands now) or, for a failed one, `{ outcome: 'dismissed' }` |
+| `scheduled.cancelled` | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, replyTo, cancelledAt }]`: cancelled ones not forgotten yet. No content                                                                                      |
+| `scheduled.forget`    | `scheduledId`                                                          | `null`. Deletes a cancelled one's copies, when the person discards it                                                                                                                         |
+| `scheduled.sendNow`   | `scheduledId`                                                          | `null`                                                                                                                                                                                        |
 
 Seal it exactly as for `messages.send`. At `sendAt` (within a year: 365 days) it becomes an
 ordinary send in its chat, on its network, with its 24-hour deadline starting then. A person
@@ -646,11 +880,22 @@ sent, and its sealed copies are deleted. A failed one stays listed until `schedu
 dismisses it. `scheduled.list` returns at most 500 of each state, so at most 500 failed
 ones are shown at once; dismissing some brings the rest into view.
 
+Cancelling is decided on the server. `scheduled.cancel` answers `cancelled`, or `sent` with the
+send's delivery state when its time or Send now came first; never infer it from the row leaving
+`scheduled.list`. A cancelled one keeps its sealed copy, returned with the answer (and again if
+`cancel` is asked again, with `first` false: only the call that cancelled it has `first` true,
+so only that one should put its text in a composer), and is listed in `scheduled.cancelled` until `scheduled.forget`, which
+the client calls only when the person discards it. Restoring its text to the composer copies
+it into an ordinary new draft and leaves the row as it is, so it can be restored again; nothing
+is forgotten by itself, except one not discarded within 30 days. Forgotten ones are kept,
+without copies, so their client message IDs stay used. A cancelled one is never sent, including by restore settlement.
+
 Errors: `That chat doesn’t exist.` · `Pick a time in the future.` · `Pick a time within a
 year.` · `You can schedule at most 500 messages.` · the sealing and reply errors of
 `messages.send` (`create`) · `Ask for at most 20 at once.` (`copies`) · `That scheduled
 message doesn’t exist.` · `That message has already gone out.` · `That message couldn’t be
-sent: its chat is gone.` (`sendNow` on a failed one)
+sent: its chat is gone.` (`sendNow` on a failed one) · `Only a cancelled message can be
+discarded.` (`forget`)
 
 ## Labels
 
@@ -673,15 +918,17 @@ have at most 100 labels.` · `That label doesn’t exist.`
 
 ## Networks and connecting accounts
 
-`api.networks.list` returns the networks this server enables:
+`api.networks.list` returns the networks people can connect here: the ones an admin installed
+(Admin settings → Networks, below) that the server runs a bridge host for:
 
 ```ts
 { network, name, maturity: 'stable' | 'beta' | 'experimental',
-  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk }
+  flows: [{ id, kind: 'qr' | 'phone' | 'cookies' | 'form', name }], termsRisk, reactions }
 ```
 
 The same table is `NETWORK_INFO` in `@trioditis/core`. Show a warning before connecting a
-network with `termsRisk` (cookie or token logins can get an account banned).
+network with `termsRisk` (cookie or token logins can get an account banned). `reactions` is
+whether the network has them (Reacting).
 
 ### The login stepper
 
@@ -689,18 +936,31 @@ network with `termsRisk` (cookie or token logins can get an account banned).
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
-   `{ _id, network, state, step, updatedAt }`, or `null` for a login that doesn't exist or
-   isn't the person's. `state` is one of `pending`, `active`, `complete`, `cancelled` or
+   `{ _id, network, state, step, updatedAt, hostLastSeenAt, hostOnline }`, or `null` for a
+   login that doesn't exist or isn't the person's. `hostLastSeenAt` is when the bridge host
+   running it (before one has it, the network's most recently seen host) was last heard from,
+   or `null`; `hostOnline` is whether that was within two minutes (`BRIDGE_HOST_STALE_MS`) when
+   the query ran. A host that has gone can't finish the login, so hide a QR or pairing code it
+   showed once `hostOnline` is false or two minutes pass with no new `hostLastSeenAt`. Likewise a
+   `step.expiresAt` or `display.expiresAt` (bridge host time, ms) that has passed, where the
+   bridge host sends one. `state` is one of `pending`, `active`, `complete`, `cancelled` or
    `error`. `step` is `null` until the bridge host sends the first step (while `pending`);
    then render it (the `LoginStep` type in `@trioditis/core/bridge-protocol`):
    - `displayAndWait`: with `display.type` `qr`, draw `display.data` as a QR code; with
      `code`, show it big, for typing on the phone; with `emoji`, show it to compare
    - `userInput`: a form from `fields` (`id`, `type`, `name`, `description?`, `pattern?`)
-   - `cookies`: ask for the listed cookies from `cookies.url`
+   - `cookies`: with `cookies.browser`, show the sign-in browser: get a ticket and an
+     admission from `api.logins.openBrowser({ loginSessionId, stepId, sessionId })` and open
+     the `/login-browser` websocket with them (signin-browser.md, Tickets). The person signs in on the site
+     and the bridge host submits what it needs itself, so there is nothing to submit here.
+     Offer pasting the listed cookies from `cookies.url` as the fallback, and only that when
+     `browser` is absent. With `cookies.hidden` (and `browser`), say it's working: the step
+     runs by itself
    - `complete`: done, the account is connected
    - `error`: show the message for `step.error` (an error code; see bridge-protocol.md,
      Errors) and offer to start again
-3. Submit what the person entered, sealed to the bridge key, since it's a credential:
+3. Submit what the person entered (a form, or pasted cookies), sealed to the bridge key,
+   since it's a credential:
 
    ```ts
    await convex.mutation(api.logins.submit, {
@@ -714,14 +974,26 @@ network with `termsRisk` (cookie or token logins can get an account banned).
    })
    ```
 
-4. Cancel with `api.logins.cancel({ loginSessionId })`. It's best effort: a login that
-   completes while the cancel is on its way still connects.
+4. Cancel with `api.logins.cancel({ loginSessionId })`. The login is `cancelled` at once,
+   and later steps for it are ignored; it returns `cancelled`, or `complete` or `error` if the
+   login had already ended that way (then it changes nothing). Cancelling again is the same.
+   A login the bridge host finishes anyway (before the cancel reached it) isn't logged out:
+   its account is kept with `connectedAfterCancel: true` (below), unless it reconnected an
+   account the person already had.
 
 Accounts: `api.logins.accounts` returns
-`[{ _id, network, state, error, lastHealthyAt, updatedAt, logoutPending, logoutError }]`.
+`[{ _id, network, state, error, lastHealthyAt, updatedAt, hint, sealedMeta, logoutPending, logoutError, connectedAfterCancel }]`.
+`connectedAfterCancel` is true for an account a login the person cancelled connected anyway:
+they decide, with `api.logins.keep({ networkAccountId })` (clears it) or a disconnect (which
+clears it too). A later normal login of the account clears it as well.
+`hint` tells the person's accounts on one network apart, as far as the backend can: `ID …` and the
+login ID's last four characters. `sealedMeta` (`{ sealed, objectId }`, kind `account`, sealed to
+the owner) carries the bridge host's own hint (the number or username), which the app shows in its
+place. The login ID itself isn't returned.
 `state` is `CONNECTED`, `CONNECTING`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` (reconnect
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
-one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
+one, returning `queued`, `pending` (one is already on its way) or `loggedOut` (nothing to do):
+`logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
 bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
 hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why. Both
 happen on time whether or not a gateway is running, with the same two exceptions as sends: a
@@ -730,17 +1002,18 @@ and one queued before deadline jobs existed is settled either by the gateway's s
 gateway is running, or once the migrations run (`migrations:runAll`, which `pnpm dev` and
 the installer run after each deploy), whichever comes first.
 
-Errors: `That network isn’t enabled on this server.` · `Finish setting up your key, with
+Errors: `That network isn’t installed on this server.` · `Finish setting up your key, with
 its password and recovery key, before connecting a network.` · `That isn’t a login method
 this network offers.` · `That step of the login is over. Start again if it didn’t finish.` ·
 `That input isn’t sealed, or is too long.` · `That’s already been sent. Wait for the next
-step.` (a second submission for the same step) · `That login doesn’t exist.` · `That
-account doesn’t exist.`
+step.` (a second submission for the same step) · `That step of the login can’t be opened in
+a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login doesn’t exist.` ·
+`That account doesn’t exist.`
 
 ### Health
 
-`api.networks.health` returns, for each enabled network,
-`{ network, bridgeOnline, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
+`api.networks.health` returns, for each network in `networks.list`,
+`{ network, bridgeOnline, bridgeLastSeenAt, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
 
 | `status`   | Means                                                                      |
 | ---------- | -------------------------------------------------------------------------- |
@@ -750,17 +1023,50 @@ account doesn’t exist.`
 | `none`     | The person hasn't connected this network                                   |
 
 `bridgeOnline` goes false two minutes after the bridge host's last heartbeat. Queries rerun
-when data changes, not when time passes, so recheck on focus.
+when data changes, not when time passes, so a host that stops heartbeating stays
+`bridgeOnline` in an answer already given. A live host's heartbeat changes
+`bridgeLastSeenAt` (null if never heard from) every 30 seconds, so treat the bridge as down
+once two minutes (`BRIDGE_HOST_STALE_MS`) pass by the client's clock without a new one, and
+recompute `status` with `networkStatus` from `@trioditis/core`. Timing it from when the
+client got the value, not from the value itself, keeps a fast or slow client clock from
+misjudging it.
+
+### Installing networks (admins)
+
+The server runs a bridge host for each network in `TRIODITIS_NETWORKS` (the installer runs
+one for every network unless the operator narrows it; docs/deploy.md). Admins choose which of
+those people can connect:
+
+- `api.networks.catalog` lists every network Trioditis knows, for the admin panel:
+  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, bridgeLastSeenAt, accounts }[]`.
+  `bridged` says the server runs its bridge host; one it doesn't can't be installed, and the
+  operator adds it with the installer (Telegram also needs its API ID and hash). `accounts`
+  counts the accounts connected to it, everyone's together; never whose.
+- `api.networks.install({ network, sessionId? })` installs one: it appears in
+  `networks.list` for everyone. Installing one already installed does nothing.
+- `api.networks.remove({ network, sessionId? })` removes one: nobody can start connecting it,
+  logins in progress on it end (`cancelled`), and every account on it, anyone's, gets a logout
+  as if its owner had disconnected it. The logouts go out in batches just after it returns; an
+  account whose login finishes anyway is logged out as soon as it reports in. Chats stay; what
+  the bridge host sends before a logout lands still arrives.
+
+All three are for admins only (`Only an admin can do that.`). Errors: `This server doesn’t run
+a bridge for <network>, so it can’t be installed here.`
+
+A server upgraded from before admins installed networks keeps the ones people had connected:
+the migrations install each network with an account that isn't logged out.
 
 ## Demo data
 
 For previews and the nightly. `api.demo.seedForMe({ sessionId? })` (an action) gives the
-signed-in person a connected fake-network account with six contacts and eight chats (two
+signed-in person a connected account on each of seven networks (WhatsApp, Signal, Google
+Messages, Telegram, Instagram, Slack and Messenger), with six contacts and eight chats (two
 groups, a pinned chat, a message request, a snoozed chat and an archived one) of 20
 messages each. The fixtures are made-up text sealed on the server to the person's identity
 public key, so they open like anything else. It needs `keys.setup` done first and works only
-where `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` (exactly when `server.info` says
-`demo: true`). The contacts, and each chat with its messages, are written whole, so a call
+where `TRIODITIS_DEMO=1` and no bridge host is configured (`TRIODITIS_NETWORKS` empty or
+unset; exactly when `server.info` says `demo: true`), so no real account can be there. The
+accounts look connected, but no bridge host runs them. The contacts, and each chat with its messages, are written whole, so a call
 that fails partway leaves no half-written chat, and calling again finishes the rest. Once
 everything is there, a call does nothing (`{ seeded: false }`). Errors: `Demo data is only
 available on demo deployments.` · `Set up your key first (keys.setup), then load the demo.`
@@ -777,22 +1083,247 @@ available on demo deployments.` · `Set up your key first (keys.setup), then loa
 
 ## Contacts
 
-Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID
-`ghostId`. A query for them comes with the conversation view (see Questions).
+Contact profiles (name, handle, avatar) are sealed with kind `contact`, object ID `ghostId`;
+the plaintext is `ContactPlaintext`. A profile is shared: every member who has the contact gets
+the same one. What each of the person's own logins knows a contact by is sealed apart, to the
+person only (object ID `<ghostId>/identifiers/<loginId>`, plaintext
+`ContactIdentifiersPlaintext`: URIs such as `tel:+15551234567`), since what each login can see
+differs. Each login's is its own row, replaced only by that login's, and needs no profile first.
+
+| Function               | Arguments                           | Returns                                                                                  |
+| ---------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `contacts.get`         | `network`, `ghostIds` (at most 100) | `[{ ghostId, sealedProfile }]` for the ones the person has a contact for on that network |
+| `contacts.list`        | `paginationOpts` (up to 500 a page) | `{ network, ghostId, sealedProfile }` pages, every network, in no meaningful order       |
+| `contacts.identifiers` | `paginationOpts` (up to 500 a page) | `{ network, ghostId, loginId, sealed }` pages: each login's identifiers for a contact    |
+| `contacts.sync`        | `networkAccountId`                  | `{ queued }`. Sends that account's contacts' numbers again; within ten minutes, nothing  |
+
+A message's sender is `{ ghostId }` on its chat's network, so the client collects a page's ghost
+IDs and asks `contacts.get` once (the desktop app does this in group chats, to name each sender
+beside an avatar, with its picture: see Media). Each profile is at most 8 KiB.
+
+The address book reads every page of `contacts.list` and `contacts.identifiers` to match contacts
+to its cards (People). A page can come back short, or empty, before the end; keep going while
+`isDone` is false.
+
+Identifiers come only from what a login's own chats carry: on networks where a contact's ID can
+be their phone number (WhatsApp, for a contact not hidden behind a LID; `CONTACT_LIST_NETWORKS`),
+each new contact comes with that number, sent once per login, and `contacts.sync` sends them again
+for the contacts in that account's chats. Networks' own contact lists aren't used yet: each
+connector's reaches past the login that asks (Telegram's changes the profile every member sees,
+WhatsApp's fills numbers in from a map the whole host shares, Signal's adds a username from the
+shared profile, Google Messages's logs numbers), so they wait for those connectors to be patched.
+
+Errors: `Ask for at most 100 contacts at once.` · `That account doesn’t exist.` · `That account
+isn’t connected.`
+
+## People
+
+The person's address book: a card for each person they know, whatever networks they're on.
+A card's plaintext is `PersonPlaintext` (packages/core, `people.ts`), modelled on vCard: name
+and its parts, nickname, organization and title, phone numbers, emails, usernames, websites and
+addresses (each with a label), birthday, note, a small photo, and `links`, the network contacts
+(`{ network, ghostId }`) the card is about. Each card is sealed to the person only (kind
+`person`, object ID `personKey`, which the client picks: 16 to 64 letters, digits, `-` and `_`),
+so the server stores ciphertext and how many cards there are, never who is on them or which
+contacts a card links.
+
+| Function          | Arguments                                                                 | Returns                                                                        |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `people.list`     | `paginationOpts` (up to 100 a page)                                       | `{ personKey, sealed, updatedAt }` pages, in `personKey` order                 |
+| `people.revision` |                                                                           | The address book's revision                                                    |
+| `people.put`      | `people: { personKey, sealed }[]` (at most 100), `revision`, `sessionId?` | The new revision. Adds cards or replaces the ones with those keys, all or none |
+| `people.remove`   | `personKeys` (at most 100), `revision`                                    | The new revision. A key with no card is skipped                                |
+
+A sealed card is at most 64 KiB, and a person can have at most 10,000. `people.put` takes the
+page's `sessionId`, like the other sealed writes, and refuses it once the browser has signed in
+to another account.
+
+Every write names the revision it was worked out from, and is refused with code
+`people_changed` if the address book has moved on (another device wrote to it). The server
+can't check links itself, since they're sealed; this is what keeps two devices from linking one
+contact to two cards. The client waits for the new revision and its cards, and works the change
+out again: a link is moved again, an import carries on from the call that was refused, and an
+edit to a card that changed meanwhile is given up, for the person to look at first.
+
+Matching happens on the device, since only it can open both sides (packages/core):
+
+- **Import and export.** `parseContactsFile` reads a vCard file (2.1, 3.0 and 4.0: what iPhone,
+  iCloud, Android, Google Contacts, Outlook and macOS export) or a Google Contacts or Outlook
+  CSV. Importing a card whose UID matches one already here replaces its fields with the file's,
+  keeping its links (and its photo, if the file has none); a UID the file repeats is one card.
+  `toVCards` writes vCard 3.0. The desktop app makes imported photos 128 pixels at most.
+- **Google Contacts.** Where an admin has set up a Google OAuth client (`google.contacts`), the
+  client reads the person's contacts from Google itself: it signs in to Google for read-only
+  access (`contacts.readonly`, the token returned in the fragment of the server's
+  `/google-contacts.html`), reads `people.connections.list`, and imports the cards as a file's
+  would (`cardFromGoogle`; each card's UID is `google:<resourceName>`, so reading the account again
+  updates them). The token stays in the page's memory for that one import: the server never
+  sees it or the contacts. As with everything sealed (sealing.md, Goal and limits), this holds
+  for the app as the server serves it: an operator who changes the served page could read the
+  token, as they could read what the page opens. In a browser the sign-in is a popup, which answers its opener over a
+  `BroadcastChannel`, by the state it asked with. The desktop app opens it in the system's
+  browser, and `/google-contacts.html` hands the answer back as
+  `trioditis://<server>/google-contacts#state=…&access_token=…`, which the app gives only to the
+  server that asked, with the same state. The app only asks where the system has it as the
+  scheme's handler; where it isn't (a development run, an AppImage without desktop integration),
+  and where there's no client ID, People says how to export a vCard file from Google and import
+  it. On Windows and Linux the system hands the link over in the app's launch arguments, which
+  other programs of the same user can read while it starts.
+- **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
+  phone number, email or username with it, or failing that has exactly the same name as one
+  card. Numbers match with or without their country code (the shorter must end the longer;
+  two with country codes must be equal). The person confirms every link; the app can link all
+  the matches that aren't by name and point at one card only, in one go.
+- **Not in People.** `groupUnlinked` groups the contacts on no card that share an identifier
+  exactly, so one person on several networks becomes one card (`cardFromContacts`). A number
+  saved without its country code can end two different full numbers, so it never joins them.
+- A contact is on one card at most: linking it to a card takes it off any other
+  (`moveLinks`).
+
+Errors: `Your people changed on another device. Try again.` (`people_changed`) · `That person
+ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
+person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
+people at once.` · `You can have at most 10,000 people.`
+
+### Google Contacts
+
+| Function             | Arguments                                       | Returns                                             |
+| -------------------- | ----------------------------------------------- | --------------------------------------------------- |
+| `google.contacts`    |                                                 | `{ clientId }`: the Google OAuth client ID, or null |
+| `google.setContacts` | `clientId` (or null to remove it), `sessionId?` | null. Admins only                                   |
+
+The client ID is for a Google Cloud OAuth client of type Web application, with the People API
+turned on, the server's origin as an authorized JavaScript origin, and
+`<origin>/google-contacts.html` as an authorized redirect URI (Admin settings → Contacts shows
+both). A client ID isn't a secret; no client secret is used.
+
+Errors: `Only an admin can do that.` · `That isn’t a Google OAuth client ID. It ends in
+.apps.googleusercontent.com.`
+
+## New chats
+
+A chat starts on one of the person's connected accounts, with one of their contacts there or
+with whoever a phone number or username belongs to. The identifier is sealed to the
+bridge key (kind `outbound`, object ID `requestId`, plaintext `{ identifier }`), so the server
+never sees it.
+
+| Function          | Arguments                                                                                                  | Returns                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `newChats.start`  | `networkAccountId`, `requestId` (16 to 64 of `A-Za-z0-9_-`), `ghostId` or `sealedIdentifier`, `sessionId?` | null. The same `requestId` again does nothing                             |
+| `newChats.status` | `requestId`                                                                                                | `{ state: 'pending' \| 'started' \| 'failed', chatId?, error? }`, or null |
+
+The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
+already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
+on the network has that identifier), `invalid_identifier` (it isn't written as a number or
+username the network takes), `unsupported`, `not_connected`, `rate_limited`,
+`network_rejected`, `timeout` (the network took over two minutes, or no host reported back), or
+`expired` (no bridge host took it in ten minutes; one that does later doesn't start it). Only
+the host the command went to can answer it.
+
+What a chat can start from depends on the network's connector (`START_TARGETS` in
+packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google Messages take a
+contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
+Instagram, Slack and LinkedIn a contact; X a username. The bridge host passes a number on as digits with
+its `+` (Signal needs the country code) and a username without its `@`, checked against the
+network's own username grammar. A number's formatting (spaces, dashes, dots, brackets, `tel:`,
+`00` for `+`) is taken off first; anything else is `invalid_identifier` (it could be one of the
+connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
+host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
+chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
+IDs and X's only screen names, so those are left out. A contact's chat can start on any of the person's accounts on
+that network; `contacts.list` gives the ones whose logins sent the contact (`networkAccountIds`),
+and the desktop app offers those first, letting the person choose when there's more than one
+account, since some networks' contact IDs belong to one login. The desktop app offers a card's linked
+contacts first, then its numbers on networks that take them, then its usernames on their own
+network, on the first account there. A `ghostId` must be one of the person's contacts on that
+account's network. A person can start 20 chats a minute; requests are kept a day. The bridge
+host silences connector logging while it resolves an identifier, since what connectors log can
+include it (whatsmeow's own debug output still names it: never run WhatsApp with `--verbose` in
+production).
+
+Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
+`That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
+sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
+then try again.`
+
+## Agents
+
+People's own agents connect over MCP at `<site>/mcp` (`convex/mcp.ts`; docs/PLAN.md, Agents).
+`@convex-dev/mcp` is the OAuth 2.1 server: an agent registers itself and sends the person to
+`<site>/agents/connect?request=<id>`, the app's consent page.
+
+- **Scopes.** Only scopes a tool uses are offered: today `read`, for `list_networks`. An agent
+  asking for any other is refused at `/mcp/oauth/authorize` (`invalid_scope`); one asking for
+  none gets `read`. Drafting, sending and channels come with their tools. A request still
+  waiting with a scope the server no longer offers can't be approved: `mcp.authorize` throws
+  `This agent asked for access Trioditis doesn’t offer yet…`; denying it still works.
+- **The consent page** runs behind the app gate, so the person is a signed-in member with their
+  key unlocked. A person who must sign in first comes back to it: the page keeps the request ID
+  in this tab's `sessionStorage` for ten minutes, and sign-in opens only `/agents/connect` with
+  it. It refuses to show the choice inside a frame. It shows `api.mcp.getAuthRequest({ requestId })`:
+  `clientName` (the agent's own, unchecked; labelled so), where approval returns
+  (`redirectUri`'s host), the scopes with their descriptions, and the account's email. Allow or
+  Deny calls `api.mcp.authorize({ requestId, approve, sessionId })` (bound to the page's session,
+  Key writes are bound to the page's session) and sends the browser to the `redirectUrl` it
+  returns, which carries the agent's `state`. A request already answered or expired is
+  refused (`…has expired`). The device flow is off.
+- **Connections.** The agent's connection exists once it trades the code for its token; it is
+  owned by the approving account and acts only as it. Settings → Agents lists
+  `api.mcp.listConnections({})`: `{ id, kind, name, clientId, scopes, createdAt, lastUsedAt? }`,
+  newest first, only the caller's. `api.mcp.revokeConnection({ id })` disconnects one at once,
+  ending its tokens; it returns false for an ID that isn't the caller's.
+- **`list_networks`** returns `{ networks: [{ accountId, network, name, state, bridgeOnline,
+connected, disconnecting, connectedAt, lastHealthyAt }] }`. `accountId` is the account's
+  opaque ID, which tells apart two accounts on one network; never the network's login ID.
+  `connected` is true only when `state` is `CONNECTED` and the network's bridge host was heard
+  from in the last two minutes, the same age the app's status uses (`networks.ts`); otherwise
+  `state` may be out of date.
+
+## Server updates
+
+Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the
+mutations take the page's `sessionId` like the other admin ones.
+
+- `api.updates.status` returns `{ channel, autoUpdate, version, updaterConfigured, request,
+updater }`: the release channel (`stable` or `nightly`) and whether updates install on
+  their own; the deployed commit (as `server.info`); whether the server has an updater at all;
+  the admins' request the updater hasn't finished (`{ kind: 'check' | 'update', at }`); and
+  the updater's last report, `{ seenAt, state, message?, startedAt?, current?, latest? }`.
+  `state` is `idle`, `checking`, `updating` or `failed`; `current` is the commit the server
+  runs; `latest` is the newest commit on `latest.channel` when it last looked
+  (`checkedAt`), with `behind` (commits it has that the server doesn't) and `ahead` (the
+  other way round). An update is available when `latest.channel` is the chosen channel,
+  `behind > 0` and `ahead` is 0. The updater reports every ten minutes.
+- `api.updates.setChannel({ channel })` and `api.updates.setAutoUpdate({ enabled })`.
+  Changing the channel also asks the updater to check the new one.
+- `api.updates.request({ kind })` asks the updater to check now or to update to the newest
+  version; refused while an update runs, or where the server has no updater. A check doesn't
+  replace a waiting update. `api.updates.cancelRequest({})` takes back one the updater hasn't
+  started.
+
+The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECRET`.
 
 ## Questions and follow-ups
 
 1. **Done:** mentions and message requests come from the bridge host and are applied at
    ingest, and a new message wakes a snoozed chat. A read receipt from the person's phone
-   recounts unread and mentions after it.
+   recounts unread and mentions after it. The chat keeps how far the person has read
+   (`readSortKey`, from `chats.markRead` or their own receipt, only ever forward), so a
+   message that arrives late but sorts before it isn't counted unread, and an older receipt
+   doesn't bring counts back. Someone else's receipt marks the person's own messages up to it
+   `read`: every one since the last such receipt (`theirReadSortKey`), 100 per transaction
+   with the rest scheduled, and one that arrives late behind it is `read` on arrival. Quarantined events are listed to admins
+   (`quarantine.list`: host, sequence, type, reason and time only) and dismissed with
+   `quarantine.dismiss({ ids })`.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
-3. **A contacts query**: planned, see Next.
+3. **Done:** contacts queries (Contacts): for a page's senders, and every contact for the
+   address book. A list of a chat's members still needs a `members` event from the bridge host.
 4. **Drafts** synced across devices are in the plan (a sealed `drafts` table) but not built.
-5. **Media**: planned, see Next.
+5. **Media**: downloads are built (see Next); uploads, for sending a file, are planned.
 6. **Changing the email** needs re-deriving `authPassword`; there's no email change yet.
-7. **Passkey PRF unlock**: the backup storage exists (`putBackup` with `kind: 'passkey'`),
-   but the PRF flow in the UI doesn't yet.
+7. **Done:** passkey PRF unlock. Adding a passkey makes its backup when the authenticator
+   gives a PRF output, and signing in with one unlocks the key in the same touch (Passkeys).
 8. **Label filter order**: a label view is in labelling order, not recency. Sorting it by
    recency needs a per-label recency index.
 
@@ -804,35 +1335,48 @@ request. Until one lands, the UI keeps the control disabled or shows the fallbac
 here.
 
 1. **Server info (built).** `api.server.info` (a query, no sign-in needed) returns
-   `{ demo, invitations }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
-   `TRIODITIS_NETWORKS=fake`, as `demo.seedForMe` needs), and `invitations` whether admins
+   `{ demo, invitations, version }`: `demo` is whether demo data loads here (`TRIODITIS_DEMO=1` and
+   no `TRIODITIS_NETWORKS`, as `demo.seedForMe` needs), and `invitations` whether admins
    can invite people here (false wherever `TRIODITIS_DEMO=1`). The client hides invite controls, and shows demo-only ones, from it instead
-   of waiting for a mutation's error. The enabled networks stay in `api.networks.list`.
-2. **Contacts for senders.** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
+   of waiting for a mutation's error. The installed networks stay in `api.networks.list`.
+   `version` is the commit the installer deployed (`TRIODITIS_VERSION`), or null where none
+   was set (`pnpm dev`, previews); an open page compares it with its own build's to pick up
+   an update (`docs/deploy.md`, Updating live).
+2. **Contacts for senders (built).** `api.contacts.get({ network, ghostIds })`, at most 100 IDs,
    returns `{ ghostId, sealedProfile }[]` for those the person has (open with kind
    `contact`, object ID `ghostId`; plaintext is `ContactPlaintext`). The client collects
    the `ghostId`s on a page of messages and asks once per page. A list of a chat's members
-   needs a new `members` event from the bridge host, so it comes later. Fallback: the
-   sender shows as "Someone".
+   needs a new `members` event from the bridge host, so it comes later. Fallback: no sender
+   name; a sender's messages run together as their own bubbles.
 3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
    envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
    replaced the `sealedPreview` planned here, so nothing new is sealed for it.
-4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
-   email, sealed to the bridge key) and `startChat`, following bridgev2's
-   `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls
-   `api.chats.start({ networkAccountId, sealedIdentifier })` and watches the returned
-   `commandId` until it gives a `chatId` or an error code (`not_found`, `unsupported`).
-   Networks that can't resolve identifiers report `unsupported`, and the button stays
-   disabled for them (`api.networks.list` gains `canStartChats`). Fallback: "New message"
-   disabled.
-5. **Media.** Files go through Convex file storage as ciphertext only (the key and nonce
-   stay in the sealed message, see `sealing.md`, Media):
-   - **Download:** `api.media.url({ chatId, mediaId })` returns a short-lived URL for the
-     encrypted file, which the client decrypts. The bridge host uploads incoming files
-     encrypted through the gateway (`POST /v1/media`), before the `message` event that
-     names them.
-   - **Upload:** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
+4. **New chat (built).** See New chats.
+5. **Media.** Files only ever leave the bridge host as ciphertext; the key and nonce stay in the
+   sealed message (see `sealing.md`, Media).
+   - **Download (built):** the bridge host keeps each incoming file encrypted in its media
+     store, and the client fetches it from the gateway on the app's own origin:
+     `GET /media/<mediaId>` with `Authorization: Bearer <token>`, which Caddy forwards to the
+     gateway's public listener. The token comes from `api.media.access({ network })`
+     (`{ token, expiresAt }`, good for an hour; ask again before it runs out, or after a
+     `401`): it is signed with `GATEWAY_SECRET` and names the person and the network's bridge
+     hosts, and the gateway asks those hosts for the file (bridge-protocol.md, Media), each of
+     which gives a person only their own. The answer is the ciphertext as
+     `application/octet-stream` with `no-store`, so no cache answers in place of the gateway's
+     checks; a `404` means no host has it for this person, `502` a host failed, `503` too many
+     files at once (retry after a second). The client decrypts it with
+     `decryptMedia(ciphertext, key, nonce, userId, mediaId)` from `@trioditis/crypto` and keeps
+     it only in memory: it shows pictures, video and sound (and SVG is not a picture here) from
+     `data:` URLs, never a Blob, which the browser may page to disk. A file becomes a Blob only
+     when the person saves it, and then as `application/octet-stream`, so it never opens as a
+     page on the app's origin. A chat's or a contact's `avatar` is fetched the same way.
+   - The desktop app shows pictures up to 25 MiB in place (trying again a few times when one
+     fails), holding only those within about two screens of the view and letting the rest go;
+     it plays video and sound up to 50 MiB when asked, and saves other files. A picture with no
+     caption has its file name as its `body`, which is not shown as a caption.
+   - **Upload (planned):** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
      URL for the encrypted file; the send's attachment names the returned `mediaId`, and
      the bridge host fetches it through the gateway and decrypts it with the key in the
      outbound plaintext. Unsent uploads are deleted after a day.
-   - Fallback: an attachment shows as a "can't open yet" tile with its name and size.
+   - Fallback until uploads land: the composer can't attach a file. A file that can't be
+     fetched shows its name and size, with a way to try again.

@@ -22,3 +22,21 @@ export function randomToken(bytes = 32): string {
   for (const byte of buffer) binary += String.fromCharCode(byte)
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 }
+
+function base64url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
+/** HMAC-SHA256 of a UTF-8 message under a UTF-8 key, base64url. */
+export async function hmacBase64url(key: string, message: string): Promise<string> {
+  const imported = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(key),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  return base64url(new Uint8Array(await crypto.subtle.sign('HMAC', imported, new TextEncoder().encode(message))))
+}

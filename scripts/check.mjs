@@ -1,6 +1,7 @@
 // Runs exactly what CI runs (.github/workflows/checks.yml), so a branch can be checked locally
-// when GitHub Actions can't run: the TypeScript typecheck, lint and tests, and the bridge
-// host's Go vet and tests. Prints a summary and exits non-zero if any check failed.
+// when GitHub Actions can't run: the TypeScript typecheck, lint and tests, the release notes'
+// format, and the bridge host's Go vet and tests. Prints a summary and exits non-zero if any
+// check failed.
 //
 //   pnpm check
 import { existsSync } from 'node:fs'
@@ -13,6 +14,8 @@ const checks = [
   { name: 'pnpm lint', cmd: 'pnpm', args: ['lint'] },
   { name: 'pnpm test', cmd: 'pnpm', args: ['test'] },
   { name: 'pnpm test:scripts', cmd: 'pnpm', args: ['test:scripts'] },
+  // CI also checks that a pull request adds a note; that needs the pull request's base.
+  { name: 'release notes', cmd: 'node', args: ['scripts/release-notes.mjs', 'check'] },
 ]
 let go = null
 if (existsSync(resolve(bridgeDir, 'go.mod'))) {
@@ -20,7 +23,22 @@ if (existsSync(resolve(bridgeDir, 'go.mod'))) {
     go = goEnv()
     checks.push(
       { name: 'go vet ./...', cmd: 'go', args: ['vet', './...'], cwd: bridgeDir, env: go },
+      // Signal's code is only compiled with this tag; vetting needs no libsignal to link.
+      {
+        name: 'go vet -tags libsignal ./...',
+        cmd: 'go',
+        args: ['vet', '-tags', 'libsignal', './...'],
+        cwd: bridgeDir,
+        env: go,
+      },
       { name: 'go test ./...', cmd: 'go', args: ['test', './...'], cwd: bridgeDir, env: go },
+      // The patched mautrix-signal and mautrix copies are upstream plus their patches, nothing else.
+      {
+        name: 'mautrix-signal and mautrix copies match their patches',
+        cmd: 'node',
+        args: ['scripts/signal-fork.mjs', 'check'],
+        env: go,
+      },
     )
   } catch (error) {
     checks.push({ name: 'go vet, go test', blocked: error.message })

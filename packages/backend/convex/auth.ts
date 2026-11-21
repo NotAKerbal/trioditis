@@ -1,5 +1,5 @@
 import { APIError, createAuthEndpoint, createAuthMiddleware, getIP } from 'better-auth/api'
-import type { BetterAuthPlugin } from 'better-auth'
+import type { BetterAuthPlugin, DBAdapter, Where } from 'better-auth'
 import { betterAuth, type BetterAuthOptions } from 'better-auth/minimal'
 import { passkey } from '@better-auth/passkey'
 import { createClient } from '@convex-dev/better-auth'
@@ -340,6 +340,25 @@ function withRetryAfter(response: Response) {
  * The per-account limit. It runs after Better Auth's per-address one, so requests that one
  * refused don't use up the account's bucket.
  */
+/** What a password sign-in noted about the account before its password was checked. */
+type CredentialNote = { version?: number }
+
+/**
+ * Notes the account's `credentialVersion` as a password sign-in arrives, before Better Auth reads
+ * the password hash, for the session hook in `createAuthOptions` to check again once the session
+ * exists. See account.ts, A password sign-in racing a change or reset.
+ */
+const credentialFence = (ctx: GenericCtx<DataModel>, note: CredentialNote) =>
+  ({
+    id: 'trioditis-credential-fence',
+    onRequest: async (request, auth) => {
+      if (authPath(request, auth.baseURL) !== '/sign-in/email' || !('runQuery' in ctx)) return
+      const email = await requestEmail(request)
+      if (!email) return
+      note.version = await ctx.runQuery(internal.account.credentialVersionFor, { email })
+    },
+  }) satisfies BetterAuthPlugin
+
 const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
   ({
     id: 'trioditis-account-rate-limit',
@@ -363,14 +382,82 @@ const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
   }) satisfies BetterAuthPlugin
 
 /**
+ * The Convex adapter, with the queries it can't run as Better Auth writes them put another way.
+ * Better Auth clears a challenge's stale copies as it uses one (`consumeVerificationValue`) with
+ * `identifier = X, id ne <the one in use>, createdAt <= <its time>`, and the Convex adapter (0.13)
+ * refuses that twice: `ne` on an ID, though it filters `ne` like `not_in`, and a `createdAt` bound
+ * next to an equality, which it sends to the index under the wrong name. So every passkey
+ * registration and passkey sign-in failed with a 500. Here `id ne` becomes `not_in [id]`, the
+ * same filter, and a delete bounded by `createdAt` alongside other clauses reads the rows by the
+ * others, keeps those in the bound, and deletes them by ID: the same rows.
+ */
+export function forConvex(
+  adapter: (options: BetterAuthOptions) => DBAdapter<BetterAuthOptions>,
+): (options: BetterAuthOptions) => DBAdapter<BetterAuthOptions> {
+  const rewrite = (where: Where[] | undefined) =>
+    where?.map((w): Where =>
+      w.field === 'id' && w.operator === 'ne' && typeof w.value === 'string'
+        ? { ...w, operator: 'not_in', value: [w.value] }
+        : w,
+    )
+  const time = (value: unknown) => new Date(value as string | number | Date).getTime()
+  const within = (value: unknown, { operator, value: bound }: Where) => {
+    const [a, b] = [time(value), time(bound)]
+    return operator === 'lt' ? a < b : operator === 'lte' ? a <= b : operator === 'gt' ? a > b : a >= b
+  }
+  const METHODS = ['findOne', 'findMany', 'count', 'update', 'updateMany', 'delete', 'deleteMany', 'consumeOne']
+  type Adapter = Record<string, (...args: never[]) => unknown>
+  const wrap = (base: Adapter): Adapter => {
+    const wrapped: Adapter = { ...base }
+    for (const method of METHODS) {
+      const call = base[method] as ((args: { where?: Where[] }) => unknown) | undefined
+      if (typeof call !== 'function') continue
+      wrapped[method] = (args: { where?: Where[] }) => call.call(base, { ...args, where: rewrite(args.where) })
+    }
+    const deleteMany = base.deleteMany as (args: { model: string; where?: Where[] }) => Promise<number>
+    const findMany = base.findMany as (args: {
+      model: string
+      where?: Where[]
+      limit?: number
+    }) => Promise<{ id: string; createdAt: unknown }[]>
+    const remove = base.delete as (args: { model: string; where: Where[] }) => Promise<void>
+    wrapped.deleteMany = async (args: { model: string; where?: Where[] }) => {
+      const where = rewrite(args.where) ?? []
+      const bound = where.find((w) => w.field === 'createdAt' && ['lt', 'lte', 'gt', 'gte'].includes(w.operator ?? ''))
+      if (!bound || where.length === 1 || where.some((w) => w.connector === 'OR')) {
+        return deleteMany.call(base, { ...args, where })
+      }
+      const rows = await findMany.call(base, {
+        model: args.model,
+        where: where.filter((w) => w !== bound),
+        limit: 1000,
+      })
+      const stale = rows.filter((row) => within(row.createdAt, bound))
+      for (const row of stale) await remove.call(base, { model: args.model, where: [{ field: 'id', value: row.id }] })
+      return stale.length
+    }
+    // Better Auth makes these calls inside a transaction, on the adapter the transaction hands it,
+    // which is the unwrapped one: so that one is wrapped too.
+    const transaction = base.transaction as ((run: (trx: Adapter) => unknown) => unknown) | undefined
+    if (typeof transaction === 'function') {
+      wrapped.transaction = (run: (trx: Adapter) => unknown) => transaction.call(base, (trx) => run(wrap(trx)))
+    }
+    return wrapped
+  }
+  return (options) => wrap(adapter(options) as unknown as Adapter) as unknown as DBAdapter<BetterAuthOptions>
+}
+
+/**
  * Better Auth's settings. Kept apart from `createAuth` so the component's adapter can read
  * them without starting Better Auth.
  */
 export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
+  // Better Auth is made afresh for each request (createAuth), so this belongs to one sign-in.
+  const signIn: CredentialNote = {}
   return {
     baseURL: siteUrl,
     trustedOrigins: [siteUrl],
-    database: authComponent.adapter(ctx),
+    database: forConvex(authComponent.adapter(ctx)),
     advanced: ipOptions.advanced,
     logger: {
       log: (level, message, ...args) => {
@@ -435,6 +522,27 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       revokeSessionsOnPasswordReset: true,
     },
     databaseHooks: {
+      session: {
+        create: {
+          // A password sign-in's session is kept only if the password didn't change while it was
+          // being checked (account.fenceNewSession). Thrown before the cookie is set, so the
+          // ended session's token never reaches the browser.
+          after: async (session) => {
+            if (signIn.version === undefined || !('runMutation' in ctx)) return
+            const kept = await ctx.runMutation(internal.account.fenceNewSession, {
+              sessionId: session.id,
+              userId: session.userId,
+              noted: signIn.version,
+            })
+            if (!kept) {
+              throw new APIError('UNAUTHORIZED', {
+                code: 'PASSWORD_CHANGED',
+                message: 'Your password was just changed. Sign in with the new one.',
+              })
+            }
+          },
+        },
+      },
       user: {
         create: {
           // Runs for every new account, however it is created. Sign-up runs in an HTTP
@@ -494,6 +602,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       convex({ authConfig }),
       endSession(ctx),
       accountRateLimit(ctx),
+      credentialFence(ctx, signIn),
       passkeySessionBinding,
     ],
   } satisfies BetterAuthOptions

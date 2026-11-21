@@ -1,4 +1,5 @@
 import type * as React from 'react'
+import { Wordmark } from '@trioditis/ui/wordmark'
 
 /** The frame for signed-out screens: one task per card, centred. */
 export function AuthCard({
@@ -17,7 +18,7 @@ export function AuthCard({
       <div className="w-full max-w-[380px]">
         <div className="mb-6 flex items-center gap-2.5">
           <img src="/icon.svg" alt="" className="size-8" />
-          <span className="text-md font-bold tracking-[-0.01em]">Trioditis</span>
+          <Wordmark className="h-5" />
         </div>
         <section className="rounded-xl bg-surface p-6 shadow-raised ring-1 ring-border">
           <h1 className="text-xl font-bold tracking-[-0.015em]">{title}</h1>

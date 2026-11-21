@@ -2,9 +2,10 @@
 //
 // whatsmeow keeps each decrypted incoming WhatsApp message (plaintext) in
 // whatsmeow_event_buffer from decryption until its handler returns success, and then clears
-// the plaintext. That is normally once the message is journaled sealed, but bridgev2 also
-// reports success when its 5-minute handler limit passes, while handling carries on. A row
-// keeps its plaintext only if handling failed, the process stopped in between, or clearing
+// the plaintext. That is once the message is journaled sealed: bridgev2 reports success when
+// its 5-minute handler limit passes, while handling carries on, so the handler is wrapped to
+// wait for the journal then (Acker). A row keeps its plaintext only if handling failed, the
+// process stopped in between, a backgrounded message wasn't journaled in time, or clearing
 // it failed; WhatsApp redelivers a message that wasn't acknowledged, and the buffered copy is
 // what lets it be bridged, since the Signal session can't decrypt it twice. (A failed clear
 // is still acknowledged, so that row waits for the sweep.) Such a row can't be cleared early: it holds no message ID,

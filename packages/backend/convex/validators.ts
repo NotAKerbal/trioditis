@@ -7,6 +7,16 @@ import { ERROR_CODES, LOGIN_STATES } from '@trioditis/core/bridge-protocol'
 
 export const network = v.union(...NETWORKS.map((name) => v.literal(name)))
 
+/**
+ * The network a stored row is on: a real one, or `fake`, a test network Trioditis no longer
+ * has. Rows on it can only be deleted (migrations.purgeFakeNetwork), and the schema has to
+ * accept them until every deployment has run that, since a schema its rows don't match won't
+ * deploy. Its type is `network`'s, so nothing else handles `fake`: the purge runs right after
+ * the deploy, and only it looks for those rows. Once every deployment has run it, this
+ * becomes `network` again.
+ */
+export const storedNetwork = v.union(network, v.literal('fake')) as unknown as typeof network
+
 /** A sealed object. Only ciphertext and recipients' key IDs; never plaintext. */
 export const envelope = v.object({
   v: v.literal(1),
@@ -68,8 +78,12 @@ export const loginStep = v.object({
     v.object({
       type: v.union(v.literal('qr'), v.literal('code'), v.literal('emoji'), v.literal('nothing')),
       data: v.optional(v.string()),
+      /** When to stop showing the code (ms); the bridge host moves it on while it's good. */
+      expiresAt: v.optional(v.number()),
     }),
   ),
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt: v.optional(v.number()),
   fields: v.optional(
     v.array(
       v.object({
@@ -86,9 +100,13 @@ export const loginStep = v.object({
       url: v.string(),
       userAgent: v.optional(v.string()),
       fields: v.array(v.object({ id: v.string(), required: v.boolean() })),
+      browser: v.optional(v.boolean()),
+      hidden: v.optional(v.boolean()),
     }),
   ),
   loginId: v.optional(v.string()),
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel: v.optional(v.boolean()),
   error: v.optional(errorCode),
 })
 
@@ -176,11 +194,21 @@ export const bridgeEvent = v.union(
     isRequest: v.optional(v.boolean()),
   }),
   v.object({ ...base, type: v.literal('contact'), ghostId: v.string(), sealed: envelope }),
+  v.object({ ...base, type: v.literal('contactIdentifiers'), ghostId: v.string(), sealed: envelope }),
+  v.object({
+    ...base,
+    type: v.literal('chatStarted'),
+    requestId: v.string(),
+    portalId: v.optional(v.string()),
+    error: v.optional(errorCode),
+  }),
   v.object({
     ...base,
     type: v.literal('loginState'),
     state: loginState,
     error: v.optional(errorCode),
+    /** The account's own metadata, sealed to its owner (kind `account`, object ID `loginId`): what tells it apart. */
+    sealed: v.optional(envelope),
   }),
   v.object({ ...base, type: v.literal('loginStep'), loginSessionId: v.string(), step: loginStep }),
   v.object({
@@ -239,6 +267,8 @@ export const commandPayload = v.union(
   v.object({ type: v.literal('loginSubmit'), loginSessionId: v.string(), stepId: v.string() }),
   v.object({ type: v.literal('loginCancel'), loginSessionId: v.string() }),
   v.object({ type: v.literal('logout') }),
+  v.object({ type: v.literal('syncContacts') }),
+  v.object({ type: v.literal('startChat'), requestId: v.string(), ghostId: v.optional(v.string()) }),
   v.object({
     type: v.literal('backfill'),
     portalId: v.string(),
@@ -247,3 +277,85 @@ export const commandPayload = v.union(
   }),
 )
 export type CommandPayload = Infer<typeof commandPayload>
+
+/** A stored command's payload: also a login on the fake network, until it's purged (`storedNetwork`). */
+export const storedCommandPayload = v.union(
+  commandPayload,
+  v.object({
+    type: v.literal('loginStart'),
+    loginSessionId: v.string(),
+    network: v.literal('fake'),
+    flowId: v.optional(v.string()),
+  }),
+) as unknown as typeof commandPayload
+
+/**
+ * A release channel: `stable` follows the repository's `main` branch, `nightly` its `dev`
+ * branch. The updater on the host maps each to its branch; see docs/deploy.md, Updates.
+ */
+export const updateChannel = v.union(v.literal('stable'), v.literal('nightly'))
+export type UpdateChannel = Infer<typeof updateChannel>
+
+/** An admin's request to the updater: look for a new version, or install it. */
+export const updateRequest = v.object({
+  id: v.string(),
+  kind: v.union(v.literal('check'), v.literal('update')),
+  at: v.number(),
+  by: v.string(),
+})
+
+/** A commit of this repository, as the updater reports it. */
+export const commitInfo = v.object({ commit: v.string(), committedAt: v.number() })
+
+/**
+ * One line of a release note: what a change does for the people using the server, with its
+ * label. Each pull request writes its own (release-notes/, docs/CONTRIBUTING.md), and the
+ * updater collects those an update brings.
+ */
+export const releaseNote = v.object({
+  label: v.union(
+    v.literal('new'),
+    v.literal('improved'),
+    v.literal('fixed'),
+    v.literal('security'),
+    v.literal('internal'),
+  ),
+  text: v.string(),
+})
+export type ReleaseNote = Infer<typeof releaseNote>
+
+/** What the updater on the host last said. */
+export const updaterReport = v.object({
+  seenAt: v.number(),
+  state: v.union(v.literal('idle'), v.literal('checking'), v.literal('updating'), v.literal('failed')),
+  /** A short, plain-language note for the admin, such as why an update failed. */
+  message: v.optional(v.string()),
+  /** When the update in progress (or the one that failed) started. */
+  startedAt: v.optional(v.number()),
+  /** The commit this server runs. */
+  current: v.optional(commitInfo),
+  /**
+   * The newest commit on `channel`'s branch when the updater last looked (`checkedAt`), and
+   * how far it is from `current`: commits it has that the server doesn't (`behind`), and the
+   * other way round (`ahead`). Only an update with nothing ahead installs.
+   */
+  latest: v.optional(
+    v.object({
+      channel: updateChannel,
+      commit: v.string(),
+      committedAt: v.number(),
+      subject: v.string(),
+      /** The release notes of the commits it has that `current` doesn't. */
+      notes: v.optional(v.array(releaseNote)),
+      behind: v.number(),
+      ahead: v.number(),
+      checkedAt: v.number(),
+    }),
+  ),
+  /**
+   * The last update that went in, from commit `from` to `to`, when (`at`), and its release
+   * notes: what admins see as what's new while the server still runs `to`.
+   */
+  installed: v.optional(v.object({ from: v.string(), to: v.string(), at: v.number(), notes: v.array(releaseNote) })),
+})
+export type UpdaterReport = Infer<typeof updaterReport>

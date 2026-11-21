@@ -1,10 +1,17 @@
 import { paginationOptsValidator } from 'convex/server'
-import { ConvexError, v } from 'convex/values'
-import { mutation, query } from './_generated/server'
+import { ConvexError, v, type Infer } from 'convex/values'
+import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
+import type { Id } from './_generated/dataModel'
+import { internalMutation, mutation, query } from './_generated/server'
+import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
-import { byteSize } from './lib/bounded'
-import { forgetMessage } from './lib/lastMessage'
-import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
+import { markOwnReadRange as markRange } from './lib/ingest'
+import { forgetMessage, lastOf } from './lib/lastMessage'
+import { retired } from './lib/networks'
+import { queueCommand } from './lib/outbox'
+import { retryPlan, retryState } from './lib/retry'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
 import { envelope } from './validators'
 
 /** The most messages one page holds. */
@@ -33,6 +40,74 @@ export const list = query({
   },
 })
 
+/** The most arrivals `arrivals` returns: more between two answers notify for the newest. */
+const ARRIVALS = 10
+/**
+ * The most live messages it looks through to find them (the person's own sends and other
+ * views' messages are skipped), and the most bytes of them, well under a query's 16 MiB.
+ */
+const ARRIVALS_SCAN = 50
+const ARRIVALS_BYTES = 8 * 1024 * 1024
+
+const arrival = v.object({ arrivedAt: v.number(), message: lastMessage, chat: chatRow })
+const arrivalFeed = v.object({ latest: v.union(v.null(), v.number()), arrivals: v.array(arrival) })
+
+/**
+ * The newest messages from other people, by when they arrived, for notifications: never
+ * imported history, the person's own, deleted ones, or chats outside the inbox. `latest` is
+ * when the newest live message of any kind arrived, a cursor that doesn't move when a chat
+ * changes view, so the client notifies only for what arrived after its first answer. See
+ * client-api.md, Arrivals.
+ */
+export const arrivals = query({
+  args: {},
+  returns: arrivalFeed,
+  handler: async (ctx) => {
+    const member = await requireMember(ctx)
+    const accounts = new Map<string, Id<'networkAccounts'> | null>()
+    const out: Infer<typeof arrival>[] = []
+    let latest: number | null = null
+    let before: number | undefined
+    let seen = 0
+    let bytes = 0
+    // A few rows at a time, only as many as can't pass the byte budget however large they are.
+    scan: while (seen < ARRIVALS_SCAN) {
+      const room = Math.min(Math.floor((ARRIVALS_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), ARRIVALS_SCAN - seen)
+      if (room < 1) break
+      const batch = await ctx.db
+        .query('messages')
+        .withIndex('by_user_live', (q) => {
+          const live = q.eq('userId', member.userId).eq('historical', false)
+          return before === undefined ? live : live.lt('_creationTime', before)
+        })
+        .order('desc')
+        .take(room)
+      for (const message of batch) {
+        latest ??= message._creationTime
+        seen++
+        bytes += byteSize(message)
+        if ('self' in message.sender || message.redactedAt !== undefined) continue
+        const chat = await ctx.db.get(message.chatId)
+        if (!chat || chat.userId !== member.userId || chat.view !== 'inbox' || retired(chat)) continue
+        out.push({
+          arrivedAt: message._creationTime,
+          message: clientLastMessage(lastOf(message)),
+          chat: await rowFor(ctx, chat, accounts),
+        })
+        if (out.length === ARRIVALS) break scan
+      }
+      if (batch.length < room) break
+      before = batch.at(-1)!._creationTime
+    }
+    return { latest, arrivals: out }
+  },
+})
+
+// `messages.arrivals` returns exactly what @trioditis/core calls an `ArrivalFeed` of `Arrival`s.
+type SameShape<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+const _arrivalMatchesCore: SameShape<keyof Infer<typeof arrival>, keyof Arrival> = true
+const _feedMatchesCore: SameShape<keyof Infer<typeof arrivalFeed>, keyof ArrivalFeed> = true
+
 /**
  * Sends a message. The client seals it twice: once to the bridge key (`forBridge`, kind
  * `outbound`, object ID `clientMessageId`), which the bridge host opens to send it, and once
@@ -41,6 +116,9 @@ export const list = query({
  *
  * `clientMessageId` makes the send idempotent end to end: sending the same ID again does
  * nothing. Retrying a failed or unknown send uses a new ID, which the person chooses to do.
+ * Returns `queued` for a new send, or what the ID was used for already and where that stands
+ * (`alreadyUsed`), so a client can say what happened rather than report a send that wasn't
+ * this one.
  */
 export const send = mutation({
   args: {
@@ -50,15 +128,75 @@ export const send = mutation({
     copy: envelope,
     replyTo: v.optional(v.string()),
   },
-  returns: v.null(),
+  returns: v.union(v.literal('queued'), alreadyUsed),
   handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
+    refuseRetryId(input.clientMessageId)
     // Sending the same message again does nothing, whatever has changed since.
-    if (await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)) return null
+    const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
+    if (used) return used
     await checkSend(ctx, chat, input)
     await queueSend(ctx, chat, input)
-    return null
+    return 'queued' as const
+  },
+})
+
+const MAX_RETRY_STATES = 100
+
+/**
+ * Where sending each of these messages again stands, for any send in a chain (the original or
+ * an attempt): the chain's original, its latest attempt and that one's delivery state, and
+ * whether another may be made, with its client message ID (lib/retry.ts). IDs that aren't the
+ * person's sends are left out.
+ */
+export const retryStates = query({
+  args: { clientMessageIds: v.array(v.string()) },
+  returns: v.array(v.object({ clientMessageId: v.string(), state: retryState })),
+  handler: async (ctx, { clientMessageIds }) => {
+    const member = await requireMember(ctx)
+    if (clientMessageIds.length > MAX_RETRY_STATES)
+      throw new ConvexError(`Ask for at most ${MAX_RETRY_STATES} at once.`)
+    const out = []
+    for (const clientMessageId of new Set(clientMessageIds)) {
+      const plan = await retryPlan(ctx, member.userId, clientMessageId)
+      if (!plan) continue
+      const { next: _next, ...state } = plan
+      out.push({ clientMessageId, state })
+    }
+    return out
+  },
+})
+
+/**
+ * Sends a message again: the next attempt of the chain `clientMessageId` belongs to (any send
+ * in it), sealed by the client for `nextId` as `messages.send` takes it. Made only if the
+ * server allows one now and `nextId` is the one it says (`retryStates`); otherwise nothing is
+ * made, and `created` is false. So repeated clicks, other tabs and stale pages make one attempt
+ * per link, and one that may have gone is never followed by another.
+ */
+export const sendAgain = mutation({
+  args: {
+    clientMessageId: v.string(),
+    nextId: v.string(),
+    forBridge: envelope,
+    copy: envelope,
+    replyTo: v.optional(v.string()),
+  },
+  returns: v.object({ created: v.boolean(), state: retryState }),
+  handler: async (ctx, { clientMessageId, nextId, ...input }) => {
+    const member = await requireMember(ctx)
+    const plan = await retryPlan(ctx, member.userId, clientMessageId)
+    if (!plan) throw new ConvexError('That message doesn’t exist.')
+    const { next, ...state } = plan
+    if (!plan.allowed || plan.nextId !== nextId) return { created: false, state }
+    const chat = await ownChat(ctx, member.userId, next.chatId!)
+    const send = { clientMessageId: nextId, ...input }
+    await checkSend(ctx, chat, send)
+    await queueSend(ctx, chat, send, { root: plan.root, of: next.of, index: next.index })
+    const after = await retryPlan(ctx, member.userId, plan.root)
+    const { next: _next, ...now } = after!
+    return { created: true, state: now }
   },
 })
 
@@ -89,8 +227,69 @@ export const discardSend = mutation({
   },
 })
 
+/**
+ * A reaction key the client may send: one emoji (a joined sequence can run to a dozen code
+ * units) or a network's short name for one, with no spaces or control characters.
+ */
+const REACTION_KEY = /^[^\s\p{Cc}]{1,64}$/u
+/**
+ * A reaction that hasn't reached the bridge host within this isn't sent: by then the person has
+ * moved on, and it would turn up unexpectedly.
+ */
+const REACTION_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Adds the person's reaction to a message, or with `remove` takes it away. The bridge host does
+ * it on the network, and its echo (a `reaction` or `reactionRemove` event) is what changes
+ * `messages.reactions`; nothing is stored until then. A network that allows one reaction per
+ * person replaces the old one itself, and the bridge host reports that removal too.
+ */
+export const react = mutation({
+  args: {
+    chatId: v.id('chats'),
+    messageId: v.id('messages'),
+    key: v.string(),
+    remove: v.optional(v.boolean()),
+  },
+  returns: v.null(),
+  handler: async (ctx, { chatId, messageId, key, remove }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    const info = NETWORK_INFO[chat.network]
+    if (info && !info.reactions) throw new ConvexError(`${info.name} doesn’t have reactions.`)
+    if (!REACTION_KEY.test(key)) throw new ConvexError('That reaction can’t be sent.')
+    const message = await ctx.db.get(messageId)
+    if (
+      !message ||
+      message.chatId !== chat._id ||
+      message.eventId.startsWith('pending:') ||
+      message.redactedAt !== undefined
+    ) {
+      throw new ConvexError('That message can’t be reacted to.')
+    }
+    const now = Date.now()
+    await queueCommand(ctx, {
+      userId: chat.userId,
+      network: chat.network,
+      loginId: chat.loginId,
+      chatId: chat._id,
+      payload: { type: remove ? 'unreact' : 'react', portalId: chat.portalId, targetEventId: message.eventId, key },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + REACTION_TTL_MS,
+    })
+    return null
+  },
+})
+
 /** The most reactions shown per message. */
 const MAX_REACTIONS_PER_MESSAGE = 100
+/**
+ * The most of the person's own reactions added to a message that has more than the first 100:
+ * theirs could be past those, and they need to see it to take it away.
+ */
+const MAX_OWN_REACTIONS = 20
 /** The most `messages.reactions` reads of reaction rows, well under a query's 16 MiB. */
 const MAX_REACTION_BYTES = 8 * 1024 * 1024
 /**
@@ -100,7 +299,8 @@ const MAX_REACTION_BYTES = 8 * 1024 * 1024
 const MAX_REACTION_ROW_BYTES = 4 * 1024
 
 /**
- * Active reactions on the given messages (at most 100 messages, 100 reactions each). It never
+ * Active reactions on the given messages (at most 100 messages, 100 reactions each, and on a
+ * message with that many, up to 20 more of the person's own that the first 100 left out). It never
  * reads the messages themselves, which can be large: a reaction row says whose it is, and a
  * deleted message's reactions are hidden by its clean-up marker until they're removed.
  *
@@ -118,7 +318,7 @@ export const reactions = query({
     const out: Record<string, { key: string; senderKey: string }[]> = {}
     let bytes = 0
     for (const messageId of messageIds) {
-      if (MAX_REACTION_BYTES - bytes < MAX_REACTIONS_PER_MESSAGE * MAX_REACTION_ROW_BYTES) break
+      if (MAX_REACTION_BYTES - bytes < (MAX_REACTIONS_PER_MESSAGE + MAX_OWN_REACTIONS) * MAX_REACTION_ROW_BYTES) break
       const deleted = await ctx.db
         .query('reactionCleanups')
         .withIndex('by_message', (q) => q.eq('messageId', messageId))
@@ -134,11 +334,35 @@ export const reactions = query({
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
         .take(MAX_REACTIONS_PER_MESSAGE)
       bytes += byteSize(rows)
+      if (rows.length === MAX_REACTIONS_PER_MESSAGE) {
+        const seen = new Set(rows.map((row) => row._id))
+        const own = await ctx.db
+          .query('reactions')
+          .withIndex('by_message_sender_active', (q) =>
+            q.eq('messageId', messageId).eq('senderKey', 'self').eq('removedAt', undefined),
+          )
+          .take(MAX_OWN_REACTIONS)
+        rows.push(...own.filter((row) => !seen.has(row._id)))
+        bytes += byteSize(own)
+      }
       out[messageId] = rows
         .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
         .map(({ key, senderKey }) => ({ key, senderKey }))
     }
     return out
+  },
+})
+
+/**
+ * The rest of a read receipt's marking of the person's own messages, when one transaction
+ * couldn't look through them all (lib/ingest.ts, markOwnReadRange).
+ */
+export const markOwnReadRange = internalMutation({
+  args: { chatId: v.id('chats'), after: v.union(v.null(), v.string()), upTo: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, after, upTo }) => {
+    await markRange(ctx, chatId, after, upTo)
+    return null
   },
 })
 

@@ -17,10 +17,12 @@ echo "$config" | grep -q 'POSTGRES_PASSWORD: test-POSTGRES_PASSWORD' && check ok
 echo "$config" | grep -q exported && check fail "no exported value reaches Compose" || check ok "no exported value reaches Compose"
 
 # Several compose files saved, ':'-separated as the installer writes them; an exported
-# separator (or profile list) mustn't change how they're read.
-sed -i 's/^COMPOSE_FILE=.*/COMPOSE_FILE=compose.yml:compose.e2e.yml/' "$root/deploy/.env"
+# separator (or profile list) mustn't change how they're read: the loopback sidecar comes
+# from the second file, and Signal's bridge host from the saved profiles.
+sed -i 's/^COMPOSE_FILE=.*/COMPOSE_FILE=compose.yml:compose.loopback.yml/' "$root/deploy/.env"
+echo LOOPBACK_PORT=18080 >>"$root/deploy/.env"
 services=$(COMPOSE_PATH_SEPARATOR=, COMPOSE_PROFILES=whatsapp COMPOSE_ENV_FILES=exported.env trioditis config --services 2>&1) || true
-echo "$services" | grep -qx fake-control && echo "$services" | grep -qx bridge-fake &&
+echo "$services" | grep -qx loopback && echo "$services" | grep -qx bridge-signal &&
   check ok "exported COMPOSE_* settings are ignored, and the saved compose files all load" ||
   { check fail "exported COMPOSE_* settings are ignored, and the saved compose files all load"; echo "$services" >&2; }
 

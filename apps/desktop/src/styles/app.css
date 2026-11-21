@@ -4,7 +4,30 @@
 @import '@fontsource-variable/dm-sans';
 @source '../../../../packages/ui/src';
 
+/* Fades for what arrives a moment after it's asked for. The late one waits first, so a quick
+   answer never shows its loading line at all: only a slow one does, and it eases in. */
+@theme {
+  --animate-fade-in: fade-in var(--duration-base) var(--ease-out) both;
+  --animate-fade-in-late: fade-in var(--duration-base) var(--ease-out) 400ms both;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
 /* The app fills the window; each screen sizes itself inside it. */
 #root {
   height: 100%;
+}
+
+/* The top and bottom bars of the sidebar and the chat share one height, so their edges line
+   up across the window: the chat header with the search, and the composer's top with the
+   account bar's (the composer's one line, 50px, sits 14px from the bottom). */
+:root {
+  --bar-h: 64px;
 }

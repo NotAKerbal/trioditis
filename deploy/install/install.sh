@@ -5,7 +5,8 @@
 #   deploy/install/install.sh --port 9000 --host 192.168.1.20
 #   deploy/install/install.sh --public-url https://box.tailnet.ts.net:8443  # behind Tailscale Serve
 #   deploy/install/install.sh --domain chat.example.com   # HTTPS with ACME
-#   deploy/install/install.sh --networks whatsapp,fake    # also the fake network, for trying it out
+#   deploy/install/install.sh --networks whatsapp,signal  # only these bridge hosts, not all
+#   deploy/install/install.sh --no-updater                # update it by hand, not from the app
 #
 # It's safe to run again: settings and secrets are kept in deploy/.env, so a rerun with no
 # options keeps the install as it is, and an option changes only its own setting. A rerun
@@ -24,7 +25,7 @@ warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 Options (each one is kept for later reruns):
   --local              Serve plain HTTP on a port, with no domain (the default)
@@ -38,7 +39,12 @@ Options (each one is kept for later reruns):
                        port, such as Tailscale Serve: the https:// origin people open.
                        Pass '' to go back to plain HTTP
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
-  --networks <list>    Comma-separated: whatsapp, fake (default whatsapp)
+  --networks <list|all>
+                       The networks this server runs a bridge host for, which admins can then
+                       install in the app (Admin settings, Networks). Comma-separated:
+                       whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack,
+                       groupme, linkedin, twitter, bluesky; or all (the default; Telegram
+                       only with its API ID and hash). Fewer suit a small machine
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
                        from, as Caddy ranges (default on a loopback bind: the loopback and
@@ -47,18 +53,32 @@ Options (each one is kept for later reruns):
   --new-server-keys    Only when the server's private keys are lost: make new key pairs.
                        Sends sealed to the old bridge key then fail, and agent access must
                        be granted again (docs/deploy.md, Keys lost). Not kept for reruns
-  --e2e, --no-e2e      Expose the fake network's test endpoint on this machine's loopback,
-                       or stop exposing it (default off)
+  --telegram-api-id <n>, --telegram-api-hash <hash>
+                       The App api_id and api_hash from https://my.telegram.org/apps, which
+                       Telegram needs from whoever runs the bridge (required with telegram
+                       in --networks; without them, all leaves Telegram out)
+  --updater, --no-updater
+                       Run the updater, a systemd service that updates this install from
+                       its git remote when admins ask in the app or on their schedule, or
+                       stop and remove it (default on, where systemd can run it;
+                       docs/deploy.md, Updates)
+  --no-setup-link      Don't print the admin setup link (the updater's runs, whose output
+                       goes to a log). Not kept for reruns
+  --without-backup     Upgrade even though this version changes the database images and
+                       there's no backup from the version installed now (docs/deploy.md,
+                       Upgrade). Not kept for reruns
 EOF
 }
 
 # Each option stays unset unless it's passed, so the saved setting applies.
-unset -v mode port host bind proxy_url trusted domain networks e2e
+unset -v mode port host bind proxy_url trusted domain networks telegram_api_id telegram_api_hash updater
 local_flag=0
 new_server_keys=0
+setup_link=1
+without_backup=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks)
+    --port | --host | --bind | --public-url | --trusted-proxies | --domain | --networks | --telegram-api-id | --telegram-api-hash)
       [ $# -ge 2 ] || die "$1 needs a value."
       ;;
   esac
@@ -71,9 +91,13 @@ while [ $# -gt 0 ]; do
     --trusted-proxies) trusted=$2; shift ;;
     --domain) mode=domain; domain=$2; shift ;;
     --networks) networks=$2; shift ;;
+    --telegram-api-id) telegram_api_id=$2; shift ;;
+    --telegram-api-hash) telegram_api_hash=$2; shift ;;
     --new-server-keys) new_server_keys=1 ;;
-    --e2e) e2e=1 ;;
-    --no-e2e) e2e=0 ;;
+    --updater) updater=1 ;;
+    --no-updater) updater=0 ;;
+    --no-setup-link) setup_link=0 ;;
+    --without-backup) without_backup=1 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -92,6 +116,14 @@ local_flags_given="${port+--port }${host+--host }${bind+--bind }"
 command -v docker >/dev/null || die "Docker isn't installed. Install Docker Engine and the Compose plugin, then run this again."
 docker compose version >/dev/null 2>&1 || die "The Docker Compose plugin isn't installed (docker compose)."
 docker info >/dev/null 2>&1 || die "Can't talk to Docker. Add yourself to the docker group (and log in again), or run this as a user who can."
+# The sign-in browser's network gives the server no address only from Docker 28 on
+# (compose.yml, signin); an older Docker would leave the server's own services reachable from
+# the browser.
+docker_major=$(docker info --format '{{.ServerVersion}}' 2>/dev/null | cut -d. -f1)
+case "$docker_major" in
+  '' | *[!0-9]*) die "Can't tell which Docker Engine this is (docker info)." ;;
+esac
+[ "$docker_major" -ge 28 ] || die "Trioditis needs Docker Engine 28 or later; this is $(docker info --format '{{.ServerVersion}}'). Upgrade Docker, then run this again."
 
 case "$(uname -m)" in
   x86_64 | amd64 | aarch64 | arm64) ;;
@@ -121,7 +153,9 @@ fi
 # One install, backup or other write command for this install at a time (deploy/trioditis
 # takes the same lock): they stop and start the server under each other.
 if command -v flock >/dev/null; then
-  exec 9>"$here/.operation.lock"
+  # The updater runs this holding the lock on descriptor 9, which is then used as it is: a
+  # lock it holds is this run's, and one anyone else holds still stops it.
+  if ! { [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$here/.operation.lock" ]; }; then exec 9>"$here/.operation.lock"; fi
   flock -n 9 || die "Another backup, install or change to this install is running."
 else
   warn "flock (util-linux) isn't installed, so nothing stops a backup running during this install."
@@ -149,8 +183,10 @@ check_option() {
 [ -z "${bind+set}" ] || check_option bind INSTALL_BIND "$bind"
 [ -z "${proxy_url+set}" ] || check_option public-url PROXY_URL "$proxy_url"
 [ -z "${domain+set}" ] || check_option domain INSTALL_DOMAIN "$domain"
-[ -z "${networks+set}" ] || check_option networks TRIODITIS_NETWORKS "$networks"
+[ -z "${networks+set}" ] || check_option networks INSTALL_NETWORKS "$networks"
 [ -z "${port+set}" ] || check_option port HTTP_PORT "$port"
+[ -z "${telegram_api_id+set}" ] || check_option telegram-api-id TELEGRAM_API_ID "$telegram_api_id"
+[ -z "${telegram_api_hash+set}" ] || check_option telegram-api-hash TELEGRAM_API_HASH "$telegram_api_hash"
 # Several ranges, separated by commas or single spaces.
 [ -z "${trusted+set}" ] || literal_setting INSTALL_TRUSTED_PROXIES "${trusted//,/ }" ||
   die "--trusted-proxies must be one line of ranges (A-Z a-z 0-9 . _ ~ : / @ + = % -), separated by commas or single spaces."
@@ -175,6 +211,16 @@ fi
 
 get() { printf '%s\n' "$env_text" | env_value "$1"; }
 has() { printf '%s\n' "$env_text" | env_names | grep -qx "$1"; }
+# A restore (deploy/trioditis restore) still replacing the volumes and settings, or cut off while
+# it did, leaves the data half one and half the other: nothing starts on it, Postgres included,
+# until the restore has finished (deploy/.restore-settle says `ready`) or is run again.
+if [ -e "$here/.restore-settle" ]; then
+  restore_state=$(sed -n 's/^state=//p' "$here/.restore-settle" 2>/dev/null | head -1)
+  [ "$restore_state" = ready ] || [ "$restore_state" = settled ] ||
+    die "A restore didn't finish replacing the data and settings (deploy/.restore-settle says ${restore_state:-nothing}), so nothing was started. Run the restore again, or restore the backup it made of the server first."
+elif [ -n "$(get RESTORE_PENDING)" ]; then
+  die "deploy/.env says a restore is under way, but deploy/.restore-settle is gone, so nothing was started. Run the restore again."
+fi
 # Writes the runtime config, $2, to path $1 through a private temp file beside it, then a
 # rename onto the exact name, so it's never half written and a symlink at the name is
 # replaced, not followed. $3 is its mode. (deploy/.env is written only by env_write.)
@@ -205,6 +251,13 @@ set_var() {
     text="$text${text:+$'\n'}$1=$2"
     shift 2
   done
+  printf '%s\n' "$text" | env_write "$env_file" || die "Couldn't save the settings (above)."
+  env_text=$text
+}
+# Removes NAME's setting, the same way.
+drop_var() {
+  local text
+  text=$(printf '%s\n' "$env_text" | grep -vE "^$1=" | sed '/^$/d' || true)
   printf '%s\n' "$text" | env_write "$env_file" || die "Couldn't save the settings (above)."
   env_text=$text
 }
@@ -245,9 +298,13 @@ if [ -z "${host+set}" ]; then
 fi
 trusted=${trusted-$(get INSTALL_TRUSTED_PROXIES)}
 trusted=${trusted//,/ }
-[ "${networks-x}" != '' ] || die "--networks needs at least one network."
-networks=${networks-$(get TRIODITIS_NETWORKS)}
-networks=${networks:-whatsapp}
+# The networks with a bridge host: all of them unless the operator limits them. Which of those
+# members are offered is for admins to choose in the app. TRIODITIS_NETWORKS isn't read: before
+# INSTALL_NETWORKS, it held the networks offered (a choice that's now the admins'), so an
+# install from then moves to every network.
+[ "${networks-x}" != '' ] || die "--networks needs at least one network, or all."
+networks=${networks-$(get INSTALL_NETWORKS)}
+networks=${networks:-all}
 # The Compose project names the install's volumes, so it never changes once there is one: a
 # saved name wins, and an install from before it was saved is the default, trioditis.
 # TRIODITIS_PROJECT only names a new install (no deploy/.env yet), and saying anything else
@@ -265,10 +322,6 @@ if [ -n "${TRIODITIS_PROJECT:-}" ] && [ "$TRIODITIS_PROJECT" != "$project" ]; th
 fi
 [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "TRIODITIS_PROJECT must be lowercase letters, digits, '-' and '_'."
 [[ "$trusted" =~ ^[A-Za-z0-9_.:/\ ]*$ ]] || die "--trusted-proxies takes IP ranges (CIDR) or private_ranges."
-if [ -z "${e2e+set}" ]; then
-  e2e=$(get INSTALL_E2E)
-  [ -n "$e2e" ] || case "$(get COMPOSE_FILE)" in *compose.e2e.yml*) e2e=1 ;; *) e2e=0 ;; esac
-fi
 
 # Checked as text first, so a huge number never reaches the shell's arithmetic.
 if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
@@ -276,17 +329,69 @@ if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$por
 fi
 port=$((10#$port))
 
-IFS=',' read -r -a network_list <<<"$networks"
-[ "${#network_list[@]}" -gt 0 ] || die "Pick at least one network."
-for network in "${network_list[@]}"; do
-  case "$network" in
-    whatsapp | fake) ;;
-    *) die "Unknown network '$network'. This version supports: whatsapp, fake." ;;
-  esac
-done
-if [ "$e2e" = 1 ] && [[ " ${network_list[*]} " != *" fake "* ]]; then
-  warn "--e2e only adds the fake network's test endpoint, and the fake network isn't enabled (--networks)."
+supported_networks=(whatsapp signal gmessages gvoice telegram meta instagram slack groupme linkedin twitter bluesky)
+if [ "$networks" = all ]; then
+  network_list=("${supported_networks[@]}")
+else
+  IFS=',' read -r -a requested_networks <<<"$networks"
+  [ "${#requested_networks[@]}" -gt 0 ] || die "Pick at least one network, or all."
+  network_list=()
+  for network in "${requested_networks[@]}"; do
+    [[ " ${supported_networks[*]} " == *" $network "* ]] ||
+      die "Unknown network '$network'. This version supports: $(IFS=,; echo "${supported_networks[*]}" | sed 's/,/, /g'); or all."
+    # Once each, so a network named twice still gets one bridge host.
+    [[ " ${network_list[*]} " == *" $network "* ]] || network_list+=("$network")
+  done
 fi
+# Telegram lets a client in only with an app's credentials, issued to whoever runs it. The
+# bridge host checks them too, but an install that can't start Telegram stops here instead,
+# when it was asked for by name; all just leaves it out until they're given.
+telegram_api_id=${telegram_api_id-$(get TELEGRAM_API_ID)}
+telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
+[ -z "$telegram_api_id" ] || [[ "$telegram_api_id" =~ ^[1-9][0-9]{0,9}$ ]] ||
+  die "--telegram-api-id must be the number my.telegram.org shows as App api_id."
+[ -z "$telegram_api_hash" ] || [[ "$telegram_api_hash" =~ ^[0-9a-fA-F]{32}$ ]] ||
+  die "--telegram-api-hash must be the 32 hex digits my.telegram.org shows as App api_hash."
+if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
+  if [ "$networks" = all ]; then
+    say "Leaving Telegram out: its bridge needs your own API ID and hash. To add it, create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash> (docs/networks/telegram.md)."
+    without_telegram=()
+    for network in "${network_list[@]}"; do [ "$network" = telegram ] || without_telegram+=("$network"); done
+    network_list=("${without_telegram[@]}")
+  else
+    die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+  fi
+fi
+# The bridged networks, comma-separated, as Compose (profiles) and the backend (what admins
+# may install) read them.
+bridged=$(IFS=,; echo "${network_list[*]}")
+updater_asked=${updater+1}
+updater=${updater-$(get INSTALL_UPDATER)}
+# A saved 1 whose service was never set up (enabled), as after a first install cut off before
+# then, is still only the default, not the operator's choice.
+if [ -z "$updater_asked" ] && [ "$updater" = 1 ] && ! bash "$here/updater/service.sh" installed "$project" 2>/dev/null; then
+  updater=''
+fi
+# The updater is on unless the install turned it off. Where it can't run (no systemd, or not a
+# git checkout), a new install, or one from before the updater, gets it off and says why; one
+# that asks for it stops here, before any setting is saved or the server touched.
+updater_default=0
+if [ -z "$updater" ]; then
+  if reason=$(bash "$here/updater/service.sh" check "$project" 2>&1); then
+    updater=1
+    updater_default=1
+  else
+    updater=0
+    warn "The updater is off, so admins can't update the server from the app: ${reason:-its check failed}. Once it can run, run this again with --updater."
+  fi
+elif [ "$updater" = 1 ]; then
+  reason=$(bash "$here/updater/service.sh" check "$project" 2>&1) ||
+    die "The updater can't run here: ${reason:-its check failed}. Fix that, or run this with --no-updater to update by hand."
+fi
+# The commit this checkout is at: the web app and the functions are built from it, and an open
+# page compares the two to see the server was updated under it.
+version=$( (command -v git >/dev/null && git -C "$root" rev-parse --verify --quiet 'HEAD^{commit}') || true)
+version=${version:-unknown}
 
 # The sidecars' image, pinned as in the compose files.
 socat_image=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
@@ -396,10 +501,47 @@ else
   caddy_site=':80'
   caddy_global='auto_https off'
 fi
-[ "$e2e" = 1 ] && compose_files="$compose_files:compose.e2e.yml"
 
 bridge_hosts=()
 for network in "${network_list[@]}"; do bridge_hosts+=("$network-1=http://bridge-$network:8611"); done
+
+# The database images, before any setting is saved or anything is built. Postgres opens only
+# data from its own major version, and the bundle doesn't upgrade it in place, so another major
+# version stops the install here. A new Postgres or Convex backend image changes the data in
+# place on its first start (the backend migrates its database), which the older images can't
+# read, so going back afterwards needs a backup from before: such an upgrade runs only with a
+# backup made at the version installed now (the updater makes one before every update), or
+# when asked to with --without-backup.
+image_of() { sed -n "s|^ *image: \($1[^ ]*\)\$|\1|p" "$here/compose/compose.yml" | head -1; }
+postgres_image=$(image_of postgres:)
+backend_image=$(image_of ghcr.io/convex/convex-backend:)
+postgres_major=${postgres_image#postgres:}
+postgres_major=${postgres_major%%[.-]*}
+if [ "$existing_install" = 1 ] && docker volume inspect "${project}_postgres" >/dev/null 2>&1; then
+  data_major=$(docker run --rm --log-driver none -v "${project}_postgres:/v:ro" --entrypoint cat "$socat_image" /v/PG_VERSION 2>/dev/null || true)
+  if [[ "$data_major" =~ ^[0-9]+$ ]] && [ "$data_major" != "$postgres_major" ]; then
+    die "This version runs Postgres $postgres_major, and this install's database is from Postgres $data_major, which it can't open: the bundle doesn't upgrade Postgres in place. Check out the version you had and run this again, or restore a backup made with Postgres $postgres_major."
+  fi
+  changed_images=''
+  for service in postgres backend; do
+    container=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service" 2>/dev/null | head -1 || true)
+    [ -n "$container" ] || continue
+    running_image=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)
+    if [ "$service" = postgres ]; then wanted=$postgres_image; else wanted=$backend_image; fi
+    [ -z "$running_image" ] || [ "$running_image" = "$wanted" ] || changed_images="$changed_images $service"
+  done
+  installed_version=$(get TRIODITIS_VERSION)
+  last_backup_version=$(sed -n 's/^version=\([0-9a-f]*\)$/\1/p' "$here/.last-backup" 2>/dev/null || true)
+  # Right after a restore (deploy/trioditis restore, which checked the backup is from this
+  # version), the data is that backup's, made with this version's images, whatever the
+  # containers left from before run: going back to it is what's happening.
+  restoring=0
+  [ ! -e "$here/.restore-settle" ] && [ -z "$(get RESTORE_PENDING)" ] || restoring=1
+  if [ -n "$changed_images" ] && [ "$without_backup" = 0 ] && [ "$restoring" = 0 ] &&
+    { [ -z "$installed_version" ] || [ "$last_backup_version" != "$installed_version" ]; }; then
+    die "This version changes the database images ($(echo $changed_images | sed 's/ /, /g')), which change the data in place, and there's no backup from the version installed now to go back to. Back up first (deploy/trioditis backup <directory>), then run this again; or, to go on without one, run it with --without-backup."
+  fi
+fi
 
 set_var \
   INSTALL_MODE "$mode" \
@@ -407,7 +549,9 @@ set_var \
   PROXY_URL "${proxy_url%/}" \
   INSTALL_HOST "$host" \
   INSTALL_BIND "$bind" \
-  INSTALL_E2E "$e2e" \
+  INSTALL_NETWORKS "$networks" \
+  INSTALL_UPDATER "$updater" \
+  TRIODITIS_VERSION "$version" \
   HTTP_PORT "$port" \
   HTTP_BIND "$http_bind" \
   PUBLIC_HOST "$public_host" \
@@ -419,9 +563,13 @@ set_var \
   LOOPBACK_PORT "$port" \
   COMPOSE_PROJECT_NAME "$project" \
   COMPOSE_FILE "$compose_files" \
-  COMPOSE_PROFILES "$networks" \
-  TRIODITIS_NETWORKS "$networks" \
-  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")"
+  COMPOSE_PROFILES "$bridged" \
+  TRIODITIS_NETWORKS "$bridged" \
+  BRIDGE_HOSTS "$(IFS=,; echo "${bridge_hosts[*]}")" \
+  TELEGRAM_API_ID "$telegram_api_id" \
+  TELEGRAM_API_HASH "$telegram_api_hash"
+# The fake network's test endpoint's setting, from a version that had one.
+! has INSTALL_E2E || drop_var INSTALL_E2E
 
 # --- Secrets ------------------------------------------------------------------------------
 
@@ -453,7 +601,13 @@ keep_or CONVEX_INSTANCE_SECRET "$(hex_secret 32)"
 keep_or BETTER_AUTH_SECRET "$(secret 32)"
 keep_or GATEWAY_SECRET "$(secret 32)"
 keep_or TRIODITIS_INTERNAL_TOKEN "$(secret 32)"
+# Lets a bridge host start sign-in browsers, and nothing else: the browser's container holds it.
+keep_or LOGIN_BROWSER_TOKEN "$(secret 32)"
 keep_or TRIODITIS_SETUP_TOKEN "$(secret 32)"
+keep_or UPDATER_SECRET "$(secret 32)"
+# Encrypts the backups (deploy/trioditis backup), and, like the private keys, is never in one:
+# deploy/trioditis keys export keeps it with them.
+keep_or BACKUP_KEY "$(secret 32)"
 
 # Compose reads COMPOSE_FILE and COMPOSE_PROFILES from deploy/.env, relative to the compose
 # directory, so it runs from there.
@@ -479,6 +633,10 @@ compose() {
 # --- Images -------------------------------------------------------------------------------
 
 say "Building the images from this checkout (the first build takes a few minutes)"
+# Without the build attestations BuildKit adds by default (their timestamps give every build a
+# new image ID), an unchanged image keeps its ID, so Compose leaves its containers running
+# instead of recreating them, and everything that waits for them, on every run.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 # The Node image is built first, by itself: it generates the key pairs the rest needs.
 docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
 
@@ -496,21 +654,31 @@ if [ "${#new_pairs[@]}" -gt 0 ]; then
   unset -v keys public_key private_key
 fi
 
-# Caddy serves it (as another user), so it's world-readable; written like deploy/.env.
-mkdir -p "$here/runtime"
+# Caddy serves it (as another user), so it's world-readable; written like deploy/.env. Checked
+# before anything is made, so a symlink there never leads mkdir elsewhere.
 [ ! -L "$here/runtime" ] || die "deploy/runtime is a symlink; it must be a directory of this checkout."
+[ ! -e "$here/runtime" ] || [ -d "$here/runtime" ] || die "deploy/runtime isn't a directory; it must be a directory of this checkout."
+mkdir -p "$here/runtime"
 write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
+# The commit the functions are deployed from (deploy-functions.sh reads it).
+write_file "$here/runtime/version" "$version" 644
 
 # Every bridge host runs one image, built here once: Compose would build it for each
-# network's service at the same time, and the builds collide on the shared tag.
-docker build -q -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
+# network's service at the same time, and the builds collide on the shared tag. Signal's
+# library (Rust) is only built when Signal is bridged (as it is with all): it adds a long
+# first build.
+with_signal=0
+[[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
+# DEBIAN_SNAPSHOT in deploy/.env, if the operator set one, pins the Debian packages to that day
+# (docs/deploy.md, Building the same images again); compose.yml passes it to the sign-in browser.
+docker build -q --build-arg "WITH_SIGNAL=$with_signal" --build-arg "DEBIAN_SNAPSHOT=$(get DEBIAN_SNAPSHOT)" \
+  -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
 compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
 # else stay on the internal network, since the backend trusts the client address Caddy
-# gives it (X-Trioditis-Client-IP). The fake network's test endpoint (--e2e) is the one
-# exception, and only on this machine's loopback.
+# gives it (X-Trioditis-Client-IP).
 compose --profile '*' config | sh "$here/scripts/check-ports.sh" ||
   die "The compose files publish more than Caddy's port (above). This is a bug in the bundle."
 
@@ -570,6 +738,17 @@ wait_healthy postgres
 for database in convex_self_hosted $(printf 'bridge_%s ' "${network_list[@]}"); do
   ensure_database "$database"
 done
+# The fake network is gone from this version. Its bridge host went with the orphans just
+# above, and its database and volume, which only ever held made-up chats, go too.
+if [ "$(psql_admin -tAc "SELECT 1 FROM pg_database WHERE datname = 'bridge_fake'" 2>/dev/null)" = 1 ]; then
+  say "Removing the fake network's database"
+  psql_admin -qc "DROP DATABASE IF EXISTS bridge_fake" >/dev/null || warn "Couldn't remove the fake network's database, bridge_fake."
+fi
+fake_volume=$(docker volume ls -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.volume=bridge-fake")
+if [ -n "$fake_volume" ]; then
+  say "Removing the fake network's volume"
+  docker volume rm "$fake_volume" >/dev/null || warn "Couldn't remove the fake network's volume, $fake_volume."
+fi
 
 say "Starting the Convex backend"
 compose up -d --remove-orphans backend
@@ -599,15 +778,79 @@ if [ "$mode" = local ] && [ -n "$proxy_url" ] && [ -z "$trusted" ]; then
   esac
 fi
 
-say "Deploying the functions and starting the server"
-if ! compose up -d --remove-orphans; then
-  # The functions job (deploy, then migrations) is what usually stops it; its log says why.
-  functions=$(compose ps -aq functions 2>/dev/null || true)
-  if [ -n "$functions" ] && [ "$(docker inspect -f '{{.State.ExitCode}}' "$functions" 2>/dev/null)" != 0 ]; then
+# After a restore (deploy/trioditis restore), before anything that sends starts: the restored
+# backup is a moment in the past, so every send it holds as still on its way may have gone out
+# since. The functions are deployed, then every such send is made `unknown` rather than sent
+# again (deploy/scripts/settle-restore.mjs). The restore's gate (deploy/.restore-settle, and
+# RESTORE_PENDING in deploy/.env, which keeps the gateway from starting) stays until that's done,
+# so a run that stops partway settles them on the next one.
+# The marker then says `settled`, and stays (deploy/trioditis still starts nothing beside it)
+# until every bridge host's container is made again with this restore's ID, below.
+pending=$(get RESTORE_PENDING)
+restore_state=$(sed -n 's/^state=//p' "$here/.restore-settle" 2>/dev/null | head -1 || true)
+if { [ -e "$here/.restore-settle" ] || [ -n "$pending" ]; } && [ "$restore_state" != settled ]; then
+  backup_at=$(sed -n 's/^backup_at=\([0-9]\{1,16\}\)$/\1/p' "$here/.restore-settle" 2>/dev/null || true)
+  backup_at=${backup_at:-$pending}
+  [[ "$backup_at" =~ ^[0-9]{1,16}$ ]] || die "deploy/.restore-settle isn't one a restore wrote. Run the restore again."
+  say "Settling the sends the restored backup holds, before anything can send them"
+  compose rm -f -s gateway >/dev/null 2>&1 || true
+  if ! compose run --rm --no-deps -T functions >/dev/null; then
     compose logs --no-log-prefix --tail 20 functions >&2 || true
-    die "Deploying the functions or running a migration failed (its log is above; a failing function's details are in deploy/trioditis logs backend). Fix the cause and run this again."
+    die "Deploying the functions after the restore failed (above). Fix the cause and run this again."
   fi
+  compose run --rm --no-deps -T -e "RESTORE_BACKUP_AT=$backup_at" --entrypoint node functions deploy/scripts/settle-restore.mjs ||
+    die "Settling the restored sends failed (above), so nothing that sends was started. Fix the cause and run this again."
+  ! has RESTORE_PENDING || drop_var RESTORE_PENDING
+  marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX")
+  { sed 's/^state=.*/state=settled/' "$here/.restore-settle" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle"; } ||
+    { rm -f "$marker_tmp"; die "Couldn't record the restored sends as settled. Run this again."; }
+fi
+
+# The functions first (deploy, then migrations), with only the database and backend beside
+# them: the gateway, bridge hosts and Caddy start only once those have finished, so a version
+# whose functions or migrations fail never takes writes or sends anything.
+say "Deploying the functions"
+compose up -d --remove-orphans postgres backend functions || die "Starting the database and backend failed (above). Fix the cause and run this again."
+functions=$(compose ps -aq functions 2>/dev/null | head -1 || true)
+[ -n "$functions" ] || die "The functions job didn't start (above). Fix the cause and run this again."
+functions_state=unknown
+for _ in $(seq 900); do
+  functions_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$functions" 2>/dev/null || echo unknown)
+  case "$functions_state" in exited* | dead*) break ;; esac
+  sleep 1
+done
+if [ "$functions_state" != 'exited 0' ]; then
+  compose logs --no-log-prefix --tail 20 functions >&2 || true
+  die "Deploying the functions or running a migration failed (its log is above; a failing function's details are in deploy/trioditis logs backend). Fix the cause and run this again."
+fi
+say "Starting the server"
+# Without dependencies, so the finished functions job isn't run again: the gateway, Caddy and
+# the sidecars, then, once the gateway is healthy, the bridge hosts that wait for it.
+mapfile -t late_services < <(compose config --services | grep -vxE 'postgres|backend|functions|bridge-.*')
+mapfile -t bridge_services < <(compose config --services | grep -xE 'bridge-.*' || true)
+if [ "${#late_services[@]}" -gt 0 ] && ! compose up -d --no-deps "${late_services[@]}"; then
   die "Starting the server failed (above). Fix the cause and run this again."
+fi
+wait_healthy gateway 90
+if [ "${#bridge_services[@]}" -gt 0 ] && ! compose up -d --no-deps "${bridge_services[@]}"; then
+  die "Starting the bridge hosts failed (above). Fix the cause and run this again."
+fi
+# After a restore, the gate comes off only once Docker shows every bridge host's container made
+# with this restore's ID, so none can run its restored queue; until then deploy/trioditis starts
+# nothing, and a rerun of this checks again.
+if [ -e "$here/.restore-settle" ]; then
+  restore_id=$(get RESTORE_ID)
+  [ -n "$restore_id" ] || die "deploy/.env has no RESTORE_ID after a restore. Run the restore again."
+  containers=$(docker ps -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null) ||
+    die "Couldn't list the server's containers to check the bridge hosts. Run this again."
+  for container in $containers; do
+    service=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$container" 2>/dev/null) ||
+      die "Couldn't check a container's settings. Run this again."
+    case "$service" in bridge-*) ;; *) continue ;; esac
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null | grep -qxF "TRIODITIS_RESTORE_ID=$restore_id" ||
+      die "$service's container wasn't made with this restore's ID, so the restore's gate stays. Run this again."
+  done
+  rm -f "$here/.restore-settle"
 fi
 ready_services=(gateway caddy)
 for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done
@@ -637,6 +880,28 @@ if [ "$reachable" = 0 ]; then
   warn "The backend can't fetch sign-in keys from $public_url, so sign-in won't work yet: $hint. Then run this again."
 fi
 
+# --- The updater --------------------------------------------------------------------------
+
+# Installed (or kept) once the server is up, since it talks to it; never restarted here, as it
+# may be the updater that's running this install. See deploy/updater/service.sh.
+if [ "$updater" = 1 ]; then
+  say "Starting the updater (trioditis-updater-$project)"
+  if ! bash "$here/updater/service.sh" install "$project"; then
+    [ "$updater_default" = 1 ] || die "Couldn't install the updater's service (above)."
+    # On by default, not asked for: the server is up, so it stays up, and the updater goes off
+    # instead. Its secret is taken back from the backend (deploy-functions.sh removes it with
+    # the updater off), so the app doesn't offer updates that nothing would run.
+    bash "$here/updater/service.sh" remove "$project" >/dev/null 2>&1 || true
+    updater=0
+    set_var INSTALL_UPDATER 0
+    compose run --rm --no-deps -T functions >/dev/null 2>&1 ||
+      warn "Couldn't take the updater's secret back from the backend: run this again."
+    warn "The updater is off, so admins can't update the server from the app: its service couldn't be installed (above). Once it can, run this again with --updater."
+  fi
+else
+  bash "$here/updater/service.sh" remove "$project" || warn "Couldn't remove the updater's service (above)."
+fi
+
 # --- Done ---------------------------------------------------------------------------------
 
 # Whether the admin account exists, asked through the backend with the admin key (which
@@ -656,7 +921,9 @@ case "$(account_state)" in
   no)
     # The web app is built in only when the checkout has it (deploy/docker/web.Dockerfile);
     # until then nothing in the browser creates accounts.
-    if [ -f "$root/apps/desktop/package.json" ]; then
+    if [ "$setup_link" = 0 ]; then
+      printf 'The admin account doesn'"'"'t exist yet. Run deploy/install/install.sh for the setup link.\n\n'
+    elif [ -f "$root/apps/desktop/package.json" ]; then
       cat <<EOF
 Create the admin account with this link. It works once, until the first account exists:
 
@@ -676,11 +943,33 @@ EOF
   *) printf "Couldn't check whether the admin account exists. Until it does, the setup link is\n%s/setup#token=<TRIODITIS_SETUP_TOKEN from deploy/.env>.\n\n" "$public_url" ;;
 esac
 cat <<EOF
+Networks: admins install the ones people can connect in the app (Admin settings → Networks),
+from those this server bridges: ${bridged//,/, }.
+
 Manage it with deploy/trioditis (docker compose for this install), e.g.:
   deploy/trioditis ps
   deploy/trioditis logs -f gateway
   deploy/trioditis down        # stop; data stays in Docker volumes
 
-Upgrade: update this checkout (git pull), then run deploy/install/install.sh again. It keeps
-these settings; pass an option only to change one.
 EOF
+if [ "$updater" = 1 ]; then
+  cat <<EOF
+Updates: admins choose the channel and update from the app (Admin settings → Updates). The
+updater's log: journalctl $([ "$(id -u)" = 0 ] || echo '--user ')-u trioditis-updater-$project
+EOF
+else
+  cat <<EOF
+Upgrade: back up (deploy/trioditis backup <directory>), update this checkout (git pull), then
+run deploy/install/install.sh again. It keeps these settings; pass an option only to change
+one. Or let admins update from the app: run this again with --updater.
+EOF
+fi
+# The app's update channel is Stable (main) until an admin chooses; a checkout from dev is
+# ahead of it, and the updater would leave it where it is.
+if [ "$updater" = 1 ] && ! git -C "$root" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null &&
+  git -C "$root" merge-base --is-ancestor HEAD refs/remotes/origin/dev 2>/dev/null; then
+  cat <<EOF
+This checkout is from dev, ahead of the Stable channel (main) the app starts on: choose
+Nightly in Admin settings → Updates to keep it updated.
+EOF
+fi

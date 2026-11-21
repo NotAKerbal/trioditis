@@ -29,9 +29,16 @@ for name in CONVEX_SELF_HOSTED_URL CONVEX_SELF_HOSTED_ADMIN_KEY; do
   fi
 done
 
+# The commit being deployed, which install.sh writes beside the web app's config.
+TRIODITIS_VERSION=$(cat /srv/runtime/version 2>/dev/null || true)
+printf '%s\n' "$TRIODITIS_VERSION" | grep -Eqx '[0-9a-f]{40}' || TRIODITIS_VERSION=unknown
+export TRIODITIS_VERSION
+
 # What the functions read. Private keys and the admin key stay out: no function needs them.
 names='SITE_URL BETTER_AUTH_SECRET GATEWAY_SECRET TRIODITIS_SETUP_TOKEN TRIODITIS_NETWORKS
-  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY'
+  BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY TRIODITIS_VERSION'
+# The updater's secret only while the updater is on; its calls are refused without it.
+if [ "${TRIODITIS_UPDATER:-0}" = 1 ]; then names="$names UPDATER_SECRET"; fi
 for name in $names; do
   if [ -z "$(printenv "$name" || true)" ]; then
     echo "deploy-functions: $name is not set" >&2
@@ -43,6 +50,18 @@ done
 for name in $names; do
   printf '%s=%s\n' "$name" "$(printenv "$name")"
 done | npx convex env set --force >/dev/null
+# With the updater off, a secret set while it was on is removed, so nothing can act as it.
+# Names only: `env get` succeeds whether or not it's set, and would print the value. A list that
+# fails stops the job, rather than reading as no secret and leaving one in place.
+if [ "${TRIODITIS_UPDATER:-0}" != 1 ]; then
+  set_names=$(npx convex env list --names-only) || {
+    echo "deploy-functions: couldn't list the backend's environment, to remove UPDATER_SECRET" >&2
+    exit 1
+  }
+  if printf '%s\n' "$set_names" | grep -qx UPDATER_SECRET; then
+    npx convex env remove UPDATER_SECRET >/dev/null
+  fi
+fi
 echo "deploy-functions: environment set"
 
 # Types and lint ran in CI; the bundle only ships what they checked.

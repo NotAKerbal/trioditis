@@ -5,6 +5,8 @@ export interface Config {
   gatewaySecret: string
   internalToken: string
   listen: { host: string; port: number }
+  /** Where the sign-in browser's websocket is served, behind Caddy (signin-browser.md). */
+  publicListen: { host: string; port: number }
   agentAccessPublicKey: string
   /** Where each bridge host takes commands, by host ID. Never taken from what a host says. */
   bridgeHosts: Map<string, string>
@@ -32,13 +34,27 @@ export function parseBridgeHosts(value: string): Map<string, string> {
   return hosts
 }
 
+/** `host:port`, from an environment variable, with the defaults for what it leaves out. */
+function address(value: string | undefined, defaultPort: number) {
+  const [host = '127.0.0.1', port = String(defaultPort)] = (value ?? `127.0.0.1:${defaultPort}`).split(':')
+  return { host, port: Number(port) }
+}
+
 export function loadConfig(): Config {
-  const [host = '127.0.0.1', port = '8601'] = (process.env.GATEWAY_INTERNAL_ADDR ?? '127.0.0.1:8601').split(':')
+  // Set by deploy/trioditis restore until the installer has settled the restored backup's sends
+  // (docs/deploy.md, Restore): until then a send it holds as on its way may already have gone
+  // out, so the gateway doesn't start at all, however it was started.
+  if (process.env.TRIODITIS_RESTORE_PENDING) {
+    throw new Error(
+      "A restore's sends aren't settled yet, so the gateway won't start: run deploy/install/install.sh, which settles them first.",
+    )
+  }
   return {
     convexUrl: required('CONVEX_URL'),
     gatewaySecret: required('GATEWAY_SECRET'),
     internalToken: required('TRIODITIS_INTERNAL_TOKEN'),
-    listen: { host, port: Number(port) },
+    listen: address(process.env.GATEWAY_INTERNAL_ADDR, 8601),
+    publicListen: address(process.env.GATEWAY_PUBLIC_ADDR, 8602),
     agentAccessPublicKey: required('AGENT_ACCESS_PUBLIC_KEY'),
     bridgeHosts: parseBridgeHosts(required('BRIDGE_HOSTS')),
   }

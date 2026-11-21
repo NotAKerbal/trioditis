@@ -4,7 +4,8 @@
 //
 // Nothing here holds plaintext content. Journal payloads are protocol events whose content
 // fields are sealed envelopes. A queued command's payload is sealed to the bridge key and is
-// deleted once the command has run. Everything else is IDs, statuses and public keys.
+// deleted once the command has run, and a kept avatar reference is sealed to it too.
+// Everything else is IDs, statuses and public keys.
 package store
 
 import (
@@ -20,9 +21,11 @@ import (
 	"time"
 
 	"go.mau.fi/util/dbutil"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
 var upgrades = dbutil.BuildUpgradeTable().
@@ -86,7 +89,162 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_login_session (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, started_at BIGINT NOT NULL)`,
 		})
 	}).
+	WithRaw(3, 4, 0, "Who gave each reaction", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// bridgev2 can overwrite its own record of a reaction before it takes the reaction away
+		// (one reaction per person, as on WhatsApp), so the index keeps who gave it, filled in
+		// now from bridgev2's records for the reactions indexed before.
+		if err := execAll(ctx, db, []string{
+			`ALTER TABLE trioditis_reaction ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
+		}); err != nil {
+			return err
+		}
+		return backfillReactionSenders(ctx, db)
+	}).
+	WithRaw(4, 5, 0, "Kept avatar references", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An avatar's upload lives minutes, its sealed copy far longer: the copy's reference,
+		// sealed to the bridge key, is what lets a later metadata change attach it again.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_avatar_ref (owner_user_id TEXT NOT NULL, avatar_uri TEXT NOT NULL, sealed TEXT NOT NULL, PRIMARY KEY (owner_user_id, avatar_uri))`,
+		})
+	}).
+	WithRaw(5, 6, 0, "Messages being bridged", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A message a network will send again if it isn't acknowledged, from its first part
+		// until bridgev2 says how handling it ended: one left at start-up was cut off, and its
+		// parts are forgotten so the redelivery bridges them all (connector, RecoverInflight).
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_inflight (receiver TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (receiver, message_id))`,
+		})
+	}).
+	WithRaw(6, 7, 0, "Cancelled logins' accounts waiting to be logged out", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An account a cancelled login connected, kept while another login of the person's
+		// could be the one they meant, until that settles (connector, settleDiscarded). Kept
+		// here so a restart in between doesn't leave it connected.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_discarded (session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, login_id TEXT NOT NULL)`,
+		})
+	}).
+	WithRaw(7, 8, 0, "Which login session connected each account", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// The account's current activation: the login session that last connected it, and for
+		// whom, until it is logged out. A cancelled login's account is logged out only while it is
+		// still that login's (connector, settleDiscarded), across restarts too.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_activation (login_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_id TEXT NOT NULL)`,
+		})
+	}).
+	WithRaw(8, 9, 0, "Drop the cancelled-login cleanup tables", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A cancelled login's account is no longer logged out on the host's own say: it is kept,
+		// reported afterCancel, and the person decides. Nothing reads these any more.
+		return execAll(ctx, db, []string{
+			`DROP TABLE trioditis_discarded`,
+			`DROP TABLE trioditis_activation`,
+		})
+	}).
 	Finish()
+
+// InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
+type InflightMessage struct{ Receiver, MessageID string }
+
+// PutInflight records that a message's parts are being bridged.
+func (s *Store) PutInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO trioditis_inflight (receiver, message_id) VALUES ($1, $2) ON CONFLICT (receiver, message_id) DO NOTHING`, m.Receiver, m.MessageID)
+	return err
+}
+
+// DeleteInflight records that a message's handling ended.
+func (s *Store) DeleteInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID)
+	return err
+}
+
+// IsInflight reports whether a message's parts are being bridged.
+func (s *Store) IsInflight(ctx context.Context, m InflightMessage) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID).Scan(&n)
+	return n > 0, err
+}
+
+// Inflight lists the messages whose handling hadn't ended when the host last stopped.
+func (s *Store) Inflight(ctx context.Context) ([]InflightMessage, error) {
+	rows, err := s.DB.Query(ctx, `SELECT receiver, message_id FROM trioditis_inflight`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InflightMessage
+	for rows.Next() {
+		var m InflightMessage
+		if err = rows.Scan(&m.Receiver, &m.MessageID); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ReactorKey is how the reaction index keeps who gave a reaction, from bridgev2's record of
+// it: `self` for the person (their Matrix user), `ghost:` and the network's ID for anyone
+// else, or empty if the record says neither.
+func ReactorKey(senderMXID, senderID string) string {
+	if ghost, ok := ids.ParseGhostMXID(id.UserID(senderMXID)); ok {
+		return "ghost:" + string(ghost)
+	} else if _, ok = ids.ParseUserMXID(id.UserID(senderMXID)); ok {
+		return "self"
+	} else if senderID != "" {
+		return "ghost:" + senderID
+	}
+	return ""
+}
+
+// BackfillReactionSenders is the 3→4 upgrade's backfill, for a test that makes its rows look
+// older to check it against bridgev2's own tables.
+func (s *Store) BackfillReactionSenders(ctx context.Context) error {
+	return backfillReactionSenders(ctx, s.DB)
+}
+
+// bridgeReactionsExist is whether the `reaction` the backfill joins exists. On PostgreSQL it
+// is looked up as the join will be, through search_path, rather than in every schema.
+func bridgeReactionsExist(ctx context.Context, db *dbutil.Database) (bool, error) {
+	if db.Dialect != dbutil.Postgres {
+		return db.TableExists(ctx, "reaction")
+	}
+	var exists bool
+	err := db.QueryRow(ctx, `SELECT to_regclass('reaction') IS NOT NULL`).Scan(&exists)
+	return exists, err
+}
+
+// backfillReactionSenders fills in who gave each indexed reaction bridgev2 still has a record
+// of. A new install has no bridgev2 tables yet, and nothing to fill in.
+func backfillReactionSenders(ctx context.Context, db *dbutil.Database) error {
+	if exists, err := bridgeReactionsExist(ctx, db); err != nil || !exists {
+		return err
+	}
+	rows, err := db.Query(ctx, `SELECT t.event_id, r.sender_mxid, r.sender_id
+		FROM trioditis_reaction t JOIN reaction r ON r.mxid = t.event_id WHERE t.sender = ''`)
+	if err != nil {
+		return err
+	}
+	type found struct{ eventID, sender string }
+	var all []found
+	for rows.Next() {
+		var eventID, senderMXID, senderID string
+		if err = rows.Scan(&eventID, &senderMXID, &senderID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if sender := ReactorKey(senderMXID, senderID); sender != "" {
+			all = append(all, found{eventID, sender})
+		}
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, f := range all {
+		if _, err = db.Exec(ctx, `UPDATE trioditis_reaction SET sender=$2 WHERE event_id=$1`, f.eventID, f.sender); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func execAll(ctx context.Context, db *dbutil.Database, statements []string) error {
 	for _, statement := range statements {
@@ -643,6 +801,13 @@ func (s *Store) RemoveMember(ctx context.Context, roomID, mxid string) error {
 	return err
 }
 
+// IsMember reports whether mxid is in roomID.
+func (s *Store) IsMember(ctx context.Context, roomID, mxid string) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_member WHERE room_id=$1 AND mxid=$2`, roomID, mxid).Scan(&n)
+	return n > 0, err
+}
+
 // Members lists a room's members.
 func (s *Store) Members(ctx context.Context, roomID string) ([]string, error) {
 	return s.strings(ctx, `SELECT mxid FROM trioditis_member WHERE room_id=$1`, roomID)
@@ -672,13 +837,24 @@ func (s *Store) strings(ctx context.Context, query string, args ...any) ([]strin
 
 // PutReaction records a reaction event's target and key, so its removal can be reported
 // with them. Reaction keys are metadata, not sealed content, per the protocol.
-func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key string) error {
+func (s *Store) PutReaction(ctx context.Context, eventID, targetEventID, key, sender string) error {
 	_, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key) VALUES ($1, $2, $3)
-		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key`,
-		eventID, targetEventID, key,
+		`INSERT INTO trioditis_reaction (event_id, target_event_id, reaction_key, sender) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (event_id) DO UPDATE SET target_event_id=excluded.target_event_id, reaction_key=excluded.reaction_key, sender=excluded.sender`,
+		eventID, targetEventID, key, sender,
 	)
 	return err
+}
+
+// ReactionSender is who gave an indexed reaction, as PutReaction was told: empty if it was
+// indexed before senders were kept.
+func (s *Store) ReactionSender(ctx context.Context, eventID string) (string, error) {
+	var sender string
+	err := s.DB.QueryRow(ctx, `SELECT sender FROM trioditis_reaction WHERE event_id=$1`, eventID).Scan(&sender)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return sender, err
 }
 
 // GetReaction returns a reaction's target and key.
@@ -694,4 +870,33 @@ func (s *Store) GetReaction(ctx context.Context, eventID string) (target, key st
 func (s *Store) DeleteReaction(ctx context.Context, eventID string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_reaction WHERE event_id=$1`, eventID)
 	return err
+}
+
+// PutAvatarRef keeps the sealed reference to an owner's copy of an avatar. The first one
+// stays: an avatar's content URI names one upload, whose copy for an owner never changes.
+func (s *Store) PutAvatarRef(ctx context.Context, ownerUserID, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_ref (owner_user_id, avatar_uri, sealed) VALUES ($1, $2, $3) ON CONFLICT (owner_user_id, avatar_uri) DO NOTHING`,
+		ownerUserID, avatarURI, string(payload))
+	return err
+}
+
+// AvatarRef is the sealed reference PutAvatarRef kept, or ErrNotFound.
+func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*seal.Envelope, error) {
+	var payload string
+	err := s.DB.QueryRow(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var env seal.Envelope
+	if err = json.Unmarshal([]byte(payload), &env); err != nil {
+		return nil, err
+	}
+	return &env, nil
 }

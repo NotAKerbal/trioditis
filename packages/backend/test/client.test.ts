@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, components } from '../convex/_generated/api'
+import { api, components, internal } from '../convex/_generated/api'
 import type { Id } from '../convex/_generated/dataModel'
 import { chatViewOf } from '../convex/lib/chatView'
-import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T } from './setup'
+import { GATEWAY_SECRET, heartbeat, sealed, setup, signIn, type T, installNetworks } from './setup'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -91,8 +91,8 @@ describe('chat views', () => {
     const a = await signIn(t, 'user_a')
     for (let n = 0; n < 55; n++) await aChat(t, 'user_a', `pin${n}`, { lastMessageAt: n, pinned: true })
     await aChat(t, 'user_a', 'plain', { lastMessageAt: 100 })
-    await aChat(t, 'user_a', 'fake-pin', { lastMessageAt: 200, pinned: true, network: 'fake' })
-    await aChat(t, 'user_a', 'fake-plain', { lastMessageAt: 300, network: 'fake' })
+    await aChat(t, 'user_a', 'signal-pin', { lastMessageAt: 200, pinned: true, network: 'signal' })
+    await aChat(t, 'user_a', 'signal-plain', { lastMessageAt: 300, network: 'signal' })
     const seen: string[] = []
     let cursor: string | null = null
     for (;;) {
@@ -105,8 +105,31 @@ describe('chat views', () => {
       cursor = result.continueCursor
     }
     expect(seen).toEqual([...Array.from({ length: 55 }, (_, n) => `pin${54 - n}`), 'plain'])
-    const fake = await a.query(api.chats.list, { network: 'fake', paginationOpts: first })
-    expect(fake.page.map((row) => row.portalId)).toEqual(['fake-pin', 'fake-plain'])
+    const signal = await a.query(api.chats.list, { network: 'signal', paginationOpts: first })
+    expect(signal.page.map((row) => row.portalId)).toEqual(['signal-pin', 'signal-plain'])
+  })
+
+  it('lists by recency alone, pinned or not, when asked', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    for (let n = 1; n <= 4; n++) await aChat(t, 'user_a', `c${n}`, { lastMessageAt: n * 10 })
+    await aChat(t, 'user_a', 'old-pin', { lastMessageAt: 5, pinned: true })
+    await aChat(t, 'user_a', 'new-pin', { lastMessageAt: 35, pinned: true })
+    await aChat(t, 'user_a', 'signal', { lastMessageAt: 99, network: 'signal' })
+    const page1 = await a.query(api.chats.list, {
+      order: 'recent',
+      network: 'whatsapp',
+      paginationOpts: { numItems: 3, cursor: null },
+    })
+    expect(page1.page.map((row) => row.portalId)).toEqual(['c4', 'new-pin', 'c3'])
+    const page2 = await a.query(api.chats.list, {
+      order: 'recent',
+      network: 'whatsapp',
+      paginationOpts: { numItems: 3, cursor: page1.continueCursor },
+    })
+    expect(page2.page.map((row) => row.portalId)).toEqual(['c2', 'c1', 'old-pin'])
+    const all = await a.query(api.chats.list, { order: 'recent', paginationOpts: first })
+    expect(all.page.map((row) => row.portalId)).toEqual(['signal', 'c4', 'new-pin', 'c3', 'c2', 'c1', 'old-pin'])
   })
 
   it('moves a chat between views as its flags change, including combined ones', async () => {
@@ -260,6 +283,137 @@ describe('messages alongside the page', () => {
       [messageId]: [{ key: '👍', senderKey: 'self' }],
     })
     expect((await a.query(api.messages.typing, { chatId })).map((row) => row.senderKey)).toEqual(['ghost:h'])
+  })
+})
+
+describe('reacting', () => {
+  const messageIdOf = async (t: T, eventId: string) =>
+    await t.run(
+      async (ctx) =>
+        (await ctx.db
+          .query('messages')
+          .filter((q) => q.eq(q.field('eventId'), eventId))
+          .first())!._id,
+    )
+
+  it('asks the bridge host to add or take away a reaction, with a deadline', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await messageIdOf(t, 'net_1')
+    const before = Date.now()
+    await a.mutation(api.messages.react, { chatId, messageId, key: '❤️' })
+    await a.mutation(api.messages.react, { chatId, messageId, key: '❤', remove: true })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((c) => [c.payload, c.chatId])).toEqual([
+      [{ type: 'react', portalId: 'p', targetEventId: 'net_1', key: '❤️' }, chatId],
+      [{ type: 'unreact', portalId: 'p', targetEventId: 'net_1', key: '❤' }, chatId],
+    ])
+    for (const c of commands) expect(c.expiresAt).toBeGreaterThanOrEqual(before + 10 * 60 * 1000)
+    // Nothing shows until the bridge host's echo.
+    expect(await a.query(api.messages.reactions, { chatId, messageIds: [messageId] })).toEqual({ [messageId]: [] })
+  })
+
+  it('refuses a message that never reached the network, is deleted, or is in another chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const other = await aChat(t, 'user_a', 'q')
+    await aMessage(t, chatId, `pending:${id(1)}`, 1)
+    await aMessage(t, chatId, 'net_gone', 2, { redactedAt: 3, sealed: undefined })
+    await aMessage(t, other, 'net_other', 4)
+    for (const eventId of [`pending:${id(1)}`, 'net_gone', 'net_other']) {
+      const messageId = await messageIdOf(t, eventId)
+      await expect(a.mutation(api.messages.react, { chatId, messageId, key: '👍' })).rejects.toThrow(
+        /can’t be reacted to/,
+      )
+    }
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+  })
+
+  it('refuses a key that isn’t one reaction, a network without reactions, and someone else’s chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const b = await signIn(t, 'user_b')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await messageIdOf(t, 'net_1')
+    for (const key of ['', 'two words', 'x'.repeat(65), 'a\u0007']) {
+      await expect(a.mutation(api.messages.react, { chatId, messageId, key })).rejects.toThrow(/can’t be sent/)
+    }
+    await expect(b.mutation(api.messages.react, { chatId, messageId, key: '👍' })).rejects.toThrow(/doesn’t exist/)
+    const voice = await aChat(t, 'user_a', 'v', { network: 'gvoice' })
+    await aMessage(t, voice, 'net_v', 1, { network: 'gvoice' })
+    const voiceMessage = await messageIdOf(t, 'net_v')
+    await expect(a.mutation(api.messages.react, { chatId: voice, messageId: voiceMessage, key: '👍' })).rejects.toThrow(
+      /Google Voice doesn’t have reactions/,
+    )
+    // A long joined emoji is one reaction.
+    await a.mutation(api.messages.react, { chatId, messageId, key: '👨‍👩‍👧‍👦' })
+  })
+})
+
+describe('the person’s own reaction on a busy message', () => {
+  it('comes back past the first 100, so it can be taken away', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', 1)
+    const messageId = await t.run(async (ctx) => (await ctx.db.query('messages').first())!._id)
+    const row = (senderKey: string, key: string, eventId: string) => ({
+      userId: 'user_a',
+      chatId,
+      messageId,
+      senderKey,
+      key,
+      eventId,
+      addedAt: 1,
+      networkTs: 1,
+    })
+    await t.run(async (ctx) => {
+      for (let r = 0; r < 100; r++) await ctx.db.insert('reactions', row(`ghost:g${r}`, '👍', `r${r}`))
+      // Taken away earlier: these mustn't use up the room for the one that's still there.
+      for (let r = 0; r < 25; r++)
+        await ctx.db.insert('reactions', { ...row('self', `x${r}`, `gone${r}`), removedAt: 2 })
+      await ctx.db.insert('reactions', row('self', '🎉', 'mine'))
+    })
+    const list = (await a.query(api.messages.reactions, { chatId, messageIds: [messageId] }))[messageId]!
+    expect(list).toHaveLength(101)
+    expect(list.filter((r) => r.senderKey === 'self')).toEqual([{ key: '🎉', senderKey: 'self' }])
+  })
+})
+
+describe('contacts', () => {
+  it('returns the person’s own contacts on that network, leaving out ones it doesn’t have', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await t.run(async (ctx) => {
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        ghostId: 'g1',
+        sealedProfile: sealed('a1'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_a',
+        network: 'signal',
+        ghostId: 'g2',
+        sealedProfile: sealed('a2'),
+      })
+      await ctx.db.insert('contacts', {
+        userId: 'user_b',
+        network: 'whatsapp',
+        ghostId: 'g2',
+        sealedProfile: sealed('b2'),
+      })
+    })
+    expect(await a.query(api.contacts.get, { network: 'whatsapp', ghostIds: ['g1', 'g2', 'g1'] })).toEqual([
+      { ghostId: 'g1', sealedProfile: sealed('a1') },
+    ])
+    await expect(
+      a.query(api.contacts.get, { network: 'whatsapp', ghostIds: Array.from({ length: 101 }, (_, i) => `g${i}`) }),
+    ).rejects.toThrow(/at most 100/)
   })
 })
 
@@ -493,7 +647,7 @@ describe('scheduled sends', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const chatId = await aChat(t, 'user_a', 'p')
-    const scheduledId = (await scheduleOne(a, chatId, 1, 30 * 60 * 1000))!
+    const scheduledId = (await scheduleOne(a, chatId, 1, 30 * 60 * 1000)) as Id<'scheduledSends'>
     expect(await a.query(api.scheduled.list, { chatId })).toMatchObject([{ clientMessageId: id(1) }])
     expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([
       { _id: scheduledId, copy: sealed('c1') },
@@ -514,8 +668,8 @@ describe('scheduled sends', () => {
     const a = await signIn(t, 'user_a')
     const b = await signIn(t, 'user_b')
     const chatId = await aChat(t, 'user_a', 'p')
-    const firstId = (await scheduleOne(a, chatId, 1, 60_000))!
-    const second = (await scheduleOne(a, chatId, 2, 60_000))!
+    const firstId = (await scheduleOne(a, chatId, 1, 60_000)) as Id<'scheduledSends'>
+    const second = (await scheduleOne(a, chatId, 2, 60_000)) as Id<'scheduledSends'>
     await expect(b.mutation(api.scheduled.cancel, { scheduledId: firstId })).rejects.toThrow(/doesn’t exist/)
     expect(await b.query(api.scheduled.copies, { scheduledIds: [firstId] })).toEqual([])
     await a.mutation(api.scheduled.cancel, { scheduledId: firstId })
@@ -525,7 +679,276 @@ describe('scheduled sends', () => {
     await t.finishInProgressScheduledFunctions()
     const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
     expect(commands.map((c) => c.clientMessageId)).toEqual([id(2)])
-    expect(await scheduleOne(a, chatId, 2, 60_000)).toBeNull()
+    expect(await scheduleOne(a, chatId, 2, 60_000)).toMatchObject({ already: 'send' })
+    // A cancelled one says so: its text never went, so the client keeps it.
+    expect(await scheduleOne(a, chatId, 1, 60_000)).toEqual({ already: 'scheduled', state: 'cancelled' })
+  })
+
+  it('says what an ID already went as, so a second tab can tell its send from the first', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const send = (n: number) =>
+      a.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(n),
+        forBridge: sealed(`b${n}`),
+        copy: sealed(`c${n}`),
+      })
+    expect(await send(3)).toBe('queued')
+    // The copy's delivery as it stands: queued until the gateway has it.
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'queued' })
+    expect(await scheduleOne(a, chatId, 3, 60_000)).toEqual({ already: 'send', delivery: 'queued' })
+    expect(typeof (await scheduleOne(a, chatId, 4, 60_000))).toBe('string')
+    expect(await scheduleOne(a, chatId, 4, 60_000)).toEqual({ already: 'scheduled', state: 'scheduled' })
+    expect(await send(4)).toEqual({ already: 'scheduled', state: 'scheduled' })
+    // It failed, and its copy was then discarded: the outbox still says how it went.
+    await t.run(async (ctx) => {
+      const copy = await ctx.db
+        .query('messages')
+        .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(3)))
+        .first()
+      await ctx.db.patch(copy!._id, { delivery: 'failed' })
+      const command = await ctx.db
+        .query('outbox')
+        .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(3)))
+        .first()
+      await ctx.db.patch(command!._id, { delivery: 'failed' })
+    })
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'failed' })
+    await a.mutation(api.messages.discardSend, { clientMessageId: id(3) })
+    expect(await send(3)).toEqual({ already: 'send', delivery: 'failed' })
+  })
+
+  it('keeps a cancelled message’s copy until it’s forgotten, and says when Send now won', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await a.mutation(api.scheduled.create, {
+      chatId,
+      clientMessageId: id(5),
+      forBridge: sealed('b5'),
+      copy: sealed('c5'),
+      sendAt: Date.now() + 60_000,
+    })) as Id<'scheduledSends'>
+    const cancelled = await a.mutation(api.scheduled.cancel, { scheduledId })
+    expect(cancelled).toEqual({
+      outcome: 'cancelled',
+      first: true,
+      clientMessageId: id(5),
+      copy: sealed('c5'),
+      replyTo: null,
+    })
+    // Asked again (an answer lost on the way, or another tab): the same copy, but not first, so
+    // only the call that cancelled it puts its text in a composer.
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId })).toEqual({ ...cancelled, first: false })
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toMatchObject([{ _id: scheduledId, replyTo: null }])
+    expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([
+      { _id: scheduledId, copy: sealed('c5') },
+    ])
+    // Its time comes: a cancelled one isn't sent.
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toEqual([])
+    // Forgotten once its text is saved in the composer: listed no more, its copy gone.
+    await a.mutation(api.scheduled.forget, { scheduledId })
+    await a.mutation(api.scheduled.forget, { scheduledId })
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await a.query(api.scheduled.copies, { scheduledIds: [scheduledId] })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+    // Send now came first: the cancel says so, and changes nothing.
+    const other = (await scheduleOne(a, chatId, 6, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.sendNow, { scheduledId: other })
+    expect(await a.mutation(api.scheduled.cancel, { scheduledId: other })).toEqual({
+      outcome: 'sent',
+      delivery: 'queued',
+    })
+  })
+
+  it('forgets a cancelled message nobody restored after 30 days', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const scheduledId = (await scheduleOne(a, chatId, 7, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.cancel, { scheduledId })
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toHaveLength(1)
+    // Cancelled 30 days ago and a moment.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(scheduledId, { cancelledAt: Date.now() - 30 * 24 * 60 * 60 * 1000 - 1 })
+    })
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+  })
+
+  it('isn’t held up by older forgotten ones, kept for their IDs, in cleanup or the list', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const old = Date.now() - 31 * 24 * 60 * 60 * 1000
+    // More forgotten ones than a cleanup batch, all older than the one still kept.
+    await t.run(async (ctx) => {
+      for (let n = 0; n < 250; n++)
+        await ctx.db.insert('scheduledSends', {
+          userId: 'user_a',
+          chatId,
+          clientMessageId: `forgotten-${String(n).padStart(12, '0')}`,
+          sendAt: old,
+          state: 'cancelled',
+          createdAt: old - 2,
+          cancelledAt: old - 1,
+          forgottenAt: old,
+        })
+    })
+    const kept = (await scheduleOne(a, chatId, 8, 60_000)) as Id<'scheduledSends'>
+    await a.mutation(api.scheduled.cancel, { scheduledId: kept })
+    expect((await a.query(api.scheduled.cancelled, { chatId })).map((r) => r._id)).toEqual([kept])
+    await t.run(async (ctx) => await ctx.db.patch(kept, { cancelledAt: old }))
+    await t.mutation(internal.scheduled.forgetOldCancelled, {})
+    expect(await a.query(api.scheduled.cancelled, { chatId })).toEqual([])
+    expect(await t.run(async (ctx) => await ctx.db.query('scheduledPayloads').collect())).toEqual([])
+  })
+
+  describe('sending again, decided by the server', () => {
+    // Sets a send's delivery state on its copy (if there still is one) and its outbox row.
+    const setDelivery = (t: T, clientMessageId: string, delivery: 'failed' | 'unknown' | 'queued' | 'sent') =>
+      t.run(async (ctx) => {
+        for (const table of ['messages', 'outbox'] as const) {
+          const row = await ctx.db
+            .query(table)
+            .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', clientMessageId))
+            .first()
+          if (row) await ctx.db.patch(row._id, { delivery })
+        }
+      })
+    const states = async (a: Awaited<ReturnType<typeof signIn>>, ids: string[]) =>
+      Object.fromEntries(
+        (await a.query(api.messages.retryStates, { clientMessageIds: ids })).map((r) => [r.clientMessageId, r.state]),
+      )
+    const again = (a: Awaited<ReturnType<typeof signIn>>, clientMessageId: string, nextId: string) =>
+      a.mutation(api.messages.sendAgain, { clientMessageId, nextId, forBridge: sealed('b'), copy: sealed('c') })
+
+    async function failedSend() {
+      const t = setup()
+      const a = await signIn(t, 'user_a')
+      const chatId = await aChat(t, 'user_a', 'p')
+      await a.mutation(api.messages.send, {
+        chatId,
+        clientMessageId: id(11),
+        forBridge: sealed('b'),
+        copy: sealed('c'),
+      })
+      await setDelivery(t, id(11), 'failed')
+      return { t, a }
+    }
+
+    it('makes one attempt per link, from any row of the chain, and says the same on each', async () => {
+      const { t, a } = await failedSend()
+      const first = (await states(a, [id(11)]))[id(11)]!
+      expect(first).toMatchObject({ root: id(11), latest: null, allowed: true })
+      expect(first.nextId).toMatch(/^rt_[A-Za-z0-9_-]{43}$/)
+      // Two clicks, or two tabs: one attempt.
+      expect((await again(a, id(11), first.nextId!)).created).toBe(true)
+      expect((await again(a, id(11), first.nextId!)).created).toBe(false)
+      const r1 = first.nextId!
+      const both = await states(a, [id(11), r1])
+      expect(both[id(11)]).toEqual(both[r1])
+      expect(both[r1]).toMatchObject({ root: id(11), latest: r1, delivery: 'queued', allowed: false, nextId: null })
+      // It failed: the next one is allowed, from the attempt's own row too.
+      await setDelivery(t, r1, 'failed')
+      const next = (await states(a, [r1]))[r1]!
+      expect(next).toMatchObject({ latest: r1, allowed: true })
+      expect(next.nextId).not.toBe(r1)
+      expect((await again(a, r1, next.nextId!)).state).toMatchObject({ latest: next.nextId, allowed: false })
+    })
+
+    it('never follows an attempt that may have gone, even once the original is deleted', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'unknown')
+      // The original's row is deleted from the chat: the server still knows the chain.
+      await a.mutation(api.messages.discardSend, { clientMessageId: id(11) })
+      const state = (await states(a, [r1]))[r1]!
+      expect(state).toMatchObject({ root: id(11), latest: r1, delivery: 'unknown', allowed: false, nextId: null })
+      // A stale page that thinks another is due: nothing is made.
+      const guess = (await states(a, [id(11)]))[id(11)]!
+      expect(guess.allowed).toBe(false)
+      const outbox = async () => (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).length
+      const before = await outbox()
+      expect((await again(a, r1, 'rt_made-up-by-a-stale-page-0000000000000000000')).created).toBe(false)
+      expect(await outbox()).toBe(before)
+    })
+
+    it('goes on from a failed attempt whose row was deleted, on a click', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      await a.mutation(api.messages.discardSend, { clientMessageId: r1 })
+      const state = (await states(a, [id(11)]))[id(11)]!
+      expect(state).toMatchObject({ latest: r1, delivery: 'failed', allowed: true })
+      expect((await again(a, id(11), state.nextId!)).created).toBe(true)
+    })
+
+    it('ends the chain when any send in it turns out to have gone, the original included', async () => {
+      const { t, a } = await failedSend()
+      await setDelivery(t, id(11), 'unknown')
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      // The original, which may not have gone, is confirmed sent after all.
+      await setDelivery(t, id(11), 'sent')
+      const state = (await states(a, [r1]))[r1]!
+      expect(state).toMatchObject({ root: id(11), latest: id(11), delivery: 'sent', allowed: false, nextId: null })
+      const stale = await again(a, r1, 'rt_made-up-by-a-stale-page-0000000000000000000')
+      expect(stale.created).toBe(false)
+    })
+
+    it('makes no further attempt while any send in the chain may still go', async () => {
+      const { t, a } = await failedSend()
+      await setDelivery(t, id(11), 'unknown')
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      // The original may still have gone: no second attempt.
+      expect((await states(a, [r1]))[r1]).toMatchObject({ allowed: false, nextId: null })
+    })
+
+    it('keeps attempt IDs for Send again alone: a send or schedule can’t take one', async () => {
+      const { t, a } = await failedSend()
+      const chatId = (await t.run(async (ctx) => await ctx.db.query('chats').first()))!._id
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await expect(
+        a.mutation(api.messages.send, { chatId, clientMessageId: r1, forBridge: sealed('b'), copy: sealed('c') }),
+      ).rejects.toThrow(/isn’t valid/)
+      await expect(
+        a.mutation(api.scheduled.create, {
+          chatId,
+          clientMessageId: r1,
+          forBridge: sealed('b'),
+          copy: sealed('c'),
+          sendAt: Date.now() + 60_000,
+        }),
+      ).rejects.toThrow(/isn’t valid/)
+      // Still free for the attempt itself.
+      expect((await again(a, id(11), r1)).created).toBe(true)
+    })
+
+    it('answers only for the person’s own sends, and makes none for anyone else', async () => {
+      const { t, a } = await failedSend()
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      const b = await signIn(t, 'user_b')
+      expect(await b.query(api.messages.retryStates, { clientMessageIds: [id(11)] })).toEqual([])
+      await expect(again(b, id(11), r1)).rejects.toThrow(/doesn’t exist/)
+      // Not offered for a send that went fine, nor for a message ID never sent.
+      await setDelivery(t, id(11), 'queued')
+      expect((await states(a, [id(11), id(12)]))[id(11)]).toMatchObject({ allowed: false })
+      expect(await states(a, [id(12)])).toEqual({})
+    })
   })
 
   it('fails, and says so, when its chat is gone by the time it’s due', async () => {
@@ -533,7 +956,7 @@ describe('scheduled sends', () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
     const chatId = await aChat(t, 'user_a', 'p')
-    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000))!
+    const scheduledId = (await scheduleOne(a, chatId, 1, 60_000)) as Id<'scheduledSends'>
     await t.run(async (ctx) => await ctx.db.patch(chatId, { deleted: true, view: 'deleted' }))
     vi.advanceTimersByTime(61_000)
     await t.finishInProgressScheduledFunctions()
@@ -558,20 +981,36 @@ describe('scheduled sends', () => {
 })
 
 describe('networks', () => {
-  it('lists the enabled networks with their login flows', async () => {
+  it('lists the installed networks with their login flows', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
+    expect(await a.query(api.networks.list, {})).toEqual([])
+    await installNetworks(t)
     const networks = await a.query(api.networks.list, {})
-    expect(networks.map((n) => n.network)).toEqual(['whatsapp', 'fake'])
+    expect(networks.map((n) => n.network)).toEqual(['whatsapp', 'signal'])
     expect(networks[0]!.flows.map((f) => f.id)).toEqual(['qr', 'phone'])
+  })
+
+  it('offers an installed network only while the server runs its bridge host', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await installNetworks(t)
+    process.env.TRIODITIS_NETWORKS = 'whatsapp'
+    try {
+      expect((await a.query(api.networks.list, {})).map((n) => n.network)).toEqual(['whatsapp'])
+      await expect(a.mutation(api.logins.start, { network: 'signal' })).rejects.toThrow(/installed/)
+    } finally {
+      process.env.TRIODITIS_NETWORKS = 'whatsapp,signal'
+    }
   })
 
   it('reports each network’s health for the person', async () => {
     const t = setup()
+    await installNetworks(t)
     const a = await signIn(t, 'user_a')
     expect(await a.query(api.networks.health, {})).toMatchObject([
       { network: 'whatsapp', status: 'none', bridgeOnline: false },
-      { network: 'fake', status: 'none' },
+      { network: 'signal', status: 'none' },
     ])
     await t.mutation(api.gateway.ingest, {
       secret: GATEWAY_SECRET,
@@ -603,6 +1042,7 @@ describe('accounts, logins and logout', () => {
 
   it('needs both key backups before a network can be connected', async () => {
     const t = setup()
+    await installNetworks(t)
     const a = await signIn(t, 'user_a')
     await t.run(async (ctx) => {
       const recovery = (await ctx.db.query('keyBackups').collect()).find((row) => row.kind === 'recovery')!
@@ -746,5 +1186,40 @@ describe('accounts, logins and logout', () => {
       logoutPending: false,
       logoutError: 'expired',
     })
+  })
+})
+
+describe('arrivals, for notifications', () => {
+  it('lists messages from others by when they arrived, without history, own, deleted or other views', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const inbox = await aChat(t, 'user_a', 'inbox')
+    const archived = await aChat(t, 'user_a', 'archived', { archived: true })
+    await aMessage(t, inbox, 'e-first', 2_000)
+    await aMessage(t, inbox, 'e-history', 5_000, { historical: true })
+    await aMessage(t, inbox, 'e-mine', 5_000, { sender: { self: true } })
+    await aMessage(t, inbox, 'e-deleted', 5_000, { redactedAt: 6_000 })
+    await aMessage(t, archived, 'e-archived', 5_000)
+    // Arrives last with an older network time: still the newest arrival.
+    await aMessage(t, inbox, 'e-late', 1_000)
+    const { latest, arrivals } = await a.query(api.messages.arrivals, {})
+    expect(arrivals.map((x) => x.message.objectId)).toEqual(['e-late', 'e-first'])
+    expect(arrivals[0]).toMatchObject({ message: { self: false, redacted: false }, chat: { portalId: 'inbox' } })
+    expect(arrivals[0]!.message.sealed).not.toBeNull()
+    expect(latest).toBe(arrivals[0]!.arrivedAt)
+    // Someone else's messages are never theirs to see.
+    const b = await signIn(t, 'user_b')
+    expect(await b.query(api.messages.arrivals, {})).toEqual({ latest: null, arrivals: [] })
+  })
+
+  it('finds an arrival behind the person’s own sends, and moves the cursor past them', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const inbox = await aChat(t, 'user_a', 'inbox')
+    await aMessage(t, inbox, 'e-theirs', 1_000)
+    for (let n = 0; n < 12; n++) await aMessage(t, inbox, `e-mine-${n}`, 2_000 + n, { sender: { self: true } })
+    const { latest, arrivals } = await a.query(api.messages.arrivals, {})
+    expect(arrivals.map((x) => x.message.objectId)).toEqual(['e-theirs'])
+    expect(latest).toBeGreaterThan(arrivals[0]!.arrivedAt)
   })
 })

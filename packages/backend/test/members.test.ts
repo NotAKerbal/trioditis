@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { api, internal } from '../convex/_generated/api'
 import { sha256Hex } from '../convex/lib/hash'
-import { SETUP_TOKEN, sealed, setup, signIn } from './setup'
+import { SETUP_TOKEN, sealed, setup, signIn, installNetworks } from './setup'
+
+const firstPage = { numItems: 50, cursor: null }
 
 describe('accounts', () => {
   const reserve = (t: ReturnType<typeof setup>, email: string, tokenHash?: string) =>
@@ -39,7 +41,7 @@ describe('accounts', () => {
     expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
     await expect(
       admin.mutation(api.members.revokeInvitation, {
-        invitationId: (await admin.query(api.members.invitations, {}))[0]!._id,
+        invitationId: (await admin.query(api.members.invitations, { paginationOpts: firstPage })).page[0]!._id,
       }),
     ).rejects.toThrow(/right now/)
     expect(
@@ -47,9 +49,10 @@ describe('accounts', () => {
     ).toEqual({ admitted: true })
     expect(await reserve(t, 'sam@example.com', tokenHash)).toEqual({ allowed: false })
 
-    const invitations = await admin.query(api.members.invitations, {})
-    expect(invitations[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
-    expect(invitations[0]).not.toHaveProperty('tokenHash')
+    // Joined, the invitation leaves the list: the person is a member now.
+    expect((await admin.query(api.members.invitations, { paginationOpts: firstPage })).page).toEqual([])
+    const accepted = await t.run(async (ctx) => await ctx.db.query('invitations').collect())
+    expect(accepted[0]).toMatchObject({ email: 'sam@example.com', acceptedBy: 'sam' })
     expect(await t.query(internal.members.isMember, { userId: 'sam' })).toBe(true)
   })
 
@@ -103,10 +106,11 @@ describe('accounts', () => {
 describe('logins', () => {
   it('needs an identity key and an enabled network', async () => {
     const t = setup()
+    await installNetworks(t)
     const noKey = await signIn(t, 'sam', 'member', false)
     await expect(noKey.mutation(api.logins.start, { network: 'whatsapp' })).rejects.toThrow(/setting up/)
     const isaac = await signIn(t, 'isaac')
-    await expect(isaac.mutation(api.logins.start, { network: 'discord' })).rejects.toThrow(/enabled/)
+    await expect(isaac.mutation(api.logins.start, { network: 'discord' })).rejects.toThrow(/installed/)
     const sessionId = await isaac.mutation(api.logins.start, { network: 'whatsapp' })
     expect(await isaac.query(api.logins.session, { loginSessionId: sessionId })).toMatchObject({ state: 'pending' })
     expect(await noKey.query(api.logins.session, { loginSessionId: sessionId })).toBeNull()
@@ -114,6 +118,7 @@ describe('logins', () => {
 
   it('accepts input only for the step being shown, sealed', async () => {
     const t = setup()
+    await installNetworks(t)
     const isaac = await signIn(t, 'isaac')
     const loginSessionId = await isaac.mutation(api.logins.start, { network: 'whatsapp' })
     await expect(isaac.mutation(api.logins.submit, { loginSessionId, stepId: 's1', sealed: sealed() })).rejects.toThrow(
@@ -158,6 +163,8 @@ describe('privacy between people', () => {
 
   it('gives an agent only its own person’s networks', async () => {
     const t = setup()
+    await signIn(t, 'user_a')
+    await signIn(t, 'user_b')
     await t.run(async (ctx) => {
       for (const userId of ['user_a', 'user_b']) {
         await ctx.db.insert('networkAccounts', {
@@ -170,7 +177,7 @@ describe('privacy between people', () => {
       }
     })
     expect(await t.query(internal.mcp.networksForUser, { userId: 'user_a' })).toEqual([
-      { network: 'whatsapp', state: 'CONNECTED', lastHealthyAt: null },
+      expect.objectContaining({ network: 'whatsapp', state: 'CONNECTED', lastHealthyAt: null }),
     ])
   })
 })
@@ -178,16 +185,16 @@ describe('privacy between people', () => {
 describe('server info', () => {
   it('says whether this is a demo server, signed in or not', async () => {
     const t = setup()
-    expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true })
+    expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: true, version: null })
     process.env.TRIODITIS_DEMO = '1'
     try {
-      // Demo data needs the fake network alone too; without it, only invitations are off.
-      expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false })
-      process.env.TRIODITIS_NETWORKS = 'fake'
-      expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false })
+      // Demo data needs a server with no bridge host too; with one, only invitations are off.
+      expect(await t.query(api.server.info, {})).toEqual({ demo: false, invitations: false, version: null })
+      delete process.env.TRIODITIS_NETWORKS
+      expect(await t.query(api.server.info, {})).toEqual({ demo: true, invitations: false, version: null })
     } finally {
       delete process.env.TRIODITIS_DEMO
-      process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
+      process.env.TRIODITIS_NETWORKS = 'whatsapp,signal'
     }
   })
 })

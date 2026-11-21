@@ -2,7 +2,6 @@ import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
 import {
   chatKind,
-  commandPayload,
   deliveryState,
   envelope,
   errorCode,
@@ -11,7 +10,12 @@ import {
   network,
   sender,
   storedChatView,
+  storedCommandPayload,
   storedLastMessage,
+  storedNetwork,
+  updateChannel,
+  updateRequest,
+  updaterReport,
 } from './validators'
 
 // Trioditis's tables. Better Auth's are in the betterAuth component (./betterAuth).
@@ -32,8 +36,37 @@ export default defineSchema({
      * removed and made again.
      */
     backupRevision: v.optional(v.number()),
+    /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
+    peopleCount: v.optional(v.number()),
+    /**
+     * Goes up with every change to the address book. Each write names the one it was made
+     * from, so two devices can't both link one contact to different cards.
+     */
+    peopleRevision: v.optional(v.number()),
+    /**
+     * Goes up whenever the sign-in password changes (a change or a reset). A password sign-in
+     * notes it before checking the password, and its new session is ended if it moved meanwhile:
+     * so a sign-in with the old password that races a reset never keeps a session.
+     */
+    credentialVersion: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
+
+  /**
+   * Members an admin removed whose network accounts may still be signed in on a bridge host. Kept
+   * until every one of their accounts reports LOGGED_OUT, so an admin can see the cleanup and try
+   * it again (members.removedCleanup, members.retryCleanup). Holds no content.
+   */
+  removedMembers: defineTable({
+    userId: v.string(),
+    email: v.optional(v.string()),
+    removedBy: v.string(),
+    removedAt: v.number(),
+    /** Some of their accounts aren't logged out yet. Only these are listed (`by_active`). */
+    active: v.optional(v.boolean()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_active', ['active', 'removedAt']),
 
   invitations: defineTable({
     email: v.string(),
@@ -50,11 +83,63 @@ export default defineSchema({
     .index('by_tokenHash', ['tokenHash'])
     .index('by_email', ['email']),
 
+  /**
+   * Password resets an admin issued (members.issuePasswordReset), each for one member, used once
+   * with the member's recovery key (account.resetPassword).
+   */
+  passwordResets: defineTable({
+    userId: v.string(),
+    /** SHA-256 of the token in the reset link. The token itself is never stored. */
+    tokenHash: v.string(),
+    issuedBy: v.string(),
+    expiresAt: v.number(),
+  })
+    .index('by_tokenHash', ['tokenHash'])
+    .index('by_user', ['userId']),
+
   /** Server-wide state. `setup` holds the first-admin sign-up while it is in progress. */
   serverState: defineTable({
     key: v.literal('setup'),
     reservedUntil: v.number(),
     reservedEmail: v.string(),
+  }).index('by_key', ['key']),
+
+  /**
+   * How the server updates itself, in one row (`key: 'server'`): the release channel and
+   * whether updates install on their own, which admins choose, an admin's request the updater
+   * hasn't finished, and what the updater on the host last reported. See updates.ts.
+   */
+  serverUpdates: defineTable({
+    key: v.literal('server'),
+    channel: updateChannel,
+    autoUpdate: v.boolean(),
+    request: v.optional(updateRequest),
+    updater: v.optional(updaterReport),
+  }).index('by_key', ['key']),
+
+  /**
+   * The networks admins have installed, one row per network an admin (or the migration that
+   * kept what an older version offered) has decided on. A network with no row isn't installed;
+   * removing one keeps its row, with `installed: false`, so the decision stands.
+   */
+  serverNetworks: defineTable({
+    network,
+    installed: v.boolean(),
+    updatedAt: v.number(),
+    /** The admin who decided, or `migration`. */
+    updatedBy: v.string(),
+  }).index('by_network', ['network']),
+
+  /**
+   * Google Contacts (google.ts), in one row (`key: 'contacts'`): the OAuth client ID an admin
+   * set up in Google Cloud, which people's apps sign in to Google with to read their contacts
+   * themselves. A client ID isn't a secret: Google shows it on every sign-in page.
+   */
+  serverGoogle: defineTable({
+    key: v.literal('contacts'),
+    clientId: v.string(),
+    updatedAt: v.number(),
+    updatedBy: v.string(),
   }).index('by_key', ['key']),
 
   /**
@@ -74,7 +159,7 @@ export default defineSchema({
   /** One connected account on one network, e.g. Isaac's WhatsApp. */
   networkAccounts: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.string(),
     /** The bridge host that runs this login; its commands go there. */
     hostId: v.optional(v.string()),
@@ -84,19 +169,28 @@ export default defineSchema({
     error: v.optional(errorCode),
     lastHealthyAt: v.optional(v.number()),
     updatedAt: v.number(),
+    /** What the bridge host last said tells the account apart, sealed to its owner (kind `account`, object ID `loginId`). */
+    sealedMeta: v.optional(envelope),
+    /**
+     * A login the person cancelled connected it anyway. Kept until they decide (logins.keep, or a
+     * disconnect), and cleared by any normal login of the account.
+     */
+    connectedAfterCancel: v.optional(v.boolean()),
     /** A logout was asked for and hasn't been confirmed yet. */
     logoutPending: v.optional(v.boolean()),
     /** The command of that pending logout: only its own outcome or timeout ends it. */
     logoutCommandId: v.optional(v.id('outbox')),
     /** Why the last logout didn't happen. */
     logoutError: v.optional(errorCode),
+    /** When the person last asked for this login's contact list (contacts.sync). */
+    contactsSyncedAt: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
     .index('by_login', ['network', 'loginId']),
 
   loginSessions: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     state: v.union(
       v.literal('pending'),
       v.literal('active'),
@@ -111,11 +205,28 @@ export default defineSchema({
     /** The step input was last sent for: each step takes one submission, as the bridge host does. */
     submittedStepId: v.optional(v.string()),
     updatedAt: v.number(),
-  }).index('by_user', ['userId']),
+  })
+    .index('by_user', ['userId'])
+    .index('by_network_state', ['network', 'state']),
+
+  /**
+   * Tickets to a login step's sign-in browser (docs/architecture/signin-browser.md). Only the
+   * ticket's SHA-256 is kept; the gateway redeems a ticket once, within a minute.
+   */
+  signinTickets: defineTable({
+    tokenHash: v.string(),
+    loginSessionId: v.id('loginSessions'),
+    userId: v.string(),
+    hostId: v.string(),
+    stepId: v.string(),
+    expiresAt: v.number(),
+  })
+    .index('by_token', ['tokenHash'])
+    .index('by_user', ['userId']),
 
   chats: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.string(),
     portalId: v.string(),
     kind: chatKind,
@@ -131,6 +242,8 @@ export default defineSchema({
      */
     last: v.optional(v.union(v.null(), storedLastMessage)),
     unreadCount: v.number(),
+    /** One more with every message counted unread (`ChatRow.unreadRev`). */
+    unreadRev: v.optional(v.number()),
     pinned: v.boolean(),
     archived: v.boolean(),
     mutedUntil: v.optional(v.number()),
@@ -139,6 +252,17 @@ export default defineSchema({
     mentionCount: v.optional(v.number()),
     /** Marked unread by the person, whatever the count says. Trioditis-side only. */
     markedUnread: v.optional(v.boolean()),
+    /**
+     * The `sortKey` of the newest message the person is known to have read, here (mark read)
+     * or elsewhere (their own read receipt). It only moves forward, so a message that arrives
+     * late but sorts at or before it doesn't count as unread.
+     */
+    readSortKey: v.optional(v.string()),
+    /**
+     * The `sortKey` of the newest message someone else's read receipt has covered. Only moves
+     * forward. The person's own messages up to it are `read`, including one that arrives late.
+     */
+    theirReadSortKey: v.optional(v.string()),
     /** Hidden from the inbox until then, or until a new message wakes it. */
     snoozedUntil: v.optional(v.number()),
     woke: v.optional(v.boolean()),
@@ -157,6 +281,9 @@ export default defineSchema({
     // Descending, `pinned: true` sorts before `false`: one range gives the pins, then the rest.
     .index('by_user_view_pinned_last', ['userId', 'view', 'pinned', 'lastMessageAt'])
     .index('by_user_view_network_pinned_last', ['userId', 'view', 'network', 'pinned', 'lastMessageAt'])
+    // The same lists by recency alone, pinned or not (chats.list, `order: 'recent'`).
+    .index('by_user_view_last', ['userId', 'view', 'lastMessageAt'])
+    .index('by_user_view_network_last', ['userId', 'view', 'network', 'lastMessageAt'])
     .index('by_portal', ['userId', 'network', 'portalId']),
 
   /**
@@ -169,6 +296,40 @@ export default defineSchema({
     sealed: envelope,
     createdAt: v.number(),
   }).index('by_user', ['userId']),
+
+  /**
+   * The person's address book: one card per person they know, which can link that person's
+   * contacts on several networks. Everything on a card is sealed to the person (kind `person`,
+   * object ID `personKey`, which the client chooses before sealing); see client-api.md, People.
+   */
+  /**
+   * A request to start a chat (newChats.start), until the bridge host answers with the chat
+   * or why there's none. The identifier it was for is sealed to the bridge key and goes with
+   * the command; none of it is kept here.
+   */
+  chatStarts: defineTable({
+    userId: v.string(),
+    network: storedNetwork,
+    loginId: v.string(),
+    /** Picked by the client, as the sealed identifier's object ID. */
+    requestId: v.string(),
+    commandId: v.id('outbox'),
+    state: v.union(v.literal('pending'), v.literal('started'), v.literal('failed')),
+    chatId: v.optional(v.id('chats')),
+    error: v.optional(errorCode),
+    createdAt: v.number(),
+  })
+    .index('by_request', ['userId', 'requestId'])
+    .index('by_command', ['commandId'])
+    .index('by_user_createdAt', ['userId', 'createdAt'])
+    .index('by_createdAt', ['createdAt']),
+
+  people: defineTable({
+    userId: v.string(),
+    personKey: v.string(),
+    sealed: envelope,
+    updatedAt: v.number(),
+  }).index('by_user', ['userId', 'personKey']),
 
   chatLabels: defineTable({
     userId: v.string(),
@@ -223,7 +384,9 @@ export default defineSchema({
 
   /**
    * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
-   * then the bridge-readable copy waits here, and is deleted when it goes out or is cancelled.
+   * then the sealed copies wait in `scheduledPayloads`, deleted when it goes out. A cancelled
+   * one keeps them, so its text can go back to the person's composer, until they discard it
+   * (`scheduled.forget`, `forgottenAt` set) or 30 days pass.
    */
   scheduledSends: defineTable({
     userId: v.string(),
@@ -234,14 +397,22 @@ export default defineSchema({
     state: v.union(v.literal('scheduled'), v.literal('sent'), v.literal('cancelled'), v.literal('failed')),
     replyTo: v.optional(v.string()),
     createdAt: v.number(),
+    cancelledAt: v.optional(v.number()),
+    /** A cancelled one whose copies are gone: restored to the composer, discarded, or expired. */
+    forgottenAt: v.optional(v.number()),
   })
     .index('by_user', ['userId', 'state', 'sendAt'])
-    .index('by_chat', ['chatId', 'state'])
-    .index('by_clientMessageId', ['userId', 'clientMessageId']),
+    .index('by_clientMessageId', ['userId', 'clientMessageId'])
+    // Cancelled ones still holding their copies (`forgottenAt` unset), oldest first: forgotten
+    // ones are kept, for their client message IDs, but never in the way of these.
+    .index('by_user_kept', ['userId', 'state', 'forgottenAt', 'cancelledAt'])
+    .index('by_chat_kept', ['chatId', 'state', 'forgottenAt', 'cancelledAt'])
+    .index('by_kept', ['state', 'forgottenAt', 'cancelledAt']),
 
   /**
    * A scheduled message's sealed copies, kept apart so listing and counting scheduled
-   * messages never reads them. Deleted when the message goes out or is cancelled.
+   * messages never reads them. Deleted when the message goes out, or when a cancelled one is
+   * forgotten.
    */
   scheduledPayloads: defineTable({
     scheduledId: v.id('scheduledSends'),
@@ -251,15 +422,33 @@ export default defineSchema({
 
   contacts: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
+    /**
+     * The accounts whose logins have sent the contact (at most 10): a chat with them starts on
+     * one of those, since some networks' contact IDs belong to one login (Google Messages').
+     */
+    accountIds: v.optional(v.array(v.id('networkAccounts'))),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
+
+  /**
+   * What one of the person's logins knows a contact by (contactIdentifiers events), sealed to
+   * the person. Its own table, one row per login and contact, so it never waits on the
+   * contact's profile and two logins never overwrite each other.
+   */
+  contactIdentifiers: defineTable({
+    userId: v.string(),
+    network: storedNetwork,
+    ghostId: v.string(),
+    loginId: v.string(),
+    sealed: envelope,
+  }).index('by_contact', ['userId', 'network', 'ghostId', 'loginId']),
 
   messages: defineTable({
     userId: v.string(),
     chatId: v.id('chats'),
-    network,
+    network: storedNetwork,
     /** The bridge host's deterministic event ID: the dedup key. `pending:<clientMessageId>` until a send is echoed. */
     eventId: v.string(),
     networkTs: v.number(),
@@ -287,6 +476,9 @@ export default defineSchema({
   })
     .index('by_event', ['userId', 'network', 'eventId'])
     .index('by_chat_sort', ['chatId', 'sortKey'])
+    // Newest arrivals first (the index ends in `_creationTime`), without imported history,
+    // for notifications (`messages.arrivals`).
+    .index('by_user_live', ['userId', 'historical'])
     .index('by_clientMessageId', ['userId', 'clientMessageId']),
 
   reactions: defineTable({
@@ -306,7 +498,9 @@ export default defineSchema({
   })
     .index('by_message', ['messageId', 'senderKey', 'key'])
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
-    .index('by_message_active', ['messageId', 'removedAt']),
+    .index('by_message_active', ['messageId', 'removedAt'])
+    // The person's own active reactions on a message, past the first 100 (`messages.reactions`).
+    .index('by_message_sender_active', ['messageId', 'senderKey', 'removedAt']),
 
   /**
    * A deleted message whose reactions are still being removed (in batches, by
@@ -322,7 +516,7 @@ export default defineSchema({
   /** Every reaction event applied, so a replay of any of them changes nothing. */
   reactionEvents: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     eventId: v.string(),
   }).index('by_event', ['userId', 'network', 'eventId']),
 
@@ -349,11 +543,11 @@ export default defineSchema({
    */
   outbox: defineTable({
     userId: v.string(),
-    network,
+    network: storedNetwork,
     loginId: v.optional(v.string()),
     /** Commands for one chat go out in order, one at a time. */
     chatId: v.optional(v.id('chats')),
-    payload: commandPayload,
+    payload: storedCommandPayload,
     /**
      * `queued` → `claimed` (leased to the gateway) → `dispatched` (the bridge host has it) or
      * `rejected` or `expired`.
@@ -385,6 +579,13 @@ export default defineSchema({
      * `migrations.scheduleCommandDeadlines` schedules one for rows from before that.
      */
     deadlineScheduled: v.optional(v.boolean()),
+    /**
+     * For a send made with `messages.sendAgain`: the original send's client message ID, the
+     * attempt before it, and its place in the chain (1, 2…). See lib/retry.ts.
+     */
+    retryRoot: v.optional(v.string()),
+    retryOf: v.optional(v.string()),
+    retryIndex: v.optional(v.number()),
   })
     // Queued commands go out in creation order (`_creationTime`); `by_lease` finds claimed
     // ones by deadline. Both orders are needed.
@@ -393,7 +594,8 @@ export default defineSchema({
     .index('by_lease', ['state', 'leaseUntil'])
     .index('by_expiry', ['state', 'expiresAt'])
     .index('by_chat', ['chatId', 'state'])
-    .index('by_clientMessageId', ['userId', 'clientMessageId']),
+    .index('by_clientMessageId', ['userId', 'clientMessageId'])
+    .index('by_retryRoot', ['userId', 'retryRoot', 'retryIndex']),
 
   /**
    * The bridge-readable part of a command (a message or login input, sealed to the bridge
@@ -417,7 +619,7 @@ export default defineSchema({
   /** Each bridge host's position in its event journal. */
   bridgeHosts: defineTable({
     hostId: v.string(),
-    network,
+    network: storedNetwork,
     lastSeq: v.number(),
     /** The last batch or heartbeat. Commands only go to hosts heard from recently. */
     lastSeenAt: v.number(),
@@ -434,7 +636,10 @@ export default defineSchema({
     userId: v.string(),
     reason: v.string(),
     at: v.number(),
-  }).index('by_host', ['hostId', 'seq']),
+  })
+    .index('by_host', ['hostId', 'seq'])
+    // Newest first, for the admin's list (quarantine.list).
+    .index('by_at', ['at']),
 
   auditLog: defineTable({
     actor: v.object({ kind: v.union(v.literal('user'), v.literal('agent'), v.literal('system')), id: v.string() }),

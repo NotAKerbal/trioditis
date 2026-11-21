@@ -32,6 +32,31 @@ export function tooManyAttempts(error: unknown, retryAfterSeconds: number | null
   return `Too many attempts. Try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}.`
 }
 
+export const UNREACHABLE = 'The server couldn’t be reached. Check your connection, then try again.'
+
+/**
+ * Runs an auth call that answers `{ data, error }`, and answers the same way when it throws
+ * instead: a request the network or the browser rejected (offline, a proxy refusing it, the
+ * password derivation failing). So a form always gets an answer to show, and never stays busy.
+ */
+export async function attempt<D, E>(
+  call: () => Promise<{ data: D; error: E }>,
+): Promise<{ data: D; error: E } | { data: null; error: unknown }> {
+  try {
+    const result = await call()
+    // A proxy or gateway answering for a server that is down (502, 503, 504) is the server not
+    // being reached, not the credentials being wrong: say so rather than the form's fallback.
+    const status = (result.error as { status?: unknown } | null)?.status
+    if (typeof status === 'number' && status >= 502 && status <= 504)
+      return { data: null, error: new Error(UNREACHABLE) }
+    return result
+  } catch (error) {
+    // fetch rejects with a TypeError ("Failed to fetch") when the request never got an answer.
+    if (error instanceof TypeError || !error) return { data: null, error: new Error(UNREACHABLE) }
+    return { data: null, error }
+  }
+}
+
 /** The `code` of a ConvexError thrown with `{ code, message }`, if that's what it is. */
 export function errorCode(error: unknown): string | undefined {
   const data = dataOf(error)
@@ -44,4 +69,7 @@ export function errorCode(error: unknown): string | undefined {
  * (the `sessionId` the page passed, see docs/architecture/client-api.md): the page should
  * start again, as whoever is signed in now, rather than offer to try again.
  */
-export const sessionChanged = (error: unknown) => errorCode(error) === 'sessionChanged'
+export const sessionChanged = (error: unknown) =>
+  errorCode(error) === 'sessionChanged' ||
+  // Better Auth's passkey registration gives the same refusal as its own error's `code`.
+  (!!error && typeof error === 'object' && (error as { code?: unknown }).code === 'sessionChanged')

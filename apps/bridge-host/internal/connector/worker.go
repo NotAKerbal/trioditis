@@ -217,6 +217,15 @@ func (c *Connector) reportUnrun(ctx context.Context, cmd *protocol.Command, code
 		if !refused {
 			return c.endLoginWithError(ctx, cmd.UserID, cmd.LoginSessionID, protocol.ErrLoginFailed)
 		}
+	case protocol.CommandStartChat:
+		// Accepted, then couldn't run (its login went away, say): say so, rather than leave
+		// the request waiting for its deadline.
+		// Prepare's refusals came before it was accepted, so every refusal here is after.
+		if requestIDPattern.MatchString(cmd.RequestID) {
+			return c.emit(ctx, &protocol.Event{
+				Type: protocol.EventChatStarted, UserID: cmd.UserID, LoginID: cmd.LoginID, RequestID: cmd.RequestID, Error: code,
+			})
+		}
 	}
 	return nil
 }
@@ -255,6 +264,48 @@ func (c *Connector) RecoverCommands(ctx context.Context) error {
 		}
 	}
 	return c.RecoverLogins(ctx)
+}
+
+// SettleRestored runs at startup in place of resuming the queue, once, when the host's data was
+// just restored from a backup (deploy/trioditis restore; docs/deploy.md, Restore). The server ran
+// on after the backup was taken, so a send the restored queue holds, queued or started, may
+// already have gone out from the original: none runs. Each that wasn't recorded is recorded as
+// unknown, which reaches the backend through the journal like any send status, and the person
+// decides; one recorded already keeps its status (MarkInFlightUnknown settles one that was in
+// flight). Logins in progress end with an error; anything else isn't run, and says so.
+func (c *Connector) SettleRestored(ctx context.Context) error {
+	for _, list := range []func(context.Context) ([]*store.QueuedCommand, error){c.Store.StartedCommands, c.Store.QueuedCommands} {
+		commands, err := list(ctx)
+		if err != nil {
+			return err
+		}
+		for _, qc := range commands {
+			cmd := qc.Command
+			switch cmd.Type {
+			case protocol.CommandSend, protocol.CommandEdit:
+				if _, err := c.Store.GetOutgoing(ctx, cmd.UserID, cmd.ClientMessageID); errors.Is(err, store.ErrNotFound) {
+					o := &owner{userID: cmd.UserID, loginID: cmd.LoginID}
+					out := &store.Outgoing{UserID: cmd.UserID, LoginID: cmd.LoginID, ClientMessageID: cmd.ClientMessageID, Status: protocol.StatusUnknown}
+					if err := c.recordSend(ctx, o, out, true); err != nil && !errors.Is(err, errAlreadyRecorded) {
+						return err
+					}
+				} else if err != nil {
+					return err
+				}
+			case protocol.CommandLoginStart, protocol.CommandLoginSubmit:
+				if err := c.endLoginWithError(ctx, cmd.UserID, cmd.LoginSessionID, protocol.ErrInternal); err != nil {
+					return err
+				}
+			default:
+				c.Log.Warn().Str("command_id", cmd.CommandID).Str("command_type", cmd.Type).
+					Msg("A command restored from a backup isn't run: it may have run already")
+			}
+			if err := c.Store.SetCommandState(ctx, cmd.CommandID, store.CommandDone); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // RecoverLogins ends every login that was in progress when the process stopped: the

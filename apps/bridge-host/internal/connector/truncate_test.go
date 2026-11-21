@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -72,5 +73,21 @@ func TestOversizedMessageIsTruncatedToFit(t *testing.T) {
 	plain := fitMessage(&protocol.MessagePlaintext{Type: "text", Body: "hello", HTML: "<b>hello</b>"})
 	if plain.Truncated || plain.HTML == "" {
 		t.Fatal("a small message must be left alone")
+	}
+}
+
+func TestIdentifiersAreKeptWholeAndFit(t *testing.T) {
+	var idents []string
+	for i := range 40 {
+		idents = append(idents, fmt.Sprintf("tel:+1555%07d%s", i, strings.Repeat("<", 60)))
+	}
+	idents = append([]string{"telegram:" + strings.Repeat("x", 600), idents[0]}, idents...)
+	got := fitIdentifiers(idents)
+	if n := sealedLen(t, protocol.ContactIdentifiersPlaintext{Identifiers: got}); n > protocol.MaxMetadataSealedBytes {
+		t.Fatalf("identifiers seal to %d bytes", n)
+	}
+	// The overlong one and the repeat are dropped, and the rest kept in order until they don't fit.
+	if len(got) == 0 || len(got) >= maxIdentifiers || got[0] != idents[1] || got[1] != idents[3] {
+		t.Fatalf("kept %d identifiers, starting %q", len(got), got[:min(2, len(got))])
 	}
 }

@@ -34,6 +34,22 @@ x-bridge-env: &bridge-env
   BRIDGE_PUBLIC_KEY: ${BRIDGE_PUBLIC_KEY:?}
   BRIDGE_PRIVATE_KEY: ${BRIDGE_PRIVATE_KEY:?}
   BRIDGE_DATABASE_TYPE: postgres
+  # The last restore's ID: a bridge host whose database hasn't settled it holds the backup's
+  # queue, and settles it rather than run it (docs/deploy.md, Restore).
+  TRIODITIS_RESTORE_ID: ${RESTORE_ID:-}
+
+# For the networks that sign in on their website: the sign-in browser, and the egress proxies
+# it reaches the web through, one per browser, at the name each such service gives as
+# BRIDGE_EGRESS_HOST. Only those services join signin, the browser's network, and each
+# refuses the browser everything but those proxies (docs/architecture/signin-browser.md,
+# Egress).
+x-signin-env: &signin-env
+  LOGIN_BROWSER_URL: http://login-browser:9222
+  LOGIN_BROWSER_TOKEN: ${LOGIN_BROWSER_TOKEN:?run install.sh first}
+  BRIDGE_EGRESS_BIND: 0.0.0.0
+  # More address ranges the egress proxy refuses, comma-separated, for what this server's
+  # network routes somewhere local (docs/deploy.md, The sign-in browser).
+  BRIDGE_EGRESS_DENY: ${BRIDGE_EGRESS_DENY:-}
 
 services:
   postgres:
@@ -106,6 +122,14 @@ services:
       TRIODITIS_NETWORKS: ${TRIODITIS_NETWORKS:?}
       BRIDGE_PUBLIC_KEY: ${BRIDGE_PUBLIC_KEY:?}
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY:?}
+      # The updater's secret reaches the backend only while the updater is on (--updater).
+      TRIODITIS_UPDATER: ${INSTALL_UPDATER:-0}
+      UPDATER_SECRET: ${UPDATER_SECRET:-}
+    # The commit being deployed, in runtime/version, not in the environment: a changed setting
+    # would make Compose recreate this job, and with it the gateway and the bridge hosts that
+    # wait for it, on every update.
+    volumes:
+      - ../runtime:/srv/runtime:ro
     depends_on:
       backend: { condition: service_healthy }
 
@@ -118,6 +142,12 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET}
       TRIODITIS_INTERNAL_TOKEN: ${TRIODITIS_INTERNAL_TOKEN}
       GATEWAY_INTERNAL_ADDR: 0.0.0.0:8601
+      # Set while a restore's sends aren't settled; the gateway then refuses to start
+      # (docs/deploy.md, Restore).
+      TRIODITIS_RESTORE_PENDING: ${RESTORE_PENDING:-}
+      # The sign-in browser's viewers and people's encrypted files, through Caddy (/login-browser,
+      # /media/*).
+      GATEWAY_PUBLIC_ADDR: 0.0.0.0:8602
       AGENT_ACCESS_PUBLIC_KEY: ${AGENT_ACCESS_PUBLIC_KEY}
       BRIDGE_HOSTS: ${BRIDGE_HOSTS:?}
     depends_on:
@@ -134,9 +164,9 @@ services:
       timeout: 3s
       start_period: 10s
 
-  # One bridge host per network, each in a compose profile; install.sh enables the chosen
-  # ones (COMPOSE_PROFILES). Signal and Google Messages get services here once the bridge
-  # host runs their connectors.
+  # One bridge host per network, each in a compose profile; install.sh enables every one, or
+  # those the operator limits it to (--networks), in COMPOSE_PROFILES. Admins then choose in
+  # the app which of them people can connect.
   bridge-whatsapp:
     <<: *bridge-host
     profiles: [whatsapp]
@@ -148,23 +178,197 @@ services:
     volumes:
       - bridge-whatsapp:/data
 
-  # The fake network: logs in with any username, for trying the server without a real account.
-  bridge-fake:
+  bridge-signal:
     <<: *bridge-host
-    profiles: [fake]
+    profiles: [signal]
     environment:
       <<: *bridge-env
-      BRIDGE_NETWORK: fake
-      BRIDGE_HOST_ID: fake-1
-      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_fake?sslmode=disable
+      BRIDGE_NETWORK: signal
+      BRIDGE_HOST_ID: signal-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_signal?sslmode=disable
     volumes:
-      - bridge-fake:/data
+      - bridge-signal:/data
+
+  bridge-gmessages:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [gmessages]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: gmessages
+      BRIDGE_HOST_ID: gmessages-1
+      BRIDGE_EGRESS_HOST: bridge-gmessages
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gmessages?sslmode=disable
+    volumes:
+      - bridge-gmessages:/data
+
+  bridge-gvoice:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [gvoice]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: gvoice
+      BRIDGE_HOST_ID: gvoice-1
+      BRIDGE_EGRESS_HOST: bridge-gvoice
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_gvoice?sslmode=disable
+    volumes:
+      - bridge-gvoice:/data
+
+  bridge-telegram:
+    <<: *bridge-host
+    profiles: [telegram]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: telegram
+      BRIDGE_HOST_ID: telegram-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_telegram?sslmode=disable
+      # The operator's app credentials from my.telegram.org (install.sh --telegram-api-id,
+      # --telegram-api-hash). Empty unless Telegram is enabled; the bridge host refuses to
+      # start without them.
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      # The connector converts some images it sends in temporary files; this keeps their
+      # plaintext in memory-backed storage rather than on the container's disk.
+      TMPDIR: /dev/shm
+    volumes:
+      - bridge-telegram:/data
+
+  bridge-meta:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [meta]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: meta
+      BRIDGE_HOST_ID: meta-1
+      BRIDGE_EGRESS_HOST: bridge-meta
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_meta?sslmode=disable
+      # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/meta.md).
+      META_PROXY: ${META_PROXY:-}
+    volumes:
+      - bridge-meta:/data
+
+  bridge-instagram:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [instagram]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: instagram
+      BRIDGE_HOST_ID: instagram-1
+      BRIDGE_EGRESS_HOST: bridge-instagram
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_instagram?sslmode=disable
+      # Optional: an http(s) or socks5 proxy URL to connect to Meta through (docs/networks/instagram.md).
+      INSTAGRAM_PROXY: ${INSTAGRAM_PROXY:-}
+    volumes:
+      - bridge-instagram:/data
+
+  bridge-slack:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [slack]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: slack
+      BRIDGE_HOST_ID: slack-1
+      BRIDGE_EGRESS_HOST: bridge-slack
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_slack?sslmode=disable
+    volumes:
+      - bridge-slack:/data
+
+  bridge-groupme:
+    <<: *bridge-host
+    profiles: [groupme]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: groupme
+      BRIDGE_HOST_ID: groupme-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_groupme?sslmode=disable
+    volumes:
+      - bridge-groupme:/data
+
+  bridge-linkedin:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [linkedin]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: linkedin
+      BRIDGE_HOST_ID: linkedin-1
+      BRIDGE_EGRESS_HOST: bridge-linkedin
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_linkedin?sslmode=disable
+    volumes:
+      - bridge-linkedin:/data
+
+  bridge-twitter:
+    <<: *bridge-host
+    networks: [default, signin]
+    profiles: [twitter]
+    environment:
+      <<: [*bridge-env, *signin-env]
+      BRIDGE_NETWORK: twitter
+      BRIDGE_HOST_ID: twitter-1
+      BRIDGE_EGRESS_HOST: bridge-twitter
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_twitter?sslmode=disable
+    volumes:
+      - bridge-twitter:/data
+
+  bridge-bluesky:
+    <<: *bridge-host
+    profiles: [bluesky]
+    environment:
+      <<: *bridge-env
+      BRIDGE_NETWORK: bluesky
+      BRIDGE_HOST_ID: bluesky-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_bluesky?sslmode=disable
+    volumes:
+      - bridge-bluesky:/data
+
+  # The sign-in browser: a Chromium for each login that signs in on a network's website. It
+  # holds no secret but its own token and is only on the signin network, which has no way out
+  # but the bridge hosts' egress proxies; the bridge hosts refuse it everything else.
+  login-browser:
+    <<: *service
+    build:
+      context: ../..
+      dockerfile: deploy/docker/login-browser.Dockerfile
+      # Debian's packages from one day of snapshot.debian.org, if deploy/.env sets one.
+      args:
+        DEBIAN_SNAPSHOT: ${DEBIAN_SNAPSHOT:-}
+    image: ${COMPOSE_PROJECT_NAME:-trioditis}/login-browser:local
+    environment:
+      LOGIN_BROWSER_TOKEN: ${LOGIN_BROWSER_TOKEN:?run install.sh first}
+      LOGIN_BROWSER_MAX: ${LOGIN_BROWSER_MAX:-4}
+    networks: [signin]
+    # Chromium's helpers outlive the launcher's own children; an init reaps them.
+    init: true
+    read_only: true
+    # Only what the launcher needs to run each login's Chromium as a user of its own, give it
+    # its profile and end it (login-browser.Dockerfile).
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL]
+    security_opt: ['no-new-privileges:true']
+    # Each browser's profile lives in /dev/shm, never on disk.
+    shm_size: 2g
+    tmpfs:
+      - /tmp
+    mem_limit: 4g
+    pids_limit: 1024
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:9222/v1/health']
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
 
   caddy:
     <<: *service
     build:
       context: ../..
       dockerfile: deploy/docker/web.Dockerfile
+      # The commit the web app is built from, which it compares with the server's to see an update.
+      args:
+        TRIODITIS_VERSION: ${TRIODITIS_VERSION:-unknown}
     image: ${COMPOSE_PROJECT_NAME:-trioditis}/web:local
     environment:
       TRIODITIS_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-:80}
@@ -185,10 +389,31 @@ services:
       interval: 10s
       timeout: 3s
 
+networks:
+  default:
+  # The sign-in browser's. Internal, so it has no way to the internet, and with no address
+  # for the server itself on it (isolated, Docker 28 and later), so the browser can't reach
+  # what the server runs outside the bundle either.
+  signin:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
+
 volumes:
   postgres:
   convex:
   bridge-whatsapp:
-  bridge-fake:
+  bridge-signal:
+  bridge-gmessages:
+  bridge-gvoice:
+  bridge-telegram:
+  bridge-meta:
+  bridge-instagram:
+  bridge-slack:
+  bridge-groupme:
+  bridge-linkedin:
+  bridge-twitter:
+  bridge-bluesky:
   caddy-data:
   caddy-config:

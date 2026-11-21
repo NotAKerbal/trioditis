@@ -13,6 +13,9 @@
 deploy/.env*
 deploy/runtime
 deploy/.operation.lock
+deploy/.updater-state*
+deploy/.last-backup
+deploy/.restore-settle*
 **/*.tgz
 **/*.tar.gz
 packages/backend/.convex

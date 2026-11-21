@@ -16,6 +16,11 @@ person's network sessions. Sealing protects stored history, backups and database
 dumps; it does not protect against an operator who modifies the running server. See
 `docs/PLAN.md`, Sealed storage.
 
+The sign-in browser is the same: while someone signs in to a network on its website, the
+page and the password they type pass through the server's memory. None of it is stored or
+logged, and the browser's profile is kept in memory and removed when the step ends. See
+`signin-browser.md`.
+
 ## Why not per-chat keys
 
 An earlier draft gave each chat a symmetric key wrapped to its owner. The bridge host
@@ -57,20 +62,25 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`. The object ID
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`, `person`, `account`. The object ID
 for each:
 
-| Object                              | Kind       | Object ID                   |
-| ----------------------------------- | ---------- | --------------------------- |
-| A message                           | `message`  | its `eventId`               |
-| An edit                             | `message`  | the edit's own `eventId`    |
-| The person's pending copy of a send | `message`  | its `clientMessageId`       |
-| Chat metadata                       | `chat`     | `portalId`                  |
-| A contact                           | `contact`  | `ghostId`                   |
-| A `send` or `edit` command          | `outbound` | its `clientMessageId`       |
-| Login input                         | `outbound` | `<loginSessionId>/<stepId>` |
-| A file                              | `media`    | its `mediaId`               |
-| A label (name and colour)           | `label`    | its `labelKey`              |
+| Object                              | Kind       | Object ID                         |
+| ----------------------------------- | ---------- | --------------------------------- |
+| A message                           | `message`  | its `eventId`                     |
+| An edit                             | `message`  | the edit's own `eventId`          |
+| The person's pending copy of a send | `message`  | its `clientMessageId`             |
+| Chat metadata                       | `chat`     | `portalId`                        |
+| A contact                           | `contact`  | `ghostId`                         |
+| What a login knows a contact by     | `contact`  | `<ghostId>/identifiers/<loginId>` |
+| A `send` or `edit` command          | `outbound` | its `clientMessageId`             |
+| Login input                         | `outbound` | `<loginSessionId>/<stepId>`       |
+| Who a new chat is with              | `outbound` | its `requestId`                   |
+| A file                              | `media`    | its `mediaId`                     |
+| A label (name and colour)           | `label`    | its `labelKey`                    |
+| An address book card                | `person`   | its `personKey`                   |
+| An unsent draft, kept in a browser  | `draft`    | its chat's `_id`                  |
+| A network account's hint            | `account`  | its `loginId`                     |
 
 ## Recipients
 
@@ -80,6 +90,7 @@ for each:
 | Message the person sent from Trioditis (their stored copy) | Same as above                                                                          |
 | Outbound send (`outbound`)                                 | The bridge key only                                                                    |
 | Draft                                                      | The owner's identity key only                                                          |
+| Label or address book card                                 | The owner's identity key only                                                          |
 
 **Granting** an agent access to a chat's history: the person's device unseals each
 message's content key and re-seals it to the agent-access key, adding a `keys` entry.
@@ -122,19 +133,34 @@ file.
 `truncated` is set only when the bridge host cut a message down to fit the 256 KiB sealed
 limit (see bridge-protocol.md, Sizes): its `html` was dropped and its `body` may end early.
 
+An attachment with `"failed": true` arrived but couldn't be stored: its upload was gone, or
+writing its sealed copy still failed after the bridge host tried again (three more times over
+about four seconds). It has empty `mediaId`, `key` and `nonce`, so there is nothing to fetch,
+and keeps what the file was (`mime`, `size`, `name`, dimensions), so the message says a file
+was sent rather than arriving without it.
+
 Chat and contact metadata carry their avatar as an attachment (with its key and nonce)
 in `avatar`, for the same reason. When the avatar is unchanged but the bridge host can't
 include it this time, the metadata says `avatarUnchanged: true` instead, and clients keep
-the avatar they have (a device seeing the chat for the first time has none until it
-changes).
+the avatar they have.
+
+An avatar's upload lives only minutes, but its sealed copy stays in the media store. So the
+bridge host keeps the first copy's attachment (its media ID, key and nonce) for each owner,
+sealed to the bridge key only (kind `avatarRef`, object ID the avatar's content URI, table
+`trioditis_avatar_ref`), and attaches it again to later metadata once the upload is gone: a
+change to the chat's name alone still carries the avatar, and a device that never saw it gets
+it. `avatarUnchanged` is left for an avatar from before references were kept, or one whose
+reference can't be opened (sealed to an earlier bridge key).
 
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.
 
 ## Bridge key exposure
 
-Anything sealed to the bridge key (outbound sends, login input) can be opened by whoever has
-both the stored ciphertext and `BRIDGE_PRIVATE_KEY`. The ciphertext is in the Convex
+Anything sealed to the bridge key (outbound sends, login input, kept avatar references) can
+be opened by whoever has both the stored ciphertext and `BRIDGE_PRIVATE_KEY`. Avatar
+references are in the bridge host's own database, not Convex, and open only the avatar's
+sealed copy in its media store. The ciphertext is in the Convex
 database, so a database backup or snapshot is one source of it. The key is not in the
 database: it is in the bridge host's environment, which is the server's `deploy/.env` in the
 self-hosted bundle and `.data/dev.env` in development.
@@ -178,23 +204,69 @@ login tables (chat names, contact names, phone numbers), WhatsApp's history-sync
 history until it is imported), whatsmeow's contacts, and whatsmeow's decrypted-event buffer
 (`whatsmeow_event_buffer`). That buffer holds each incoming WhatsApp message's decrypted
 protobuf (content included) from decryption until its handler returns success, and
-whatsmeow then clears the plaintext. That is normally once the bridge host has journaled it
-sealed (usually moments), but bridgev2 also reports success when its 5-minute handler limit
-passes, while handling carries on (see below). It is kept on purpose: a message can be decrypted only once, so without it a
-crash mid-message would lose that message. Plaintext stays in a row only when:
+whatsmeow then clears the plaintext and acknowledges the message. That is once the bridge
+host has journaled it sealed (usually moments). bridgev2 reports success when its 5-minute
+handler limit passes, while handling carries on in the background, so the bridge host wraps
+the handler: one that took that long says what bridgev2's handling really ended with, which
+the host's patched bridgev2 reports when the handler returns (`third_party/mautrix.patch`):
+success once every part of the message is journaled and saved, and failure if handling failed,
+if it doesn't end within 20 minutes, or if the host is stopping. A message whose handling
+failed part way, or that a stop cut off (`trioditis_inflight` lists the messages being
+bridged), has its saved parts forgotten, so bridgev2 doesn't drop the redelivery as a
+duplicate of them and bridges it whole; the parts already journaled come again with the same
+event IDs and are applied once. A redelivery that arrives while the first attempt is still
+unsettled waits until it is settled (the attempts at one message go one at a time, from
+handling to settling), and is then bridged against what that attempt left, an attempt that
+ends after its handler stopped waiting is still settled, and the outcome is passed on only once
+the in-flight record is cleared. A record an earlier attempt couldn't clear (the database down)
+is settled by the next delivery before bridgev2 looks for a duplicate, or that delivery isn't
+acknowledged either. It is kept on purpose: a
+message can be decrypted only once, so without it a crash mid-message would lose that
+message. Plaintext stays in a row only when:
 
-- handling failed, or the process stopped before it finished: the message wasn't
-  acknowledged, so WhatsApp redelivers it, and the buffered copy is bridged and cleared then;
+- handling failed, the process stopped before it finished, or a backgrounded message
+  wasn't journaled in time: the message wasn't acknowledged, so WhatsApp redelivers it, and
+  the buffered copy is bridged and cleared then (a copy that did reach the journal meanwhile
+  is the same event ID, so it is applied once);
 - clearing the plaintext failed with a database error: whatsmeow still acknowledges the
   message, so no redelivery clears it.
 
 Either way the row is deleted, plaintext and all, by the first sweep that succeeds once it
 is about 14 days old (WhatsApp's redelivery window); the bridge host sweeps at start-up and
-hourly, and a sweep that fails leaves the row for the next. One case loses a message rather than
-keeping it: after bridgev2's 5-minute handler limit it reports success while handling
-carries on in the background, so whatsmeow clears the plaintext and acknowledges the
-message; if the process stops before the sealed event is journaled, WhatsApp doesn't
-redeliver it. See the bridge host README, Plaintext at rest.
+hourly, and a sweep that fails leaves the row for the next. See the bridge host README,
+Plaintext at rest.
+
+### The other networks
+
+Each network's page in `docs/networks/` lists exactly what its connector keeps; in short:
+
+- **Every network** keeps the login's credentials in bridgev2's `user_login.metadata`:
+  session cookies (Google Messages, Google Voice, Messenger, Instagram, Slack, LinkedIn, X;
+  for the Google networks they are a whole Google account session), tokens (GroupMe,
+  Bluesky, Slack), Telegram's MTProto auth key, Signal's account keys, and X Chat's private
+  keys (with each conversation's keys in `portal.metadata`).
+- **Message content, bounded:** Messenger's encrypted chats run on whatsmeow, so the same
+  `whatsmeow_event_buffer` and sweep as WhatsApp apply. Signal's `signalmeow_event_buffer`
+  works the same way, its acknowledgement held back past bridgev2's handler limit in the same
+  way (docs/networks/signal.md); the bridge host deletes rows past 35 days (Signal's server keeps
+  undelivered messages for 30), and deletes a history transfer's contacts once every chat
+  in it has been imported. GroupMe keeps each message's text in
+  its message metadata for edits; the bridge host clears it once GroupMe's edit window has
+  passed. Telegram's `telegram_file` cache holds no content but is kept shorter than an
+  upload lives, so a reused file is never lost.
+- **Message content, not bounded yet:** unsalted SHA-256 hashes of message text, used to
+  tell real edits from unchanged updates, so a short message can be confirmed by guessing:
+  Google Messages (`text_hash`), Telegram (`content_hash`, also logged at info when a send
+  succeeds) and LinkedIn (`edit_hash`, edited messages only). Messenger keeps poll questions
+  and options, and Instagram keeps shared posts' URLs from backfilled history.
+- **Names and numbers:** phone numbers and contact names in ghost, portal and connector
+  tables, and RCS read receipts naming who read a message (Google Messages).
+
+None of the connectors writes message content to its logs at info level, except Telegram's
+content hash; a few log raw network responses at warn or error. Signal's connector logs the
+history transfer's backup key and the name and number of a synced contact with no Signal ID,
+but its bridge host drops those fields from every line before they are written
+(docs/networks/signal.md, What's stored in plaintext).
 
 **Phase 0:** that database, the event buffer included, lives on an **encrypted disk, with
 encrypted backups**; the installer warns when its data directory isn't on an encrypted

@@ -64,12 +64,6 @@ export const environments = {
   nightly: { siteUrl: null, deployment: null },
 }
 
-/**
- * The only networks a backend on Convex's cloud (a preview or nightly) may offer. Their data is
- * made up, so real accounts and real messages never reach the cloud.
- */
-export const CLOUD_NETWORKS = 'fake'
-
 // Every dev instance and preview gets this account, so there is something to sign in with
 // straight away. Those backends hold throwaway data only. Nightly never gets it.
 export const TESTER = { name: 'Dev Tester', email: 'tester@trioditis.test', password: 'trioditis-dev-tester' }
@@ -201,8 +195,26 @@ export const portsFor = (slot) => ({
   convexCloud: 4210 + 2 * slot,
   convexSite: 4211 + 2 * slot,
   gateway: 8700 + 10 * slot,
-  bridge: { fake: 8701 + 10 * slot, whatsapp: 8702 + 10 * slot },
-  fakeControl: 8709 + 10 * slot,
+  // The gateway's public listener (the sign-in browser's viewers) and the login-browser
+  // launcher, in the gaps the 8700s left.
+  gatewayPublic: 8701 + 10 * slot,
+  loginBrowser: 8703 + 10 * slot,
+  bridge: {
+    whatsapp: 8702 + 10 * slot,
+    // The networks added later, above every slot's ports in the 8700s and 9000s (slots go
+    // up to 99), so the ports above don't move.
+    signal: 10101 + 20 * slot,
+    gmessages: 10102 + 20 * slot,
+    gvoice: 10103 + 20 * slot,
+    telegram: 10104 + 20 * slot,
+    meta: 10105 + 20 * slot,
+    instagram: 10106 + 20 * slot,
+    slack: 10107 + 20 * slot,
+    groupme: 10108 + 20 * slot,
+    linkedin: 10109 + 20 * slot,
+    twitter: 10110 + 20 * slot,
+    bluesky: 10111 + 20 * slot,
+  },
 })
 
 const allPorts = (ports) => [
@@ -210,8 +222,9 @@ const allPorts = (ports) => [
   ports.convexCloud,
   ports.convexSite,
   ports.gateway,
+  ports.gatewayPublic,
+  ports.loginBrowser,
   ...Object.values(ports.bridge),
-  ports.fakeControl,
 ]
 
 const slotsDir = resolve(stateDir, 'slots')
@@ -734,6 +747,7 @@ export function devSecrets() {
     GATEWAY_SECRET: secret,
     TRIODITIS_INTERNAL_TOKEN: secret,
     TRIODITIS_SETUP_TOKEN: secret,
+    LOGIN_BROWSER_TOKEN: secret,
   }
   for (const [name, make] of Object.entries(defaults)) if (!values.has(name)) values.set(name, make())
   for (const name of ['BRIDGE', 'AGENT_ACCESS']) {
@@ -925,6 +939,20 @@ export function setConvexEnv(values, options) {
   )
 }
 
+/**
+ * Unsets variables on a backend; one that isn't set is left as it is. `options` says which
+ * backend, as for `setConvexEnv`.
+ */
+export function removeConvexEnv(names, options) {
+  for (const name of names) {
+    capture(
+      'pnpm',
+      convex('env', 'remove', name, ...(options.deployment ? ['--deployment', options.deployment] : [])),
+      { ...options, quiet: true },
+    )
+  }
+}
+
 /** The Go toolchain: on PATH, or where the dev VM keeps it. */
 export function goEnv() {
   const local = resolve(homedir(), '.local/go/bin')
@@ -934,10 +962,63 @@ export function goEnv() {
   throw new Error('Go 1.27 is needed for the bridge host: https://go.dev/dl/ (or put it in ~/.local/go)')
 }
 
-/** Builds the bridge host binary. Go's build cache makes this quick when nothing changed. */
-export function buildBridgeHost() {
-  run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnv() })
+/**
+ * Builds the bridge host binary. Go's build cache makes this quick when nothing changed.
+ * With `signal`, Signal's connector is built in, linking libsignal from `libsignalDir`.
+ */
+export function buildBridgeHost({ signal = false } = {}) {
+  const goEnvironment = goEnv()
+  // The sign-in browser's launcher, from the same module.
+  run('go', ['build', '-o', 'bin/login-browser', './cmd/login-browser'], { cwd: bridgeDir, env: goEnvironment })
+  if (!signal) {
+    run('go', ['build', '-o', 'bin/bridge-host', './cmd/bridge-host'], { cwd: bridgeDir, env: goEnvironment })
+    return resolve(bridgeDir, 'bin/bridge-host')
+  }
+  const dir = libsignalDir()
+  const libraryPath = [dir, process.env.LIBRARY_PATH].filter(Boolean).join(delimiter)
+  run('go', ['build', '-tags', 'libsignal', '-o', 'bin/bridge-host', './cmd/bridge-host'], {
+    cwd: bridgeDir,
+    env: { ...goEnvironment, LIBRARY_PATH: libraryPath },
+  })
   return resolve(bridgeDir, 'bin/bridge-host')
+}
+
+/**
+ * The directory holding libsignal_ffi.a for a bridge host built with Signal: LIBSIGNAL_FFI_DIR,
+ * or .data/libsignal in this checkout. It must be the libsignal version mautrix-signal's
+ * bindings were generated against, which only the link would otherwise check; this says what
+ * is missing instead. Building it: docs/networks/signal.md. `module` is mautrix-signal's source:
+ * the bridge host builds against the patched copy in this checkout (third_party/README.md).
+ */
+export function libsignalDir(module = resolve(bridgeDir, 'third_party/mautrix-signal')) {
+  const dir = process.env.LIBSIGNAL_FFI_DIR ? resolve(process.env.LIBSIGNAL_FFI_DIR) : resolve(dataDir, 'libsignal')
+  const pinned = readFileSync(resolve(module, 'pkg/libsignalgo/signalversion/version.go'), 'utf8')
+  const version = /const Version = "v(\d+\.\d+\.\d+)"/.exec(pinned)?.[1]
+  if (!version) throw new Error(`Couldn't tell which libsignal version mautrix-signal needs (${module}).`)
+  const how = `Build libsignal v${version} (docs/networks/signal.md) and put its libsignal_ffi.a there, or set LIBSIGNAL_FFI_DIR to the directory that has it.`
+  const library = resolve(dir, 'libsignal_ffi.a')
+  if (!existsSync(library))
+    throw new Error(`Signal's bridge host links libsignal, and ${library} doesn't exist. ${how}`)
+  // libsignalgo calls signal_ffi_version_<version> to fail the link on any other version.
+  if (!readFileSync(library).includes(`signal_ffi_version_${version.replaceAll('.', '_')}`)) {
+    throw new Error(`${library} isn't libsignal v${version}, the version mautrix-signal needs. ${how}`)
+  }
+  return dir
+}
+
+/**
+ * The Chromium the sign-in browser runs: CHROMIUM_PATH, or the first Chromium or Chrome on
+ * PATH. Without one, `pnpm dev` runs no sign-in browser and cookie logins are pasted by hand.
+ */
+export function findChromium() {
+  const names = process.env.CHROMIUM_PATH
+    ? [process.env.CHROMIUM_PATH]
+    : ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome']
+  for (const name of names) {
+    const found = spawnSync('sh', ['-c', 'command -v "$1"', 'sh', name], { encoding: 'utf8' })
+    if (found.status === 0 && found.stdout.trim()) return found.stdout.trim()
+  }
+  return null
 }
 
 /** The desktop and web app's package, if this checkout has it. */

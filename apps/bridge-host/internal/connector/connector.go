@@ -8,10 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exsync"
 
 	"maunium.net/go/mautrix"
@@ -22,11 +26,13 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/keys"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
@@ -42,6 +48,8 @@ type Options struct {
 	Notify func()
 	// SendTimeout is how long a send may wait for an outcome before it is marked unknown.
 	SendTimeout time.Duration
+	// Signin, if set, runs cookie login steps in the sign-in browser.
+	Signin *signin.Launcher
 }
 
 // Connector implements bridgev2.MatrixConnector.
@@ -56,6 +64,12 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
+	// messages serializes the attempts at one message, from handling to settling (messageLocks).
+	messages messageLocks
+	// browserSteps holds the login steps the sign-in browser submitted ("<login session
+	// ID>/<step ID>" → struct{}), for as long as the process runs: a paste of one that arrives
+	// later is dropped rather than refused.
+	browserSteps sync.Map
 	// busy holds chats (by opaque portal ID) with a command (a send, edit, reaction or
 	// redaction) still out with bridgev2 or the network; the worker runs their next command
 	// once it settles, or once the hold is released (see holdLimit).
@@ -63,12 +77,39 @@ type Connector struct {
 	// lanes holds chats (by opaque portal ID) whose command is running on its own goroutine.
 	lanes        sync.Map // portal ID → struct{}
 	lanesRunning sync.WaitGroup
-	wake         chan struct{}
+	// starting holds a lock per login (networkid.UserLoginID → *sync.Mutex), so one login's
+	// startChat commands run one at a time.
+	starting sync.Map
+	wake     chan struct{}
 }
 
 var (
-	_ bridgev2.MatrixConnector = (*Connector)(nil)
+	_ bridgev2.MatrixConnector                 = (*Connector)(nil)
+	_ bridgev2.MatrixConnectorWithHTTPSettings = (*Connector)(nil)
 )
+
+// HTTPTransportWrapper is implemented by a network connector that needs to see the requests
+// of the HTTP clients its library builds from the bridge's settings, which it can't reach
+// otherwise (mautrix-gmessages' libgm keeps its clients private).
+type HTTPTransportWrapper interface {
+	WrapHTTPTransport(http.RoundTripper) http.RoundTripper
+}
+
+// GetHTTPClientSettings is what bridgev2 gives connectors to build HTTP clients from: its own
+// default, with the network's transport wrapper (HTTPTransportWrapper) around the transport
+// if it has one.
+func (c *Connector) GetHTTPClientSettings() exhttp.ClientSettings {
+	settings := exhttp.SensibleClientSettings
+	if c.Bridge == nil {
+		return settings
+	}
+	if wrapper, ok := c.Bridge.Network.(HTTPTransportWrapper); ok {
+		settings.TransportOverride = func(cs exhttp.ClientSettings) http.RoundTripper {
+			return wrapper.WrapHTTPTransport(cs.Configure(&http.Transport{}))
+		}
+	}
+	return settings
+}
 
 // New makes a connector. Pass it to bridgev2.NewBridge, which calls Init.
 func New(opts Options) *Connector {
@@ -86,11 +127,128 @@ func New(opts Options) *Connector {
 func (c *Connector) Init(br *bridgev2.Bridge) {
 	c.Bridge = br
 	c.Log = br.Log.With().Str("component", "trioditis connector").Logger()
+	// One connector per process: the patched bridgev2 tells it how each remote event's
+	// handling really ended (third_party/mautrix.patch).
+	bridgev2.RemoteEventDone = c.remoteEventDone
+	bridgev2.RemoteEventStart = c.remoteEventStart
 }
 
-func (c *Connector) Start(ctx context.Context) error { return nil }
-func (c *Connector) PreStop()                        {}
-func (c *Connector) Stop()                           {}
+// Start runs after bridgev2 has upgraded its database and before any login connects, so a
+// message cut off by the last stop is undone before its network sends it again.
+func (c *Connector) Start(ctx context.Context) error { return c.RecoverInflight(ctx) }
+
+// remoteEventDone settles the messages a watched remote event was bridging (handled): once
+// handling ended, they're no longer in flight, and if it failed, what of them bridgev2 saved is
+// forgotten. bridgev2 drops a redelivered message as a duplicate once any part of it is saved,
+// so without that a message whose second part failed would never get it; the parts already
+// journaled come again with the same event IDs and are applied once.
+func (c *Connector) remoteEventDone(evt bridgev2.RemoteEvent, res bridgev2.EventHandlingResult) {
+	// Last, once the outcome is settled and reported: the next attempt at the message goes then.
+	defer c.messages.done(evt)
+	messages, watched := handled.Messages(evt)
+	if !watched {
+		return
+	}
+	ctx := context.Background()
+	if c.Bridge != nil && c.Bridge.BackgroundCtx != nil {
+		ctx = context.WithoutCancel(c.Bridge.BackgroundCtx)
+	}
+	succeeded := res.Success
+	// Settled before the outcome is reported: the handler acknowledges on it, and a record
+	// left after the acknowledgement would have the next start undo a message the network
+	// won't send again. One that can't be cleared is reported failed instead.
+	for _, m := range messages {
+		if err := c.settleInflight(ctx, store.InflightMessage{Receiver: m.Receiver, MessageID: m.ID}, !res.Success); err != nil {
+			c.Log.Err(err).Msg("Settling a bridged message failed; it is settled at the next start")
+			succeeded = false
+		}
+	}
+	// A redelivery bridgev2 took for a duplicate of a message another attempt is still
+	// bridging (its parts in flight) is refused, so the network sends it again later, rather
+	// than acknowledged while that attempt may yet fail and undo its parts.
+	if succeeded && res.Ignored && len(messages) == 0 {
+		if m, ok := remoteMessage(evt); ok {
+			inflight, err := c.Store.IsInflight(ctx, m)
+			if err != nil || inflight {
+				succeeded = false
+			}
+		}
+	}
+	handled.Finished(evt, succeeded)
+}
+
+// remoteMessage names the message a remote event brings, if it brings one.
+func remoteMessage(evt bridgev2.RemoteEvent) (store.InflightMessage, bool) {
+	switch evt.GetType() {
+	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventMessageUpsert:
+		if msg, ok := evt.(bridgev2.RemoteMessage); ok {
+			return store.InflightMessage{Receiver: string(evt.GetPortalKey().Receiver), MessageID: string(msg.GetID())}, true
+		}
+	}
+	return store.InflightMessage{}, false
+}
+
+// remoteEventStart holds evt's message (messageLocks) and, holding it, settles what an earlier
+// attempt left unsettled: an in-flight record still there means that attempt's cleanup
+// failed (the database was down, say) with some of its parts saved. They are undone before
+// bridgev2 looks for a duplicate, which it would otherwise find in them: WhatsApp's upsert
+// answers plain success then, and the partial message would be acknowledged. If they can't be
+// undone either, this delivery is reported failed, so it isn't acknowledged, whatever bridgev2
+// makes of it.
+func (c *Connector) remoteEventStart(evt bridgev2.RemoteEvent) {
+	m, held := c.messages.start(evt)
+	if !held {
+		return
+	}
+	ctx := context.Background()
+	if c.Bridge != nil && c.Bridge.BackgroundCtx != nil {
+		ctx = context.WithoutCancel(c.Bridge.BackgroundCtx)
+	}
+	inflight, err := c.Store.IsInflight(ctx, m)
+	if err == nil && inflight {
+		err = c.settleInflight(ctx, m, true)
+	}
+	if err != nil {
+		c.Log.Err(err).Msg("Settling an earlier attempt at a message failed; leaving this one unacknowledged")
+		handled.Fail(evt)
+	}
+}
+
+// settleInflight ends a message's in-flight record, first forgetting its saved parts if undo.
+func (c *Connector) settleInflight(ctx context.Context, m store.InflightMessage, undo bool) error {
+	if undo {
+		if err := undoParts(c, ctx, m); err != nil {
+			return err
+		}
+	}
+	return c.Store.DeleteInflight(ctx, m)
+}
+
+// undoParts forgets the parts of a message bridgev2 saved; tests replace it.
+var undoParts = func(c *Connector, ctx context.Context, m store.InflightMessage) error {
+	return c.Bridge.DB.Message.DeleteAllParts(ctx, networkid.UserLoginID(m.Receiver), networkid.MessageID(m.MessageID))
+}
+
+// RecoverInflight undoes the messages whose handling the last stop cut off: they weren't
+// acknowledged, so their network sends them again, and bridgev2 must not take that for a
+// duplicate of the parts it had saved.
+func (c *Connector) RecoverInflight(ctx context.Context) error {
+	messages, err := c.Store.Inflight(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list messages being bridged: %w", err)
+	}
+	for _, m := range messages {
+		if err = c.settleInflight(ctx, m, true); err != nil {
+			return fmt.Errorf("failed to undo a message cut off by the last stop: %w", err)
+		}
+	}
+	if len(messages) > 0 {
+		c.Log.Info().Int("messages", len(messages)).Msg("Undid messages cut off by the last stop, for their redelivery")
+	}
+	return nil
+}
+func (c *Connector) PreStop() {}
+func (c *Connector) Stop()    {}
 
 // BotIntent satisfies the unexported interface bridgev2.NewBridge asserts.
 func (c *Connector) BotIntent() bridgev2.MatrixAPI { return c.bot }
@@ -221,10 +379,49 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 	if err != nil {
 		return err
 	}
-	return c.emit(ctx, &protocol.Event{
+	evt := &protocol.Event{
 		Type: protocol.EventLoginState, UserID: userID, LoginID: loginID,
 		State: mapped, Error: code,
-	})
+	}
+	if hint := accountHint(state); hint != "" && mapped != "LOGGED_OUT" {
+		// Sealed to the person only, never an agent key: it names their account.
+		sealed, err := c.seal(ctx, &owner{userID: userID, loginID: loginID}, seal.KindAccount, loginID, protocol.AccountPlaintext{Hint: hint})
+		if err != nil {
+			// The state still goes; the account is told apart by less until the next one.
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Sealing an account's hint failed")
+		} else {
+			evt.Sealed = sealed
+		}
+	}
+	return c.emit(ctx, evt)
+}
+
+// maxAccountHint bounds an account's hint, well inside the sealed metadata limit.
+const maxAccountHint = 256
+
+// accountHint is what tells a login's account apart from the person's others on the network,
+// from what the connector says about it: its number, username, email or name, in that order.
+func accountHint(state *status.BridgeState) string {
+	p := state.RemoteProfile
+	hint := p.Phone
+	switch {
+	case hint != "":
+	case p.Username != "":
+		hint = "@" + strings.TrimPrefix(p.Username, "@")
+	case p.Email != "":
+		hint = p.Email
+	case p.Name != "":
+		hint = p.Name
+	default:
+		hint = state.RemoteName
+	}
+	if len(hint) > maxAccountHint {
+		hint = hint[:maxAccountHint]
+		for !utf8.ValidString(hint) {
+			hint = hint[:len(hint)-1]
+		}
+	}
+	return hint
 }
 
 // BatchSend receives history. Each event already carries its deterministic ID.

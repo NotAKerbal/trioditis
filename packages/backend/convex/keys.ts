@@ -61,7 +61,7 @@ const wrapped = v.object({ nonce: v.string(), ct: v.string() })
 type Params = { salt: string; opslimit: number; memlimit: number }
 
 /** A wrapped 32-byte X25519 private key: a 24-byte nonce, and 32 bytes plus a 16-byte tag. */
-function checkWrapped({ nonce, ct }: { nonce: string; ct: string }) {
+export function checkWrapped({ nonce, ct }: { nonce: string; ct: string }) {
   if (decodedLength(nonce) !== 24 || decodedLength(ct) !== 48) throw new ConvexError('That isn’t a wrapped key.')
 }
 
@@ -98,7 +98,7 @@ export function keyState(member: Doc<'members'>, backups: Doc<'keyBackups'>[]) {
  * Uses up a challenge the device opened, sealed to `publicKey`. Each works once, within five
  * minutes, and only for the key it was sealed to.
  */
-async function consumeProof(ctx: MutationCtx, userId: string, proof: string, publicKey: string) {
+export async function consumeProof(ctx: MutationCtx, userId: string, proof: string, publicKey: string) {
   const hash = await sha256Hex(proof)
   const now = Date.now()
   const rows = await ctx.db
@@ -185,23 +185,28 @@ export const challenge = mutation({
       throw new ConvexError('This account already has an identity key. Unlock it with your password or recovery key.')
     }
     if (!isPublicKey(publicKey)) throw new ConvexError('That isn’t a valid public key.')
-    const secret = crypto.getRandomValues(new Uint8Array(32))
-    const expiresAt = Date.now() + CHALLENGE_TTL_MS
-    const old = await ctx.db
-      .query('keyChallenges')
-      .withIndex('by_user', (q) => q.eq('userId', member.userId))
-      .take(20)
-    // A handful outstanding at most; the oldest go.
-    for (const row of old.slice(0, Math.max(0, old.length - 4))) await ctx.db.delete(row._id)
-    await ctx.db.insert('keyChallenges', {
-      userId: member.userId,
-      hash: await sha256Hex(encode(secret)),
-      publicKey,
-      expiresAt,
-    })
-    return { sealed: encode(sealBox(secret, decode(publicKey))), expiresAt }
+    return await issueChallenge(ctx, member.userId, publicKey)
   },
 })
+
+/** A new challenge for `userId`, sealed to `publicKey`, for `consumeProof` to take back. */
+export async function issueChallenge(ctx: MutationCtx, userId: string, publicKey: string) {
+  const secret = crypto.getRandomValues(new Uint8Array(32))
+  const expiresAt = Date.now() + CHALLENGE_TTL_MS
+  const old = await ctx.db
+    .query('keyChallenges')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .take(20)
+  // A handful outstanding at most; the oldest go.
+  for (const row of old.slice(0, Math.max(0, old.length - 4))) await ctx.db.delete(row._id)
+  await ctx.db.insert('keyChallenges', {
+    userId,
+    hash: await sha256Hex(encode(secret)),
+    publicKey,
+    expiresAt,
+  })
+  return { sealed: encode(sealBox(secret, decode(publicKey))), expiresAt }
+}
 
 /**
  * Sets up the identity key with its password and recovery-key backups, with `proof` from
@@ -212,6 +217,11 @@ export const challenge = mutation({
  *
  * The server can't open the wraps, so it can't check they hold this key; the client checks
  * that before calling (packages/crypto `makeKeySetup` does).
+ *
+ * It answers which of the two backups this call stored (`stored`), decided in the same
+ * transaction that writes them. Two devices finishing setup at once both succeed, but only the
+ * first stores its recovery key; the other learns from `stored` that the recovery key it showed
+ * isn't the one kept, without a second read that a change in between could fool.
  */
 export const setup = mutation({
   args: {
@@ -221,7 +231,7 @@ export const setup = mutation({
     proof: v.string(),
     sessionId: v.optional(v.string()),
   },
-  returns: v.object({ kid: v.string() }),
+  returns: v.object({ kid: v.string(), stored: v.array(v.union(v.literal('password'), v.literal('recovery'))) }),
   handler: async (ctx, args) => {
     await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
@@ -236,7 +246,7 @@ export const setup = mutation({
     const backups = await backupsOf(ctx, member.userId)
     const existing = backups.filter((row) => row.kid === kid)
     const missing = (['password', 'recovery'] as const).filter((kind) => !existing.some((row) => row.kind === kind))
-    if (missing.length === 0) return { kid }
+    if (missing.length === 0) return { kid, stored: [] }
     await consumeProof(ctx, member.userId, args.proof, args.publicKey)
     if (!member.identityPublicKey) {
       await ctx.db.patch(member._id, { identityPublicKey: args.publicKey, identityKid: kid })
@@ -248,12 +258,12 @@ export const setup = mutation({
       await ctx.db.insert('keyBackups', { userId: member.userId, kid, kind, ...wrap, revision, createdAt: now })
     }
     await audit(ctx, { kind: 'user', id: member.userId }, 'identity.setup', kid)
-    return { kid }
+    return { kid, stored: missing }
   },
 })
 
 /** Checks a replacement for the backup of `kind` (and `credentialId`) against what's stored. */
-async function checkReplacement(
+export async function checkReplacement(
   ctx: MutationCtx,
   member: Doc<'members'>,
   args: { kind: Doc<'keyBackups'>['kind']; expectedRevision: number; params?: Params; credentialId?: string },
@@ -281,7 +291,7 @@ async function checkReplacement(
 }
 
 /** Replaces `current` with the new wrap, at the next revision, which it returns. */
-async function replaceBackup(
+export async function replaceBackup(
   ctx: MutationCtx,
   member: Doc<'members'>,
   { current, backups, kid }: { current: Doc<'keyBackups'>[]; backups: Doc<'keyBackups'>[]; kid: string },
@@ -329,6 +339,11 @@ export const putBackup = mutation({
     ) {
       throw new ConvexError('A passkey backup needs its credential and a 32-byte PRF salt.')
     }
+    // Only for a passkey on this account, checked in this transaction: so a backup is never made
+    // for someone else's credential, nor lands after its passkey was removed.
+    if (args.kind === 'passkey' && !(await passkeyOf(ctx, member.userId, args.credentialId!))) {
+      throw new ConvexError('That passkey isn’t on your account any more. Add it again, then try again.')
+    }
     const replacing = await checkReplacement(ctx, member, args)
     await consumeKeyProof(ctx, member, args.proof)
     const revision = await replaceBackup(ctx, member, replacing, {
@@ -341,6 +356,28 @@ export const putBackup = mutation({
   },
 })
 
+/** The person's Better Auth passkey with `credentialId`, if they have it. */
+async function passkeyOf(ctx: QueryCtx, userId: string, credentialId: string) {
+  const row = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+    model: 'passkey',
+    where: [{ field: 'credentialID', value: credentialId }],
+  })) as { _id: string; userId: string } | null
+  return row?.userId === userId ? row : null
+}
+
+/** Removes the person's passkey backups for `credentialId`, keeping the revision counter up. */
+async function removeBackupsOf(ctx: MutationCtx, member: Doc<'members'>, credentialId: string) {
+  // Before a backup goes, the counter holds at least its revision, even for an account
+  // whose backups were written before the counter existed.
+  const seen = (await backupsOf(ctx, member.userId)).reduce((n, row) => Math.max(n, row.revision), 0)
+  if ((member.backupRevision ?? 0) < seen) await ctx.db.patch(member._id, { backupRevision: seen })
+  const rows = await ctx.db
+    .query('keyBackups')
+    .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('kind', 'passkey'))
+    .take(50)
+  for (const row of rows) if (row.credentialId === credentialId) await ctx.db.delete(row._id)
+}
+
 /**
  * Removes a passkey backup, with `proof`. Password and recovery backups are replaced, never
  * removed. A backup made again for the same credential gets a new revision, never its old one.
@@ -352,15 +389,63 @@ export const removePasskeyBackup = mutation({
     await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
     await consumeKeyProof(ctx, member, proof)
-    // Before a backup goes, the counter holds at least its revision, even for an account
-    // whose backups were written before the counter existed.
-    const seen = (await backupsOf(ctx, member.userId)).reduce((n, row) => Math.max(n, row.revision), 0)
-    if ((member.backupRevision ?? 0) < seen) await ctx.db.patch(member._id, { backupRevision: seen })
-    const rows = await ctx.db
-      .query('keyBackups')
-      .withIndex('by_user', (q) => q.eq('userId', member.userId).eq('kind', 'passkey'))
-      .take(50)
-    for (const row of rows) if (row.credentialId === credentialId) await ctx.db.delete(row._id)
+    await removeBackupsOf(ctx, member, credentialId)
+    return null
+  },
+})
+
+/**
+ * The signed-in person's passkeys, as Better Auth has them, for listing in settings. Read here
+ * rather than from Better Auth's own route so it answers for the page's session (`sessionId`)
+ * and never for whoever another tab signed in as.
+ */
+export const passkeys = query({
+  args: { sessionId: v.optional(v.string()) },
+  returns: v.array(
+    v.object({
+      credentialId: v.string(),
+      name: v.union(v.null(), v.string()),
+      createdAt: v.union(v.null(), v.number()),
+      backedUp: v.boolean(),
+    }),
+  ),
+  handler: async (ctx, { sessionId }) => {
+    await requireSessionIfGiven(ctx, sessionId)
+    const member = await requireMember(ctx)
+    const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: 'passkey',
+      where: [{ field: 'userId', value: member.userId }],
+      paginationOpts: { cursor: null, numItems: 100 },
+    })) as { page: { credentialID: string; name?: string | null; createdAt?: number | null; backedUp: boolean }[] }
+    return page.map((row) => ({
+      credentialId: row.credentialID,
+      name: row.name ?? null,
+      createdAt: row.createdAt ?? null,
+      backedUp: row.backedUp,
+    }))
+  },
+})
+
+/**
+ * Removes a passkey: its backups and its sign-in credential, in this one transaction, so no
+ * half-removed passkey is left that the person thinks is gone but still opens their key. Needs
+ * `proof`, like any backup change. A credential that's no longer registered just loses its backups.
+ */
+export const removePasskey = mutation({
+  args: { credentialId: v.string(), proof: v.string(), sessionId: v.optional(v.string()) },
+  returns: v.null(),
+  handler: async (ctx, { credentialId, proof, sessionId }) => {
+    await requireSessionIfGiven(ctx, sessionId)
+    const member = await requireMember(ctx)
+    await consumeKeyProof(ctx, member, proof)
+    await removeBackupsOf(ctx, member, credentialId)
+    const passkey = await passkeyOf(ctx, member.userId, credentialId)
+    if (passkey) {
+      await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+        input: { model: 'passkey', where: [{ field: '_id', value: passkey._id }] },
+      })
+    }
+    await audit(ctx, { kind: 'user', id: member.userId }, 'passkey.remove', member.identityKid)
     return null
   },
 })
@@ -454,6 +539,8 @@ export const commitPasswordChange = internalMutation({
         update: { password: args.newHash, updatedAt: Date.now() },
       },
     })
+    // A sign-in with the old password still under way ends its session as it starts (auth.ts).
+    await ctx.db.patch(member._id, { credentialVersion: (member.credentialVersion ?? 0) + 1 })
     const revision = await replaceBackup(ctx, member, replacing, {
       kind: 'password',
       nonce: args.nonce,
@@ -464,7 +551,7 @@ export const commitPasswordChange = internalMutation({
   },
 })
 
-async function memberById(ctx: QueryCtx, userId: string) {
+export async function memberById(ctx: QueryCtx, userId: string) {
   const member = await ctx.db
     .query('members')
     .withIndex('by_userId', (q) => q.eq('userId', userId))

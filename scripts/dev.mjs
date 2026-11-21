@@ -1,9 +1,10 @@
 // Starts a working local instance of this checkout: its own Convex backend running on this
 // machine, the gateway, a bridge host for each network, and the web app from apps/desktop.
 //
-//   pnpm dev                       set up if needed, then start, with the fake network
-//   pnpm dev --network whatsapp    a real WhatsApp bridge host instead (needs your phone)
-//   pnpm dev --network fake,whatsapp
+//   pnpm dev                       set up if needed, then start, with a WhatsApp bridge host
+//   pnpm dev --network signal      another network's bridge host instead
+//   pnpm dev --network whatsapp,signal
+//   pnpm dev --demo                no gateway or bridge host: demo chats only, like a preview
 //   pnpm dev --setup               set up and stop; run for each new worktree
 //   pnpm dev --setup --reset       throw this checkout's backend data away first, then set up
 //   pnpm dev --setup --reset --reset-ignoring <pid>
@@ -28,6 +29,7 @@ import {
   bridgeDir,
   buildBridgeHost,
   capture,
+  findChromium,
   claimSlot,
   convex,
   dataDir,
@@ -43,6 +45,7 @@ import {
   parseDotenv,
   portsFor,
   privateDir,
+  removeConvexEnv,
   removeFromCheckout,
   root,
   run,
@@ -56,7 +59,20 @@ import {
   writeDevEnv,
 } from './lib.mjs'
 
-const NETWORKS = ['fake', 'whatsapp']
+const NETWORKS = [
+  'whatsapp',
+  'signal',
+  'gmessages',
+  'gvoice',
+  'telegram',
+  'meta',
+  'instagram',
+  'slack',
+  'groupme',
+  'linkedin',
+  'twitter',
+  'bluesky',
+]
 
 const args = process.argv.slice(2)
 const setupOnly = args.includes('--setup')
@@ -69,12 +85,17 @@ const resetIgnoring = args.flatMap((arg, i) =>
       ? [arg.slice('--reset-ignoring='.length)]
       : [],
 )
+// A demo instance bridges nothing: the backend makes demo data only when it has no networks
+// (TRIODITIS_DEMO=1 and no TRIODITIS_NETWORKS), so a demo chat can never sit beside a real one.
+const demo = args.includes('--demo')
 const networkArg =
   args.find((arg, i) => args[i - 1] === '--network') ?? args.find((arg) => arg.startsWith('--network='))?.split('=')[1]
-const networks = (networkArg ?? 'fake')
-  .split(',')
-  .map((name) => name.trim())
-  .filter(Boolean)
+const networks = demo
+  ? []
+  : (networkArg ?? 'whatsapp')
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean)
 for (const name of networks) {
   if (!NETWORKS.includes(name)) {
     console.error(`"${name}" isn't a network the dev stack can run. Choose from: ${NETWORKS.join(', ')}`)
@@ -87,6 +108,8 @@ const fail = (message) => {
   process.exit(1)
 }
 
+if (demo && networkArg !== undefined) fail('`--demo` runs no bridge host, so it takes no `--network`.')
+if (!demo && networks.length === 0) fail('`--network` needs at least one network.')
 if (reset && !setupOnly) fail('`--reset` only goes with `--setup`: run `pnpm dev --setup --reset`.')
 if (resetIgnoring.length > 0 && !reset) fail('`--reset-ignoring` only goes with `--setup --reset`.')
 // A whole decimal process ID, nothing else: `=42=typo` must not become 42.
@@ -108,6 +131,13 @@ try {
     dir: dataDir,
     busy: (pid) => `Another \`pnpm dev\` for this checkout (process ${pid}) is running. Stop it first.`,
   })
+} catch (error) {
+  fail(error.message)
+}
+
+// The fake network's logins, from before it was removed: they only ever held made-up chats.
+try {
+  removeFromCheckout(resolve(dataDir, 'bridge-fake'))
 } catch (error) {
   fail(error.message)
 }
@@ -154,8 +184,8 @@ const instance = {
   SITE_URL: siteUrl,
   GATEWAY_URL: `http://127.0.0.1:${ports.gateway}`,
   GATEWAY_INTERNAL_ADDR: `127.0.0.1:${ports.gateway}`,
+  GATEWAY_PUBLIC_ADDR: `127.0.0.1:${ports.gatewayPublic}`,
   BRIDGE_HOSTS: networks.map((network) => `${hostId(network)}=http://${bridgeAddr(network)}`).join(','),
-  BRIDGE_FAKE_CONTROL_ADDR: `127.0.0.1:${ports.fakeControl}`,
   TRIODITIS_NETWORKS: networks.join(','),
 }
 writeDevEnv(instance)
@@ -191,12 +221,15 @@ try {
   assertLocalBackend()
 
   step('Checking backend settings')
+  // Undefined is a variable this instance must not have (TRIODITIS_DEMO outside a demo run, the
+  // networks in one), so it's removed: Convex holds no empty values.
   const wanted = {
     SITE_URL: siteUrl,
     BETTER_AUTH_SECRET: secrets.BETTER_AUTH_SECRET,
     GATEWAY_SECRET: secrets.GATEWAY_SECRET,
     TRIODITIS_SETUP_TOKEN: secrets.TRIODITIS_SETUP_TOKEN,
-    TRIODITIS_NETWORKS: instance.TRIODITIS_NETWORKS,
+    TRIODITIS_NETWORKS: demo ? undefined : instance.TRIODITIS_NETWORKS,
+    TRIODITIS_DEMO: demo ? '1' : undefined,
     BRIDGE_PUBLIC_KEY: secrets.BRIDGE_PUBLIC_KEY,
     AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
   }
@@ -206,13 +239,19 @@ try {
       parseDotenv(capture('pnpm', convex('env', 'list', '--include-values'), { ...localConvex, quiet: true })),
     ),
   )
-  const changed = Object.fromEntries(Object.entries(wanted).filter(([name, value]) => existing.get(name) !== value))
+  const changed = Object.fromEntries(
+    Object.entries(wanted).filter(([name, value]) => value !== undefined && existing.get(name) !== value),
+  )
   setConvexEnv(changed, localConvex)
   for (const name of Object.keys(changed)) console.log(`Set ${name}.`)
+  const removed = Object.keys(wanted).filter((name) => wanted[name] === undefined && existing.has(name))
+  removeConvexEnv(removed, localConvex)
+  for (const name of removed) console.log(`Removed ${name}.`)
 
-  if (hasBridgeHost) {
+  if (hasBridgeHost && networks.length > 0) {
     step('Building the bridge host')
-    buildBridgeHost()
+    // Signal links libsignal (Rust), so it is only built in when it is asked for.
+    buildBridgeHost({ signal: networks.includes('signal') })
   }
 } catch (error) {
   fail(error.message)
@@ -327,6 +366,7 @@ function superviseGateway() {
     GATEWAY_SECRET: secrets.GATEWAY_SECRET,
     TRIODITIS_INTERNAL_TOKEN: secrets.TRIODITIS_INTERNAL_TOKEN,
     GATEWAY_INTERNAL_ADDR: instance.GATEWAY_INTERNAL_ADDR,
+    GATEWAY_PUBLIC_ADDR: instance.GATEWAY_PUBLIC_ADDR,
     AGENT_ACCESS_PUBLIC_KEY: secrets.AGENT_ACCESS_PUBLIC_KEY,
     BRIDGE_HOSTS: instance.BRIDGE_HOSTS,
   }
@@ -375,13 +415,46 @@ function superviseGateway() {
   }
 }
 
-/** Starts the gateway, the bridge hosts and the web app, each once the one before is up. */
+/**
+ * Starts the gateway, the bridge hosts and the web app, each once the one before is up. A demo
+ * instance is what a preview is, the backend and the web app: with nothing to bridge, it runs
+ * no gateway either.
+ */
 async function startServices() {
-  step('Starting the gateway')
-  superviseGateway()
-  if (!(await ready('The gateway', `${instance.GATEWAY_URL}/healthz`, 30))) return
+  if (!demo) {
+    step('Starting the gateway')
+    superviseGateway()
+    if (!(await ready('The gateway', `${instance.GATEWAY_URL}/healthz`, 30))) return
+  }
 
-  if (hasBridgeHost) {
+  if (demo) {
+    // Nothing to bridge, so no bridge host.
+  } else if (hasBridgeHost) {
+    // The sign-in browser, for networks that log in on their website, when there's a Chromium
+    // and somewhere in memory for its profiles (/dev/shm, or LOGIN_BROWSER_TMP if you name a
+    // memory-backed directory): a signed-in profile never goes to disk.
+    const profiles = process.env.LOGIN_BROWSER_TMP || (existsSync('/dev/shm') ? '/dev/shm' : null)
+    const chromium = profiles ? findChromium() : null
+    const loginBrowserUrl = `http://127.0.0.1:${ports.loginBrowser}`
+    if (chromium) {
+      step('Starting the sign-in browser')
+      launch('login-browser', resolve(bridgeDir, 'bin/login-browser'), [], {
+        cwd: root,
+        env: {
+          LOGIN_BROWSER_TOKEN: secrets.LOGIN_BROWSER_TOKEN,
+          LOGIN_BROWSER_ADDR: `127.0.0.1:${ports.loginBrowser}`,
+          LOGIN_BROWSER_TMP: profiles,
+          CHROMIUM_PATH: chromium,
+        },
+      })
+      if (!(await ready('The sign-in browser', `${loginBrowserUrl}/v1/health`, 30))) return
+    } else {
+      console.log(
+        profiles
+          ? '\nNo Chromium found (set CHROMIUM_PATH): cookie logins are pasted by hand.'
+          : '\nNo /dev/shm for the sign-in browser’s profiles (set LOGIN_BROWSER_TMP to a memory-backed directory): cookie logins are pasted by hand.',
+      )
+    }
     for (const network of networks) {
       step(`Starting the ${network} bridge host`)
       launch(`bridge:${network}`, resolve(bridgeDir, 'bin/bridge-host'), ['--network', network, 'run'], {
@@ -394,7 +467,7 @@ async function startServices() {
           BRIDGE_HOST_ID: hostId(network),
           BRIDGE_HOST_ADDR: bridgeAddr(network),
           BRIDGE_DATA_DIR: resolve(dataDir, `bridge-${network}`),
-          ...(network === 'fake' ? { BRIDGE_FAKE_CONTROL_ADDR: instance.BRIDGE_FAKE_CONTROL_ADDR } : {}),
+          ...(chromium ? { LOGIN_BROWSER_URL: loginBrowserUrl, LOGIN_BROWSER_TOKEN: secrets.LOGIN_BROWSER_TOKEN } : {}),
         },
       })
     }
@@ -413,6 +486,7 @@ async function startServices() {
         PORT: String(ports.web),
         VITE_CONVEX_URL: convexUrl,
         VITE_CONVEX_SITE_URL: convexSiteUrl,
+        VITE_GATEWAY_PUBLIC_URL: `http://${instance.GATEWAY_PUBLIC_ADDR}`,
         VITE_TRIODITIS_ENVIRONMENT: 'development',
       },
     })
@@ -425,7 +499,7 @@ async function startServices() {
   URL        ${web ? siteUrl : `${siteUrl} (no web app in this checkout yet: apps/desktop)`}
   Email      ${TESTER.email}
   Password   ${TESTER.password}
-  Networks   ${networks.join(', ')}${networks.includes('fake') ? `  (pnpm fake <username> <from> "<text>" delivers a message)` : ''}
+  Networks   ${demo ? 'none: demo chats only (pnpm dev --demo)' : networks.join(', ')}
   Data       packages/backend/.convex/local and .data/, this checkout only
 
 Ctrl+C stops everything.`)

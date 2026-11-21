@@ -47,6 +47,19 @@ http://127.0.0.1:8090 {
 		reverse_proxy backend:3211
 	}
 
+	# The sign-in browser's viewer, a websocket the gateway checks the ticket of and relays to
+	# the bridge host running the login (docs/architecture/signin-browser.md).
+	handle /login-browser {
+		reverse_proxy gateway:8602
+	}
+
+	# People's encrypted pictures and files, which the gateway fetches from the bridge host that
+	# has them once it has checked the request's media token. The app decrypts them
+	# (docs/architecture/client-api.md, Media).
+	handle /media/* {
+		reverse_proxy gateway:8602
+	}
+
 	# Where the web app finds its backend, written by install.sh. Never cached, so a changed
 	# address takes effect on the next load.
 	handle /config.json {
@@ -66,7 +79,9 @@ http://127.0.0.1:8090 {
 
 	handle {
 		root * /srv/web
-		@html path / /index.html
+		# The page, and the build it's from (/version.json, which open pages check after an
+		# update), are revalidated on every load.
+		@html path / /index.html /version.json
 		header @html Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server

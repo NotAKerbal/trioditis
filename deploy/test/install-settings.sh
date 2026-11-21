@@ -13,7 +13,11 @@
 # added without deciding whether backups keep it, and nothing else writes deploy/.env; and a
 # value that isn't literal (a space from --bind, say), or an option's value spanning lines (a
 # second setting slipped in), or a NUL in deploy/.env, stops it before anything is saved. Every
-# value a fresh install writes or generates is literal, since the stub runs get through. TRIODITIS_INSTALLER=<path> tests another
+# value a fresh install writes or generates is literal, since the stub runs get through. And
+# the networks: every one gets a bridge host by default (Telegram only with its credentials),
+# --networks limits them and is kept (INSTALL_NETWORKS), an unknown one (fake) stops the
+# install, and an install from before (TRIODITIS_NETWORKS=whatsapp,fake, the fake network's
+# --e2e) moves to every network, without the fake one. TRIODITIS_INSTALLER=<path> tests another
 # install.sh.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 set -eu
@@ -36,12 +40,24 @@ checkout() {
   cp "$installer" "$work/checkout/deploy/install/install.sh"
   cp -r "$repo/deploy/compose" "$work/checkout/deploy/compose"
   cp -r "$repo/deploy/scripts" "$work/checkout/deploy/scripts"
+  cp -r "$repo/deploy/updater" "$work/checkout/deploy/updater"
   cp "$repo/deploy/install/env-names" "$work/checkout/deploy/install/env-names"
 }
+# A systemd whose user manager answers, or doesn't with STUB_SYSTEMCTL=fail.
+cat >"$work/bin/systemctl" <<'EOF'
+#!/bin/sh
+[ "${STUB_SYSTEMCTL:-ok}" = ok ]
+EOF
+chmod +x "$work/bin/systemctl"
 cat >"$work/bin/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
-  info) [ "${2:-}" != --format ] || echo /var/lib/docker ;;
+  info)
+    case "${3:-}" in
+      *ServerVersion*) echo 29.1.3 ;;
+      *) [ "${2:-}" != --format ] || echo /var/lib/docker ;;
+    esac
+    ;;
   build) ;;
   run)
     for name in BRIDGE AGENT_ACCESS; do echo "${name}_PUBLIC_KEY=stub-public" "${name}_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | tr ' ' '\n'; done
@@ -59,7 +75,10 @@ EOF
 chmod +x "$work/bin/docker"
 install() {
   runs=$((${runs:-0} + 1))
-  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
+  # Its own systemd config directory (test_config, else $work/config), never the caller's, so no
+  # updater unit of this machine's is seen.
+  if PATH="$work/bin:$PATH" STUB_LOG="$work/compose.log" XDG_CONFIG_HOME="${test_config:-$work/config}" \
+    bash "$work/checkout/deploy/install/install.sh" --host 127.0.0.1 --bind 127.0.0.1 --port 18999 "$@" >"$work/out" 2>&1; then status=0; else status=$?; fi
   cp "$work/checkout/deploy/.env" "$work/env.$runs" 2>/dev/null || true
   return "$status"
 }
@@ -182,6 +201,223 @@ cp "$work/checkout/deploy/.env" "$work/env.nul"
 if install; then status=0; else status=$?; fi
 [ "$status" != 0 ] && grep -q "holds a NUL or a carriage return" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.nul" &&
   check ok "a NUL in deploy/.env stops the install, unchanged" || { check fail "a NUL in deploy/.env stops the install, unchanged"; tail -2 "$work/out" >&2; }
+
+# Telegram needs the operator's own app credentials: without them, or with ones that can't be
+# right, the install stops before saving anything; with them they're saved, and a rerun that
+# doesn't pass them keeps them.
+checkout
+if install --networks whatsapp,telegram; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "my.telegram.org/apps" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+  check ok "telegram without an API ID and hash stops the install, saving nothing" ||
+  { check fail "telegram without an API ID and hash stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+if install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q -- "--telegram-api-hash must be" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+  check ok "a short API hash stops the install, saving nothing" ||
+  { check fail "a short API hash stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+install --networks telegram --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef0123456789abcdef || true
+[ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
+  check ok "the API ID and hash are saved" || { check fail "the API ID and hash are saved"; tail -2 "$work/out" >&2; }
+install || true
+[ "$(value TELEGRAM_API_ID)" = 1234567 ] && [ "$(value TELEGRAM_API_HASH)" = 0123456789abcdef0123456789abcdef ] &&
+  [ "$(value TRIODITIS_NETWORKS)" = telegram ] && check ok "and a rerun keeps them" || check fail "and a rerun keeps them"
+
+# Every network gets a bridge host by default, but Telegram only with its credentials: all
+# leaves it out, with a note, rather than stopping. What's bridged is what the backend may
+# offer (TRIODITIS_NETWORKS) and the profiles Compose runs.
+all_but_telegram=whatsapp,signal,gmessages,gvoice,meta,instagram,slack,groupme,linkedin,twitter,bluesky
+checkout
+install || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  [ "$(value COMPOSE_PROFILES)" = "$all_but_telegram" ] && grep -q "Leaving Telegram out" "$work/out" &&
+  check ok "by default every network but Telegram (without its credentials) is bridged" ||
+  { check fail "by default every network but Telegram (without its credentials) is bridged"; grep -E '^(INSTALL_NETWORKS|TRIODITIS_NETWORKS)=' "$work/checkout/deploy/.env" >&2; }
+[ "$(value BRIDGE_HOSTS | tr ',' '\n' | wc -l)" = 11 ] && value BRIDGE_HOSTS | tr ',' '\n' | grep -qx 'bluesky-1=http://bridge-bluesky:8611' &&
+  check ok "each with its bridge host" || check fail "each with its bridge host ($(value BRIDGE_HOSTS))"
+install --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef0123456789abcdef || true
+[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal,gmessages,gvoice,telegram,meta,instagram,slack,groupme,linkedin,twitter,bluesky ] &&
+  ! grep -q "Leaving Telegram out" "$work/out" && check ok "and Telegram too once its credentials are given" ||
+  check fail "and Telegram too once its credentials are given ($(value TRIODITIS_NETWORKS))"
+
+# --networks limits them, and a rerun keeps the limit; all goes back to every one.
+checkout
+install --networks whatsapp,signal,whatsapp || true
+[ "$(value INSTALL_NETWORKS)" = whatsapp,signal,whatsapp ] && [ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal ] &&
+  [ "$(value COMPOSE_PROFILES)" = whatsapp,signal ] &&
+  [ "$(value BRIDGE_HOSTS)" = whatsapp-1=http://bridge-whatsapp:8611,signal-1=http://bridge-signal:8611 ] &&
+  check ok "--networks limits the bridge hosts, each once" || check fail "--networks limits the bridge hosts, each once ($(value TRIODITIS_NETWORKS))"
+install || true
+[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal ] && check ok "and a rerun keeps the limit" || check fail "and a rerun keeps the limit"
+install --networks all || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  check ok "--networks all goes back to every network" || check fail "--networks all goes back to every network"
+for networks in fake whatsapp,fake all,signal; do
+  checkout
+  if install --networks "$networks"; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "Unknown network" "$work/out" && [ ! -e "$work/checkout/deploy/.env" ] &&
+    check ok "--networks $networks stops the install, saving nothing" ||
+    { check fail "--networks $networks stops the install, saving nothing"; tail -2 "$work/out" >&2; }
+done
+
+# An install from before INSTALL_NETWORKS: its TRIODITIS_NETWORKS was what it offered (now the
+# admins' choice), so it moves to every network; and the fake network's test endpoint (--e2e)
+# goes, with its setting and compose file.
+checkout
+printf '%s\n' POSTGRES_PASSWORD=keep-me COMPOSE_PROJECT_NAME=trioditis-test INSTALL_E2E=1 \
+  COMPOSE_FILE=compose.yml:compose.e2e.yml COMPOSE_PROFILES=whatsapp,fake TRIODITIS_NETWORKS=whatsapp,fake \
+  BRIDGE_HOSTS=whatsapp-1=http://bridge-whatsapp:8611,fake-1=http://bridge-fake:8611 >"$work/checkout/deploy/.env"
+chmod 600 "$work/checkout/deploy/.env"
+install || true
+[ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
+  [ "$(value COMPOSE_PROFILES)" = "$all_but_telegram" ] && [ "$(value POSTGRES_PASSWORD)" = keep-me ] &&
+  check ok "an install from before moves to every network" || { check fail "an install from before moves to every network"; tail -3 "$work/out" >&2; }
+! grep -q fake "$work/checkout/deploy/.env" && ! grep -q '^INSTALL_E2E=' "$work/checkout/deploy/.env" &&
+  [ "$(value COMPOSE_FILE)" = compose.yml:compose.loopback.yml ] &&
+  check ok "without the fake network or its test endpoint" ||
+  { check fail "without the fake network or its test endpoint"; grep -E 'fake|E2E|COMPOSE_FILE' "$work/checkout/deploy/.env" >&2; }
+
+# The updater is on by default where it can run: a new install in a git checkout with an origin
+# remote turns it on, and one in a directory that isn't a git checkout gets it off and says why.
+# A saved choice stays, and --updater where it can't run stops the install, changing nothing.
+checkout
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one" "$work/out" &&
+  check ok "outside a git checkout, the updater is off, saying why" ||
+  { check fail "outside a git checkout, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work/checkout" init -q
+git -C "$work/checkout" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m test
+git -C "$work/checkout" remote add origin https://example.invalid/trioditis.git
+install || true
+[ "$(value INSTALL_UPDATER)" = 1 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "in a git checkout with an origin remote, the updater is on" ||
+  { check fail "in a git checkout with an origin remote, the updater is on"; tail -2 "$work/out" >&2; }
+sed -i 's/^INSTALL_UPDATER=.*/INSTALL_UPDATER=0/' "$work/checkout/deploy/.env"
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && ! grep -q "The updater is off" "$work/out" &&
+  check ok "an install that turned it off keeps it off" || check fail "an install that turned it off keeps it off"
+cp "$work/checkout/deploy/.env" "$work/env.updater"
+if STUB_SYSTEMCTL=fail install --updater; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "The updater can't run here: .*user manager" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
+  check ok "--updater where it can't run stops the install, unchanged" ||
+  { check fail "--updater where it can't run stops the install, unchanged"; tail -2 "$work/out" >&2; }
+
+# A saved 1 whose service was never set up (a first install cut off before then, even after it
+# wrote the unit) is still the default, so where the updater can't run it goes off; once the
+# service is enabled, it's the install's choice, and the install stops instead.
+unit_dir="$work/config/systemd/user"
+mkdir -p "$unit_dir/default.target.wants"
+for setup in 'not written' 'written, not enabled'; do
+  [ "$setup" = 'not written' ] || : >"$unit_dir/trioditis-updater-trioditis-test.service"
+  printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
+  if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
+  [ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*user manager" "$work/out" && ! grep -q "can't run here" "$work/out" &&
+    check ok "a saved 1 with its unit $setup is still the default" ||
+    { check fail "a saved 1 with its unit $setup is still the default"; tail -2 "$work/out" >&2; }
+done
+ln -s "$unit_dir/trioditis-updater-trioditis-test.service" "$unit_dir/default.target.wants/trioditis-updater-trioditis-test.service"
+printf '%s\n' COMPOSE_PROJECT_NAME=trioditis-test INSTALL_UPDATER=1 >"$work/checkout/deploy/.env"
+cp "$work/checkout/deploy/.env" "$work/env.updater"
+if STUB_SYSTEMCTL=fail install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "The updater can't run here" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.updater" &&
+  check ok "a saved 1 with its service enabled stops the install where it can't run" ||
+  { check fail "a saved 1 with its service enabled stops the install where it can't run"; tail -2 "$work/out" >&2; }
+rm -rf "$work/config"
+
+# A unit directory it can't write or search, and a copy unpacked inside another repository (git
+# would find that one, and the updater would update it), get the updater off by default too.
+mkdir -p "$work/xdg/systemd"
+: >"$work/xdg/systemd/user"
+rm -f "$work/checkout/deploy/.env"
+test_config=$work/xdg
+install || true
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
+  check ok "with a unit directory it can't write, the updater is off, saying why" ||
+  { check fail "with a unit directory it can't write, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+mkdir -p "$work/xdg-closed/systemd/user"
+chmod 600 "$work/xdg-closed/systemd/user"
+rm -f "$work/checkout/deploy/.env"
+test_config=$work/xdg-closed
+install || true
+unset test_config
+chmod 700 "$work/xdg-closed/systemd/user"
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't a directory this user can write to" "$work/out" &&
+  check ok "with a unit directory it can't search, the updater is off, saying why" ||
+  { check fail "with a unit directory it can't search, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+checkout
+git -C "$work" init -q
+git -C "$work" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m parent
+git -C "$work" remote add origin https://example.invalid/other.git
+install || true
+rm -rf "$work/.git"
+[ "$(value INSTALL_UPDATER)" = 0 ] && grep -q "The updater is off.*isn't one of its own" "$work/out" &&
+  check ok "inside another repository, the updater is off, saying why" ||
+  { check fail "inside another repository, the updater is off, saying why"; tail -2 "$work/out" >&2; }
+
+# A fresh install makes the backup key, in the form of a key.
+checkout
+install || true
+printf '%s\n' "$(value BACKUP_KEY)" | grep -qxE '[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]' &&
+  check ok "a fresh install makes BACKUP_KEY" || check fail "a fresh install makes BACKUP_KEY"
+
+# deploy/runtime a symlink (to a directory that doesn't exist yet): refused before anything is
+# made there.
+checkout
+ln -s "$work/elsewhere" "$work/checkout/deploy/runtime"
+if install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "deploy/runtime is a symlink" "$work/out" && [ ! -e "$work/elsewhere" ] &&
+  check ok "a symlinked deploy/runtime is refused before mkdir follows it" ||
+  { check fail "a symlinked deploy/runtime is refused before mkdir follows it"; tail -2 "$work/out" >&2; }
+
+# Settings an operator writes by hand, held to their form: LOGIN_BROWSER_MAX a whole number from
+# 1 to 64, DEBIAN_SNAPSHOT a snapshot time, UPDATE_BACKUP_DIR an absolute path. Each bad one
+# stops the install, leaving deploy/.env as it was.
+for setting in LOGIN_BROWSER_MAX=0 LOGIN_BROWSER_MAX=65 LOGIN_BROWSER_MAX=lots LOGIN_BROWSER_MAX=04 LOGIN_BROWSER_MAX=-1 \
+  DEBIAN_SNAPSHOT=yesterday DEBIAN_SNAPSHOT=20261101 UPDATE_BACKUP_DIR=backups UPDATE_BACKUP_DIR=/srv/../etc; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  cp "$work/checkout/deploy/.env" "$work/env.before"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "has a value that isn't literal" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.before" &&
+    check ok "$setting stops the install, unchanged" || { check fail "$setting stops the install, unchanged"; tail -2 "$work/out" >&2; }
+done
+for setting in LOGIN_BROWSER_MAX=1 LOGIN_BROWSER_MAX=64 DEBIAN_SNAPSHOT=20261101T000000Z UPDATE_BACKUP_DIR=/srv/trioditis-backups; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  install || true
+  grep -qx "$setting" "$work/checkout/deploy/.env" && ! grep -q "isn't literal" "$work/out" &&
+    check ok "$setting is kept" || { check fail "$setting is kept"; tail -2 "$work/out" >&2; }
+done
+
+# A restore that didn't finish replacing the data (its marker says loading, or deploy/.env says
+# one is under way with no marker): the installer starts nothing, not even Postgres.
+for case in loading pending; do
+  checkout
+  rm -f "$work/compose.log"
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n' >"$work/checkout/deploy/.env"
+  if [ "$case" = loading ]; then
+    printf 'state=loading\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+  else
+    echo 'RESTORE_PENDING=1800000000000' >>"$work/checkout/deploy/.env"
+  fi
+  chmod 600 "$work/checkout/deploy/.env"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ ! -s "$work/compose.log" ] &&
+    check ok "an unfinished restore ($case) stops the install before anything starts" ||
+    { check fail "an unfinished restore ($case) stops the install before anything starts"; tail -2 "$work/out" >&2; }
+done
+# One whose sends are settled but whose bridge hosts weren't checked yet (cut off after
+# settling) goes on: the install gets as far as Compose, and the marker stays.
+checkout
+rm -f "$work/compose.log"
+printf 'COMPOSE_PROJECT_NAME=trioditis-test\nRESTORE_ID=1800000000-0123456789abcdef\n' >"$work/checkout/deploy/.env"
+printf 'state=settled\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+chmod 600 "$work/checkout/deploy/.env"
+install || true
+! grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ -s "$work/compose.log" ] && [ -e "$work/checkout/deploy/.restore-settle" ] &&
+  check ok "a restore settled but not yet checked goes on, keeping its gate" ||
+  { check fail "a restore settled but not yet checked goes on, keeping its gate"; tail -2 "$work/out" >&2; }
 
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]

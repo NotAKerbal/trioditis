@@ -1,7 +1,7 @@
 package host
 
-// The automated conformance suite: a real bridge host, running bridgev2 with the fake
-// network connector, against a fake gateway. See docs/PLAN.md, Connector platform.
+// The automated conformance suite: a real bridge host, running bridgev2 with the test
+// connector, against a fake gateway. See docs/PLAN.md, Connector platform.
 
 import (
 	"bytes"
@@ -11,8 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +30,7 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/pkg/fakenet"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/testconnector"
 )
 
 const testToken = "test-internal-token"
@@ -150,19 +152,21 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 // for each event type, its required and optional fields beyond the ones every event has.
 // The backend refuses an event with a missing or unknown field.
 var eventFields = map[string][2][]string{
-	protocol.EventMessage:        {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
-	protocol.EventEdit:           {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
-	protocol.EventReaction:       {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	protocol.EventReactionRemove: {{"portalId", "targetEventId", "sender", "key"}, nil},
-	protocol.EventRedaction:      {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	protocol.EventReceipt:        {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	protocol.EventTyping:         {{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	protocol.EventChat:           {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
-	protocol.EventContact:        {{"ghostId", "sealed"}, nil},
-	protocol.EventLoginState:     {{"state"}, {"error"}},
-	protocol.EventLoginStep:      {{"loginSessionId", "step"}, nil},
-	protocol.EventSendStatus:     {{"clientMessageId", "status"}, {"eventId", "error"}},
-	protocol.EventBackfillDone:   {{"portalId", "direction", "more"}, nil},
+	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId", "mentionsMe"}},
+	protocol.EventEdit:               {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
+	protocol.EventReaction:           {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
+	protocol.EventReactionRemove:     {{"portalId", "targetEventId", "sender", "key"}, nil},
+	protocol.EventRedaction:          {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
+	protocol.EventReceipt:            {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
+	protocol.EventTyping:             {{"portalId", "sender", "typing", "timeoutMs"}, nil},
+	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted", "isRequest"}},
+	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
+	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
+	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
+	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
+	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
+	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
 }
 
 func validateEvent(evt map[string]json.RawMessage) string {
@@ -230,7 +234,7 @@ type harness struct {
 	t         *testing.T
 	dir       string
 	gw        *fakeGateway
-	net       *fakenet.Network
+	net       *testconnector.Network
 	host      *Host
 	bridgeKey seal.KeyPair
 }
@@ -257,9 +261,9 @@ func startHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *h
 // buildHost makes a host without starting it, so a test can prepare its database first.
 func buildHost(t *testing.T, dir string, gw *fakeGateway, opts ...hostOption) *harness {
 	t.Helper()
-	net := fakenet.New()
+	net := testconnector.New()
 	cfg := Config{
-		Network:          "fake",
+		Network:          "testnet",
 		DataDir:          dir,
 		ListenAddr:       "127.0.0.1:0",
 		CommandAddr:      "http://127.0.0.1:0",
@@ -297,6 +301,21 @@ func (h *harness) command(cmd protocol.Command) (int, string) {
 	return resp.StatusCode, string(data)
 }
 
+// media fetches a file as the gateway does for a person.
+func (h *harness) media(mediaID, userID string) (int, []byte) {
+	h.t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, "http://"+h.host.Addr()+"/v1/media/"+url.PathEscape(mediaID), nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("X-Trioditis-User-Id", userID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, data
+}
+
 func (h *harness) mustCommand(cmd protocol.Command) {
 	h.t.Helper()
 	if status, body := h.command(cmd); status != http.StatusAccepted {
@@ -320,11 +339,11 @@ func nextCommandID() string {
 	return fmt.Sprintf("cmd-%d-%d", time.Now().UnixNano(), commandCounter)
 }
 
-// login runs the fake network's login flow through commands and returns the opaque login ID.
+// login runs the test connector's login flow through commands and returns the opaque login ID.
 func (h *harness) login(userID, username string) string {
 	h.t.Helper()
 	session := "session-" + username
-	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: userID, LoginSessionID: session, Network: "fake"})
+	h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: userID, LoginSessionID: session, Network: "testnet"})
 	step := h.gw.waitFor(h.t, "username step", func(e *protocol.Event) bool {
 		return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
 	}).Step
@@ -354,6 +373,10 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindChat, evt.PortalID
 	case protocol.EventContact:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
+	case protocol.EventContactIdentifiers:
+		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
+	case protocol.EventLoginState:
+		ctx.Kind, ctx.ObjectID = seal.KindAccount, evt.LoginID
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -377,14 +400,28 @@ func TestConformance(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice", "bob")
 	h := startHost(t, dir, gw)
-	aliceLogin := h.login("alice", "alice-fake")
-	const aliceNet = networkid.UserLoginID("alice-fake")
+	aliceLogin := h.login("alice", "alice-testnet")
+	const aliceNet = networkid.UserLoginID("alice-testnet")
 
 	t.Run("registers with an empty batch on startup", func(t *testing.T) {
 		gw.lock.Lock()
 		defer gw.lock.Unlock()
-		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "fake-1" {
-			t.Fatalf("the first batch must be an empty heartbeat from fake-1, got %+v", gw.batches[0])
+		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "testnet-1" {
+			t.Fatalf("the first batch must be an empty heartbeat from testnet-1, got %+v", gw.batches[0])
+		}
+	})
+
+	t.Run("an account's hint is sealed to its owner, and its login ID is opaque", func(t *testing.T) {
+		state := gw.waitFor(t, "a login state with a hint", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginState && e.LoginID == aliceLogin && e.Sealed != nil
+		})
+		var account protocol.AccountPlaintext
+		h.open("alice", state, &account)
+		if account.Hint != "alice-testnet" {
+			t.Fatalf("hint %q", account.Hint)
+		}
+		if err := seal.OpenJSON(state.Sealed, gw.keys["bob"], seal.Context{Kind: seal.KindAccount, OwnerUserID: "alice", ObjectID: aliceLogin}, &account); err == nil {
+			t.Fatal("bob opened alice's account hint")
 		}
 	})
 
@@ -398,7 +435,7 @@ func TestConformance(t *testing.T) {
 	// History the chat already has before Trioditis sees it. bridgev2 imports it through
 	// BatchSend when the chat's portal is created.
 	base := time.Now().Add(-time.Hour)
-	h.net.SetHistory("family", []fakenet.HistoryMessage{
+	h.net.SetHistory("family", []testconnector.HistoryMessage{
 		{ID: "h1", SenderID: "peer-family", Text: "history one", TS: base},
 		{ID: "h2", SenderID: networkid.UserID(aliceNet), Text: "history two", TS: base.Add(time.Minute)},
 	})
@@ -454,6 +491,81 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("starts a direct chat from an identifier or a contact, and says when there's no one", func(t *testing.T) {
+		started := func(requestID string) *protocol.Event {
+			return gw.waitFor(t, "chatStarted "+requestID, func(e *protocol.Event) bool {
+				return e.Type == protocol.EventChatStarted && e.RequestID == requestID
+			})
+		}
+		byIdentifier := "request-erin-000001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: byIdentifier, Sealed: h.sealForBridge("alice", byIdentifier, map[string]string{"identifier": "erin"}),
+		})
+		evt := started(byIdentifier)
+		if evt.PortalID == "" || evt.Error != "" || evt.UserID != "alice" {
+			t.Fatalf("chatStarted %+v", evt)
+		}
+		chat := gw.waitFor(t, "erin's chat", func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == evt.PortalID })
+		if chat.Kind != "dm" {
+			t.Fatalf("started chat kind %q", chat.Kind)
+		}
+
+		// The same person again, by the contact this time: the chat they already have.
+		erin := gw.waitFor(t, "erin's contact", func(e *protocol.Event) bool {
+			if e.Type != protocol.EventContact || e.UserID != "alice" {
+				return false
+			}
+			var plain protocol.ContactPlaintext
+			h.open("alice", e, &plain)
+			return plain.Name == "Erin"
+		})
+		byContact := "request-erin-000002"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: byContact, GhostID: erin.GhostID,
+		})
+		if again := started(byContact); again.PortalID != evt.PortalID {
+			t.Fatalf("starting a chat with erin again gave %+v, not %s", again, evt.PortalID)
+		}
+
+		nobody := "request-nobody-0001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: nobody, Sealed: h.sealForBridge("alice", nobody, map[string]string{"identifier": "nobody"}),
+		})
+		if miss := started(nobody); miss.PortalID != "" || miss.Error != protocol.ErrNotFound {
+			t.Fatalf("starting a chat with nobody gave %+v", miss)
+		}
+
+		// One past its deadline isn't started late, after the person was told it timed out.
+		late := "request-late-000001"
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: late, GhostID: erin.GhostID, NotAfter: time.Now().Add(-time.Minute).UnixMilli(),
+		})
+		if expired := started(late); expired.PortalID != "" || expired.Error != protocol.ErrExpired {
+			t.Fatalf("a late start gave %+v", expired)
+		}
+
+		// Only the kinds of identifier the network takes: this one is neither a number nor a username.
+		odd := "request-odd-0000001"
+		status, body := h.command(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
+			RequestID: odd, Sealed: h.sealForBridge("alice", odd, map[string]string{"identifier": "lid:12345 x"}),
+		})
+		if status != http.StatusConflict || strings.TrimSpace(body) != `{"error":"invalid_identifier"}` {
+			t.Fatalf("an identifier of no kind the network takes got %d %s", status, body)
+		}
+
+		status, body = h.command(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin, RequestID: "short", GhostID: erin.GhostID,
+		})
+		if status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+			t.Fatalf("a bad request ID got %d %s", status, body)
+		}
+	})
+
 	t.Run("a dm- chat is a direct chat named after the other person", func(t *testing.T) {
 		if err := h.net.Incoming(aliceNet, "dm-carol", "carol", "d1", "hi, it's carol", time.Now()); err != nil {
 			t.Fatal(err)
@@ -471,6 +583,48 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+	})
+
+	t.Run("a contact whose ID is a phone number comes with it, to the login that saw it", func(t *testing.T) {
+		const number = networkid.UserID("15550001234")
+		if err := h.net.Incoming(aliceNet, "dm-15550001234", number, "n1", "hi from a number", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		first := gw.waitFor(t, "the number's identifiers", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice"
+		})
+		var plain protocol.ContactIdentifiersPlaintext
+		h.open("alice", first, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("identifiers %q", plain.Identifiers)
+		}
+		// Another of alice's logins that sees them sends its own, under its own login.
+		aliceTwo := h.login("alice", "alice-two")
+		if err := h.net.Incoming("alice-two", "dm-15550001234", number, "n2", "hi again", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		second := gw.waitFor(t, "the number from alice's second login", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.LoginID == aliceTwo
+		})
+		if second.GhostID != first.GhostID || second.LoginID == first.LoginID {
+			t.Fatalf("second login's identifiers %+v, first %+v", second, first)
+		}
+		h.open("alice", second, &plain)
+		if !slices.Equal(plain.Identifiers, []string{"tel:+15550001234"}) {
+			t.Fatalf("second login's identifiers %q", plain.Identifiers)
+		}
+		// A sync sends them again; another login without a chat with them gets nothing.
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "alice", LoginID: aliceLogin})
+		gw.waitFor(t, "the number again", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventContactIdentifiers && e.UserID == "alice" && e.GhostID == first.GhostID &&
+				e.LoginID == aliceLogin && e.Seq > second.Seq
+		})
+		bobLogin := h.login("bob", "bob-contacts")
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandSyncContacts, UserID: "bob", LoginID: bobLogin})
+		time.Sleep(300 * time.Millisecond)
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventContactIdentifiers && e.UserID != "alice" }); n != 0 {
+			t.Fatalf("%d identifier events went to someone without a chat with the contact", n)
 		}
 	})
 
@@ -526,6 +680,28 @@ func TestConformance(t *testing.T) {
 		gw.waitFor(t, "reaction removal", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventReactionRemove && e.TargetEventID == first.EventID && e.Key == "👍"
 		})
+		// Given again after it was taken away: a new reaction event, not a replay of the first
+		// one, which the backend would drop.
+		time.Sleep(2 * time.Millisecond)
+		if err := h.net.React(aliceNet, "family", "peer-family", "m1", "👍", false); err != nil {
+			t.Fatal(err)
+		}
+		reactions := func(e *protocol.Event) bool {
+			return e.Type == protocol.EventReaction && e.TargetEventID == first.EventID && e.Key == "👍"
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for gw.count(reactions) < 2 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		var reactionIDs []string
+		for _, evt := range gw.snapshot() {
+			if reactions(evt) {
+				reactionIDs = append(reactionIDs, evt.EventID)
+			}
+		}
+		if len(reactionIDs) != 2 || reactionIDs[0] == reactionIDs[1] {
+			t.Fatalf("a reaction given again must have its own event ID: %v", reactionIDs)
+		}
 		if err := h.net.Receipt(aliceNet, "family", "peer-family", "m1"); err != nil {
 			t.Fatal(err)
 		}
@@ -540,6 +716,92 @@ func TestConformance(t *testing.T) {
 		gw.waitFor(t, "redaction", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventRedaction && e.TargetEventID == first.EventID
 		})
+	})
+
+	t.Run("mentions of the person and message requests are flagged", func(t *testing.T) {
+		if err := h.net.IncomingMention(aliceNet, "family", "peer-family", "m-mention", "hey you"); err != nil {
+			t.Fatal(err)
+		}
+		mention := gw.waitFor(t, "a mention", isMessage("hey you", h, "alice"))
+		if !mention.MentionsMe {
+			t.Fatal("a message mentioning the person isn't flagged")
+		}
+		if first.MentionsMe {
+			t.Fatal("a message mentioning nobody is flagged")
+		}
+
+		if err := h.net.Incoming(aliceNet, "request-stranger", "peer-request-stranger", "m-req", "hi, it's me", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		req := gw.waitFor(t, "a message request", isMessage("hi, it's me", h, "alice"))
+		chats := func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == req.PortalID }
+		created := gw.waitFor(t, "the request's chat", chats)
+		if created.IsRequest == nil || !*created.IsRequest {
+			t.Fatalf("a message request's chat isn't flagged: %+v", created.IsRequest)
+		}
+		if family := gw.waitFor(t, "the family chat", func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == portalID }); family.IsRequest != nil {
+			t.Fatal("a chat that was never a request mustn't say anything about requests")
+		}
+		if err := h.net.AcceptRequest(aliceNet, "request-stranger"); err != nil {
+			t.Fatal(err)
+		}
+		gw.waitFor(t, "the accepted request", func(e *protocol.Event) bool {
+			return chats(e) && e.IsRequest != nil && !*e.IsRequest
+		})
+	})
+
+	t.Run("the person's reactions: a replaced one is taken away, and a late one isn't sent", func(t *testing.T) {
+		if err := h.net.Incoming(aliceNet, "family", "peer-family", "m-react", "react to me", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		target := gw.waitFor(t, "a message to react to", isMessage("react to me", h, "alice")).EventID
+		react := func(key string, notAfter time.Time) protocol.Command {
+			return protocol.Command{
+				CommandID: nextCommandID(), Type: protocol.CommandReact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+				TargetEventID: target, Key: key, NotAfter: notAfter.UnixMilli(),
+			}
+		}
+		isOwn := func(typ, key string) func(*protocol.Event) bool {
+			return func(e *protocol.Event) bool {
+				return e.Type == typ && e.TargetEventID == target && e.Key == key && e.Sender != nil && e.Sender.Self
+			}
+		}
+		// One reaction per person, as on WhatsApp: a new one replaces the old, and the old one's
+		// removal is reported as the person's, so their reactions don't show both.
+		h.net.SetMaxReactions(1)
+		defer h.net.SetMaxReactions(0)
+		h.mustCommand(react("👍", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the first reaction", isOwn(protocol.EventReaction, "👍"))
+		h.mustCommand(react("🎉", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the second reaction", isOwn(protocol.EventReaction, "🎉"))
+		gw.waitFor(t, "the first one taken away", isOwn(protocol.EventReactionRemove, "👍"))
+		// A reaction indexed before the index kept senders gets its sender from bridgev2's
+		// record when the store is upgraded, so replacing it works the same.
+		ctx := context.Background()
+		if _, err := h.host.Store.DB.Exec(ctx, `UPDATE trioditis_reaction SET sender=''`); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.host.Store.BackfillReactionSenders(ctx); err != nil {
+			t.Fatal(err)
+		}
+		h.mustCommand(react("😂", time.Now().Add(time.Hour)))
+		gw.waitFor(t, "the third reaction", isOwn(protocol.EventReaction, "😂"))
+		gw.waitFor(t, "the upgraded one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
+		// And the one that replaced it can still be taken away.
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandUnreact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			TargetEventID: target, Key: "😂", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+		})
+		gw.waitFor(t, "the last one taken away", isOwn(protocol.EventReactionRemove, "😂"))
+
+		before := h.net.Reactions()
+		if status, body := h.command(react("😮", time.Now().Add(-time.Second))); status != http.StatusConflict || !strings.Contains(body, protocol.ErrExpired) {
+			t.Fatalf("expected 409 expired for a late reaction, got %d %s", status, body)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if n := h.net.Reactions() - before; n != 0 {
+			t.Fatalf("a late reaction reached the network %d times", n)
+		}
 	})
 
 	sendCommand := func(clientMessageID, body string) protocol.Command {
@@ -587,8 +849,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("an ambiguous send becomes unknown and isn't retried", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendAmbiguous)
-		defer h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendAmbiguous)
+		defer h.net.SetSendMode(testconnector.SendOK)
 		before := len(h.net.Sent())
 		send("cm-ambiguous", "maybe sent")
 		unknown := gw.waitFor(t, "unknown", statusOf("cm-ambiguous", protocol.StatusUnknown))
@@ -602,8 +864,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("a refused send fails", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendRefused)
-		defer h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendRefused)
+		defer h.net.SetSendMode(testconnector.SendOK)
 		send("cm-refused", "refused")
 		failed := gw.waitFor(t, "failed", statusOf("cm-refused", protocol.StatusFailed))
 		if failed.Error != protocol.ErrNetworkRejected {
@@ -740,7 +1002,7 @@ func TestConformance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = os.WriteFile(filepath.Join(dir, "media", "fake", "latemedia1"), enc.Ciphertext, 0o600); err != nil {
+		if err = os.WriteFile(filepath.Join(dir, "media", "testnet", "latemedia1"), enc.Ciphertext, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		// In time at the hand-off; by the time the network reads the attachment, a second
@@ -765,7 +1027,7 @@ func TestConformance(t *testing.T) {
 
 	t.Run("a login step takes one submit", func(t *testing.T) {
 		session := "session-twice"
-		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "fake"})
+		h.mustCommand(protocol.Command{CommandID: nextCommandID(), Type: protocol.CommandLoginStart, UserID: "alice", LoginSessionID: session, Network: "testnet"})
 		step := gw.waitFor(t, "username step", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventLoginStep && e.LoginSessionID == session && e.Step.Type == protocol.StepUserInput
 		}).Step
@@ -802,6 +1064,7 @@ func TestConformance(t *testing.T) {
 			protocol.ErrNetworkRejected: true, protocol.ErrNotConnected: true, protocol.ErrTimeout: true,
 			protocol.ErrInvalidCommand: true, protocol.ErrExpired: true, protocol.ErrUnsupported: true,
 			protocol.ErrRateLimited: true, protocol.ErrBadCredentials: true, protocol.ErrLoginFailed: true, protocol.ErrInternal: true,
+			protocol.ErrNotFound: true, protocol.ErrInvalidIdentifier: true,
 		}
 		for _, evt := range gw.snapshot() {
 			raw, _ := json.Marshal(evt)
@@ -850,8 +1113,8 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("two people in the same chat each get their own copy", func(t *testing.T) {
-		bobLogin := h.login("bob", "bob-fake")
-		if err := h.net.Incoming("bob-fake", "family", "peer-family", "b1", "hello bob", time.Now()); err != nil {
+		bobLogin := h.login("bob", "bob-testnet")
+		if err := h.net.Incoming("bob-testnet", "family", "peer-family", "b1", "hello bob", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		evt := gw.waitFor(t, "bob's message", isMessage("hello bob", h, "bob"))
@@ -879,13 +1142,33 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("expected one attachment, got %+v", plain.Attachments)
 		}
 		att := plain.Attachments[0]
-		ct, err := os.ReadFile(filepath.Join(dir, "media", "fake", att.MediaID))
-		if err != nil {
-			t.Fatal(err)
+		// The gateway fetches the ciphertext for its owner; nobody else gets it.
+		status, ct := h.media(att.MediaID, "alice")
+		if status != http.StatusOK {
+			t.Fatalf("fetching alice's attachment: %d", status)
 		}
 		got, err := seal.DecryptMedia(ct, att.Key, att.Nonce, "alice", att.MediaID)
 		if err != nil || !bytes.Equal(got, image) {
 			t.Fatalf("attachment doesn't decrypt to the image: %v", err)
+		}
+		if status, _ = h.media(att.MediaID, "bob"); status != http.StatusNotFound {
+			t.Fatalf("bob fetching alice's attachment: %d, want 404", status)
+		}
+		if status, _ = h.media("../../../etc/passwd", "alice"); status != http.StatusNotFound {
+			t.Fatalf("a path for a media ID: %d, want 404", status)
+		}
+		err = filepath.WalkDir(filepath.Join(dir, "media"), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err == nil && bytes.Contains(data, image) {
+				t.Errorf("%s holds the image in plaintext", path)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -895,7 +1178,7 @@ func TestConformance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = os.WriteFile(filepath.Join(dir, "media", "fake", "outmedia1"), enc.Ciphertext, 0o600); err != nil {
+		if err = os.WriteFile(filepath.Join(dir, "media", "testnet", "outmedia1"), enc.Ciphertext, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		h.mustCommand(protocol.Command{
@@ -932,7 +1215,7 @@ func TestConformance(t *testing.T) {
 	})
 
 	t.Run("exactly once across a restart", func(t *testing.T) {
-		h.net.SetSendMode(fakenet.SendOK)
+		h.net.SetSendMode(testconnector.SendOK)
 		// A send whose outcome is never reported, then a restart: it must become unknown.
 		h.host.Connector.SendTimeout = time.Hour
 		gw.lock.Lock()

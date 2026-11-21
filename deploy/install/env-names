@@ -1,15 +1,17 @@
 # The settings install.sh writes to deploy/.env, which `deploy/trioditis backup` copies into a
-# backup's secrets.env: only these, one per line. The other two names it writes,
-# BRIDGE_PRIVATE_KEY and AGENT_ACCESS_PRIVATE_KEY, never go into a backup (they're kept
-# apart with `deploy/trioditis keys export`). A name the installer starts writing must be
-# added here or to those two; deploy/test/install-settings.sh fails until it is.
+# backup's secrets.env: only these, one per line. The other three names it writes,
+# BRIDGE_PRIVATE_KEY, AGENT_ACCESS_PRIVATE_KEY and BACKUP_KEY, never go into a backup (they're
+# kept apart with `deploy/trioditis keys export`). A name the installer starts writing must be
+# added here or to those three; deploy/test/install-settings.sh fails until it is.
 INSTALL_MODE
 INSTALL_DOMAIN
 PROXY_URL
 INSTALL_HOST
 INSTALL_BIND
-INSTALL_E2E
+INSTALL_NETWORKS
 INSTALL_TRUSTED_PROXIES
+INSTALL_UPDATER
+TRIODITIS_VERSION
 HTTP_PORT
 HTTP_BIND
 PUBLIC_HOST
@@ -31,7 +33,22 @@ CONVEX_INSTANCE_SECRET
 BETTER_AUTH_SECRET
 GATEWAY_SECRET
 TRIODITIS_INTERNAL_TOKEN
+LOGIN_BROWSER_TOKEN
 TRIODITIS_SETUP_TOKEN
+UPDATER_SECRET
 CONVEX_ADMIN_KEY
 BRIDGE_PUBLIC_KEY
 AGENT_ACCESS_PUBLIC_KEY
+TELEGRAM_API_ID
+TELEGRAM_API_HASH
+# Not written by install.sh: settings an operator may add by hand, which backups keep too.
+META_PROXY
+BRIDGE_EGRESS_DENY
+INSTAGRAM_PROXY
+LOGIN_BROWSER_MAX
+DEBIAN_SNAPSHOT
+UPDATE_BACKUP_DIR
+# Written by deploy/trioditis restore, cleared by the installer once the restored sends are settled.
+RESTORE_PENDING
+# The last restore's ID, kept for good: each bridge host settles a restored queue once per ID.
+RESTORE_ID

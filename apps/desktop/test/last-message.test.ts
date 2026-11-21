@@ -1,6 +1,6 @@
 import { generateKeyPair, keyId, ready, sealJson } from '@trioditis/crypto'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { openLastMessage, summarize } from '../src/data/last-message.ts'
+import { captionOf, openLastMessage, summarize } from '../src/data/last-message.ts'
 
 describe('a chat’s last message, for the list', () => {
   beforeAll(ready)
@@ -51,5 +51,14 @@ describe('a chat’s last message, for the list', () => {
     expect(summarize({ type: 'emote', body: 'waves' })).toBe('* waves')
     expect(summarize({ type: 'notice', body: '' })).toBeNull()
     expect(summarize(null)).toBeNull()
+  })
+
+  it('takes a picture’s file name for no caption, as networks send one', () => {
+    const photo = { mediaId: 'm', mime: 'image/jpeg', size: 1, key: 'k', nonce: 'n', name: 'image-2256.jpg' }
+    expect(summarize({ type: 'image', body: 'image-2256.jpg', attachments: [photo] })).toBe('Photo')
+    expect(captionOf({ type: 'image', body: 'image-2256.jpg', attachments: [photo] })).toBe('')
+    expect(captionOf({ type: 'image', body: 'The awards', attachments: [photo] })).toBe('The awards')
+    // Without the file, the name is all there is to show.
+    expect(summarize({ type: 'image', body: 'image-2256.jpg' })).toBe('image-2256.jpg')
   })
 })

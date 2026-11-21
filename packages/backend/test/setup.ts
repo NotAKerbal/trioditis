@@ -14,7 +14,7 @@ export const SETUP_TOKEN = 'test-setup-token'
 export function setup() {
   process.env.GATEWAY_SECRET = GATEWAY_SECRET
   process.env.TRIODITIS_SETUP_TOKEN = SETUP_TOKEN
-  process.env.TRIODITIS_NETWORKS = 'whatsapp,fake'
+  process.env.TRIODITIS_NETWORKS = 'whatsapp,signal'
   process.env.SITE_URL = 'https://trioditis.test'
   // Real Convex transaction limits, so a test can't pass by doing what a deployment refuses.
   const t = convexTest({ schema, modules, transactionLimits: true })
@@ -91,6 +91,15 @@ export function sealed(tag = 'x') {
 }
 
 /** Reports a bridge host in, as its heartbeat does, so commands can be claimed for it. */
-export async function heartbeat(t: T, hostId = 'whatsapp-1', network: 'whatsapp' | 'fake' = 'whatsapp') {
+export async function heartbeat(t: T, hostId = 'whatsapp-1', network: 'whatsapp' | 'signal' = 'whatsapp') {
   return await t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId, network, events: [] })
+}
+
+/** Installs networks as an admin would (networks.install), so people can connect them. */
+export async function installNetworks(t: T, names: ('whatsapp' | 'signal')[] = ['whatsapp', 'signal']) {
+  await t.run(async (ctx) => {
+    for (const network of names) {
+      await ctx.db.insert('serverNetworks', { network, installed: true, updatedAt: Date.now(), updatedBy: 'test' })
+    }
+  })
 }

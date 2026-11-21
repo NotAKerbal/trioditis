@@ -4,12 +4,17 @@ import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+// The cached hook keeps a chat's pages subscribed for a while after its pane closes (main.tsx),
+// so going back to a chat shows its latest messages at once, already up to date, instead of
+// loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
+import { usePaginatedQuery as useCachedPaginatedQuery } from 'convex-helpers/react/cache/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
 import type { BridgeStatus } from './bridge-ready.ts'
 import { reactionGroups, reactionRequests, showReactions, type Shown } from './reaction-requests.ts'
+import { CONFIRM_MS, confirmed, sameKey, withPending, type PendingReaction, type Reaction } from './reaction-toggle.ts'
 
 export interface Message {
   id: Id<'messages'>
@@ -53,30 +58,37 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
   }
 }
 
-/** A chat's messages, oldest first for display, loading older pages on request. */
-export function useMessages(chatId: ChatId) {
+const PAGE = 50
+
+/**
+ * A chat's messages, oldest first for display, loading older pages on request. `attempt` counts
+ * the retries after a page couldn't load (RetryBoundary). The cached hook keeps a page's
+ * subscription, its error too, for minutes after it's let go, under a key made from its
+ * arguments (its pagination ID is always 0): asked again the same way, a failed page fails
+ * again, and every page it keeps is asked again at once when the connection comes back. So a
+ * retry uses Convex's own hook instead, which asks under a new pagination ID each time it mounts
+ * and lets its pages go as soon as it unmounts.
+ */
+export function useMessages(chatId: ChatId, attempt = 0) {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.messages.list, { chatId }, { initialNumItems: 50 })
+  const retrying = attempt > 0
+  const cached = useCachedPaginatedQuery(api.messages.list, retrying ? 'skip' : { chatId }, { initialNumItems: PAGE })
+  const fresh = usePaginatedQuery(api.messages.list, retrying ? { chatId } : 'skip', { initialNumItems: PAGE })
+  const { results, status, loadMore } = retrying ? fresh : cached
   const messages = useMemo(() => [...results].reverse().map((m) => toMessage(m, session)), [results, session])
   return {
     messages,
     loading: status === 'LoadingFirstPage',
     canLoadMore: status === 'CanLoadMore',
     loadingMore: status === 'LoadingMore',
-    loadMore: () => loadMore(50),
+    loadMore: () => loadMore(PAGE),
   }
 }
 
 type ReactionAnswer = Record<string, { key: string; senderKey: string }[]>
 const MAX_REACTIONS_PER_MESSAGE = 100
 
-/** One reaction on a message, with how many gave it: `more` when there may be others unseen. */
-export interface Reaction {
-  key: string
-  count: number
-  more: boolean
-  mine: boolean
-}
+export type { Reaction }
 // Outside the hook, so useQueries can keep its result while the answers don't change.
 const resultsOf = (results: { data?: ReactionAnswer | undefined; isPending: boolean; isError: boolean }[]) =>
   results.map((r) => ({ data: r.data, pending: r.isPending, failed: r.isError }))
@@ -142,6 +154,59 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
   }, [data])
 }
 
+/**
+ * The reactions to show, the person's own choices laid over the server's until its echo says
+ * the same (reaction-toggle.ts), and `toggle`, which adds the person's reaction with that key or
+ * takes it away. One the network hasn't confirmed in CONFIRM_MS goes back to what the server
+ * says, and `onUnconfirmed` is told; one the server refused goes back at once, with its error.
+ */
+export function useReactionToggle(
+  chatId: ChatId,
+  server: Map<string, Reaction[]>,
+  onUnconfirmed: () => void,
+  onError: (e: unknown) => void,
+) {
+  const react = useMutation(api.messages.react)
+  const [pending, setPending] = useState<PendingReaction[]>([])
+  const live = useMemo(() => pending.filter((p) => !confirmed(p, server)), [pending, server])
+  useEffect(() => {
+    if (live.length !== pending.length) setPending(live)
+  }, [live, pending.length])
+  const onUnconfirmedRef = useRef(onUnconfirmed)
+  onUnconfirmedRef.current = onUnconfirmed
+  const oldest = live.length ? Math.min(...live.map((p) => p.at)) : null
+  useEffect(() => {
+    if (oldest === null) return
+    const timer = setTimeout(
+      () => {
+        const now = Date.now()
+        setPending((list) => list.filter((p) => now - p.at < CONFIRM_MS))
+        onUnconfirmedRef.current()
+      },
+      Math.max(0, oldest + CONFIRM_MS - Date.now()),
+    )
+    return () => clearTimeout(timer)
+  }, [oldest])
+  const shown = useMemo(() => withPending(server, live), [server, live])
+  const toggle = useCallback(
+    (messageId: Id<'messages'>, key: string) => {
+      // A change still on its way can't be undone yet: the bridge host may not have the
+      // reaction to take away until it has added it. The choice shows as made meanwhile.
+      if (live.some((q) => q.messageId === messageId && sameKey(q.key, key))) return
+      const remove = !!shown.get(messageId)?.some((r) => r.mine && sameKey(r.key, key))
+      const p: PendingReaction = { messageId, key, remove, at: Date.now() }
+      const others = (q: PendingReaction) => q.messageId !== messageId || !sameKey(q.key, key)
+      setPending((list) => [...list.filter(others), p])
+      react({ chatId, messageId, key, ...(remove ? { remove } : {}) }).catch((e: unknown) => {
+        setPending((list) => list.filter((q) => q !== p))
+        onError(e)
+      })
+    },
+    [live, shown, react, chatId, onError],
+  )
+  return { reactions: shown, toggle }
+}
+
 /** Who is typing now. Queries don't rerun as time passes, so expiry is checked here. */
 export function useTyping(chatId: ChatId) {
   const { data } = useQuery(convexQuery(api.messages.typing, { chatId }))
@@ -163,12 +228,26 @@ export function useBridge(): { key: string | undefined; status: BridgeStatus } {
   return data?.publicKey ? { key: data.publicKey, status: 'ready' } : { key: undefined, status: 'missing' }
 }
 
+/**
+ * Where sending each of these sends again stands, by client message ID, as the server decides
+ * it (messages.retryStates): the same for every send of a chain.
+ */
+export function useRetryStates(clientMessageIds: string[]) {
+  const { data } = useQuery({
+    ...convexQuery(api.messages.retryStates, { clientMessageIds }),
+    enabled: clientMessageIds.length > 0,
+  })
+  return data
+}
+
 export function useSendMutations() {
   return {
     send: useMutation(api.messages.send),
+    sendAgain: useMutation(api.messages.sendAgain),
     discard: useMutation(api.messages.discardSend),
     schedule: useMutation(api.scheduled.create),
     cancelScheduled: useMutation(api.scheduled.cancel),
+    forgetScheduled: useMutation(api.scheduled.forget),
     sendScheduledNow: useMutation(api.scheduled.sendNow),
   }
 }

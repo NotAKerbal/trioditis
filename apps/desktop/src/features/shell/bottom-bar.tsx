@@ -11,7 +11,7 @@ import {
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { toast } from '@trioditis/ui/toast'
-import { KeyRound, LogOut, Plus, Settings, Users } from 'lucide-react'
+import { KeyRound, LogOut, Plus, Settings, ShieldCheck } from 'lucide-react'
 import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { signOut } from '~/lib/sign-out.ts'
@@ -32,7 +32,7 @@ export function BottomBar({
 }: {
   name: string
   email: string
-  openSettings: (section: SettingsSection) => void
+  openSettings: (section: SettingsSection, connect?: boolean) => void
 }) {
   const session = useSession()
   const health = useNetworkHealth()
@@ -70,12 +70,12 @@ export function BottomBar({
           <DropdownMenuItem onSelect={() => openSettings('appearance')}>
             <Settings /> Settings
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openSettings('accounts')}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
             <Plus /> Connect a network
           </DropdownMenuItem>
           {session.role === 'admin' ? (
             <DropdownMenuItem onSelect={() => openSettings('members')}>
-              <Users /> Members
+              <ShieldCheck /> Admin settings
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem onSelect={() => openSettings('keys')}>
@@ -110,7 +110,17 @@ export function BottomBar({
                 />
               ))}
             </span>
-            {trouble.length ? <span className="text-warning">{trouble.length} offline</span> : null}
+            {/* "Offline" only when it is: a network with some accounts still connected is degraded. */}
+            {trouble.length ? (
+              <span className="text-warning">
+                {trouble.length}{' '}
+                {trouble.every((h) => h.status === 'offline')
+                  ? 'offline'
+                  : trouble.length === 1
+                    ? 'needs attention'
+                    : 'need attention'}
+              </span>
+            ) : null}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" side="top">
@@ -127,7 +137,7 @@ export function BottomBar({
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openSettings('accounts')}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
             <Plus /> Connect a network
           </DropdownMenuItem>
         </DropdownMenuContent>

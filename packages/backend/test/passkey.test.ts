@@ -208,3 +208,84 @@ describe('adding a passkey', () => {
     expect(empty.status).toBe(409)
   })
 })
+
+describe('signing in with a passkey', () => {
+  it('uses up its challenge, rather than failing on clearing stale ones', async () => {
+    // Better Auth clears a challenge's stale copies with a query the Convex adapter only takes
+    // put another way (forConvex in convex/auth.ts). Without it this answers 500, and so does
+    // every passkey sign-in and registration.
+    const t = setup()
+    const started = await t.fetch('/api/auth/passkey/generate-authenticate-options', { headers: { origin: ORIGIN } })
+    expect(started.status).toBe(200)
+    const cookie = started.headers
+      .getSetCookie()
+      .map((value) => value.split(';')[0])
+      .join('; ')
+    expect(await challenges(t)).toBe(1)
+    const clientDataJSON = Buffer.from(JSON.stringify({ origin: ORIGIN })).toString('base64url')
+    const answered = await t.fetch('/api/auth/passkey/verify-authentication', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, origin: ORIGIN },
+      body: JSON.stringify({ response: { id: 'no-such-credential', response: { clientDataJSON } } }),
+    })
+    // The challenge was found and used; then there's no such passkey.
+    expect(answered.status).toBe(401)
+    expect(await challenges(t)).toBe(0)
+  })
+})
+
+describe('the adapter for Convex', () => {
+  it('deletes exactly the stale copies of a challenge, as Better Auth asks', async () => {
+    setup()
+    const { forConvex } = await import('../convex/auth')
+    const rows = [
+      { id: 'a', identifier: 'x', createdAt: new Date(1000) },
+      { id: 'b', identifier: 'x', createdAt: new Date(2000) },
+      { id: 'c', identifier: 'x', createdAt: new Date(3000) },
+      { id: 'd', identifier: 'y', createdAt: new Date(1000) },
+    ]
+    type W = { field: string; operator?: string; value: unknown }
+    const matches = (row: Record<string, unknown>, w: W) =>
+      w.operator === 'not_in' ? !(w.value as unknown[]).includes(row[w.field]) : row[w.field] === w.value
+    const calls: unknown[] = []
+    const fake = {
+      findMany: async ({ where }: { where: W[] }) => {
+        calls.push(['findMany', where])
+        return rows.filter((row) => where.every((w) => matches(row, w)))
+      },
+      delete: async ({ where }: { where: W[] }) => {
+        rows.splice(
+          rows.findIndex((row) => row.id === where[0]!.value),
+          1,
+        )
+      },
+      deleteMany: async () => {
+        throw new Error('not reached for this query')
+      },
+    }
+    const adapter = forConvex((() => fake) as never)({} as never) as unknown as {
+      deleteMany: (args: { model: string; where: W[] }) => Promise<number>
+    }
+    // `b` is in use; `a` is older, `c` newer, and `d` another challenge.
+    const deleted = await adapter.deleteMany({
+      model: 'verification',
+      where: [
+        { field: 'identifier', value: 'x' },
+        { field: 'id', operator: 'ne', value: 'b' },
+        { field: 'createdAt', operator: 'lte', value: new Date(2000) },
+      ],
+    })
+    expect(deleted).toBe(1)
+    expect(rows.map((row) => row.id)).toEqual(['b', 'c', 'd'])
+    // `ne` on the ID went to the adapter as `not_in`, which it takes.
+    expect(calls).toEqual([
+      [
+        'findMany',
+        [
+          { field: 'identifier', value: 'x' },
+          { field: 'id', operator: 'not_in', value: ['b'] },
+        ],
+      ],
+    ])
+  })
+})

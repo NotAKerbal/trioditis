@@ -20,18 +20,18 @@ Always install from the root, and always with pnpm.
 
 Run these from the repository root.
 
-| Command                                | What it does                                                                              |
-| -------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `pnpm dev`                             | A working local instance of this checkout, with its own backend, gateway and fake network |
-| `pnpm dev --network whatsapp`          | The same with a real WhatsApp bridge host (`fake,whatsapp` for both)                      |
-| `pnpm dev --setup`                     | Sets that instance up and stops; run it for every new worktree                            |
-| `pnpm fake <username> <from> "<text>"` | Delivers a message on the fake network to the running instance                            |
-| `pnpm preview`                         | Deploys your working tree as a demo instance on a public URL, with its own backend        |
-| `pnpm check`                           | Runs exactly what CI runs: typecheck, lint, tests, and the bridge host's Go vet and tests |
-| `pnpm typecheck`                       | Type-checks every TypeScript package                                                      |
-| `pnpm test`                            | Runs the TypeScript tests; no services needed                                             |
-| `pnpm lint`                            | Lints the TypeScript and JavaScript with oxlint                                           |
-| `pnpm build`                           | Builds every package that has a build                                                     |
+| Command                     | What it does                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                  | A working local instance of this checkout, with its own backend, gateway and a WhatsApp bridge host |
+| `pnpm dev --network signal` | The same with another network's bridge host (`whatsapp,signal` for both)                            |
+| `pnpm dev --demo`           | The same with no network: demo chats only, like a preview                                           |
+| `pnpm dev --setup`          | Sets that instance up and stops; run it for every new worktree                                      |
+| `pnpm preview`              | Deploys your working tree as a demo instance on a public URL, with its own backend                  |
+| `pnpm check`                | Runs exactly what CI runs: typecheck, lint, tests, and the bridge host's Go vet and tests           |
+| `pnpm typecheck`            | Type-checks every TypeScript package                                                                |
+| `pnpm test`                 | Runs the TypeScript tests; no services needed                                                       |
+| `pnpm lint`                 | Lints the TypeScript and JavaScript with oxlint                                                     |
+| `pnpm build`                | Builds every package that has a build                                                               |
 
 ## Running locally
 
@@ -47,10 +47,11 @@ This one command:
    by you), and sets the ones the backend needs on it: `SITE_URL`, `BETTER_AUTH_SECRET`,
    `GATEWAY_SECRET`, `TRIODITIS_SETUP_TOKEN`, `TRIODITIS_NETWORKS`, `BRIDGE_PUBLIC_KEY` and
    `AGENT_ACCESS_PUBLIC_KEY`.
-3. Builds the bridge host.
+3. Builds the bridge host and the sign-in browser's launcher.
 4. Starts the backend in watch mode and creates the test account, as the server's admin.
-5. Starts the gateway, a bridge host for each network (the fake network unless you pass
-   `--network`), and the web app from `apps/desktop` once that exists.
+5. Starts the gateway, the sign-in browser if it finds a Chromium, a bridge host for each
+   network (WhatsApp unless you pass `--network`), and the web app from `apps/desktop` once
+   that exists.
 
 Each process's output is prefixed with its name. When everything is up it prints the URL and
 the test account, `tester@trioditis.test` / `trioditis-dev-tester`. Ctrl+C stops everything.
@@ -64,19 +65,35 @@ in on the page's own address, as it does behind Caddy and on Vercel; `SITE_URL` 
 is that address. Without `apps/desktop`, `SITE_URL` is the backend's own HTTP address, which
 tools and scripts call directly.
 
-### The fake network
+### Networks
 
-The fake network is a network that doesn't exist: it logs in with any username and does what
-it's told. Connect it from the app (or the end-to-end script) with a username, then deliver
-messages to it:
+`TRIODITIS_NETWORKS` is the networks this instance runs a bridge host for: the ones an admin
+can install in the app (Admin settings → Networks). The test account is the admin, so install
+the network there, then connect your account to it. `pnpm dev` bridges WhatsApp, which links
+with your phone; `--network` picks others, comma-separated. A network's data stays on this
+machine, in this checkout's `.data/`. Signal's bridge host links libsignal, so the first run
+with Signal builds it (Rust, several minutes).
+
+The networks that log in on their website (Messenger, Instagram, Google Messages, Google
+Voice, Slack, LinkedIn, X) sign in through the sign-in browser
+(docs/architecture/signin-browser.md). `pnpm dev` runs it with `CHROMIUM_PATH`, or the first
+of `chromium`, `chromium-browser`, `google-chrome-stable` and `google-chrome` on your `PATH`,
+keeping each browser's profile in `/dev/shm`. Without one it says so, and those logins ask
+for their cookies to be pasted instead. Its launcher and the gateway's public listener, which
+the web app's dev server forwards `/login-browser` to, take two more of the checkout's ports.
+
+### Demo data
 
 ```sh
-pnpm fake isaac alice "hello"                 # a direct message from alice
-pnpm fake isaac alice "hi all" --chat family  # into a group chat
+pnpm dev --demo
 ```
 
-Use `pnpm dev --network whatsapp` to bridge a real WhatsApp account instead. Its data stays on
-this machine, in this checkout's `.data/`.
+This runs no gateway and no bridge host, and sets `TRIODITIS_DEMO=1` on the backend with no
+`TRIODITIS_NETWORKS`, as a preview does. The backend then makes demo data for an account that
+asks for it (`demo.seedForMe`, from the app's settings), sealed to that account's own key, and
+turns invitations off. Demo chats show on real networks' badges, though nothing is bridged.
+The next `pnpm dev` without `--demo` removes `TRIODITIS_DEMO` again; the demo chats stay until
+you start over.
 
 ### One instance per branch
 
@@ -87,13 +104,12 @@ the machine shares, `~/.local/state/trioditis/slots/<n>.lock`, which names the c
 is created only if it doesn't exist, so two worktrees setting up at once never get the same
 slot.
 
-|                                    | Slot 0 (main checkout) | Slot n (a worktree)        |
-| ---------------------------------- | ---------------------- | -------------------------- |
-| Web app                            | `5180`                 | `5180 + n`                 |
-| Backend (Convex API, HTTP actions) | `4210`, `4211`         | `4210 + 2n`, `4211 + 2n`   |
-| Gateway                            | `8700`                 | `8700 + 10n`               |
-| Bridge hosts (fake, WhatsApp)      | `8701`, `8702`         | `8701 + 10n`, `8702 + 10n` |
-| Fake network control               | `8709`                 | `8709 + 10n`               |
+|                                    | Slot 0 (main checkout) | Slot n (a worktree)      |
+| ---------------------------------- | ---------------------- | ------------------------ |
+| Web app                            | `5180`                 | `5180 + n`               |
+| Backend (Convex API, HTTP actions) | `4210`, `4211`         | `4210 + 2n`, `4211 + 2n` |
+| Gateway                            | `8700`                 | `8700 + 10n`             |
+| Bridge host (WhatsApp)             | `8702`                 | `8702 + 10n`             |
 
 A worktree claims the first free slot the first time it is set up and keeps it while it
 exists, even when it isn't running. On every start the saved slot is checked against the
@@ -161,7 +177,7 @@ so idle worktrees use no memory. Run `pnpm dev` when you want to use it.
   a process list, and the settings already there are read without being printed.
   `packages/backend/.convex` and `.data/` are readable only by you, from when they are created.
 
-The gateway, the bridge hosts and the fake network's control port listen on `127.0.0.1` only,
+The gateway and the bridge hosts listen on `127.0.0.1` only,
 and the web app does unless you set `HOST`. The local backend listens on all of the machine's
 network interfaces: the Convex CLI has no option to bind it to `127.0.0.1`. Its admin API needs
 the admin key in `.convex`, but its HTTP actions (sign-in) can be reached from your network.
@@ -186,6 +202,134 @@ everything.
 
 Previews get `preview`, nightly `nightly`, and the self-hosted bundle `selfhosted`. The web app
 builds to `apps/desktop/dist`, a static single-page app.
+
+### The desktop app
+
+The desktop app is an Electron window onto a server's own web app: the same pages a browser
+gets, with native notifications, a dock badge for unread chats and an app menu. It ships no
+copy of the web app, so it is always the version the server runs, and sign-in, cookies and
+passkeys stay first-party on the server's address. Its code is in `apps/desktop/electron`.
+
+```sh
+pnpm --filter @trioditis/desktop app                                     # asks for a server
+pnpm --filter @trioditis/desktop app --server http://localhost:<port>    # this checkout's, not saved
+```
+
+The first run downloads Electron's binary (pnpm doesn't run its install script). The app asks
+for the address you open Trioditis at, checks that it is a Trioditis server whose web app
+works in the desktop app (its `trioditis-desktop` marker; a server from before it is turned
+away as too old), and remembers it; **File → Change Server…**, or **Change** beside the
+server's name on the sign-in page, picks another. Plain `http://` is accepted only for this
+machine. Each server gets its own session, so nothing is shared between them.
+
+What the server's page can do is limited: it runs sandboxed with no Node, stays on the
+server's address (other links open in your browser), may ask only for notifications, the
+clipboard and full screen, and reaches the app only to set the badge, bring the window
+forward and open the server picker, each checked in the main process. Opening the picker
+changes nothing by itself: the person still types the address, and the picker checks it.
+
+Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
+the desktop app; a browser asks first (Settings → Notifications). They show who sent the
+message (the chat's name; a group's own name, until member names exist) and what it says,
+never the network. The system can keep them in its notification history, outside the
+sealing: a deliberate exception (AGENTS.md). Settings → Notifications → Show offers less:
+the sender only, or nothing but that a message came. Each tab reads the choice from storage
+again when a notification is due, so turning them off or down in one tab holds in every other.
+The unread badge is a count on the Mac's Dock and on Linux launchers that show one (Ubuntu's
+dock does, for an installed app), and a red dot on the app's Windows taskbar button.
+
+On Ubuntu, Chromium's sandbox refuses to start from `node_modules`, because `chrome-sandbox`
+isn't owned by root there; for local testing pass `--no-sandbox` after `app`. The `.deb`
+installer sets it up properly.
+
+On a Mac and on Linux, passkeys don't work in the desktop app: Electron reaches the Mac's own
+(iCloud Keychain) only from a signed app tied to the server's domain, which a self-hosted
+server can't be, and it can't ask a security key for the PIN that signing in, unlocking and
+adding a passkey all require. On Windows the system asks, so they work. Sign-in, unlock and
+Settings → Keys and devices say so and disable their passkey buttons; use the password or
+recovery key in the app, or the passkey in a browser.
+
+Unsent drafts are kept across a reload in the browser's storage, each sealed to the person's
+own key (kind `draft`; apps/desktop/src/data/saved-drafts.ts), so nothing readable is stored.
+Each chat's draft and sends still on their way are saved apart, one tab at a time per chat (a
+Web Lock), writing before deleting. A send's client message ID comes from its draft, so the
+same draft sent from two tabs, or again after a reload, is one message; a send under way when
+the page went comes back as a draft, never sent again on its own. A cancelled scheduled message
+isn't kept on the device: the server keeps it, shown in its chat to restore (as often as
+wanted) or discard, until it's discarded or 30 days pass. Reloading, closing the window or changing
+servers asks first only while a send is on its way, or if the browser refused to save a draft.
+If the page crashes or stops responding, the app says so and offers to reload it; it logs
+only why (Chromium's reason and exit code), never the page's address.
+
+#### Invitation links
+
+An invitation link is `https://<server>/invite?email=…#token=…`, and the system opens https
+links in the browser: a self-hosted server can't tie its address to the app. So the browser's
+invitation page offers **Open in the desktop app**, the same link as
+`trioditis://<server>/invite?email=…#token=…`, which an installed app opens. The app takes
+only that: the `/invite` path with an email address and a token, rebuilt from those parts
+(`apps/desktop/electron/links.ts`); anything else just brings the app forward. A server on
+this machine is plain http, any other https. An invitation to the server the app is connected
+to opens there; one to another server, or with none yet, asks first and names the server, since
+anyone can send a link. On Windows and Linux the link reaches the app as a launch argument, so
+it is briefly in the process list of the launch that hands it over.
+
+#### What the app keeps on disk
+
+Each server's session keeps no HTTP cache: what the server sends stays in memory, and a cache
+left by an older version is cleared. Decrypted pictures and files are only ever in memory as
+`data:` URLs (`src/data/media.ts`); one the person saves goes to their downloads. On disk, in
+the app's data folder (`~/.config/Trioditis`, `~/Library/Application Support/Trioditis`,
+`%APPDATA%\Trioditis`), are the server's address (`settings.json`) and, per server, what a
+browser keeps: the sign-in cookie, display preferences in local storage, the identity key in
+IndexedDB (encrypted with a non-extractable device key), and Chromium's compiled-code cache for
+the web app's scripts. None of it holds message text, chat names or contact names.
+
+#### Installers
+
+```sh
+pnpm --filter @trioditis/desktop package:linux   # AppImage and .deb, in apps/desktop/release
+pnpm --filter @trioditis/desktop package:mac     # .dmg and .zip; on a Mac
+pnpm --filter @trioditis/desktop package:win     # NSIS installer; on Windows
+pnpm --filter @trioditis/desktop package:dir     # this system's app, unpacked, to try quickly
+```
+
+`electron-builder.yml` packages only the main process, preload and server picker: the web
+app comes from the server. Each build is made on its own system (a Mac build needs a Mac). None
+are signed with a certificate, since the project has no Apple Developer ID or Windows
+code-signing certificate: Gatekeeper and SmartScreen warn, a Mac must be told to open the app
+the first time (**Open Anyway** in System Settings → Privacy & Security), and passkeys stay
+unavailable on a Mac (above), which needs an app signed with a Developer ID for them. The Mac
+apps are ad-hoc signed and not notarized: an ad-hoc signature proves nothing about who made the
+app, but Apple silicon calls an app with a broken signature damaged and won't open it at all. The AppImage needs
+`--no-sandbox` where unprivileged user namespaces are restricted (Ubuntu 24.04 and later); the
+`.deb` doesn't.
+
+#### Desktop releases
+
+A release is a tag on the release merge, the commit a pull request from `dev` makes on `main`
+(Branches, below). `main` is also what servers on the Stable channel update to, so desktop
+`v0.1.0` is built from the same code as the web app those servers serve once they've updated to
+that merge. The workflow refuses a tag that isn't on `main`.
+Pushing `v<version>`, such as `v0.1.0`, runs
+`.github/workflows/desktop-release.yml`: it builds every installer on its own system (Linux and
+Windows x64, the Mac for Apple silicon and Intel), with the tag's version as the app's, and
+publishes them as the tag's GitHub release, with their SHA-256 sums and notes generated from
+the pull requests since the last release.
+
+```sh
+git fetch origin && git tag v0.1.0 origin/main
+git push origin v0.1.0
+```
+
+The installers keep the same names in every release, `Trioditis-mac-arm64.dmg`,
+`Trioditis-windows-x64.exe` and so on (`electron-builder.yml`), so the Download section on
+trioditis.app (`apps/site/index.html`) links to `releases/latest/download/<name>` and always
+gets the newest. Renaming one means changing both. A tag with a suffix, such as
+`v0.2.0-beta.1`, is a prerelease: it gets a release, but the site's links stay on the last full
+one. A pull request that changes the desktop app's packaging (its `electron/`, `build/`,
+`electron-builder.yml` or `package.json`, or the lockfile) runs the same builds without
+publishing, and keeps the installers as the run's artifacts for a week.
 
 ### Starting over
 
@@ -252,17 +396,6 @@ batch; a migration that goes on in further scheduled batches finishes in the bac
 a later batch's failure shows in the backend's logs rather than stopping setup. The self-hosted installer calls it after each of
 its deploys as well: see `docs/deploy.md`.
 
-### End-to-end check
-
-With `pnpm dev` running, the end-to-end script signs in as the test account, connects the fake
-network through a sealed login, receives and sends a message, and checks that nothing readable
-reached the backend:
-
-```sh
-cd apps/gateway
-node --env-file=../../.data/dev.env scripts/e2e-fake.ts tester@trioditis.test trioditis-dev-tester
-```
-
 ## Previews
 
 ```sh
@@ -273,12 +406,13 @@ This deploys the code in your working tree, committed or not, as a demo instance
 preview backend of its own and a Vercel preview of the web app. It prints the URL and the test
 account when it finishes. `pnpm preview --dry-run` prints every step and does nothing.
 
-**A preview is demo-only.** It sets `TRIODITIS_NETWORKS=fake` and `TRIODITIS_DEMO=1` on every
-run. The backend then refuses events for any other network and refuses invitations, so the
-test account can't invite anyone. It runs no gateway or bridge host,
-and its data is made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to
-the test account's own key exactly as real data would be. No real account or real message
-ever goes to Convex's cloud.
+**A preview is demo-only.** It has no networks: every run removes `TRIODITIS_NETWORKS` and sets
+`TRIODITIS_DEMO=1`. The backend then refuses every network's events and refuses invitations,
+so the test account can't invite anyone. It runs no gateway or bridge host, and its data is
+made up by the backend (`demo.seedForMe`, with `TRIODITIS_DEMO=1`), sealed to the test
+account's own key exactly as real data would be. Its demo chats show on real networks'
+badges, though nothing is bridged. No real account or real message ever goes to Convex's
+cloud.
 
 Previews are short-lived and per branch, so each gets the known test account. It signs in with
 the password the app derives from `trioditis-dev-tester` (`authPassword` in packages/crypto),
@@ -313,8 +447,8 @@ How it works:
 2. Makes a temporary deploy key, and deletes it however the script ends.
 3. Sets the backend's variables that are missing: `BETTER_AUTH_SECRET`, `SITE_URL`, and a
    gateway secret, setup token and public keys that nothing outside the backend ever
-   holds, since no bridge host connects to a preview. `TRIODITIS_NETWORKS=fake` and
-   `TRIODITIS_DEMO=1` are set on every run, whatever the backend held before.
+   holds, since no bridge host connects to a preview. `TRIODITIS_DEMO=1` is set and
+   `TRIODITIS_NETWORKS` removed on every run, whatever the backend held before.
 4. Deploys the backend functions.
 5. Deploys the web app to a Vercel preview, with `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL` and
    `TRIODITIS_PREVIEW` as build variables, and without git details, so a preview made from
@@ -337,7 +471,7 @@ deploys it by hand.
 | -------- | ---------------------------------------------------------- |
 | Branch   | `dev`                                                      |
 | Backend  | The `nightly` deployment in the `trioditis` Convex project |
-| Networks | The fake network only; no bridge host                      |
+| Networks | None; no bridge host                                       |
 | Accounts | One: the first admin, who signs up with the setup link     |
 | Data     | Demo data for whoever signs up, sealed to their own key    |
 
@@ -350,9 +484,10 @@ prints the link in its Vercel build log, once; after that, get the token with:
 cd packages/backend && npx convex env get TRIODITIS_SETUP_TOKEN --deployment isaac-cochran:trioditis:nightly
 ```
 
-Nightly sets `TRIODITIS_DEMO=1` and `TRIODITIS_NETWORKS=fake` on every deploy: the backend
-refuses events for any other network and refuses invitations, and the admin gets demo data
-from the backend (`demo.seedForMe`), sealed to their own key. No known password is involved.
+Nightly sets `TRIODITIS_DEMO=1` and has no `TRIODITIS_NETWORKS` on every deploy: the backend
+refuses every network's events and refuses invitations, and the admin gets demo data from the
+backend (`demo.seedForMe`), sealed to their own key, on real networks' badges. No known
+password is involved.
 
 There is no production site on Vercel. Trioditis's production is a server people run
 themselves (`deploy/`). Only `dev` deploys from Git; `vercel.json` turns `main` off, and
@@ -368,8 +503,8 @@ command with `scripts/vercel-build.mjs`. For a push to `dev`, that script:
    `CONVEX_DEPLOY_KEY`, which Vercel holds for the `dev` branch and must be a production key
    for nightly's deployment.
 2. Checks the backend's variables. It sets `SITE_URL` to nightly's address the first time and
-   stops the build if it holds a different one. It sets `TRIODITIS_NETWORKS=fake` the first
-   time and stops the build if it holds anything else. It sets `TRIODITIS_DEMO=1`. It creates
+   stops the build if it holds a different one. It removes `TRIODITIS_NETWORKS` if it's set (a
+   backend on Convex's cloud has no networks), and sets `TRIODITIS_DEMO=1`. It creates
    the secrets it needs if they're missing (through stdin, never in the build log), and creates
    `TRIODITIS_SETUP_TOKEN` once, printing the setup link on that run only.
 3. Runs `convex deploy`, which pushes the backend functions and builds the web app with
@@ -445,7 +580,33 @@ running from `dev` on a server of your own. See `deploy/` for installing and upd
 - Work that depends on an unmerged branch stacks on it, and its pull request targets that
   branch until it merges.
 - A release is a pull request from `dev` to `main`.
+- Every pull request adds a release note (below).
 - Nothing is merged without passing checks and an independent review.
+
+## Release notes
+
+Every pull request adds a file to `release-notes/` saying what it changes, written by whoever
+makes the change, agent or person. Admins read them in the app before and after an update
+(Admin settings → Updates): the updater collects the notes an update adds, and the app groups
+them by label.
+
+```
+New: React to a message from the button beside Reply.
+Fixed: Signing in to Google no longer freezes when the page asks for a passkey.
+```
+
+- Name the file after the change, in lowercase letters, digits and dashes:
+  `release-notes/message-reactions.md`.
+- Each line is one change, starting with its label: `New:`, `Improved:`, `Fixed:`,
+  `Security:` or `Internal:`. One to eight lines, each at most 200 characters, with no tabs.
+- Write for the people using the server: what they can now do, or what no longer goes wrong.
+  `Internal:` is for changes they won't notice (CI, refactors, docs), so every pull request
+  still has a note.
+- Add a new file every time. The updater shows the lines an update adds, word for word, so a
+  note renamed or moved isn't shown again, and an edited line shows as new.
+
+`node scripts/release-notes.mjs check` checks the format (it's part of `pnpm check`), and CI
+fails a pull request that adds no new line. Review judges whether the note says what changed.
 
 ## Worktrees
 
@@ -471,13 +632,13 @@ pnpm install && pnpm dev --setup
 apps/
   bridge-host/    Go: bridgev2 network connectors behind Trioditis's own MatrixConnector
   gateway/        Node: bridge host ↔ Convex pipeline
-  desktop/        The desktop and web app (from the UI work)
+  desktop/        The web app, and the desktop app's Electron shell in electron/
 packages/
   backend/        Convex: schema, functions, auth, MCP server
   core/           Shared types and the bridge protocol's wire types
   crypto/         Sealing (docs/architecture/sealing.md)
   config/         Shared TypeScript config
-scripts/          pnpm dev, preview, fake and check; the Vercel build and skip steps; the preview test account
+scripts/          pnpm dev, preview and check; the Vercel build and skip steps; the preview test account
 deploy/           The self-hosted bundle
 docs/
   PLAN.md         Product and implementation plan
@@ -494,8 +655,11 @@ pnpm check
 ```
 
 It runs exactly what CI runs (`.github/workflows/checks.yml`): `pnpm typecheck`, `pnpm lint`,
-`pnpm test`, `pnpm test:scripts`, and `go vet ./...` and `go test ./...` in `apps/bridge-host`,
-then prints each as Passed or Failed. Use it when CI can't run, and report its results.
+`pnpm test`, `pnpm test:scripts`, `node scripts/release-notes.mjs check`, `go vet ./...`, `go vet -tags libsignal ./...` and `go test ./...` in `apps/bridge-host`,
+and `node scripts/signal-fork.mjs check` (the bridge host's patched copy of mautrix-signal is
+upstream plus its patch; `apps/bridge-host/third_party/README.md`), then prints each as Passed
+or Failed. Use it when CI can't run, and report its results. CI also checks that a pull
+request adds a release note, which `pnpm check` can't do without the pull request's base.
 
 `pnpm lint` also checks the design system's rules in `apps/desktop` and `packages/ui`
 (`scripts/lint/design-system.mjs`, after Flux's):
@@ -530,5 +694,3 @@ with the shared test vectors or fixtures updated.
   `CONVEX_` variable in another dotenv file). Move those files aside, or start over.
 - **"Another run holds preview-<name>."** A `pnpm preview` with that name is still running.
 - **The bridge host won't build.** It needs Go 1.27 on `PATH` or in `~/.local/go`.
-- **The fake network refuses a message (409).** The username must be the one you connected
-  the fake network with.

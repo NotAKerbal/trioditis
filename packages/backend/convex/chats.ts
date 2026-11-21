@@ -7,8 +7,10 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { ownChat, requireMember } from './lib/access'
 import { newestMessageWhere } from './lib/bounded'
 import { patchChat } from './lib/chatView'
+import { readAlready } from './lib/ingest'
+import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
-import { chatKind, chatView, envelope, network } from './validators'
+import { chatKind, chatView, envelope, network, storedLastMessage } from './validators'
 
 // The inbox, and what the person does to a chat. Names, topics and avatars are sealed; the
 // client opens `sealedMeta`. Each chat's list (`view`) is kept by lib/chatView.ts, so every
@@ -33,7 +35,7 @@ const READ_SCAN_BYTES = 4 * 1024 * 1024
 
 // Matches `LastMessage` in @trioditis/core. `sealed` and `objectId` open as a message does in
 // `messages.list`: `sealedEdit ?? sealed`, with `editEventId` or `sealedObjectId`.
-const lastMessage = v.object({
+export const lastMessage = v.object({
   messageId: v.id('messages'),
   at: v.number(),
   self: v.boolean(),
@@ -44,7 +46,7 @@ const lastMessage = v.object({
 })
 
 // Matches `ChatRow` in @trioditis/core; the check at the end of this file keeps them in step.
-const chatRow = v.object({
+export const chatRow = v.object({
   _id: v.id('chats'),
   network,
   networkAccountId: v.union(v.null(), v.id('networkAccounts')),
@@ -52,6 +54,7 @@ const chatRow = v.object({
   sealedMeta: v.union(v.null(), envelope),
   portalId: v.string(),
   unreadCount: v.number(),
+  unreadRev: v.number(),
   mentionCount: v.number(),
   markedUnread: v.boolean(),
   pinned: v.boolean(),
@@ -68,8 +71,11 @@ const chatRow = v.object({
 
 /** The chat's preview, from the pointer kept on it (lib/lastMessage.ts): no message is read. */
 function lastMessageOf(chat: Doc<'chats'>): Infer<typeof lastMessage> | null {
-  const last = chat.last
-  if (!last) return null
+  return chat.last ? clientLastMessage(chat.last) : null
+}
+
+/** A stored pointer (lib/lastMessage.ts) as the client is given it. */
+export function clientLastMessage(last: Infer<typeof storedLastMessage>): Infer<typeof lastMessage> {
   return {
     messageId: last.messageId,
     at: last.at,
@@ -81,7 +87,7 @@ function lastMessageOf(chat: Doc<'chats'>): Infer<typeof lastMessage> | null {
   }
 }
 
-async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
   const accountKey = `${chat.network}:${chat.loginId}`
   if (!accounts.has(accountKey)) {
     const account = await ctx.db
@@ -102,6 +108,7 @@ async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, I
     sealedMeta: chat.sealedMeta ?? null,
     portalId: chat.portalId,
     unreadCount: chat.unreadCount,
+    unreadRev: chat.unreadRev ?? 0,
     mentionCount: chat.mentionCount ?? 0,
     markedUnread: chat.markedUnread ?? false,
     pinned: chat.pinned,
@@ -135,14 +142,16 @@ function pageOptions(opts: Infer<typeof paginationOptsValidator>) {
 
 /**
  * One list of chats, a page at a time: the pinned chats, most recent first, then the rest,
- * most recent first. With `network`, only that network's chats. With `labelId`, the
- * chats with that label, in the order they were labelled, pinned or not.
+ * most recent first. With `order: 'recent'`, most recent first, pinned or not. With
+ * `network`, only that network's chats. With `labelId`, the chats with that label, in the
+ * order they were labelled, pinned or not.
  */
 export const list = query({
   args: {
     view: v.optional(chatView),
     network: v.optional(network),
     labelId: v.optional(v.id('labels')),
+    order: v.optional(v.literal('recent')),
     paginationOpts: paginationOptsValidator,
   },
   returns: paginationResultValidator(chatRow),
@@ -167,7 +176,13 @@ export const list = query({
       const chats = []
       for (const row of result.page) {
         const chat = await ctx.db.get(row.chatId)
-        if (chat && chat.userId === userId && chat.view === view && (!args.network || chat.network === args.network)) {
+        if (
+          chat &&
+          chat.userId === userId &&
+          chat.view === view &&
+          (!args.network || chat.network === args.network) &&
+          !retired(chat)
+        ) {
           chats.push(await rowFor(ctx, chat, accounts))
         }
       }
@@ -175,23 +190,25 @@ export const list = query({
     }
 
     // One range, newest first: `pinned: true` sorts after `false`, so descending gives every
-    // pinned chat first and then the rest, and pins past one page carry on to the next.
+    // pinned chat first and then the rest, and pins past one page carry on to the next. By
+    // recency alone, a range of an index without `pinned`.
     const network = args.network
-    const result = network
-      ? await ctx.db
-          .query('chats')
-          .withIndex('by_user_view_network_pinned_last', (q) =>
+    const recent = args.order === 'recent'
+    const chats = ctx.db.query('chats')
+    const range = network
+      ? recent
+        ? chats.withIndex('by_user_view_network_last', (q) =>
             q.eq('userId', userId).eq('view', view).eq('network', network),
           )
-          .order('desc')
-          .paginate(opts)
-      : await ctx.db
-          .query('chats')
-          .withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
-          .order('desc')
-          .paginate(opts)
+        : chats.withIndex('by_user_view_network_pinned_last', (q) =>
+            q.eq('userId', userId).eq('view', view).eq('network', network),
+          )
+      : recent
+        ? chats.withIndex('by_user_view_last', (q) => q.eq('userId', userId).eq('view', view))
+        : chats.withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
+    const result = await range.order('desc').paginate(opts)
     const page = []
-    for (const chat of result.page) page.push(await rowFor(ctx, chat, accounts))
+    for (const chat of result.page) if (!retired(chat)) page.push(await rowFor(ctx, chat, accounts))
     return { ...result, page }
   },
 })
@@ -201,7 +218,9 @@ export const get = query({
   returns: chatRow,
   handler: async (ctx, { chatId }) => {
     const member = await requireMember(ctx)
-    return await rowFor(ctx, await ownChat(ctx, member.userId, chatId), new Map())
+    const chat = await ownChat(ctx, member.userId, chatId)
+    if (retired(chat)) throw new ConvexError('That chat doesn’t exist.')
+    return await rowFor(ctx, chat, new Map())
   },
 })
 
@@ -264,18 +283,21 @@ export const markRead = mutation({
   returns: v.null(),
   handler: async (ctx, { chatId }) => {
     const chat = await ownForChange(ctx, chatId)
-    await patchChat(ctx, chat, {
-      unreadCount: 0,
-      mentionCount: 0,
-      markedUnread: false,
-      ...(chat.woke ? { woke: false, snoozedUntil: undefined } : {}),
-    })
     const latest = await newestMessageWhere(
       ctx,
       chat._id,
       (message) => !message.eventId.startsWith('pending:') && message.redactedAt === undefined,
       { maxRows: READ_SCAN, maxBytes: READ_SCAN_BYTES },
     )
+    await patchChat(ctx, chat, {
+      unreadCount: 0,
+      mentionCount: 0,
+      markedUnread: false,
+      ...(chat.woke ? { woke: false, snoozedUntil: undefined } : {}),
+      // What the person has now read, so a message that arrives late but sorts before it
+      // isn't counted as unread (lib/ingest.ts). It never moves back.
+      ...(latest && !readAlready(chat, latest.sortKey) ? { readSortKey: latest.sortKey } : {}),
+    })
     if (!latest) return null
     await queueCommand(ctx, {
       userId: chat.userId,

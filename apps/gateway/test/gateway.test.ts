@@ -26,6 +26,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend & { ingested: un
     recipientKeys: vi.fn(async () => null),
     claimCommands: vi.fn(async () => []),
     commandResult: vi.fn(async () => null),
+    redeemSigninTicket: vi.fn(async () => null),
     watchPendingCommands: () => () => {},
     close: async () => {},
     ...overrides,
@@ -239,6 +240,17 @@ describe('events', () => {
     expect(await post(await serve(backend), batch([]))).toEqual({ status: 200, body: { ackedThrough: 41 } })
   })
 
+  it('passes on a stopping heartbeat, and only a heartbeat, as stopping', async () => {
+    const backend = fakeBackend()
+    const base = await serve(backend)
+    await post(base, { ...batch([]), stopping: true })
+    expect(backend.ingest).toHaveBeenLastCalledWith(expect.objectContaining({ events: [], stopping: true }))
+    await post(base, { ...batch([event(1)]), stopping: true })
+    expect(backend.ingest).toHaveBeenLastCalledWith(expect.not.objectContaining({ stopping: true }))
+    await post(base, batch([]))
+    expect(backend.ingest).toHaveBeenLastCalledWith(expect.not.objectContaining({ stopping: true }))
+  })
+
   it('passes a gap back as 409 with the sequence to resend from', async () => {
     const backend = fakeBackend({ ingest: vi.fn(async () => ({ expectedSeq: 7 })) })
     expect(await post(await serve(backend), batch([event(9)]))).toEqual({ status: 409, body: { expectedSeq: 7 } })
@@ -400,10 +412,10 @@ describe('dispatcher', () => {
 
 describe('config and logs', () => {
   it('reads bridge host addresses and refuses anything else', () => {
-    expect(parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611, fake-1=http://bridge:8612')).toEqual(
+    expect(parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611, signal-1=http://bridge:8612')).toEqual(
       new Map([
         ['whatsapp-1', 'http://127.0.0.1:8611'],
-        ['fake-1', 'http://bridge:8612'],
+        ['signal-1', 'http://bridge:8612'],
       ]),
     )
     expect(() => parseBridgeHosts('whatsapp-1=http://127.0.0.1:8611/path')).toThrow()

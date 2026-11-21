@@ -12,7 +12,6 @@ import {
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
 import { Input, InputGroup } from '@trioditis/ui/input'
-import { Kbd } from '@trioditis/ui/kbd'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { toast } from '@trioditis/ui/toast'
@@ -29,6 +28,7 @@ import {
   Search,
   SquarePen,
   UserPlus,
+  Users,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -42,6 +42,7 @@ import {
   useScheduledTexts,
   useSidebarLayout,
   type Chat,
+  type ChatId,
   type ChatList,
   type ChatFilter,
   type LabelId,
@@ -51,7 +52,9 @@ import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
+import { searchScope } from './search-scope.ts'
 import { usePrefs } from '~/lib/prefs.ts'
+import { useSession } from '~/lib/session.tsx'
 
 /** What the sidebar asks the shell to do to a chat. The shell owns selection and auto-advance. */
 export type SidebarAction =
@@ -62,12 +65,18 @@ interface SidebarProps {
   /** The chat opened while it had unread messages: it stays under Unread until another chat opens. */
   openedUnreadId: string | undefined
   onOpen: (chat: Chat) => void
+  /** Opens a chat by ID, for one the sidebar hasn't loaded (a scheduled message's). */
+  onOpenId: (chatId: ChatId) => void
   onClose: () => void
   onAction: (action: SidebarAction) => void
-  /** Kept up to date with the on-screen order, for actions taken outside the sidebar. */
-  shownRef: { current: string[] }
+  onPeople: () => void
+  onNewChat: () => void
+  /**
+   * Kept up to date with the on-screen order, for actions taken outside the sidebar; null
+   * while the list is still loading, when there's nothing to compare against.
+   */
+  shownRef: { current: string[] | null }
   chatsRef: { current: Map<string, Chat> }
-  bottomBar: ReactNode
 }
 
 const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
@@ -82,13 +91,16 @@ export function Sidebar({
   selectedId,
   openedUnreadId,
   onOpen,
+  onOpenId,
   onClose,
   onAction,
+  onPeople,
+  onNewChat,
   shownRef,
   chatsRef,
-  bottomBar,
 }: SidebarProps) {
   const [layout] = useSidebarLayout()
+  const session = useSession()
   const prefs = usePrefs()
   const [query, setQuery] = useState('')
   const [network, setNetwork] = useState<Network | undefined>()
@@ -118,7 +130,9 @@ export function Sidebar({
 
   const filter: ChatFilter = { network, labelId }
   const focused = layout === 'focused'
-  const main = useChats(focused ? 'inbox' : simpleShow, filter)
+  // Focused pages its inbox by recency alone, so Read is newest first across pages; Unread
+  // puts the pins first among what's loaded.
+  const main = useChats(focused ? 'inbox' : simpleShow, filter, true, focused ? 'recent' : undefined)
   // Focused mode shows every view at once, folded into dividers; Simple loads only the one it shows.
   const snoozedList = useChats('snoozed', filter, focused)
   const requestsList = useChats('requests', filter, focused)
@@ -151,20 +165,23 @@ export function Sidebar({
   const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
   const unloaded = searched.filter((l) => l.canLoadMore)
   const searchedAll = searched.every((l) => l.exhausted)
-  const searchLabel = !searchedAll
-    ? 'Results in loaded chats'
-    : focused
-      ? 'Results in all chats'
-      : simpleShow === 'inbox'
-        ? 'Results in the inbox'
-        : `Results in ${SIMPLE_SHOWS.find((v) => v.view === simpleShow)!.label.toLowerCase()}`
+  const searchLabel = searchScope({
+    searchedAll,
+    view: focused ? null : SIMPLE_SHOWS.find((v) => v.view === simpleShow)!.label,
+    network: network ? networkName(network) : undefined,
+    label: labelId ? (labels?.find((l) => l.id === labelId)?.name ?? 'a label') : undefined,
+  })
   const results = searching
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
 
   const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || c.id === openedUnreadId
   const unread = (inbox ?? []).filter(isUnread)
+  if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
+  // Newest first. The server pages Focused that way already, except with a label, whose pages
+  // come in the order chats were labelled: then the loaded chats are sorted, by the same key.
   const read = (inbox ?? []).filter((c) => !isUnread(c))
+  if (focused && labelId) read.sort((a, b) => b.row.lastMessageAt - a.row.lastMessageAt)
 
   // Scheduled messages, each with its chat (when one of the loaded views has it) and its opened text.
   const scheduled = useMemo(
@@ -191,14 +208,14 @@ export function Sidebar({
         ]
       : (inbox ?? [])
   const shownIds = shown.map((c) => c.id as string)
-  shownRef.current = shownIds
+  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
+  shownRef.current = loaded ? shownIds : null
   chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
 
   // A view or filter change that hides the open chat closes it rather than opening another:
   // opening a chat marks it read, and nobody asked to read it.
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
-  const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
   useEffect(() => {
     if (!loaded || lastFilterKey.current === filterKey) return
     lastFilterKey.current = filterKey
@@ -238,9 +255,9 @@ export function Sidebar({
   const showLabel = SIMPLE_SHOWS.find((s) => s.view === simpleShow)!
 
   return (
-    <aside className="flex w-[332px] shrink-0 flex-col border-r border-border bg-rail" aria-label="Chats">
-      <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border px-2.5">
-        <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />} end={<Kbd>⌘K</Kbd>}>
+    <>
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-b border-border px-2.5">
+        <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
           <Input
             ref={searchRef}
             value={query}
@@ -249,18 +266,21 @@ export function Sidebar({
             aria-label="Search chats"
           />
         </InputGroup>
+        <Button variant="ghost" size="icon" aria-label="New chat" onClick={onNewChat}>
+          <SquarePen className="size-[17px]" />
+        </Button>
+        <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
+          <Users className="size-[17px]" />
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
               size="icon"
               aria-label="Filter chats"
-              className={cn('relative', filterActive && 'bg-primary-soft text-primary')}
+              className={cn(filterActive && 'bg-primary-soft text-primary')}
             >
               <Filter className="size-[17px]" />
-              {filterActive ? (
-                <span className="absolute top-1.5 right-1.5 size-[7px] rounded-full bg-primary ring-2 ring-rail" />
-              ) : null}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="max-h-[70vh] overflow-y-auto">
@@ -317,19 +337,11 @@ export function Sidebar({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="New message"
-          title="Starting a new chat isn’t available yet"
-          disabled
-        >
-          <SquarePen className="size-[17px]" />
-        </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-3">
-        {filterActive && !searching ? (
+        {/* Shown while searching too: the filters narrow the search, and Clear widens it. */}
+        {filterActive ? (
           <div className="mx-1 mt-1.5 mb-0.5 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
             Showing
             {!focused && simpleShow !== 'inbox' ? (
@@ -355,7 +367,12 @@ export function Sidebar({
 
         <FailedScheduled rows={failedSends} />
         {inbox === undefined ? (
-          <ListSkeleton />
+          // Opened before the server answered (app-gate.tsx): nothing is kept here to show.
+          session.offline ? (
+            <Empty>Can’t reach your server. Nothing shows until it’s back; still trying.</Empty>
+          ) : (
+            <ListSkeleton />
+          )
         ) : searching ? (
           <>
             <SectionHeader label={searchLabel} count={results.length} />
@@ -378,7 +395,7 @@ export function Sidebar({
           ) : (
             <Empty>
               {simpleShow === 'inbox' && !filterActive
-                ? 'No chats yet. Connect a network in Settings → Accounts and they’ll show up here.'
+                ? 'No chats yet. Connect a network in Settings → Accounts.'
                 : 'Nothing here.'}
             </Empty>
           )
@@ -398,7 +415,7 @@ export function Sidebar({
               <Empty>
                 {everything.length
                   ? 'You’re all caught up.'
-                  : 'No chats yet. Connect a network in Settings → Accounts and they’ll show up here.'}
+                  : 'No chats yet. Connect a network in Settings → Accounts.'}
               </Empty>
             )}
             {/* The inbox's next page can hold unread chats too, so it's offered with Read folded;
@@ -444,10 +461,21 @@ export function Sidebar({
                       </>,
                     )
                   ) : (
-                    <p key={s._id} className="px-2.5 py-2 text-sm text-muted-foreground">
+                    // Its chat isn't in a loaded view (not scrolled to yet): it still opens it.
+                    <Button
+                      variant="bare"
+                      type="button"
+                      key={s._id}
+                      onClick={() => onOpenId(s.chatId)}
+                      className={cn(
+                        'block w-full truncate rounded-md px-2.5 py-2 text-left text-sm text-muted-foreground hover:bg-rail-hover hover:text-foreground',
+                        s.chatId === selectedId && 'bg-rail-hover text-foreground',
+                      )}
+                    >
+                      <Clock className="mr-1 inline size-3 align-[-1px]" />
                       {formatWhen(s.sendAt)}
                       {prefs.previews ? ` · ${s.body}` : ' · Scheduled message'}
-                    </p>
+                    </Button>
                   ),
                 )}
               </Divider>
@@ -486,8 +514,36 @@ export function Sidebar({
           </>
         )}
       </div>
+    </>
+  )
+}
 
-      <div className="flex h-[52px] shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
+/**
+ * The sidebar's column, with the bottom bar outside the list, so its menus stay open and
+ * Settings stays in reach while RetryBoundary retries a list that couldn't load.
+ */
+export function SidebarFrame({
+  bottomBar,
+  chatOpen,
+  children,
+}: {
+  bottomBar: ReactNode
+  /** A chat is open: on a narrow screen it takes the whole width, and the list steps aside. */
+  chatOpen: boolean
+  children: ReactNode
+}) {
+  return (
+    // Hidden, not unmounted, behind an open chat on a narrow screen: the shell still reads what
+    // the list shows to move on after an archive or snooze.
+    <aside
+      className={cn(
+        'flex w-[332px] shrink-0 flex-col border-r border-border bg-rail max-md:w-full max-md:border-r-0',
+        chatOpen && 'max-md:hidden',
+      )}
+      aria-label="Chats"
+    >
+      {children}
+      <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-t border-border px-2.5">{bottomBar}</div>
     </aside>
   )
 }

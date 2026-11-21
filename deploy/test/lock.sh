@@ -4,9 +4,11 @@
 # is refused, lock or not, and so is a command it doesn't know; a command's own options
 # (logs -f) pass through, but config never writes its output (the secrets) to a file, in
 # any spelling of -o/--output. While a backup, install or other write command holds the lock, the
-# commands that change things (start, up, stop…), create-admin and backup are refused, and the
-# read-only ones (ps, config, logs) run. And restore, on a checkout with no install, still
-# says it isn't available yet.
+# commands that change things (start, up, stop…), create-admin, backup and restore are
+# refused, and the read-only ones (ps, config, logs) run. A command that may start something
+# is refused while deploy/.env has a setting the installer would refuse (LOGIN_BROWSER_MAX out
+# of range), and ps still runs. And restore, on a checkout with no install, asks for the key
+# file.
 # shellcheck disable=SC2015,SC2143 # `cond && check ok || check fail`: check ok always succeeds
 # shellcheck source=deploy/test/lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -56,17 +58,26 @@ refused_by "$locked" up -d postgres
 refused_by "$locked" stop postgres
 refused_by "$locked" create-admin someone@example.invalid
 refused_by "$locked" backup "$backups"
+refused_by "$locked" restore --yes "$backups/x"
 allowed ps
 allowed config --services
 allowed logs backend
 kill "$holder" 2>/dev/null || true
 wait 2>/dev/null || true
 
+# A setting out of its range: commands that may start something are refused, ps runs.
+cp "$root/deploy/.env" "$root/env.saved"
+echo 'LOGIN_BROWSER_MAX=lots' >>"$root/deploy/.env"
+refused_by "isn't all in the form the installer writes" up -d login-browser
+refused_by "isn't all in the form the installer writes" restart gateway
+allowed ps
+cp "$root/env.saved" "$root/deploy/.env"
+
 # Restore on a checkout with no install yet.
 mv "$root/deploy/.env" "$root/env.saved"
 run restore --yes "$backups/x"
 mv "$root/env.saved" "$root/deploy/.env"
-[ "$status" != 0 ] && grep -q "Restore isn't available in this version yet" "$root/out" &&
-  check ok "restore with no install says it isn't available yet" || { check fail "restore with no install says it isn't available yet"; cat "$root/out" >&2; }
+[ "$status" = 2 ] && grep -q -- "--keys <file>" "$root/out" &&
+  check ok "restore with no install asks for the key file" || { check fail "restore with no install asks for the key file"; cat "$root/out" >&2; }
 
 finish

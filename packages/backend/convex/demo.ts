@@ -1,18 +1,21 @@
 import { ConvexError, v } from 'convex/values'
+import type { Network } from '@trioditis/core'
 import { internal } from './_generated/api'
 import { action, internalMutation, type MutationCtx } from './_generated/server'
 import { requireSessionIfGiven, requireUserId } from './auth'
 import { chatViewOf } from './lib/chatView'
 import { sortKey } from './lib/ingest'
 import { refreshLast } from './lib/lastMessage'
+import { bridgedNetworks } from './lib/networks'
 import { sealJson } from './lib/seal'
-import { chatKind, envelope, sender } from './validators'
+import { chatKind, envelope, network, sender } from './validators'
 
-// Demo data for previews and the nightly: a fake-network account with a few contacts and
-// chats, sealed on the server to the signed-in person's identity public key. The fixtures are
-// made-up text kept here, so sealing them on the server is fine; what's stored is sealed like
-// anything a bridge host writes. Only on a deployment with TRIODITIS_DEMO=1 and the fake
-// network alone, so it can never mix with real accounts.
+// Demo data for previews and the nightly: accounts on a few networks, with contacts and chats,
+// sealed on the server to the signed-in person's identity public key. The fixtures are made-up
+// text kept here, so sealing them on the server is fine; what's stored is sealed like anything
+// a bridge host writes. The accounts look connected but no bridge host runs them. Only on a
+// deployment with TRIODITIS_DEMO=1 and no bridge host at all (no TRIODITIS_NETWORKS), so it
+// can never mix with real accounts: nothing from a real network can arrive there.
 
 const CONTACTS = [
   { ghostId: 'g_demo_alice', name: 'Alice Moreno', handle: '+1 555 0101' },
@@ -25,6 +28,7 @@ const CONTACTS = [
 
 type Fixture = {
   portalId: string
+  network: Network
   kind: 'dm' | 'group'
   name: string
   people: string[]
@@ -39,6 +43,7 @@ type Fixture = {
 const CHATS: Fixture[] = [
   {
     portalId: 'p_demo_alice',
+    network: 'whatsapp',
     kind: 'dm',
     name: 'Alice Moreno',
     people: ['g_demo_alice'],
@@ -53,6 +58,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_family',
+    network: 'whatsapp',
     kind: 'group',
     name: 'Family',
     people: ['g_demo_alice', 'g_demo_bob', 'g_demo_carol'],
@@ -67,6 +73,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_hike',
+    network: 'signal',
     kind: 'group',
     name: 'Weekend hike',
     people: ['g_demo_dan', 'g_demo_eve'],
@@ -75,6 +82,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_bob',
+    network: 'gmessages',
     kind: 'dm',
     name: 'Bob Chen',
     people: ['g_demo_bob'],
@@ -83,6 +91,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_carol',
+    network: 'telegram',
     kind: 'dm',
     name: 'Carol Singh',
     people: ['g_demo_carol'],
@@ -91,6 +100,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_dan',
+    network: 'instagram',
     kind: 'dm',
     name: 'Dan Okafor',
     people: ['g_demo_dan'],
@@ -100,6 +110,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_eve',
+    network: 'slack',
     kind: 'dm',
     name: 'Eve Laurent',
     people: ['g_demo_eve'],
@@ -109,6 +120,7 @@ const CHATS: Fixture[] = [
   },
   {
     portalId: 'p_demo_frank',
+    network: 'meta',
     kind: 'dm',
     name: 'Frank Ito',
     people: ['g_demo_frank'],
@@ -121,9 +133,19 @@ const CHATS: Fixture[] = [
 /** How many messages each demo chat gets. */
 const MESSAGES_PER_CHAT = 20
 
-/** Whether `demo.seedForMe` works here: a demo deployment with the fake network alone. */
+/** The networks the demo chats are on, each with one demo account. */
+const DEMO_NETWORKS = [...new Set(CHATS.map((chat) => chat.network))]
+
+/** Each contact on each network a chat of theirs is on, as contacts are kept per network. */
+const DEMO_CONTACTS = CONTACTS.flatMap((contact) =>
+  DEMO_NETWORKS.filter((name) =>
+    CHATS.some((chat) => chat.network === name && chat.people.includes(contact.ghostId)),
+  ).map((name) => ({ ...contact, network: name })),
+)
+
+/** Whether `demo.seedForMe` works here: a demo deployment with no bridge host. */
 export function demoEnabled() {
-  return process.env.TRIODITIS_DEMO === '1' && process.env.TRIODITIS_NETWORKS === 'fake'
+  return process.env.TRIODITIS_DEMO === '1' && bridgedNetworks().size === 0
 }
 
 function assertDemo() {
@@ -135,8 +157,8 @@ function loginIdFor(userId: string) {
 }
 
 /**
- * Starts seeding, or carries on with one that stopped partway: makes the fake account if it
- * isn't there, and says which contacts and chats are still missing. Null if nothing is.
+ * Starts seeding, or carries on with one that stopped partway: makes the demo accounts that
+ * aren't there, and says which contacts and chats are still missing. Null if nothing is.
  */
 export const begin = internalMutation({
   args: { userId: v.string(), sessionId: v.optional(v.string()) },
@@ -154,41 +176,47 @@ export const begin = internalMutation({
     if (!member) throw new ConvexError('Your account isn’t a member of this server.')
     if (!member.identityPublicKey) throw new ConvexError('Set up your key first (keys.setup), then load the demo.')
     const loginId = loginIdFor(userId)
-    const existing = await ctx.db
-      .query('networkAccounts')
-      .withIndex('by_login', (q) => q.eq('network', 'fake').eq('loginId', loginId))
-      .unique()
-    if (!existing) {
+    let accountsMissing = false
+    for (const name of DEMO_NETWORKS) {
+      const existing = await ctx.db
+        .query('networkAccounts')
+        .withIndex('by_login', (q) => q.eq('network', name).eq('loginId', loginId))
+        .unique()
+      if (existing) continue
+      accountsMissing = true
       const now = Date.now()
       await ctx.db.insert('networkAccounts', {
         userId,
-        network: 'fake',
+        network: name,
         loginId,
         state: 'CONNECTED',
         lastHealthyAt: now,
         updatedAt: now,
       })
     }
-    const contactsMissing = !(await hasContact(ctx, userId, CONTACTS.at(-1)!.ghostId))
+    const last = DEMO_CONTACTS.at(-1)!
+    const contactsMissing = !(await hasContact(ctx, userId, last.network, last.ghostId))
     const chatsMissing = []
-    for (const chat of CHATS) if (!(await hasChat(ctx, userId, chat.portalId))) chatsMissing.push(chat.portalId)
-    if (existing && !contactsMissing && chatsMissing.length === 0) return null
+    for (const chat of CHATS) {
+      if (!(await hasChat(ctx, userId, chat.network, chat.portalId))) chatsMissing.push(chat.portalId)
+    }
+    if (!accountsMissing && !contactsMissing && chatsMissing.length === 0) return null
     return { publicKey: member.identityPublicKey, contactsMissing, chatsMissing }
   },
 })
 
-async function hasContact(ctx: MutationCtx, userId: string, ghostId: string) {
+async function hasContact(ctx: MutationCtx, userId: string, name: Network, ghostId: string) {
   const row = await ctx.db
     .query('contacts')
-    .withIndex('by_ghost', (q) => q.eq('userId', userId).eq('network', 'fake').eq('ghostId', ghostId))
+    .withIndex('by_ghost', (q) => q.eq('userId', userId).eq('network', name).eq('ghostId', ghostId))
     .first()
   return row !== null
 }
 
-async function hasChat(ctx: MutationCtx, userId: string, portalId: string) {
+async function hasChat(ctx: MutationCtx, userId: string, name: Network, portalId: string) {
   const row = await ctx.db
     .query('chats')
-    .withIndex('by_portal', (q) => q.eq('userId', userId).eq('network', 'fake').eq('portalId', portalId))
+    .withIndex('by_portal', (q) => q.eq('userId', userId).eq('network', name).eq('portalId', portalId))
     .first()
   return row !== null
 }
@@ -196,7 +224,14 @@ async function hasChat(ctx: MutationCtx, userId: string, portalId: string) {
 export const writeContacts = internalMutation({
   args: {
     userId: v.string(),
-    contacts: v.array(v.object({ ghostId: v.string(), sealed: envelope })),
+    contacts: v.array(
+      v.object({
+        network,
+        ghostId: v.string(),
+        sealed: envelope,
+        identifiers: v.optional(v.array(v.object({ loginId: v.string(), sealed: envelope }))),
+      }),
+    ),
     sessionId: v.optional(v.string()),
   },
   returns: v.null(),
@@ -205,13 +240,22 @@ export const writeContacts = internalMutation({
     await requireSessionIfGiven(ctx, sessionId, userId)
     // All of them in one transaction, so a seed that stopped partway has all or none.
     for (const contact of contacts.slice(0, 50)) {
-      if (await hasContact(ctx, userId, contact.ghostId)) continue
+      if (await hasContact(ctx, userId, contact.network, contact.ghostId)) continue
       await ctx.db.insert('contacts', {
         userId,
-        network: 'fake',
+        network: contact.network,
         ghostId: contact.ghostId,
         sealedProfile: contact.sealed,
       })
+      for (const { loginId, sealed } of contact.identifiers ?? []) {
+        await ctx.db.insert('contactIdentifiers', {
+          userId,
+          network: contact.network,
+          ghostId: contact.ghostId,
+          loginId,
+          sealed,
+        })
+      }
     }
     return null
   },
@@ -221,6 +265,7 @@ async function insertChat(
   ctx: MutationCtx,
   userId: string,
   chat: {
+    network: Network
     portalId: string
     kind: 'dm' | 'group' | 'channel' | 'space'
     sealed: typeof envelope.type
@@ -234,7 +279,7 @@ async function insertChat(
 ) {
   const fields = {
     userId,
-    network: 'fake' as const,
+    network: chat.network,
     loginId: loginIdFor(userId),
     portalId: chat.portalId,
     kind: chat.kind,
@@ -252,6 +297,7 @@ async function insertChat(
 export const writeChat = internalMutation({
   args: {
     userId: v.string(),
+    network,
     portalId: v.string(),
     kind: chatKind,
     sealed: envelope,
@@ -269,7 +315,7 @@ export const writeChat = internalMutation({
     await requireSessionIfGiven(ctx, sessionId, userId)
     // A chat and its messages are one transaction: a retry after a failure finds either the
     // whole chat or none of it.
-    if (await hasChat(ctx, userId, chat.portalId)) return null
+    if (await hasChat(ctx, userId, chat.network, chat.portalId)) return null
     const bounded = messages.slice(0, 50)
     const lastMessageAt = bounded.reduce((at, message) => Math.max(at, message.networkTs), 0)
     const chatId = await insertChat(ctx, userId, { ...chat, lastMessageAt })
@@ -277,7 +323,7 @@ export const writeChat = internalMutation({
       await ctx.db.insert('messages', {
         userId,
         chatId,
-        network: 'fake',
+        network: chat.network,
         eventId: message.eventId,
         networkTs: message.networkTs,
         sortKey: sortKey(message.networkTs, message.eventId),
@@ -293,8 +339,8 @@ export const writeChat = internalMutation({
 })
 
 /**
- * Loads the demo data for the signed-in person, once: a connected fake-network account, six
- * contacts and eight chats (two groups, a pinned chat, a message request, a snoozed chat and an
+ * Loads the demo data for the signed-in person, once: a connected account on each of seven
+ * networks, six contacts and eight chats (two groups, a pinned chat, a message request, a snoozed chat and an
  * archived one) of 20 messages each. It needs `keys.setup` done first. Each contact batch and
  * each chat is written whole, so if it stops partway, calling it again finishes the rest;
  * once everything is there, calling it does nothing (`seeded: false`).
@@ -315,9 +361,26 @@ export const seedForMe = action({
       await ctx.runMutation(internal.demo.writeContacts, {
         userId,
         sessionId,
-        contacts: CONTACTS.map(({ ghostId, name, handle }) => ({
+        contacts: DEMO_CONTACTS.map(({ network, ghostId, name, handle }) => ({
+          network,
           ghostId,
           sealed: seal({ name, handle }, 'contact', ghostId),
+          // What a bridge host sends for a login's contact (contactIdentifiers): the identifiers
+          // as URIs, so the address book can match them.
+          identifiers: [
+            {
+              loginId: loginIdFor(userId),
+              sealed: seal(
+                {
+                  identifiers: [
+                    handle.startsWith('+') ? `tel:${handle.replaceAll(' ', '')}` : `${network}:${handle.slice(1)}`,
+                  ],
+                },
+                'contact',
+                `${ghostId}/identifiers/${loginIdFor(userId)}`,
+              ),
+            },
+          ],
         })),
       })
     }
@@ -341,6 +404,7 @@ export const seedForMe = action({
       await ctx.runMutation(internal.demo.writeChat, {
         userId,
         sessionId,
+        network: chat.network,
         portalId: chat.portalId,
         kind: chat.kind,
         sealed: seal({ name: chat.name }, 'chat', chat.portalId),

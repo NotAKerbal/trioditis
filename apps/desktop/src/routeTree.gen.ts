@@ -9,8 +9,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as InviteRouteImport } from './routes/invite'
+import { Route as ResetRouteImport } from './routes/reset'
 import { Route as SetupRouteImport } from './routes/setup'
 import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as AgentsConnectRouteImport } from './routes/agents.connect'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -20,6 +22,11 @@ const IndexRoute = IndexRouteImport.update({
 const InviteRoute = InviteRouteImport.update({
   id: '/invite',
   path: '/invite',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetRoute = ResetRouteImport.update({
+  id: '/reset',
+  path: '/reset',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SetupRoute = SetupRouteImport.update({
@@ -32,39 +39,52 @@ const SignInRoute = SignInRouteImport.update({
   path: '/sign-in',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentsConnectRoute = AgentsConnectRouteImport.update({
+  id: '/agents/connect',
+  path: '/agents/connect',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/invite': typeof InviteRoute
+  '/reset': typeof ResetRoute
   '/setup': typeof SetupRoute
   '/sign-in': typeof SignInRoute
+  '/agents/connect': typeof AgentsConnectRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/invite': typeof InviteRoute
+  '/reset': typeof ResetRoute
   '/setup': typeof SetupRoute
   '/sign-in': typeof SignInRoute
+  '/agents/connect': typeof AgentsConnectRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/invite': typeof InviteRoute
+  '/reset': typeof ResetRoute
   '/setup': typeof SetupRoute
   '/sign-in': typeof SignInRoute
+  '/agents/connect': typeof AgentsConnectRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/invite' | '/setup' | '/sign-in'
+  fullPaths: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/invite' | '/setup' | '/sign-in'
-  id: '__root__' | '/' | '/invite' | '/setup' | '/sign-in'
+  to: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
+  id: '__root__' | '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   InviteRoute: typeof InviteRoute
+  ResetRoute: typeof ResetRoute
   SetupRoute: typeof SetupRoute
   SignInRoute: typeof SignInRoute
+  AgentsConnectRoute: typeof AgentsConnectRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -83,6 +103,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InviteRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/reset': {
+      id: '/reset'
+      path: '/reset'
+      fullPath: '/reset'
+      preLoaderRoute: typeof ResetRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/setup': {
       id: '/setup'
       path: '/setup'
@@ -97,15 +124,22 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignInRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agents/connect': {
+      id: '/agents/connect'
+      path: '/agents/connect'
+      fullPath: '/agents/connect'
+      preLoaderRoute: typeof AgentsConnectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   InviteRoute: InviteRoute,
+  ResetRoute: ResetRoute,
   SetupRoute: SetupRoute,
   SignInRoute: SignInRoute,
+  AgentsConnectRoute: AgentsConnectRoute,
 }
-export const routeTree = rootRouteImport
-  ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>()
+export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>()

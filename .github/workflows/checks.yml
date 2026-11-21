@@ -1,9 +1,9 @@
 # The checks docs/CONTRIBUTING.md asks for, on every pull request and on pushes to dev and
-# main: TypeScript typecheck, lint and tests, and the bridge host's Go vet and tests.
+# main: TypeScript typecheck, lint and tests, release notes, and the bridge host's Go vet and
+# tests.
 #
-# Jobs run on GitHub's ubuntu-24.04 runners unless the repository variable CI_RUNS_ON says
-# otherwise, as a JSON runs-on value. '["self-hosted","trioditis"]' sends them to the
-# self-hosted runners on Isaac's VM; delete the variable to go back to GitHub's runners.
+# Jobs run only on GitHub's hosted runners. The repository is public, so a pull request from
+# a fork runs here too, and a self-hosted runner would hand that code a machine we keep.
 name: Checks
 
 on:
@@ -22,12 +22,14 @@ concurrency:
 jobs:
   typescript:
     name: TypeScript
-    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The base too, for the release note check.
+          fetch-depth: 2
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -38,10 +40,16 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm test:scripts
+      - run: node scripts/release-notes.mjs check
+      # A pull request's checkout is its merge into the base branch, whose first parent is the
+      # base, so the note must be among the changes it brings (docs/CONTRIBUTING.md).
+      - name: The pull request adds a release note
+        if: github.event_name == 'pull_request'
+        run: node scripts/release-notes.mjs added HEAD^1
 
   go:
     name: Bridge host
-    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -62,5 +70,26 @@ jobs:
           cache-dependency-path: apps/bridge-host/go.sum
       - if: steps.module.outputs.present == 'true'
         run: go vet ./...
+      # Signal's connector is only built with -tags libsignal and libsignal (Rust) to link,
+      # which is too slow to build on every run. Vetting needs no library, so this keeps the
+      # Signal code compiling; docs/networks/signal.md has the full build.
+      - if: steps.module.outputs.present == 'true'
+        name: go vet -tags libsignal ./...
+        run: go vet -tags libsignal ./...
+      # The runner's /usr/bin/chromium is a bare build that aborts at startup because AppArmor
+      # blocks its sandbox; Google Chrome's own AppArmor profile lets it sandbox.
       - if: steps.module.outputs.present == 'true'
         run: go test ./...
+        env:
+          CHROMIUM_PATH: google-chrome
+      # The bridge host builds against patched copies of mautrix-signal and mautrix
+      # (apps/bridge-host/third_party/README.md); this fails unless each copy is upstream at
+      # go.mod's version plus its patch (third_party/<name>.patch), so the patch is the whole change.
+      - if: steps.module.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - if: steps.module.outputs.present == 'true'
+        name: mautrix-signal and mautrix copies match their patches
+        working-directory: .
+        run: node scripts/signal-fork.mjs check

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-electron/
 .turbo/
 coverage/
 *.log
@@ -10,6 +11,9 @@ coverage/
 
 # An install's settings and secrets, their backups, and server backups taken in the checkout.
 deploy/.env*
+deploy/.updater-state*
+deploy/.last-backup
+deploy/.restore-settle*
 trioditis-*.tgz
 
 # Convex: local deployment state and generated environment.

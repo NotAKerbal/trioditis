@@ -17,7 +17,7 @@ import {
 import { hashPassword, verifyPassword } from 'better-auth/crypto'
 import { api, components, internal } from '../convex/_generated/api'
 import { MAX_PASSKEY_BACKUPS, MIN_MEMLIMIT, MIN_OPSLIMIT } from '../convex/keys'
-import { sealed, setup, signIn, type T } from './setup'
+import { sealed, setup, signIn, type T, installNetworks } from './setup'
 
 beforeAll(ready)
 
@@ -59,6 +59,38 @@ async function setUp(as: As, device: ReturnType<typeof firstDevice>) {
 /** A WebAuthn credential ID, as base64url. */
 const credential = (n: number) => toBase64Url(new TextEncoder().encode(`credential-${n}`))
 
+/** Registers a passkey for `userId` in Better Auth, as adding one in the browser does. */
+async function registerPasskey(t: T, userId: string, credentialId: string) {
+  await t.run(async (ctx) => {
+    await ctx.runMutation(components.betterAuth.adapter.create, {
+      input: {
+        model: 'passkey',
+        data: {
+          userId,
+          credentialID: credentialId,
+          publicKey: 'pk',
+          counter: 0,
+          deviceType: 'singleDevice',
+          backedUp: false,
+          createdAt: Date.now(),
+        },
+      },
+    })
+  })
+}
+
+/** The passkeys Better Auth has for `userId`. */
+async function registeredPasskeys(t: T, userId: string) {
+  return await t.run(async (ctx) => {
+    const { page } = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: 'passkey',
+      where: [{ field: 'userId', value: userId }],
+      paginationOpts: { cursor: null, numItems: 100 },
+    })) as { page: { credentialID: string }[] }
+    return page.map((row) => row.credentialID)
+  })
+}
+
 /** A 32-byte X25519 point of order 8: every shared secret with it is zero. */
 const LOW_ORDER = toBase64Url(
   Uint8Array.from(
@@ -83,8 +115,8 @@ describe('identity key setup', () => {
     const sam = await fresh(t)
     expect((await sam.query(api.keys.identity, {})).state).toBe('none')
     const device = firstDevice('sam', 'correct horse battery')
-    expect(await setUp(sam, device)).toEqual({ kid: device.kid })
-    expect(await setUp(sam, device)).toEqual({ kid: device.kid })
+    expect(await setUp(sam, device)).toEqual({ kid: device.kid, stored: ['password', 'recovery'] })
+    expect(await setUp(sam, device)).toEqual({ kid: device.kid, stored: [] })
 
     const { state, publicKey, kid, backups } = await sam.query(api.keys.identity, {})
     expect(state).toBe('ready')
@@ -184,6 +216,33 @@ describe('identity key setup', () => {
     await sam.mutation(api.keys.setup, { ...device.args, proof: await proofFrom(sam, identity) })
     expect((await sam.query(api.keys.identity, {})).state).toBe('ready')
   })
+
+  it('tells two devices finishing setup at once which one’s recovery key was kept', async () => {
+    const t = setup()
+    const sam = await fresh(t)
+    const identity = generateKeyPair()
+    await t.run(async (ctx) => {
+      const member = (await ctx.db.query('members').first())!
+      await ctx.db.patch(member._id, {
+        identityPublicKey: toBase64Url(identity.publicKey),
+        identityKid: keyId(identity.publicKey),
+      })
+    })
+    // Two devices holding the key, each with its own new recovery key, racing to finish.
+    const a = firstDevice('sam', 'correct horse battery', identity)
+    const b = firstDevice('sam', 'correct horse battery', identity)
+    const [proofA, proofB] = [await proofFrom(sam, identity), await proofFrom(sam, identity)]
+    const results = await Promise.all([
+      sam.mutation(api.keys.setup, { ...a.args, proof: proofA }),
+      sam.mutation(api.keys.setup, { ...b.args, proof: proofB }),
+    ])
+    const stored = results.map((r) => r.stored)
+    expect(stored).toContainEqual(['password', 'recovery'])
+    expect(stored).toContainEqual([])
+    const winner = results[0]!.stored.length ? a : b
+    const kept = (await sam.query(api.keys.identity, {})).backups.find((row) => row.kind === 'recovery')!
+    expect(kept.ct).toBe(winner.args.recovery.ct)
+  })
 })
 
 describe('replacing backups', () => {
@@ -227,6 +286,33 @@ describe('replacing backups', () => {
     ).toEqual(device.identity.privateKey)
   })
 
+  it('lets one of two racing recovery-key rotations win, and refuses the other with nothing changed', async () => {
+    const t = setup()
+    const { sam, device } = await ready_(t)
+    const rotation = async () => {
+      const recovery = generateRecoveryKey()
+      const wrap = wrapIdentityKey(device.identity.privateKey, recovery.bytes, {
+        userId: 'sam',
+        kid: device.kid,
+        kind: 'recovery',
+      })
+      return { wrap, proof: await proofFrom(sam, device.identity) }
+    }
+    // Both read revision 1 before either wrote.
+    const [a, b] = [await rotation(), await rotation()]
+    const results = await Promise.allSettled([
+      sam.mutation(api.keys.putBackup, { kind: 'recovery', ...a.wrap, proof: a.proof, expectedRevision: 1 }),
+      sam.mutation(api.keys.putBackup, { kind: 'recovery', ...b.wrap, proof: b.proof, expectedRevision: 1 }),
+    ])
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(String(refused.reason)).toMatch(/another device/)
+    const winner = results[0]!.status === 'fulfilled' ? a : b
+    const recoveries = (await sam.query(api.keys.identity, {})).backups.filter((row) => row.kind === 'recovery')
+    expect(recoveries).toHaveLength(1)
+    expect(recoveries[0]).toMatchObject({ ct: winner.wrap.ct, revision: 2 })
+  })
+
   it('never reuses a revision, even for a passkey backup removed and made again', async () => {
     const t = setup()
     const { sam, device } = await ready_(t)
@@ -247,6 +333,7 @@ describe('replacing backups', () => {
         expectedRevision,
       })
     const credentialId = credential(1)
+    await registerPasskey(t, 'sam', credentialId)
     const { revision: first } = await put(credentialId, 0)
     expect(first).toBe(2)
     await sam.mutation(api.keys.removePasskeyBackup, { credentialId, proof: await proofFrom(sam, device.identity) })
@@ -262,6 +349,7 @@ describe('replacing backups', () => {
     const t = setup()
     const { sam, device } = await ready_(t)
     const credentialId = credential(5)
+    await registerPasskey(t, 'sam', credentialId)
     // A passkey backup at revision 7, written before the counter existed.
     await t.run(async (ctx) => {
       const member = (await ctx.db.query('members').first())!
@@ -316,9 +404,86 @@ describe('replacing backups', () => {
     await expect(put(credential(0), toBase64Url(new Uint8Array(1024)))).rejects.toThrow(/PRF salt/)
     await expect(put(credential(0), 'not base64url!')).rejects.toThrow(/PRF salt/)
     await expect(put('c'.repeat(600), salt)).rejects.toThrow(/PRF salt/)
-    for (let i = 0; i < MAX_PASSKEY_BACKUPS; i++) await put(credential(i), salt)
+    for (let i = 0; i < MAX_PASSKEY_BACKUPS; i++) {
+      await registerPasskey(t, 'sam', credential(i))
+      await put(credential(i), salt)
+    }
+    await registerPasskey(t, 'sam', credential(99))
     await expect(put(credential(99), salt)).rejects.toThrow(/at most 10 passkey/)
     expect((await sam.query(api.keys.identity, {})).backups).toHaveLength(2 + MAX_PASSKEY_BACKUPS)
+  })
+
+  it('makes a passkey backup only for a passkey on this account', async () => {
+    const t = setup()
+    const { sam, device } = await ready_(t)
+    await fresh(t, 'alex')
+    const wrap = wrapIdentityKey(device.identity.privateKey, new Uint8Array(32).fill(9), {
+      userId: 'sam',
+      kid: device.kid,
+      kind: 'passkey',
+    })
+    const put = async (credentialId: string) =>
+      await sam.mutation(api.keys.putBackup, {
+        kind: 'passkey',
+        ...wrap,
+        credentialId,
+        prfSalt: toBase64Url(new Uint8Array(32).fill(1)),
+        proof: await proofFrom(sam, device.identity),
+        expectedRevision: 0,
+      })
+    // Not registered at all, or registered to someone else (another tab's account).
+    await expect(put(credential(1))).rejects.toThrow(/isn’t on your account/)
+    await registerPasskey(t, 'alex', credential(2))
+    await expect(put(credential(2))).rejects.toThrow(/isn’t on your account/)
+    await registerPasskey(t, 'sam', credential(3))
+    await put(credential(3))
+    expect((await sam.query(api.keys.identity, {})).backups.filter((b) => b.kind === 'passkey')).toHaveLength(1)
+  })
+
+  it('lists only the person’s own passkeys', async () => {
+    const t = setup()
+    const { sam } = await ready_(t)
+    await fresh(t, 'alex')
+    await registerPasskey(t, 'sam', credential(1))
+    await registerPasskey(t, 'alex', credential(2))
+    expect((await sam.query(api.keys.passkeys, {})).map((p) => p.credentialId)).toEqual([credential(1)])
+  })
+
+  it('removes a passkey and its backup together, and nobody else’s', async () => {
+    const t = setup()
+    const { sam, device } = await ready_(t)
+    await fresh(t, 'alex')
+    const credentialId = credential(1)
+    await registerPasskey(t, 'sam', credentialId)
+    await registerPasskey(t, 'alex', credential(2))
+    const wrap = wrapIdentityKey(device.identity.privateKey, new Uint8Array(32).fill(9), {
+      userId: 'sam',
+      kid: device.kid,
+      kind: 'passkey',
+    })
+    await sam.mutation(api.keys.putBackup, {
+      kind: 'passkey',
+      ...wrap,
+      credentialId,
+      prfSalt: toBase64Url(new Uint8Array(32).fill(1)),
+      proof: await proofFrom(sam, device.identity),
+      expectedRevision: 0,
+    })
+    await sam.mutation(api.keys.removePasskey, { credentialId, proof: await proofFrom(sam, device.identity) })
+    expect(await registeredPasskeys(t, 'sam')).toEqual([])
+    expect((await sam.query(api.keys.identity, {})).backups.filter((b) => b.kind === 'passkey')).toEqual([])
+    // Another person's credential, named here, isn't touched.
+    await sam.mutation(api.keys.removePasskey, {
+      credentialId: credential(2),
+      proof: await proofFrom(sam, device.identity),
+    })
+    expect(await registeredPasskeys(t, 'alex')).toEqual([credential(2)])
+    // Without a proof, nothing goes.
+    await registerPasskey(t, 'sam', credential(3))
+    await expect(
+      sam.mutation(api.keys.removePasskey, { credentialId: credential(3), proof: 'p'.repeat(43) }),
+    ).rejects.toThrow(/proof/)
+    expect(await registeredPasskeys(t, 'sam')).toEqual([credential(3)])
   })
 
   it('keeps each person’s backups and challenges to themselves', async () => {
@@ -644,15 +809,19 @@ describe('key writes bound to a session', () => {
       sessionId,
     })
     const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), device.identity))
-    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({ kid: device.kid })
+    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({
+      kid: device.kid,
+      stored: ['password', 'recovery'],
+    })
 
     const bob = await fresh(t, 'bob')
     const bobDevice = firstDevice('bob', 'bob password!!!!')
-    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid })
+    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid, stored: ['password', 'recovery'] })
   })
 
   it('refuses, writing nothing, when the shared client has switched to another account', async () => {
     const t = setup()
+    await installNetworks(t)
     const alice = await fresh(t, 'alice')
     const { sessionId: alicePage } = (await alice.query(api.members.me, {}))!
     // Bob signed in from another tab, so the page's calls now run as him.
@@ -684,6 +853,14 @@ describe('key writes bound to a session', () => {
         sessionId: alicePage,
       }),
     ).rejects.toMatchObject(sessionChanged)
+    await expect(
+      bob.mutation(api.keys.removePasskey, {
+        credentialId: credential(1),
+        proof: 'p'.repeat(43),
+        sessionId: alicePage,
+      }),
+    ).rejects.toMatchObject(sessionChanged)
+    await expect(bob.query(api.keys.passkeys, { sessionId: alicePage })).rejects.toMatchObject(sessionChanged)
     await expect(
       bob.action(api.account.changePassword, {
         currentAuthPassword: 'a'.repeat(43),
@@ -738,6 +915,7 @@ describe('key writes bound to a session', () => {
 
   it('starts a network login with the page’s session named', async () => {
     const t = setup()
+    await installNetworks(t)
     const carol = await signIn(t, 'carol')
     const { sessionId } = (await carol.query(api.members.me, {}))!
     const loginSessionId = await carol.mutation(api.logins.start, { network: 'whatsapp', sessionId })

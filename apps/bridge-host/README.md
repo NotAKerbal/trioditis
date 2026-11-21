@@ -13,17 +13,19 @@ and [`docs/architecture/sealing.md`](../../docs/architecture/sealing.md). Backgr
 
 ```
 cmd/bridge-host/       the binary: run, login (terminal), inspect (dev)
+cmd/login-browser/     the sign-in browser's launcher: one Chromium per connection
 internal/connector/    the MatrixConnector and MatrixAPI intents; commands; logins
 internal/seal/         sealing, byte-compatible with packages/crypto
 internal/store/        journal, command dedup, send state, opaque IDs, key cache, membership
 internal/gateway/      journal pusher with heartbeats; key fetching
-internal/server/       POST /v1/commands
+internal/server/       POST /v1/commands; GET /v1/logins/{id}/browser (sign-in viewer)
+internal/signin/       the sign-in browser: CDP driver, field collection, egress proxy
 internal/media/        encrypted media store
 internal/keys/         recipient keys, cached in memory and in the database
 internal/ids/          Matrix-shaped IDs on a fake server; opaque protocol IDs
 internal/devkeys/      dev identity keys, for trying it without the gateway
 internal/host/         assembles a process; the conformance suite
-pkg/fakenet/           a fake network connector for tests and the dev stack
+internal/testconnector/ the connector the host's tests drive; not a network, never built in
 ```
 
 ## Run it
@@ -38,16 +40,13 @@ go build -o bin/bridge-host ./cmd/bridge-host
 GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVATE_KEY=… \
   ./bin/bridge-host --network whatsapp run
 
-# The fake network, for the dev stack without a real account:
-./bin/bridge-host --network fake run
-
 # Without a gateway at all, sealing to dev keys kept in the data directory:
-./bin/bridge-host --network fake --dev-keys run
+./bin/bridge-host --network whatsapp --dev-keys run
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BRIDGE_NETWORK` | `whatsapp` | Network (`--network`): `whatsapp` or `fake` |
+| `BRIDGE_NETWORK` | `whatsapp` | Network (`--network`, listed by `--help`), such as `whatsapp`, `signal` or `telegram` |
 | `BRIDGE_HOST_ID` | `<network>-1` | Stable host ID; the gateway maps it to this host's URL |
 | `BRIDGE_HOST_ADDR` | `127.0.0.1:8611` | Command server address |
 | `BRIDGE_DATA_DIR` | `.data/bridge-host` | Database, media and dev files |
@@ -55,7 +54,6 @@ GATEWAY_URL=… TRIODITIS_INTERNAL_TOKEN=… BRIDGE_PUBLIC_KEY=… BRIDGE_PRIVAT
 | `GATEWAY_URL` | none | Required, unless `--dev-keys` is given (then nothing is pushed) |
 | `TRIODITIS_INTERNAL_TOKEN` | none | Bearer token both ways |
 | `BRIDGE_PUBLIC_KEY` / `BRIDGE_PRIVATE_KEY` | generated in dev | Bridge key pair, base64url X25519. In dev it is generated once into `bridge-key.json` and kept. Opaque IDs don't depend on it (see Design), so it can be rotated |
-| `BRIDGE_FAKE_CONTROL_ADDR` | none | `--network fake` only: a loopback endpoint (`POST /fake/incoming`, internal token) for the end-to-end script to deliver messages. Dev only |
 
 ### Try WhatsApp from the terminal
 
@@ -196,7 +194,7 @@ pnpm --filter @trioditis/crypto test  # TypeScript opens vectors-go.json
 ```
 
 The conformance suite (`internal/host/conformance_test.go`) runs a real bridge host with
-`fakenet` against a fake gateway and checks:
+`internal/testconnector` against a fake gateway and checks:
 
 - every event against the backend's field validators
 - registration heartbeat
@@ -239,14 +237,16 @@ releases its chat; `internal/gateway` that an event too large to send goes as a 
 `internal/wabuffer`, on a seeded whatsmeow store, that the sweep deletes only rows past 14
 days, keeps sweeping, and stops while its parent context is live; `cmd/bridge-host` that
 SIGINT or SIGTERM at a login prompt, with stdin left open, stops the host and exits 1.
+`internal/signin` tests the egress proxy's address checks and the field collection, and,
+with a Chromium on `PATH` (or `CHROMIUM_PATH`), signs in on a local page through the real
+launcher, proxy and viewer protocol; it skips that test without one.
 `vectors-go.json` is only rewritten with `TRIODITIS_WRITE_VECTORS=1`.
 
 ## Spike findings
 
 ### Verified
 
-- bridgev2 runs with this connector and no homeserver: the fake-network conformance suite
-  passes (also under the race detector).
+- bridgev2 runs with this connector and no homeserver: the conformance suite passes (also under the race detector).
 - The WhatsApp connector (`mautrix-whatsapp v0.2611.0`, `mautrix v0.33.0`) builds, starts,
   creates its schemas, and reaches the QR login step against WhatsApp's servers under this
   connector. **Not verified:** completing a pairing, live messages, history sync, media and
@@ -282,7 +282,17 @@ suite. WhatsApp additionally uses:
   and slow fetches (asking the phone) are allowed so it can be followed. It is refused
   (`unsupported`) for WhatsApp: its connector treats an empty result for the requested range
   as the end of history and deletes every cached history row for the chat, including newer
-  ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead.
+  ones not imported yet. WhatsApp history arrives through bridgev2's own backfill instead:
+  pairing asks the phone for a full sync (about a year rather than three months), and once a
+  chat's synced history is imported the backfill queue asks the phone for older messages on
+  demand (50 at a time, one request per chat in flight). Both are mautrix-whatsapp settings
+  the host turns on. The full sync is asked for when a login is paired. The on-demand part
+  is checked at each fetch, but only for a chat whose backfill hasn't finished and whose
+  synced metadata says the phone has more, so a login paired before these were on mostly
+  needs relinking (scanning a new QR) to benefit. Relinking keeps the chats already
+  bridged, and history is only imported before a chat's oldest bridged message or after its
+  newest, so messages the new sync has between those are skipped (the connector's range
+  queries; changing that means patching it).
 - **`notAfter` is best effort for WhatsApp sends in Phase 0.** A send handed to bridgev2 can
   still reach the network after `notAfter`, by any amount (bridge-protocol.md, Delivery
   rules): behind more than two incoming events that each hit bridgev2's 5-minute handler
@@ -324,7 +334,13 @@ suite). But the connectors' own storage, in the same database, does:
 - **WhatsApp's `whatsapp_history_sync_message`** stores raw history-sync message protobufs
   (`data bytea`, plaintext content) until they are backfilled. The connector already deletes
   each batch once imported (its `CompleteCallback`), so rows only remain for history not yet
-  imported. Deleting them earlier would lose that history, so the host doesn't.
+  imported, and the connector prunes a chat's remaining rows when a fetch for it comes back
+  empty, which can drop rows that were never imported (see the `backfill` command above).
+  Deleting them earlier would lose that history, so the host doesn't. Pairing
+  asks for a full sync, so right after pairing up to a year of history waits here while the
+  backfill queue works through it, and longer if an import stalls. The queued sync
+  notifications (`whatsapp_history_sync_notification`) are stored whole until processed,
+  and the first one can carry history inline.
 - whatsmeow's store holds the session keys (expected; it is what makes the bridge work)
   and its contacts table, which has push names and phone numbers.
 - **whatsmeow's `whatsmeow_event_buffer`** holds each incoming message's decrypted protobuf
@@ -334,11 +350,19 @@ suite). But the connectors' own storage, in the same database, does:
   message whose handling failed, or was cut off by a crash, be bridged when WhatsApp
   redelivers it (it isn't acknowledged until it is handled). Turning it off would lose that
   message. The row is written in the decrypting transaction, and its plaintext is cleared
-  when the handler returns success: normally once the message is journaled sealed (usually
-  moments), but bridgev2 also reports success when its 5-minute handler limit passes, while
-  handling carries on (see below). Plaintext stays in a row only when handling failed
-  or the process stopped in between (the message wasn't acknowledged, so WhatsApp redelivers
-  it, and the redelivery is bridged and cleared), or when clearing it failed with a database
+  (and the message acknowledged) when the handler returns success: once the message is
+  journaled sealed (usually moments). bridgev2 also reports success when its 5-minute handler
+  limit passes, while handling carries on in the background, so the host wraps
+  mautrix-whatsapp's handler (`wabuffer.Acker`, installed by `networks/whatsapp.go` on each
+  login's client): a handler that took that long says what bridgev2's handling really ended
+  with, which the patched bridgev2 reports when the handler returns
+  (`third_party/mautrix.patch`, `internal/handled`), and failure if that doesn't come within 20
+  minutes or the host is stopping. A message whose handling failed part way, or that a stop cut
+  off (`trioditis_inflight`, undone when the host starts, before any login connects), has its
+  saved parts forgotten so the redelivery is bridged whole. Plaintext stays in a row only when handling failed, the
+  process stopped in between, or a backgrounded message wasn't journaled in time (the message
+  wasn't acknowledged, so WhatsApp redelivers it, and the redelivery is bridged, or applied
+  once if it reached the journal meanwhile, and cleared), or when clearing it failed with a database
   error (whatsmeow logs it and still acknowledges the message, so nothing clears it). Either
   way the row is deleted by the first sweep that succeeds once it is about 14 days old
   (WhatsApp's redelivery window): whatsmeow sweeps only after an incoming message, at most
@@ -346,11 +370,11 @@ suite). But the connectors' own storage, in the same database, does:
   (`internal/wabuffer`), and stops it before the host on shutdown. A sweep that fails (the
   database unavailable, say) leaves the row for the next one. A row
   can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a row
-  without plaintext makes whatsmeow drop the redelivery as already handled. One case loses a
-  message instead: after its 5-minute handler limit bridgev2 reports success while handling
-  carries on in the background, so whatsmeow clears the plaintext and acknowledges; if the
-  process stops before the sealed event is journaled, WhatsApp doesn't redeliver it. Outgoing
-  messages kept for retry receipts stay in memory (`use_whatsapp_retry_store` is off).
+  without plaintext makes whatsmeow drop the redelivery as already handled. whatsmeow has no
+  way to wrap another package's handler, so the wrapper reaches into its unexported handler
+  list; a whatsmeow update that moves it fails `TestWrapHandlersWrapsWhatsmeowsList`, and the
+  login refuses to load rather than run unwrapped. Outgoing messages kept for retry receipts
+  stay in memory (`use_whatsapp_retry_store` is off).
 - A connector's media conversion can write a replacement file (for example a converted
   voice note) wherever the connector chooses; the host reads and removes it, but doesn't
   choose where it was written.
@@ -361,7 +385,8 @@ plaintext). Options for Phase 1:
 
 - an encrypted volume for the bridge host database (the Phase 0 decision)
 - pruning or minimizing those columns where bridgev2 allows
-- configuring WhatsApp's history sync to keep the window short
+- configuring WhatsApp's history sync to keep the window short (it asks for a full sync
+  now, so people get their history)
 
 ### Known follow-ups
 
@@ -373,8 +398,6 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   retention window (they are sealed, but they grow).
 - **Legacy journal gaps.** A v1 database migrated to v2 keeps any sequence gaps the old
   identity column left. Detect and repair them on upgrade, or document an operator reset.
-- **Avatar rehydration.** A device that first sees a chat after its avatar upload expired
-  has no avatar until it changes. Keep a durable sealed avatar reference to resend.
 - **Media buffering.** Large media is buffered fully in memory; stream it.
 - **Plaintext at rest** in connector storage (above): decide between an encrypted volume
   only, sealing those columns with a server key, or patching connectors.
@@ -419,8 +442,9 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   Matrix message" with the error). The host can't change them; keep its log level at warn
   or above in production and treat its logs as sensitive.
 - Large media is buffered fully in memory.
-- Avatars older than the 10-minute upload window can't be attached to later `chat` and
-  `contact` events; those carry `avatarUnchanged: true` instead, and clients keep the avatar
-  they have. A client with no copy (a new device) shows none until the avatar changes.
+- An avatar first attached before kept avatar references existed (schema version 5) can't
+  be attached to later `chat` and `contact` events once its upload is gone; those carry
+  `avatarUnchanged: true`, and a client with no copy shows none until the avatar changes.
+  Later avatars are attached again from their reference (sealing.md, Message plaintext).
 - The connector is pinned to `mautrix v0.33.0`. Every bump needs this suite plus the live
   checklist, since mautrix isn't tested against a non-homeserver Matrix side.

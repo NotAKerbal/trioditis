@@ -1,11 +1,12 @@
-import { ConvexError, type Infer } from 'convex/values'
+import { ConvexError, v, type Infer } from 'convex/values'
 import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx, QueryCtx } from '../_generated/server'
-import type { envelope } from '../validators'
+import { deliveryState, type envelope } from '../validators'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './envelope'
 import { sortKey } from './ingest'
 import { noteMessage } from './lastMessage'
 import { queueCommand } from './outbox'
+import { RETRY_PREFIX } from './retry'
 
 // Sending a message: the checks every send goes through, and turning it into the person's
 // pending copy plus an outbox command. A direct send and a scheduled one, when its time comes,
@@ -23,18 +24,59 @@ export interface SendInput {
   replyTo?: string
 }
 
-/** Whether `clientMessageId` has been used by this person, as a send or a scheduled send. */
-export async function clientMessageIdUsed(ctx: QueryCtx, userId: string, clientMessageId: string) {
+/**
+ * What a `clientMessageId` was already used for, as `messages.send` and `scheduled.create`
+ * return it when it was: a send, with its delivery state (the copy's, or the outbox's once
+ * that copy was discarded; null only for a send from before the outbox kept it), or a
+ * scheduled send that hasn't gone out, with where it stands.
+ */
+export const alreadyUsed = v.union(
+  v.object({ already: v.literal('send'), delivery: v.union(v.null(), deliveryState) }),
+  v.object({
+    already: v.literal('scheduled'),
+    state: v.union(v.literal('scheduled'), v.literal('cancelled'), v.literal('failed')),
+  }),
+)
+export type AlreadyUsed = Infer<typeof alreadyUsed>
+
+/**
+ * What `clientMessageId` has been used for by this person, or null if nothing yet. A
+ * scheduled send that has gone out was a send too, and says so.
+ */
+export async function clientMessageIdUsed(
+  ctx: QueryCtx,
+  userId: string,
+  clientMessageId: string,
+): Promise<AlreadyUsed | null> {
   const sent = await ctx.db
     .query('outbox')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  if (sent) return true
+  if (sent) {
+    const copy = await ctx.db
+      .query('messages')
+      .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
+      .first()
+    // A discarded copy's state is still the outbox's: it's kept in step with the copy.
+    return { already: 'send', delivery: copy?.delivery ?? sent.delivery ?? null }
+  }
   const scheduled = await ctx.db
     .query('scheduledSends')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  return scheduled !== null
+  if (!scheduled) return null
+  // `sent` has its outbox row, found above; one in between still counts as pending.
+  const state = scheduled.state === 'cancelled' || scheduled.state === 'failed' ? scheduled.state : 'scheduled'
+  return { already: 'scheduled', state }
+}
+
+/**
+ * Refuses a client message ID in the namespace of attempts made by `messages.sendAgain`
+ * (lib/retry.ts): only that makes them, so a chain's next ID can't be taken by an ordinary send
+ * or schedule first.
+ */
+export function refuseRetryId(clientMessageId: string) {
+  if (clientMessageId.startsWith(RETRY_PREFIX)) throw new ConvexError('That message ID isn’t valid.')
 }
 
 /** Refuses a send that can't go out as given. */
@@ -62,7 +104,13 @@ export async function checkSend(ctx: QueryCtx, chat: Doc<'chats'>, input: SendIn
  * Queues a send that has passed `checkSend`: the person's pending copy and the outbox command.
  * Its 24-hour deadline starts now.
  */
-export async function queueSend(ctx: MutationCtx, chat: Doc<'chats'>, input: SendInput) {
+export async function queueSend(
+  ctx: MutationCtx,
+  chat: Doc<'chats'>,
+  input: SendInput,
+  /** For an attempt made with `messages.sendAgain` (lib/retry.ts). */
+  retry?: { root: string; of: string; index: number },
+) {
   const now = Date.now()
   const pendingId = `pending:${input.clientMessageId}`
   const copy = {
@@ -100,6 +148,7 @@ export async function queueSend(ctx: MutationCtx, chat: Doc<'chats'>, input: Sen
       clientMessageId: input.clientMessageId,
       createdAt: now,
       expiresAt: now + SEND_EXPIRY_MS,
+      ...(retry ? { retryRoot: retry.root, retryOf: retry.of, retryIndex: retry.index } : {}),
     },
     input.forBridge,
   )

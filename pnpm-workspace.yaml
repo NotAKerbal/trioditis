@@ -5,3 +5,5 @@ packages:
 # Packages allowed to run install scripts. Anything else is refused.
 allowBuilds:
   esbuild: true
+  # electron-builder's Squirrel.Windows installer, which isn't used (Windows builds use NSIS).
+  electron-winstaller: false

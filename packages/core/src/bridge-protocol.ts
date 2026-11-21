@@ -21,6 +21,8 @@ export const ERROR_CODES = [
   'bad_credentials',
   'login_failed',
   'internal',
+  'not_found',
+  'invalid_identifier',
 ] as const
 export type ErrorCode = (typeof ERROR_CODES)[number]
 
@@ -120,6 +122,25 @@ export interface ContactEvent extends EventBase {
   sealed: Envelope
 }
 
+/**
+ * What the event's login knows a contact by: kind `contact`, object ID
+ * `<ghostId>/identifiers/<loginId>`, plaintext `ContactIdentifiersPlaintext`. Sent to that
+ * login's owner only.
+ */
+/** A `startChat` command's outcome: the chat (created if it's new), or why there is none. */
+export interface ChatStartedEvent extends EventBase {
+  type: 'chatStarted'
+  requestId: string
+  portalId?: string
+  error?: ErrorCode
+}
+
+export interface ContactIdentifiersEvent extends EventBase {
+  type: 'contactIdentifiers'
+  ghostId: string
+  sealed: Envelope
+}
+
 export const LOGIN_STATES = [
   'CONNECTING',
   'CONNECTED',
@@ -134,17 +155,39 @@ export interface LoginStateEvent extends EventBase {
   type: 'loginState'
   state: LoginState
   error?: ErrorCode
+  /** `AccountPlaintext`, sealed to the owner: kind `account`, object ID `loginId`. */
+  sealed?: Envelope
 }
 
 export interface LoginStep {
   stepId: string
   type: 'displayAndWait' | 'userInput' | 'cookies' | 'complete' | 'cancelled' | 'error'
   instructions?: string
-  display?: { type: 'qr' | 'code' | 'emoji' | 'nothing'; data?: string }
+  display?: {
+    type: 'qr' | 'code' | 'emoji' | 'nothing'
+    data?: string
+    /**
+     * When to stop showing the code (ms). The bridge host moves it on while the code is good,
+     * so a code from a host that has gone down stops being shown.
+     */
+    expiresAt?: number
+  }
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt?: number
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
-  cookies?: { url: string; userAgent?: string; fields: { id: string; required: boolean }[] }
+  cookies?: {
+    url: string
+    userAgent?: string
+    fields: { id: string; required: boolean }[]
+    /** The bridge host can run this step in the sign-in browser (signin-browser.md). */
+    browser?: boolean
+    /** The page needs nobody to look at it: with `browser`, the bridge host runs it by itself. */
+    hidden?: boolean
+  }
   loginId?: string
   error?: ErrorCode
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel?: boolean
 }
 
 export interface LoginStepEvent extends EventBase {
@@ -180,6 +223,8 @@ export type BridgeEvent =
   | TypingEvent
   | ChatEvent
   | ContactEvent
+  | ContactIdentifiersEvent
+  | ChatStartedEvent
   | LoginStateEvent
   | LoginStepEvent
   | SendStatusEvent
@@ -192,6 +237,8 @@ export interface EventBatch {
   commandAddr?: string
   /** Empty for a heartbeat. */
   events: BridgeEvent[]
+  /** The last heartbeat of a host that is shutting down: it is offline from now. */
+  stopping?: boolean
 }
 
 export type EventBatchResponse = { ackedThrough: number }
@@ -246,6 +293,8 @@ export type BridgeCommand = CommandBase &
     | { type: 'loginCancel'; loginSessionId: string; loginId?: never; notAfter: number }
     | { type: 'logout' }
     | { type: 'backfill'; portalId: string; beforeEventId?: string; limit: number }
+    | { type: 'syncContacts' }
+    | { type: 'startChat'; requestId: string; ghostId?: string; sealed?: Envelope }
   )
 
 export interface RecipientKeys {

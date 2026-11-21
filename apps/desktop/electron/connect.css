@@ -1,0 +1,136 @@
+/* The connect page is the app's own, shown before any server's styles exist. Its colours are
+   the design tokens' (packages/ui/src/styles/tokens.css), copied: keep them in step. */
+:root {
+  --bg: #ffffff;
+  --fg: #0f172a;
+  --fg-muted: #475569;
+  --border-strong: #d9dde4;
+  --surface-2: #f8f9fb;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-fg: #ffffff;
+  --accent-ring: #0ea5e9;
+  --danger: #dc2626;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --fg: #e9ebf0;
+    --fg-muted: #a3aab6;
+    --border-strong: #333944;
+    --surface-2: #1b1f27;
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --accent-fg: #04131c;
+    --accent-ring: #38bdf8;
+    --danger: #f87171;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    14px/1.45 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+main {
+  padding: 36px 32px 28px;
+}
+
+.mark {
+  display: block;
+  width: 44px;
+  height: 44px;
+}
+
+h1 {
+  margin: 18px 0 4px;
+  font-size: 20px;
+  letter-spacing: -0.015em;
+}
+
+.lead {
+  margin: 0 0 22px;
+  color: var(--fg-muted);
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--fg);
+  font: inherit;
+}
+
+input:focus {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.error {
+  margin: 10px 0 0;
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+button {
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent-hover);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+button.secondary:hover {
+  background: var(--surface-2);
+}
+
+[hidden] {
+  display: none;
+}
