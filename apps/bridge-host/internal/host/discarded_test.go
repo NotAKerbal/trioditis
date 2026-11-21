@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
@@ -17,7 +18,11 @@ func TestACancelledLoginsAccountIsLoggedOutAfterARestart(t *testing.T) {
 	h := startHost(t, dir, gw)
 	loginID := h.login("alice", "alice-cancelled")
 	ctx := context.Background()
-	// What a cancelled session that completed late, while a retry was going, leaves kept.
+	// What a cancelled session that completed late, while a retry was going, leaves kept: the
+	// account is that session's activation, and its logout is waiting.
+	if err := h.host.Store.PutActivation(ctx, "alice-cancelled", store.Activation{SessionID: "session-gone", UserID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := h.host.Store.PutDiscarded(ctx, store.DiscardedLogin{SessionID: "session-gone", UserID: "alice", LoginID: "alice-cancelled"}); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +33,15 @@ func TestACancelledLoginsAccountIsLoggedOutAfterARestart(t *testing.T) {
 	gw.waitFor(t, "the account logged out", func(e *protocol.Event) bool {
 		return e.Type == protocol.EventLoginState && e.LoginID == loginID && e.State == "LOGGED_OUT"
 	})
-	if kept, err := h2.host.Store.Discarded(ctx); err != nil || len(kept) != 0 {
-		t.Fatalf("decided, but still kept: %v %v", kept, err)
+	// The record goes once the logout has returned, just after it reports the state.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		kept, err := h2.host.Store.Discarded(ctx)
+		if err == nil && len(kept) == 0 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("decided, but still kept: %v %v", kept, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

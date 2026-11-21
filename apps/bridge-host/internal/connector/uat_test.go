@@ -246,9 +246,13 @@ func TestLoginCancelAndCompleteRaceEndsOnce(t *testing.T) {
 func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 	var loggedOut []*bridgev2.UserLogin
 	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) { loggedOut = append(loggedOut, login) }
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin, done func()) {
+		loggedOut = append(loggedOut, login)
+		done()
+	}
+	useTestAccounts(t)
 	t.Cleanup(func() { logoutDiscarded = old })
-	account := &bridgev2.UserLogin{}
+	account := testAccount("15551234567", "alice")
 	completes := func() *bridgev2.LoginStep {
 		return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
 			CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
@@ -303,7 +307,7 @@ func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 	first, retry = startedSession(c, "first"), startedSession(c, "retry")
 	cancel(c, "first")
 	first.advance(completes(), nil)
-	other := &bridgev2.UserLogin{}
+	other := testAccount("15550009999", "alice")
 	retry.advance(&bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
 		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15550009999", UserLogin: other}}, nil)
 	if len(loggedOut) != 1 || loggedOut[0] != account {
@@ -328,9 +332,13 @@ func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 func TestADisconnectedAccountsCancelledRepairIsLoggedOut(t *testing.T) {
 	var loggedOut []*bridgev2.UserLogin
 	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) { loggedOut = append(loggedOut, login) }
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin, done func()) {
+		loggedOut = append(loggedOut, login)
+		done()
+	}
+	useTestAccounts(t)
 	t.Cleanup(func() { logoutDiscarded = old })
-	account := &bridgev2.UserLogin{}
+	account := testAccount("15551234567", "alice")
 	completes := &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
 		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
 	c := testConnector(t)
