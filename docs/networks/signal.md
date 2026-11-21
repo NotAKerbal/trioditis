@@ -253,9 +253,17 @@ plaintext indefinitely. The bridge host deletes every row older than 35 days, pl
 all (`internal/signalsweep`, `MaxAge`): Signal's server keeps an undelivered message 30 days
 (Signal-Server's message table expiry), so no redelivery can need it later; 5 days' margin
 covers the expiry running late. It sweeps at start-up and hourly, stops before the host on
-shutdown, and a failed sweep leaves the rows for the next. bridgev2's 5-minute handler limit
-has the same effect as for WhatsApp (sealing.md): past it the message is acknowledged and
-its plaintext cleared while handling carries on, and a crash then loses it.
+shutdown, and a failed sweep leaves the rows for the next. bridgev2 reports success when its
+5-minute handler limit passes, while handling carries on in the background, and signalmeow
+answers Signal's server for the envelope (acknowledging it, and clearing its plaintext) on that
+success. So the bridge host wraps signalmeow's handler (its exported `EventHandler`, replaced
+in `internal/networks/signal.go` when each login loads; no patch needed), as for WhatsApp
+(sealing.md): a chat event (a message, edit, reaction or deletion) whose handling took that
+long is acknowledged only once its own write is journaled with none failed or running, and
+not at all if that doesn't happen within 20 minutes or the host is stopping, so Signal
+delivers it again. Other signalmeow events (receipts, calls, decryption errors, sync
+messages) aren't held back; a call notice or decryption-error notice backgrounded past the
+limit can still be lost to a crash.
 
 **History transfer.** The phone's archive is downloaded to a temporary file (encrypted;
 removed once read), and read in one transaction into the `signalmeow_backup_*` tables. The

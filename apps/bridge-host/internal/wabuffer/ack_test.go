@@ -25,8 +25,8 @@ func init() {
 	})
 }
 
-func testAcker(ctx context.Context) *Acker {
-	return &Acker{Limit: 50 * time.Millisecond, Settle: 30 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: ctx, Log: zerolog.Nop()}
+func testAcker(ctx context.Context) *handled.Acker {
+	return &handled.Acker{Limit: 50 * time.Millisecond, Settle: 30 * time.Millisecond, MaxWait: 300 * time.Millisecond, Ctx: ctx, Log: zerolog.Nop()}
 }
 
 // write reports one write for msg, as the connector does: own says it is the message's own.
@@ -47,13 +47,13 @@ func backgrounded(msg *events.Message, after func()) func(any) bool {
 func TestAckerPassesQuickAnswersThrough(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
-	if !a.Wrap(func(any) bool { return true })(msg) {
+	if !WrapAck(a)(func(any) bool { return true })(msg) {
 		t.Fatal("a handler that finished in time succeeded")
 	}
-	if a.Wrap(func(any) bool { return false })(msg) {
+	if WrapAck(a)(func(any) bool { return false })(msg) {
 		t.Fatal("a handler that failed must stay failed")
 	}
-	if !a.Wrap(func(any) bool { time.Sleep(80 * time.Millisecond); return true })(&events.Receipt{}) {
+	if !WrapAck(a)(func(any) bool { time.Sleep(80 * time.Millisecond); return true })(&events.Receipt{}) {
 		t.Fatal("only messages are held back")
 	}
 }
@@ -64,7 +64,7 @@ func TestAckerWaitsForABackgroundedMessage(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
 	journaled := make(chan struct{})
-	ok := a.Wrap(backgrounded(msg, func() {
+	ok := WrapAck(a)(backgrounded(msg, func() {
 		time.Sleep(40 * time.Millisecond)
 		write(msg, nil, true)
 		close(journaled)
@@ -85,7 +85,7 @@ func TestAckerWaitsForABackgroundedMessage(t *testing.T) {
 func TestAckerIgnoresWritesOnTheSide(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
-	if a.Wrap(backgrounded(msg, func() { write(msg, nil, false) }))(msg) {
+	if WrapAck(a)(backgrounded(msg, func() { write(msg, nil, false) }))(msg) {
 		t.Fatal("a side write followed by a stall acknowledged the message")
 	}
 }
@@ -96,7 +96,7 @@ func TestAckerDoesntAcknowledgeAPartialMessage(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
 	start := time.Now()
-	if a.Wrap(backgrounded(msg, func() {
+	if WrapAck(a)(backgrounded(msg, func() {
 		write(msg, nil, true)
 		write(msg, errors.New("part 2 failed"), true)
 	}))(msg) {
@@ -105,7 +105,7 @@ func TestAckerDoesntAcknowledgeAPartialMessage(t *testing.T) {
 		t.Fatal("a failed write should end the wait at once")
 	}
 	stalled := &events.Message{}
-	if a.Wrap(backgrounded(stalled, func() {
+	if WrapAck(a)(backgrounded(stalled, func() {
 		write(stalled, nil, true)
 		_ = handled.Writing(remoteFor{stalled}) // part 2 starts and never ends
 	}))(stalled) {
@@ -118,18 +118,18 @@ func TestAckerDoesntAcknowledgeAPartialMessage(t *testing.T) {
 func TestAckerDoesntAcknowledgeAnUnjournaledMessage(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
-	if a.Wrap(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
+	if WrapAck(a)(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
 		t.Fatal("a backgrounded message never journaled must not be acknowledged")
 	}
 	// Another message's journaling doesn't count for this one.
 	other := &events.Message{}
-	if a.Wrap(backgrounded(msg, func() { write(other, nil, true) }))(msg) {
+	if WrapAck(a)(backgrounded(msg, func() { write(other, nil, true) }))(msg) {
 		t.Fatal("another message's journaling was taken for this one's")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	if testAcker(ctx).Wrap(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
+	if WrapAck(testAcker(ctx))(func(any) bool { time.Sleep(60 * time.Millisecond); return true })(msg) {
 		t.Fatal("a stopping host must not acknowledge it")
 	} else if time.Since(start) > 200*time.Millisecond {
 		t.Fatal("a stopping host shouldn't wait")
@@ -140,7 +140,7 @@ func TestAckerDoesntAcknowledgeAnUnjournaledMessage(t *testing.T) {
 func TestAckerAcknowledgesOnceJournaledParts(t *testing.T) {
 	a := testAcker(context.Background())
 	msg := &events.Message{}
-	if !a.Wrap(func(any) bool {
+	if !WrapAck(a)(func(any) bool {
 		write(msg, nil, true)
 		time.Sleep(60 * time.Millisecond)
 		return true

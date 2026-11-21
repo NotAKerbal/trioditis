@@ -1,115 +1,32 @@
 package wabuffer
 
 import (
-	"context"
 	"errors"
 	"reflect"
 	"sync"
-	"time"
 	"unsafe"
 
-	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types/events"
-	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 )
 
 // whatsmeow acknowledges an incoming message (and clears its buffered plaintext) as soon as
-// every event handler returns success. mautrix-whatsapp's handler returns what bridgev2 says,
-// and bridgev2 says success when its handler limit passes, while the message is still being
-// handled in the background. Acknowledged then, a message the process stops before journaling
-// is gone: WhatsApp doesn't send it again.
-//
-// Acker wraps the handler so that doesn't happen. A handler that returned before the limit
-// was waited for in full, and its answer stands. One that took as long as the limit may have
-// been backgrounded: the wrapper waits for the message's own write to be journaled, with no
-// write failed or still running, before it says success. If that doesn't happen in MaxWait,
-// a write fails, or the host is stopping, it says failure, so the message isn't acknowledged
-// and WhatsApp sends it again; a message journaled twice is deduplicated by its event ID.
-type Acker struct {
-	// Limit is how long a handler may take before bridgev2 may have backgrounded it.
-	Limit time.Duration
-	// Settle is how long the journal must go quiet after the message's own write before the
-	// rest is taken to be journaled too (a message's parts are journaled one after another).
-	Settle time.Duration
-	// MaxWait bounds how long a backgrounded message is waited for.
-	MaxWait time.Duration
-	// Ctx ends the wait when the host stops.
-	Ctx context.Context
-	Log zerolog.Logger
-}
+// every event handler returns success. WrapAck holds that back until the message is journaled
+// (handled.Acker): mautrix-whatsapp's handler returns what bridgev2 says, which is success
+// once bridgev2's handler limit passes, journaled or not.
 
-// NewAcker waits as long as bridgev2's own handler limit allows, less a margin for the time
-// between this wrapper starting its clock and bridgev2 starting its own.
-func NewAcker(ctx context.Context, log zerolog.Logger) *Acker {
-	limit := time.Duration(bridgev2.EventHandlingTimeoutTicks)*30*time.Second - 5*time.Second
-	return &Acker{Limit: limit, Settle: 2 * time.Second, MaxWait: 20 * time.Minute, Ctx: ctx, Log: log}
-}
-
-// Wrap is the handler to give whatsmeow in place of next.
-func (a *Acker) Wrap(next whatsmeow.EventHandlerWithSuccessStatus) whatsmeow.EventHandlerWithSuccessStatus {
-	return func(evt any) bool {
-		msg, ok := evt.(*events.Message)
-		if !ok {
-			return next(evt)
-		}
-		h := handled.Begin(msg)
-		defer h.End()
-		start := time.Now()
-		if !next(evt) {
-			return false
-		}
-		if time.Since(start) < a.Limit {
-			return true
-		}
-		return a.wait(h)
-	}
-}
-
-// settled is a state the message can be acknowledged in.
-func settled(s handled.State) bool { return s.Done && s.Running == 0 && !s.Failed }
-
-// wait reports whether the message was journaled: one of its own writes (a part of the
-// message, the reaction itself, the edit) reached the journal, none failed, none is still
-// running, and nothing more happened for Settle. Writes on the side, such as the error notice
-// bridgev2 sends when converting the message failed, or the removal of a reaction being
-// replaced, don't count: either can be journaled while the message itself never is.
-func (a *Acker) wait(h *handled.Handling) bool {
-	deadline := time.NewTimer(a.MaxWait)
-	defer deadline.Stop()
-	settle := time.NewTimer(a.Settle)
-	defer settle.Stop()
-	if !settled(h.State()) {
-		settle.Stop()
-	}
-	for {
-		select {
-		case <-h.Changed():
-			state := h.State()
-			if state.Failed {
-				// bridgev2 gives up on a message one of whose writes failed: it isn't
-				// acknowledged, so WhatsApp sends it again.
-				a.Log.Warn().Msg("A WhatsApp message handled in the background failed to journal; leaving it unacknowledged")
-				return false
+// WrapAck is the handler to give whatsmeow in place of next. Only messages are held back: they
+// are what WhatsApp would not send again.
+func WrapAck(a *handled.Acker) func(whatsmeow.EventHandlerWithSuccessStatus) whatsmeow.EventHandlerWithSuccessStatus {
+	return func(next whatsmeow.EventHandlerWithSuccessStatus) whatsmeow.EventHandlerWithSuccessStatus {
+		return func(evt any) bool {
+			msg, ok := evt.(*events.Message)
+			if !ok {
+				return next(evt)
 			}
-			if settled(state) {
-				settle.Reset(a.Settle)
-			} else {
-				settle.Stop()
-			}
-		case <-settle.C:
-			if settled(h.State()) {
-				return true
-			}
-		case <-deadline.C:
-			// Not acknowledged, so WhatsApp sends it again; the copy that arrives is bridged
-			// (or deduplicated, if this one got to the journal meanwhile).
-			a.Log.Warn().Bool("part_journaled", h.State().Done).Msg("A WhatsApp message handled in the background wasn't journaled in time; leaving it unacknowledged")
-			return false
-		case <-a.Ctx.Done():
-			return false
+			return a.Handle(msg, func() bool { return next(evt) })
 		}
 	}
 }
