@@ -2,7 +2,7 @@ import { toast } from '@trioditis/ui/toast'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useRef, useState } from 'react'
 import { membersOf, onEach, useChatActions, type Chat, type ChatId } from '~/data/chats.ts'
-import { requestSendOn, useConversationIds } from '~/data/conversations.ts'
+import { requestSendOn, setConversations, setDmChats, useConversationIds } from '~/data/conversations.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
 import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
@@ -136,7 +136,12 @@ export function Shell() {
       >
         <RetryBoundary
           offline={session.offline}
-          onError={() => (shownRef.current = null)}
+          onError={() => {
+            shownRef.current = null
+            // What the failed list said goes with it: the open chat stands alone until it's back.
+            setConversations([])
+            setDmChats([])
+          }}
           fallback={(say, retry) => <LoadError say={say('Couldn’t load your chats.')} onRetry={retry} />}
         >
           {() => (

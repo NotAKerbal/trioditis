@@ -26,6 +26,8 @@ export interface ViaOption {
 
 interface ComposerProps {
   network: Network
+  /** The chat it sends on: a menu open when that changes closes, so it can't act on another. */
+  destination?: string | undefined
   /** In a conversation of a person's chats on several networks, the ones to choose from. */
   via?: { options: ViaOption[]; current: string; onChange: (id: string) => void } | undefined
   draft: string
@@ -39,6 +41,7 @@ interface ComposerProps {
 
 export function Composer({
   network,
+  destination,
   via,
   draft,
   onDraft,
@@ -119,7 +122,7 @@ export function Composer({
           }}
           className="max-h-40 min-h-[38px] flex-1 px-2 py-2"
         />
-        <DropdownMenu>
+        <DropdownMenu key={destination}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"

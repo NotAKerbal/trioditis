@@ -32,7 +32,7 @@ import {
   networkName,
   onEach,
   useChat,
-  useCancelledScheduled,
+  useCancelledIn,
   useChatActions,
   useAccounts,
   useChatsById,
@@ -84,6 +84,7 @@ import { DetailsPanel, type PanelView } from './details-panel.tsx'
 import { ChatAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
 import { ReadWhileOpen } from './read-while-open.tsx'
+import type { ReadOnOpen } from '~/data/read-on-open.ts'
 import { draftSendId } from '~/data/saved-drafts.ts'
 import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
 import { restoreConflict } from './cancel-scheduled.ts'
@@ -111,6 +112,9 @@ interface ChatPaneProps {
 export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, onOpenChat }: ChatPaneProps) {
   const session = useSession()
   const chat = useChat(chatId)
+  // What each read tracker has done, kept above the retry boundary: a retry isn't a new opening,
+  // which would clear the person's own "marked unread". Opening another chat starts again.
+  const readStates = useMemo(() => new Map<string, ReadOnOpen>(), [chatId])
   useEffect(() => {
     if (chatId && chat === null) onGone()
   }, [chatId, chat, onGone])
@@ -148,6 +152,7 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
           chat={chat}
           chatIds={chatIds}
           attempt={attempt}
+          readStates={readStates}
           act={act}
           onBack={onBack}
           onOpenPerson={onOpenPerson}
@@ -162,6 +167,7 @@ function OpenChat({
   chat,
   chatIds,
   attempt,
+  readStates,
   act,
   onBack,
   onOpenPerson,
@@ -169,6 +175,7 @@ function OpenChat({
 }: Pick<ChatPaneProps, 'chatIds' | 'act' | 'onBack' | 'onOpenPerson' | 'onOpenChat'> & {
   chat: Chat
   attempt: number
+  readStates: Map<string, ReadOnOpen>
 }) {
   const session = useSession()
   const actions = useChatActions()
@@ -180,10 +187,17 @@ function OpenChat({
   const lastLive = useRef<Chat[] | undefined>(undefined)
   if (looked) lastLive.current = looked
   const live = together ? (looked ?? lastLive.current?.filter((m) => chatIds.includes(m.id))) : undefined
-  const members = useMemo(
-    () => (live && live.length > 1 && live.some((m) => m.id === chat.id) ? live : [chat]),
-    [live, chat],
-  )
+  // Only chats the person's cards link to the same person as the opened one, as they are now:
+  // a chat moved to another card on another device is out at once, whatever the sidebar said.
+  const people = usePeople()
+  const cards = useMemo(() => cardIndex(people), [people])
+  const opened = cardOfChat(chat, cards)
+  const members = useMemo(() => {
+    const same = live?.filter(
+      (m) => m.id === chat.id || (!!opened && cardOfChat(m, cards)?.personKey === opened.personKey),
+    )
+    return same && same.length > 1 && same.some((m) => m.id === chat.id) ? same : [chat]
+  }, [live, chat, cards, opened])
   const accounts = useAccounts()
   const accountNames = useMemo(
     () => accountLabels((accounts ?? []).map((a) => ({ id: a._id as string, network: a.network, hint: a.hint }))),
@@ -191,9 +205,7 @@ function OpenChat({
   )
   const memberIds = members.map((m) => m.id)
   const merged = members.length > 1
-  const people = usePeople()
-  const cards = useMemo(() => cardIndex(people), [people])
-  const person = members.map((m) => cardOfChat(m, cards)).find(Boolean)
+  const person = opened
   // Named and pictured after the person; acted on as the chat that was opened.
   const shown = { ...mergedChat(members, person), id: chat.id }
   const each = (run: (chatId: ChatId) => Promise<boolean>) => onEach(members, run)
@@ -206,7 +218,7 @@ function OpenChat({
   )
   // A conversation's chats and their first pages are still on their way: until they're in, what
   // it shows of each (and so what it marks read) isn't known.
-  const waiting = together && (!looked || loading)
+  const waiting = together && (!looked || !people || loading)
   const networkOfChat = new Map(members.map((m) => [m.id as string, m.network]))
   // Where focus goes back to when the side panel's sheet closes: what opened it.
   const detailsButton = useRef<HTMLButtonElement>(null)
@@ -231,7 +243,8 @@ function OpenChat({
   const typing = useTyping(memberIds)
   // A conversation's scheduled messages are those of any of its chats.
   const scheduledRows = useScheduled(merged ? undefined : chat.id)
-  const cancelledRows = useCancelledScheduled(merged ? undefined : chat.id)
+  // Each chat's own, so none is cut off by a limit on everyone's.
+  const cancelledRows = useCancelledIn(memberIds)
   // Scheduled messages whose cancel is on its way: Cancel is off for them meanwhile.
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set())
   const bridge = useBridge()
@@ -765,6 +778,7 @@ function OpenChat({
         />
         <Composer
           network={sendChat.network}
+          destination={sendChat.id}
           via={
             merged
               ? {
@@ -788,7 +802,13 @@ function OpenChat({
           what the others have loaded so far). Each keeps its tracker while it waits, so a wait
           isn't a new opening, which would clear the person's own "marked unread". */}
       {members.map((m) => (
-        <ReadWhileOpen key={m.id} chatId={m.id} paused={waiting || hidden.includes(m.id)} markRead={actions.markRead} />
+        <ReadWhileOpen
+          key={m.id}
+          chatId={m.id}
+          paused={waiting || hidden.includes(m.id)}
+          states={readStates}
+          markRead={actions.markRead}
+        />
       ))}
       {panel ? (
         <DetailsPanel

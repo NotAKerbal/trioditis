@@ -384,6 +384,19 @@ export function useScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.list, chatId ? { chatId } : {})).data
 }
 
+type CancelledRow = FunctionReturnType<typeof api.scheduled.cancelled>[number]
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const cancelledOf = (results: { data?: CancelledRow[] | undefined }[]) =>
+  results.some((r) => !r.data) ? undefined : results.flatMap((r) => r.data!)
+
+/** Each of these chats' cancelled scheduled messages, asked chat by chat; undefined while any loads. */
+export function useCancelledIn(chatIds: readonly ChatId[]) {
+  return useQueries({
+    queries: chatIds.map((chatId) => convexQuery(api.scheduled.cancelled, { chatId })),
+    combine: cancelledOf,
+  })
+}
+
 /** Cancelled scheduled messages kept on the server until restored or discarded (scheduled.cancelled). */
 export function useCancelledScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.cancelled, chatId ? { chatId } : {})).data
