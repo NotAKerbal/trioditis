@@ -41,6 +41,13 @@ head -c "$((size - 1))" "$work/sealed" | fails "a file cut short by a byte"
 head -c "$((20 + 32 + 65536 + 16))" "$work/sealed" | fails "a file cut just after a whole chunk"
 { head -c 100 "$work/sealed"; printf 'X'; tail -c +102 "$work/sealed"; } | fails "a file with a byte changed"
 BACKUP_KEY=$(new_key) fails "decrypting with another key" <"$work/sealed"
+# A file encrypted as one backup's archive opens only as that.
+BACKUP_CONTEXT=one/archive node "$crypt" encrypt <"$work/plain" >"$work/bound"
+BACKUP_CONTEXT=one/archive node "$crypt" decrypt <"$work/bound" | cmp -s - "$work/plain" &&
+  check ok "a file bound to its backup and role decrypts as itself" || check fail "a file bound to its backup and role decrypts as itself"
+BACKUP_CONTEXT=two/archive fails "the same file as another backup's archive" <"$work/bound"
+BACKUP_CONTEXT=one/settings fails "the same file as its backup's settings" <"$work/bound"
+fails "the same file with no backup named" <"$work/bound"
 printf 'not a backup' | fails "a file that isn't one"
 for bad in '' short "$(new_key)=" "$(new_key | cut -c1-42)B"; do
   if BACKUP_KEY=$bad node "$crypt" encrypt </dev/null >/dev/null 2>&1; then

@@ -87,9 +87,13 @@ fill() {
   docker run --rm --log-driver none -v "${project}_$1:/v" --entrypoint sh "$tool" -c "$2"
 }
 
-# decrypt <file>: a backup file, decrypted with this install's BACKUP_KEY, on stdout.
+# decrypt <file>: a backup file (archive.enc or secrets.env.enc), decrypted with this install's
+# BACKUP_KEY as the file of its backup it is, on stdout.
 node_image=node:24.21-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 decrypt() {
-  BACKUP_KEY=$(private_value BACKUP_KEY) docker run --rm -i --network none --log-driver none -e BACKUP_KEY \
+  case "$(basename "$1")" in archive.enc) role=archive ;; *) role=settings ;; esac
+  backup_id=$(sed -n 's/^id=//p' "$(dirname "$1")/backup.info" 2>/dev/null)
+  BACKUP_KEY=$(private_value BACKUP_KEY) BACKUP_CONTEXT=${backup_id:+$backup_id/$role} \
+    docker run --rm -i --network none --log-driver none -e BACKUP_KEY -e BACKUP_CONTEXT \
     "$node_image" node --input-type=module -e "$(cat "$scripts/backup-crypt.mjs")" decrypt <"$1"
 }

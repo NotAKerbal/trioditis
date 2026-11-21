@@ -18,15 +18,6 @@ env_file="$here/.env"
 # shellcheck source=deploy/scripts/env.sh
 . "$here/scripts/env.sh"
 env_names_file="$here/install/env-names"
-# A restore onto a checkout with no install yet (after losing the server) brings its own
-# settings, from the backup and the key file; every other command needs the install's.
-fresh=0
-if [ "${1:-}" = restore ] && [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
-  fresh=1
-elif [ ! -f "$env_file" ]; then
-  echo "No install here yet. Run deploy/install/install.sh first, or restore a backup onto it with deploy/trioditis restore --keys <key file> <backup>." >&2
-  exit 1
-fi
 # One backup, install or other write command for this install at a time: they stop and
 # start the server under each other. install.sh takes the same lock. A command run by one
 # that holds it (the updater's backup and restore, or a restore's own backup and install) is
@@ -37,6 +28,18 @@ take_lock() {
   if ! { [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$here/.operation.lock" ]; }; then exec 9>"$here/.operation.lock"; fi
   flock -n 9 || { echo "Another backup, install or change to this install is running." >&2; exit 1; }
 }
+# A restore takes the lock before anything else, so whether there's an install here is decided
+# under it.
+[ "${1:-}" != restore ] || take_lock
+# A restore onto a checkout with no install yet (after losing the server) brings its own
+# settings, from the backup and the key file; every other command needs the install's.
+fresh=0
+if [ "${1:-}" = restore ] && [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
+  fresh=1
+elif [ ! -f "$env_file" ]; then
+  echo "No install here yet. Run deploy/install/install.sh first, or restore a backup onto it with deploy/trioditis restore --keys <key file> <backup>." >&2
+  exit 1
+fi
 
 # deploy/.env is read once, here, for everything below. A backup reads it only under the
 # lock, from a private copy (the snapshot) that it then uses throughout; a restore reads it
@@ -52,8 +55,6 @@ if [ "${1:-}" = backup ]; then
   trap 'rm -f "$snapshot"' EXIT
   cp "$env_file" "$snapshot"
   env_source=$snapshot
-elif [ "${1:-}" = restore ]; then
-  take_lock
 fi
 if [ "$fresh" = 1 ]; then
   env_text=''
@@ -122,16 +123,37 @@ derive_public_keys() {
     })"
 }
 
-# crypt encrypt|decrypt KEY [NAME]: deploy/scripts/backup-crypt.mjs on stdin to stdout, with
-# backup key KEY, in the bundle's Node image with no network and no log, as container NAME if
-# given (for cleanup to remove). The key reaches it by name in its environment, never as an
-# argument, and the script as the program's text, so nothing on the host need be shared with
-# the container. Interrupts reach this script, not the container, which ends when its input
-# does or cleanup removes it.
+# crypt encrypt|decrypt KEY CONTEXT [NAME]: deploy/scripts/backup-crypt.mjs on stdin to stdout,
+# with backup key KEY, for the file CONTEXT names (`<backup id>/archive` or `<backup id>/settings`,
+# which binds it to its backup and role; empty for a file from before backups had an ID), in the
+# bundle's Node image with no network and no log, as container NAME if given (for cleanup to
+# remove). The key reaches it by name in its environment, never as an argument, and the script
+# as the program's text, so nothing on the host need be shared with the container. Interrupts
+# reach this script, not the container, which ends when its input does or cleanup removes it.
 crypt() {
   node_ready
-  BACKUP_KEY=$2 docker run --rm -i ${3:+--name "$3"} --network none --log-driver none --sig-proxy=false -e BACKUP_KEY \
-    "$node_image" node --input-type=module -e "$(cat "$here/scripts/backup-crypt.mjs")" "$1"
+  BACKUP_KEY=$2 BACKUP_CONTEXT=$3 docker run --rm -i ${4:+--name "$4"} --network none --log-driver none --sig-proxy=false \
+    -e BACKUP_KEY -e BACKUP_CONTEXT "$node_image" node --input-type=module -e "$(cat "$here/scripts/backup-crypt.mjs")" "$1"
+}
+# backup_id DIR: the ID a backup's files are bound to, from its backup.info; empty for one
+# from before backups had one. Exits if it isn't in the form backup writes.
+backup_id() {
+  id=$(sed -n 's/^id=//p' "$1/backup.info" 2>/dev/null | head -1)
+  [ -z "$id" ] || printf '%s\n' "$id" | grep -qxE '[A-Za-z0-9_-]{1,64}-[0-9]{1,12}-[0-9a-f]{16}' ||
+    { echo "$1/backup.info has an ID that isn't one backup writes." >&2; exit 1; }
+  printf '%s' "$id"
+}
+# A private directory in memory (the user's runtime directory, else /dev/shm) for what must
+# never reach a disk in the clear: a backup's settings before they're encrypted, and the
+# private keys' values its last check looks for.
+memory_dir() {
+  for base in "${XDG_RUNTIME_DIR:-}" /dev/shm; do
+    [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
+    [ "$(stat -f -c %T "$base" 2>/dev/null)" = tmpfs ] || continue
+    (umask 077 && mktemp -d "$base/trioditis-XXXXXX") && return 0
+  done
+  echo "This needs a memory-backed directory it can write (\$XDG_RUNTIME_DIR or /dev/shm), so a backup's settings never reach a disk in the clear." >&2
+  return 1
 }
 
 # The server's private keys, which open what's sealed to it: the bridge key (sends and login
@@ -206,7 +228,15 @@ check_key_file() {
 
 case "${1:-}" in
   backup)
-    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup <directory outside the checkout>" >&2; exit 2; }
+    # --keep-stopped (the updater's, and a restore's) leaves the server stopped once the backup
+    # is made, so nothing it does afterwards is missing from the backup; a backup that fails
+    # starts it again as usual.
+    keep_stopped=0
+    if [ "${2:-}" = --keep-stopped ]; then
+      keep_stopped=1
+      shift
+    fi
+    [ $# -eq 2 ] || { echo "Usage: deploy/trioditis backup [--keep-stopped] <directory outside the checkout>" >&2; exit 2; }
     # The snapshot of deploy/.env, read once under the lock (above), is the project, the
     # settings Compose runs with, and secrets.env, for the whole backup. It's checked before
     # anything is made.
@@ -224,13 +254,23 @@ case "${1:-}" in
     version=$(value_in TRIODITIS_VERSION "$env_text")
     # Everything the backup writes is the caller's alone.
     umask 077
+    # Real paths, so a symlink can't lead the backup into the checkout: resolved and checked
+    # before anything is made, and checked again once the directory exists.
+    checkout_dir=$(cd "$here/.." && pwd -P)
+    outside() {
+      case "$1/" in "$checkout_dir"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;; esac
+    }
+    planned=$(realpath -m -- "$2") || { echo "Can't resolve $2." >&2; exit 2; }
+    outside "$planned"
     mkdir -p "$2"
-    # Real paths, so a symlink can't lead the backup into the checkout.
     dir=$(cd "$2" && pwd -P)
-    case "$dir/" in
-      "$(cd "$here/.." && pwd -P)"/*) echo "Back up outside the checkout: image builds copy it." >&2; exit 2 ;;
-    esac
+    outside "$dir"
+    # The settings in the clear, and the keys' values the last check looks for, stay in memory.
+    plain=$(memory_dir) || exit 1
+    trap 'rm -f "$snapshot"; rm -rf "$plain"' EXIT
     worker="$project-backup-$(random_hex)"
+    # What the backup's files are bound to (crypt), so they only decrypt together.
+    id="$project-$created-$(random_hex)"
     # A backup is a directory holding the archive and the .env. It's assembled in a new
     # private directory beside where it goes, and published with one rename that fails if
     # anything is at the name, so there's either a whole backup there or none, and nothing
@@ -250,9 +290,14 @@ case "${1:-}" in
       trap '' INT TERM HUP
       docker rm -f "$worker" "$worker-crypt" >/dev/null 2>&1 || true
       [ -z "$work" ] || rm -rf "$work" || true
+      rm -rf "$plain" || true
       # Only a name this backup made (recorded once mkdir succeeded), and only while empty.
       [ -z "$reserved" ] || rmdir "$reserved" 2>/dev/null || true
-      if [ -n "$running" ]; then
+      if [ -n "$running" ] && [ "$keep_stopped" = 1 ] && [ "$status" = 0 ]; then
+        # Kept stopped, as asked: whatever starts it next (the installer) picks up from here.
+        compose stop >/dev/null 2>&1 || true
+        echo "The server is left stopped, as asked (--keep-stopped)."
+      elif [ -n "$running" ]; then
         compose stop >/dev/null 2>&1 || true
         restart_running || {
           echo "The server didn't start again after the backup: run deploy/trioditis up -d." >&2
@@ -333,7 +378,7 @@ case "${1:-}" in
     # shellcheck disable=SC2086 # $mounts is a list of -v options
     {
       docker run --rm --init --name "$worker" --log-driver none $mounts \
-        -e MEMBERS="$members" -e MANIFEST="$manifest" -e CREATED="$created" -e VERSION="${version:-unknown}" \
+        -e MEMBERS="$members" -e MANIFEST="$manifest" -e CREATED="$created" -e VERSION="${version:-unknown}" -e ID="$id" \
         -e PGDATA_DIR="./${project}_postgres" \
         --entrypoint sh "$tool" -c '
           trap "kill \$tar_pid 2>/dev/null; exit 130" INT TERM
@@ -342,6 +387,7 @@ case "${1:-}" in
             echo "trioditis-backup 2"
             echo "created $CREATED"
             echo "version $VERSION"
+            echo "id $ID"
             [ ! -f "$PGDATA_DIR/PG_VERSION" ] || echo "postgres $(cat "$PGDATA_DIR/PG_VERSION")"
             for volume in $MEMBERS; do
               entries=$(find "$volume" | wc -l)
@@ -352,7 +398,7 @@ case "${1:-}" in
           tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
           wait "$tar_pid"'
       echo "$?" >"$archived"
-    } | crypt encrypt "$backup_key" "$worker-crypt" >"$work/archive.enc" ||
+    } | crypt encrypt "$backup_key" "$id/archive" "$worker-crypt" >"$work/archive.enc" ||
       { echo "Couldn't encrypt the archive. Nothing was published." >&2; exit 1; }
     [ "$(cat "$archived" 2>/dev/null)" = 0 ] || { echo "Couldn't archive the volumes. Nothing was published." >&2; exit 1; }
     rm -f "$archived"
@@ -372,17 +418,17 @@ case "${1:-}" in
     allowed=" $(printf '%s ' $allowed)"
     present=$(env_names <"$snapshot") || copy_failed
     kept=0
-    : >"$work/secrets.env"
+    : >"$plain/secrets.env"
     for name in $present; do
       case "$name" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY | BACKUP_KEY) continue ;; esac
       case "$allowed" in *" $name "*) ;; *) left_out="$left_out $name" && continue ;; esac
       value=$(env_value "$name" <"$snapshot") || copy_failed
-      printf '%s=%s\n' "$name" "$value" >>"$work/secrets.env" || copy_failed
+      printf '%s=%s\n' "$name" "$value" >>"$plain/secrets.env" || copy_failed
       kept=$((kept + 1))
     done
     # Then checked again, by a second reader: every listed setting the snapshot has is in
     # secrets.env once, with its value, and nothing else is.
-    verified=$(env_kept "$env_names_file" "$snapshot" "$work/secrets.env") || verified=failed
+    verified=$(env_kept "$env_names_file" "$snapshot" "$plain/secrets.env") || verified=failed
     if [ "$verified" != "$kept" ]; then
       echo "secrets.env doesn't hold exactly the listed settings from deploy/.env. Nothing was published." >&2
       exit 1
@@ -392,7 +438,7 @@ case "${1:-}" in
     # checked: secrets.env counts as clean only if grep found nothing (exit 1) with exactly as
     # many patterns as there are keys; anything else, a step that failed included, publishes
     # nothing.
-    patterns="$work/.patterns"
+    patterns="$plain/.patterns"
     expected=0
     : >"$patterns"
     for key_name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY BACKUP_KEY; do
@@ -404,7 +450,7 @@ case "${1:-}" in
     scan=0
     if [ "$expected" -gt 0 ]; then
       [ "$(wc -l <"$patterns" | tr -d ' ')" = "$expected" ] && [ "$(grep -c . "$patterns")" = "$expected" ] || scan=2
-      [ "$scan" != 0 ] || grep -qFf "$patterns" "$work/secrets.env" || scan=$?
+      [ "$scan" != 0 ] || grep -qFf "$patterns" "$plain/secrets.env" || scan=$?
     else
       scan=1
     fi
@@ -416,10 +462,10 @@ case "${1:-}" in
     esac
     # Then it's encrypted like the archive, and the copy in the clear goes. backup.info says,
     # unencrypted, what a restore needs to know first: which version to check out to restore it.
-    crypt encrypt "$backup_key" "$worker-crypt" <"$work/secrets.env" >"$work/secrets.env.enc" ||
+    crypt encrypt "$backup_key" "$id/settings" "$worker-crypt" <"$plain/secrets.env" >"$work/secrets.env.enc" ||
       { echo "Couldn't encrypt secrets.env. Nothing was published." >&2; exit 1; }
-    rm -f "$work/secrets.env"
-    printf 'format=2\nproject=%s\nversion=%s\ncreated=%s\n' "$project" "${version:-unknown}" "$created" >"$work/backup.info"
+    rm -f "$plain/secrets.env"
+    printf 'format=2\nid=%s\nproject=%s\nversion=%s\ncreated=%s\n' "$id" "$project" "${version:-unknown}" "$created" >"$work/backup.info"
 
     # The name is reserved with mkdir, which fails if anything (a file, a directory, a link) is
     # there; then the private directory is renamed onto that empty one in one step, so the
@@ -508,14 +554,21 @@ case "${1:-}" in
     fi
     work=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/trioditis-restore-XXXXXX")
     trap 'rm -rf "$work"' EXIT
+    # The ID both files are bound to: each decrypts only as its own backup's archive or settings.
+    id=$(backup_id "$source_dir") || refuse "The backup's backup.info isn't one backup writes."
     # stream DIR: the backup's archive, decrypted, on stdout.
     stream() {
-      if [ "$encrypted" = 1 ]; then crypt decrypt "$backup_key" <"$1/archive.enc"; else cat "$1/archive.tgz"; fi
+      if [ "$encrypted" = 1 ]; then
+        stream_id=$(backup_id "$1") || return 1
+        crypt decrypt "$backup_key" "${stream_id:+$stream_id/archive}" <"$1/archive.enc"
+      else
+        cat "$1/archive.tgz"
+      fi
     }
 
     # Its settings first: they say which server and which version it's from.
     if [ "$encrypted" = 1 ]; then
-      backup_env=$(crypt decrypt "$backup_key" <"$source_dir/secrets.env.enc") ||
+      backup_env=$(crypt decrypt "$backup_key" "${id:+$id/settings}" <"$source_dir/secrets.env.enc") ||
         refuse "Couldn't open the backup's secrets.env.enc with this BACKUP_KEY: it's another install's backup, or it's damaged."
     else
       env_raw_clean "$source_dir/secrets.env" || refuse "The backup's secrets.env holds a NUL or a carriage return."
@@ -527,6 +580,11 @@ case "${1:-}" in
     if [ "$fresh" = 1 ]; then
       printf '%s\n' "$backup_project" | grep -qxE '[a-z0-9][a-z0-9_-]*' || refuse "The backup's project name isn't one an install uses."
       project=$backup_project
+      # A checkout with no install has no way to stop, or back up, another checkout's server of
+      # the same project on this Docker, so if that project has anything here (a volume, or a
+      # container, running or not), the restore is that install's to do, from its own checkout.
+      [ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")$(docker ps -aq --filter "label=com.docker.compose.project=$project")" ] ||
+        refuse "Project $project already has volumes or containers on this Docker, from another checkout. Restore it from that checkout (deploy/trioditis restore there backs it up first), or remove that install first."
     else
       [ "$backup_project" = "$project" ] || refuse "The backup is of project $backup_project, and this install is $project."
     fi
@@ -541,10 +599,21 @@ case "${1:-}" in
       else
         [ "$(value_in "${pair}_PUBLIC_KEY" "$env_text")" = "$expected" ] ||
           refuse "This install's ${pair} key isn't the one the backup's data is sealed to: restore it on the server it's from, or onto a new checkout with --keys <that server's key file>."
-        [ -n "$(value_in "${pair}_PRIVATE_KEY" "$env_text")" ] ||
+        valid_key "$(value_in "${pair}_PRIVATE_KEY" "$env_text")" ||
           refuse "deploy/.env has no ${pair}_PRIVATE_KEY: import the keys first (deploy/trioditis keys import <file>)."
       fi
     done
+    # And each private key must be that public key's private half, derived here (no key is
+    # printed), not taken on trust from deploy/.env. (A key file's were derived when it was read.)
+    if [ "$fresh" = 0 ]; then
+      derived=$(for pair in BRIDGE AGENT_ACCESS; do
+        printf '%s %s\n' "$pair" "$(value_in "${pair}_PRIVATE_KEY" "$env_text")"
+      done | derive_public_keys) || refuse "Couldn't check the server's keys."
+      for pair in BRIDGE AGENT_ACCESS; do
+        [ "$(printf '%s\n' "$derived" | sed -n "s/^$pair //p")" = "$(value_in "${pair}_PUBLIC_KEY" "$backup_env")" ] ||
+          refuse "deploy/.env's ${pair}_PRIVATE_KEY isn't the private half of the public key the backup's data is sealed to."
+      done
+    fi
     # The same version as this checkout, whose functions and schema the data was written by;
     # one this version descends from only when asked (its migrations then move the data
     # forward); never a newer one, which this version's schema may not read.
@@ -595,7 +664,23 @@ case "${1:-}" in
     backup_at=$((created * 1000))
     # Postgres opens only data from its own major version, and the bundle doesn't upgrade it in
     # place, so a backup from another stops here rather than once its data has replaced this.
+    # The archive's own record of what it is must agree with backup.info and the settings: the
+    # same backup, from the same version.
+    manifest_id=$(printf '%s\n' "$manifest_text" | sed -n 's/^id //p')
+    [ "$manifest_id" = "$id" ] || refuse "The backup's archive isn't the one its backup.info names."
+    manifest_version=$(printf '%s\n' "$manifest_text" | sed -n 's/^version //p')
+    [ -z "$manifest_version" ] || [ "$manifest_version" = "${backup_version:-unknown}" ] ||
+      refuse "The backup's archive is from version $manifest_version, and its settings from ${backup_version:-unknown}."
     backup_pg=$(printf '%s\n' "$manifest_text" | sed -n 's/^postgres \([0-9][0-9]*\)$/\1/p')
+    # A manifest from before it recorded the Postgres version: read it from the archived data.
+    if [ -z "$backup_pg" ] && printf '%s\n' "$volumes" | grep -qxF "${project}_postgres"; then
+      # shellcheck disable=SC2016 # expanded in the container
+      backup_pg=$( { stream "$source_dir"; echo "$?" >"$work/read"; } |
+        docker run --rm -i --sig-proxy=false --log-driver none --entrypoint sh "$tool" -c \
+          'tar -xzOf - "./$1/PG_VERSION"' sh "${project}_postgres") && [ "$(cat "$work/read")" = 0 ] &&
+        printf '%s\n' "$backup_pg" | grep -qxE '[0-9]+' ||
+        refuse "Couldn't read which Postgres version the backup's database is from."
+    fi
     bundle_pg=$(sed -n 's/^ *image: postgres:\([0-9][0-9]*\)[.-].*/\1/p' "$here/compose/compose.yml" | head -1)
     [ -z "$backup_pg" ] || [ -z "$bundle_pg" ] || [ "$backup_pg" = "$bundle_pg" ] ||
       refuse "The backup's database is from Postgres $backup_pg, and this version runs Postgres $bundle_pg, which can't open it."
@@ -629,12 +714,20 @@ case "${1:-}" in
     fi
 
     # From here the data changes, so interrupts are held off until it and the settings are
-    # whole. Until the installer has settled the restored sends (deploy/.restore-settle), the
-    # gateway doesn't start, whatever stops this partway.
+    # whole. Until the installer has settled the restored sends, the gateway can't start,
+    # whatever stops this partway: deploy/.restore-settle is there, which deploy/trioditis
+    # refuses to start anything beside; RESTORE_PENDING is in deploy/.env, which Compose hands
+    # the gateway, which then refuses to start (apps/gateway/src/config.ts); and the gateway's
+    # container is gone, so nothing can start it again as it was.
     trap '' INT TERM HUP
     marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX")
     printf 'backup_at=%s\n' "$backup_at" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle" ||
       { rm -f "$marker_tmp"; refuse "Couldn't write deploy/.restore-settle."; }
+    if [ "$fresh" = 0 ]; then
+      { printf '%s\n' "$env_text" | grep -v '^RESTORE_PENDING=' || true; echo "RESTORE_PENDING=$backup_at"; } |
+        sed '/^$/d' | env_write "$env_file" || { echo "Couldn't mark deploy/.env as restoring." >&2; exit 1; }
+      compose rm -f -s gateway >/dev/null 2>&1 || { echo "Couldn't remove the gateway's container." >&2; exit 1; }
+    fi
     # load DIR VOLUMES MANIFEST: empties each volume and fills it from DIR's archive, then
     # checks every one against the manifest's count of entries and bytes.
     load() {
@@ -665,7 +758,7 @@ case "${1:-}" in
     # shellcheck disable=SC2086 # one volume per word, on one line
     echo "Restoring the volumes: $(echo $volumes)"
     if ! load "$source_dir" "$volumes" "$manifest_text"; then
-      rm -f "$here/.restore-settle"
+      # The gate stays until the copy from before is back and checked.
       [ -n "$recovery" ] || { echo "Restoring the volumes failed partway (above). Run the restore again." >&2; exit 1; }
       echo "Restoring the volumes failed partway (above); putting back the server as it was, from $recovery." >&2
       encrypted=1
@@ -675,7 +768,11 @@ case "${1:-}" in
           'mkdir /out && tar -xzf - -C /out "./$1" && cat "/out/$1"' sh "$manifest") && [ "$(cat "$work/read")" = 0 ] &&
         back_volumes=$(printf '%s\n' "$back_manifest" | sed -n 's/^volume \([^ ]*\) [0-9]* [0-9]*$/\1/p') &&
         load "$recovery" "$back_volumes" "$back_manifest" ||
-        { echo "Putting it back failed too: deploy/trioditis restore $recovery tries again." >&2; exit 1; }
+        { echo "Putting it back failed too: deploy/trioditis restore $recovery tries again. Until then nothing that sends starts." >&2; exit 1; }
+      # The data is as it was when the server stopped for this restore, so there's nothing to
+      # settle: the gate comes off, and deploy/.env goes back as it was.
+      printf '%s\n' "$env_text" | env_write "$env_file" || { echo "Couldn't put deploy/.env back as it was." >&2; exit 1; }
+      rm -f "$here/.restore-settle"
       "$here/install/install.sh" --no-setup-link || echo "The server as it was is back, but didn't start (above): run deploy/install/install.sh." >&2
       echo "Nothing was restored: the server is as it was." >&2
       exit 1
@@ -684,7 +781,10 @@ case "${1:-}" in
     # The settings: the backup's, with this server's keys (the backup has only the public
     # halves, the same ones) and any setting the operator added by hand, which backups leave out.
     if [ "$fresh" = 1 ]; then keys_from=$key_file_text; else keys_from=$env_text; fi
-    new_text=$(printf '%s\n' "$backup_env" | grep -vE "^($private_keys)=" || true)
+    # RESTORE_PENDING stays set, for the installer to clear once it has settled the sends.
+    new_text=$(printf '%s\n' "$backup_env" | grep -vE "^($private_keys|RESTORE_PENDING)=" || true)
+    new_text="$new_text
+RESTORE_PENDING=$backup_at"
     for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY BACKUP_KEY; do
       value=$(value_in "$name" "$keys_from")
       [ -z "$value" ] || new_text="$new_text
@@ -821,6 +921,16 @@ BACKUP_KEY=$backup_key"
       up | down | start | stop | restart | run | exec | rm | create | kill | pause | unpause | pull | build | cp | attach | wait | watch | scale | stats)
         take_lock
         check_env_text
+        # Until the installer has settled a restore's sends, nothing that could start the
+        # gateway (or anything waiting on it) runs: a send the backup held may have gone already.
+        case "$1" in
+          up | start | restart | run | create | unpause | watch | scale)
+            if [ -e "$here/.restore-settle" ] || [ -n "$(value_in RESTORE_PENDING "$env_text")" ]; then
+              echo "A restore's sends aren't settled yet, so deploy/trioditis $1 won't start anything: run deploy/install/install.sh, which settles them first." >&2
+              exit 1
+            fi
+            ;;
+        esac
         ;;
       *) echo "deploy/trioditis doesn't know the command $1." >&2 && exit 2 ;;
     esac

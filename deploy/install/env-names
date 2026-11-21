@@ -48,3 +48,5 @@ INSTAGRAM_PROXY
 LOGIN_BROWSER_MAX
 DEBIAN_SNAPSHOT
 UPDATE_BACKUP_DIR
+# Written by deploy/trioditis restore, cleared by the installer once the restored sends are settled.
+RESTORE_PENDING

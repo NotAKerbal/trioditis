@@ -3,7 +3,9 @@
 # stops anything, keeps a backup of the server as it was, replaces every volume and the
 # settings with the backup's (keeping this server's keys and settings added by hand), and starts
 # the server through the installer with deploy/.restore-settle written, so the restored sends are
-# settled before the gateway starts (here a stub installer records how it was run). Ownership and
+# settled before the gateway starts (here a stub installer records how it was run); until then
+# deploy/trioditis starts nothing and Compose hands the gateway RESTORE_PENDING, which it
+# refuses to start with. Ownership and
 # modes survive. It refuses, changing nothing, a backup from another version (unless it's an
 # older one this version descends from, with --from-older-version), one it can't open with this
 # BACKUP_KEY, one whose archive is damaged, one whose keys aren't this server's, one from another
@@ -39,7 +41,10 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 lock=no
 if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
 echo "$* lock=$lock $(cat "$root/deploy/.restore-settle" 2>/dev/null)" >>"$root/installs"
-[ ! -e "$root/install-fails" ]
+[ ! -e "$root/install-fails" ] || exit 1
+# As the real one does once it has settled the restored sends: the gate comes off.
+sed -i '/^RESTORE_PENDING=/d' "$root/deploy/.env"
+rm -f "$root/deploy/.restore-settle"
 EOF
 chmod +x "$root/deploy/install/install.sh"
 
@@ -132,7 +137,24 @@ run restore --yes "$pg16"
 [ "$status" != 0 ] && grep -q "from Postgres 16, and this version runs Postgres 17" "$root/out" && unchanged &&
   check ok "a backup from another Postgres major version is refused, changing nothing" ||
   { check fail "a backup from another Postgres major version is refused, changing nothing"; cat "$root/out" >&2; }
-rm -rf "$pg16"
+# Refused: one backup's archive beside another's settings (each file is bound to its backup).
+mkdir -m 700 "$backups/mixed"
+cp "$b1/archive.enc" "$backups/mixed/"
+cp "$pg16/secrets.env.enc" "$pg16/backup.info" "$backups/mixed/"
+run restore --yes "$backups/mixed"
+rm -rf "$pg16" "$backups/mixed"
+[ "$status" != 0 ] && grep -q "Couldn't read the backup's archive" "$root/out" && unchanged &&
+  check ok "one backup's archive beside another's settings is refused, changing nothing" ||
+  { check fail "one backup's archive beside another's settings is refused, changing nothing"; cat "$root/out" >&2; }
+
+# Refused: a private key in deploy/.env that isn't the half of the public key there.
+other_key=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+sed "s/^BRIDGE_PRIVATE_KEY=.*/BRIDGE_PRIVATE_KEY=$other_key/" "$root/env.now" >"$env_file"
+run restore --yes "$b1"
+cp "$root/env.now" "$env_file"
+[ "$status" != 0 ] && grep -q "isn't the private half" "$root/out" && unchanged &&
+  check ok "a private key that isn't its public key's half is refused, changing nothing" ||
+  { check fail "a private key that isn't its public key's half is refused, changing nothing"; cat "$root/out" >&2; }
 
 # It restores: the volumes and settings are the backup's, the server's keys and hand-added
 # settings stay, the server as it was is backed up, and the installer starts it holding the
@@ -175,12 +197,32 @@ rm -f "$root/install-fails"
   grep -q "settles the restored sends before it starts" "$root/out" &&
   check ok "a failing installer fails the restore, leaving the marker for the next run" ||
   { check fail "a failing installer fails the restore, leaving the marker for the next run"; cat "$root/out" >&2; }
+# Until it's settled, nothing that could start the gateway runs, and Compose would hand the
+# gateway the setting it refuses to start with.
+for command in "up -d" "start" "restart gateway" "run --rm gateway true"; do
+  # shellcheck disable=SC2086 # the command and its arguments
+  run $command
+  [ "$status" != 0 ] && grep -q "A restore's sends aren't settled yet" "$root/out" &&
+    check ok "while the restore isn't settled, '$command' is refused" ||
+    { check fail "while the restore isn't settled, '$command' is refused"; cat "$root/out" >&2; }
+done
+run config
+grep -qE "TRIODITIS_RESTORE_PENDING: \"?${created}000\"?" "$root/out" &&
+  check ok "and the gateway's container would be made with RESTORE_PENDING" ||
+  { check fail "and the gateway's container would be made with RESTORE_PENDING"; grep -n RESTORE "$root/out" >&2; }
+sed -i '/^RESTORE_PENDING=/d' "$env_file"
 rm -f "$root/installs" "$root/deploy/.restore-settle"
 
 # An older, unencrypted backup (archive.tgz and secrets.env in the clear) still restores.
+# Its manifest as the first format wrote it: no ID, time, version or Postgres line, so the
+# Postgres version is read from the archived data.
 mkdir -m 700 "$backups/older"
-decrypt "$b1/archive.enc" >"$backups/older/archive.tgz"
 decrypt "$b1/secrets.env.enc" >"$backups/older/secrets.env"
+# shellcheck disable=SC2016 # expanded in the container
+decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
+  mkdir /x && cd /x && tar -xzf - &&
+  sed -i -e "1s/.*/trioditis-backup 1/" -e "/^\(id\|created\|version\|postgres\) /d" trioditis-backup.manifest &&
+  tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/older/archive.tgz"
 fill bridge-whatsapp 'echo three >/v/a'
 run restore --yes "$backups/older"
 [ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] && grep -q "older, unencrypted backup" "$root/out" &&
@@ -195,7 +237,7 @@ decrypt "$b1/secrets.env.enc" >"$backups/wrong/secrets.env"
 # shellcheck disable=SC2016 # expanded in the container
 decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
   mkdir /x && cd /x && tar -xzf - &&
-  sed -i "s/^\(volume [^ ]*_bridge-whatsapp [0-9]*\) [0-9]*$/\1 999999/" trioditis-backup.manifest &&
+  sed -i -e "s/^\(volume [^ ]*_bridge-whatsapp [0-9]*\) [0-9]*$/\1 999999/" -e "/^id /d" trioditis-backup.manifest &&
   tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/wrong/archive.tgz"
 fill bridge-whatsapp 'echo five >/v/a'
 before_wrong=$(contents)
@@ -224,6 +266,13 @@ fill bridge-whatsapp 'echo gone >/v/a'
 run restore --yes "$b1"
 [ "$status" = 2 ] && grep -q -- "--keys <file>" "$root/out" && [ ! -e "$env_file" ] &&
   check ok "with no install, it needs the key file" || { check fail "with no install, it needs the key file"; cat "$root/out" >&2; }
+run restore --yes --keys "$backups/keys" "$b1"
+[ "$status" != 0 ] && grep -q "already has volumes or containers on this Docker" "$root/out" && [ ! -e "$env_file" ] &&
+  [ "$(docker run --rm --log-driver none -v "${project}_bridge-whatsapp:/w:ro" --entrypoint cat "$tool" /w/a)" = gone ] &&
+  check ok "with no install, it won't overwrite the project's volumes another checkout has on this Docker" ||
+  { check fail "with no install, it won't overwrite the project's volumes another checkout has on this Docker"; cat "$root/out" >&2; }
+# A new machine: none of the project's volumes are here.
+docker volume ls -q --filter "label=com.docker.compose.project=$project" | xargs -r docker volume rm -f >/dev/null
 run restore --yes --keys "$backups/keys" "$b1"
 [ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] && [ "$(sort "$env_file")" = "$(grep -v '^OPERATOR_NOTE=' "$root/env.lost" | sort)" ] &&
   [ -e "$root/installs" ] && check ok "with --keys it restores onto a checkout with no install" ||

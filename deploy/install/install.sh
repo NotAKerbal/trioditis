@@ -522,7 +522,12 @@ if [ "$existing_install" = 1 ] && docker volume inspect "${project}_postgres" >/
   done
   installed_version=$(get TRIODITIS_VERSION)
   last_backup_version=$(sed -n 's/^version=\([0-9a-f]*\)$/\1/p' "$here/.last-backup" 2>/dev/null || true)
-  if [ -n "$changed_images" ] && [ "$without_backup" = 0 ] &&
+  # Right after a restore (deploy/trioditis restore, which checked the backup is from this
+  # version), the data is that backup's, made with this version's images, whatever the
+  # containers left from before run: going back to it is what's happening.
+  restoring=0
+  [ ! -e "$here/.restore-settle" ] && [ -z "$(get RESTORE_PENDING)" ] || restoring=1
+  if [ -n "$changed_images" ] && [ "$without_backup" = 0 ] && [ "$restoring" = 0 ] &&
     { [ -z "$installed_version" ] || [ "$last_backup_version" != "$installed_version" ]; }; then
     die "This version changes the database images ($(echo $changed_images | sed 's/ /, /g')), which change the data in place, and there's no backup from the version installed now to go back to. Back up first (deploy/trioditis backup <directory>), then run this again; or, to go on without one, run it with --without-backup."
   fi
@@ -766,31 +771,54 @@ fi
 # After a restore (deploy/trioditis restore), before anything that sends starts: the restored
 # backup is a moment in the past, so every send it holds as still on its way may have gone out
 # since. The functions are deployed, then every such send is made `unknown` rather than sent
-# again (deploy/scripts/settle-restore.mjs). deploy/.restore-settle stays until that's done, so a
-# run that stops partway settles them on the next one.
-if [ -e "$here/.restore-settle" ]; then
-  backup_at=$(sed -n 's/^backup_at=\([0-9]\{1,16\}\)$/\1/p' "$here/.restore-settle")
-  [ -n "$backup_at" ] || die "deploy/.restore-settle isn't one a restore wrote. Run the restore again."
+# again (deploy/scripts/settle-restore.mjs). The restore's gate (deploy/.restore-settle, and
+# RESTORE_PENDING in deploy/.env, which keeps the gateway from starting) stays until that's done,
+# so a run that stops partway settles them on the next one.
+pending=$(get RESTORE_PENDING)
+if [ -e "$here/.restore-settle" ] || [ -n "$pending" ]; then
+  backup_at=$(sed -n 's/^backup_at=\([0-9]\{1,16\}\)$/\1/p' "$here/.restore-settle" 2>/dev/null || true)
+  backup_at=${backup_at:-$pending}
+  [[ "$backup_at" =~ ^[0-9]{1,16}$ ]] || die "deploy/.restore-settle isn't one a restore wrote. Run the restore again."
   say "Settling the sends the restored backup holds, before anything can send them"
-  compose stop gateway >/dev/null 2>&1 || true
+  compose rm -f -s gateway >/dev/null 2>&1 || true
   if ! compose run --rm --no-deps -T functions >/dev/null; then
     compose logs --no-log-prefix --tail 20 functions >&2 || true
     die "Deploying the functions after the restore failed (above). Fix the cause and run this again."
   fi
   compose run --rm --no-deps -T -e "RESTORE_BACKUP_AT=$backup_at" --entrypoint node functions deploy/scripts/settle-restore.mjs ||
     die "Settling the restored sends failed (above), so nothing that sends was started. Fix the cause and run this again."
+  ! has RESTORE_PENDING || drop_var RESTORE_PENDING
   rm -f "$here/.restore-settle"
 fi
 
-say "Deploying the functions and starting the server"
-if ! compose up -d --remove-orphans; then
-  # The functions job (deploy, then migrations) is what usually stops it; its log says why.
-  functions=$(compose ps -aq functions 2>/dev/null || true)
-  if [ -n "$functions" ] && [ "$(docker inspect -f '{{.State.ExitCode}}' "$functions" 2>/dev/null)" != 0 ]; then
-    compose logs --no-log-prefix --tail 20 functions >&2 || true
-    die "Deploying the functions or running a migration failed (its log is above; a failing function's details are in deploy/trioditis logs backend). Fix the cause and run this again."
-  fi
+# The functions first (deploy, then migrations), with only the database and backend beside
+# them: the gateway, bridge hosts and Caddy start only once those have finished, so a version
+# whose functions or migrations fail never takes writes or sends anything.
+say "Deploying the functions"
+compose up -d --remove-orphans postgres backend functions || die "Starting the database and backend failed (above). Fix the cause and run this again."
+functions=$(compose ps -aq functions 2>/dev/null | head -1 || true)
+[ -n "$functions" ] || die "The functions job didn't start (above). Fix the cause and run this again."
+functions_state=unknown
+for _ in $(seq 900); do
+  functions_state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$functions" 2>/dev/null || echo unknown)
+  case "$functions_state" in exited* | dead*) break ;; esac
+  sleep 1
+done
+if [ "$functions_state" != 'exited 0' ]; then
+  compose logs --no-log-prefix --tail 20 functions >&2 || true
+  die "Deploying the functions or running a migration failed (its log is above; a failing function's details are in deploy/trioditis logs backend). Fix the cause and run this again."
+fi
+say "Starting the server"
+# Without dependencies, so the finished functions job isn't run again: the gateway, Caddy and
+# the sidecars, then, once the gateway is healthy, the bridge hosts that wait for it.
+mapfile -t late_services < <(compose config --services | grep -vxE 'postgres|backend|functions|bridge-.*')
+mapfile -t bridge_services < <(compose config --services | grep -xE 'bridge-.*' || true)
+if [ "${#late_services[@]}" -gt 0 ] && ! compose up -d --no-deps "${late_services[@]}"; then
   die "Starting the server failed (above). Fix the cause and run this again."
+fi
+wait_healthy gateway 90
+if [ "${#bridge_services[@]}" -gt 0 ] && ! compose up -d --no-deps "${bridge_services[@]}"; then
+  die "Starting the bridge hosts failed (above). Fix the cause and run this again."
 fi
 ready_services=(gateway caddy)
 for network in "${network_list[@]}"; do ready_services+=("bridge-$network"); done

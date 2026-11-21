@@ -30,7 +30,13 @@ const secret = Buffer.from(text, 'base64url')
 // Exactly a key, as the installer writes one: 32 bytes of canonical unpadded base64url.
 if (secret.length !== 32 || secret.toString('base64url') !== text) fail("BACKUP_KEY isn't a key")
 
-const fileKey = (salt) => Buffer.from(hkdfSync('sha256', secret, salt, 'trioditis backup v1', 32))
+// BACKUP_CONTEXT names the file within its backup (`<backup id>/archive`, `<backup id>/settings`)
+// and goes into the key, so a file only decrypts as itself: one backup's archive put beside
+// another's settings, or a file renamed to the other, doesn't.
+const context = process.env.BACKUP_CONTEXT ?? ''
+if (!/^[A-Za-z0-9._/-]{0,200}$/.test(context)) fail("BACKUP_CONTEXT isn't a backup file's name")
+const fileKey = (salt) =>
+  Buffer.from(hkdfSync('sha256', secret, salt, context ? `trioditis backup v1 ${context}` : 'trioditis backup v1', 32))
 function nonce(index, last) {
   const value = Buffer.alloc(12)
   value.writeBigUInt64BE(BigInt(index), 3)

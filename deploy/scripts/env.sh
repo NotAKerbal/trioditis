@@ -38,6 +38,7 @@ env_check() {
       value = $0; sub(/^[^=]*=/, "", value)
       if (seen[name]++) { print "line " NR " sets " name " again"; bad = 1 }
       if (name == "BRIDGE_PRIVATE_KEY" || name == "AGENT_ACCESS_PRIVATE_KEY" || name == "BACKUP_KEY") ok = key(value)
+      else if (name == "RESTORE_PENDING") ok = value ~ /^[0-9]*$/
       else if (name == "LOGIN_BROWSER_MAX") ok = value ~ /^[1-9][0-9]?$/ && value + 0 <= 64
       else if (name == "DEBIAN_SNAPSHOT") ok = value ~ /^(2[0-9][0-9][0-9][01][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-5][0-9]Z)?$/
       else if (name == "UPDATE_BACKUP_DIR") ok = value ~ /^(\/[A-Za-z0-9._~@+=,%-]+)*\/?$/ && value !~ /(^|\/)\.\.?(\/|$)/
