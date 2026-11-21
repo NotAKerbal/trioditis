@@ -47,7 +47,9 @@ import {
   type ChatFilter,
   type LabelId,
 } from '~/data/chats.ts'
+import { warmChat } from '~/data/chat-content.ts'
 import { useSendMutations } from '~/data/messages.ts'
+import { warmPeople } from '~/data/people.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
@@ -78,6 +80,10 @@ interface SidebarProps {
   shownRef: { current: string[] | null }
   chatsRef: { current: Map<string, Chat> }
 }
+
+/** How many of the first unread chats are fetched ahead, and how long after the list settles. */
+const WARM_UNREAD = 3
+const WARM_UNREAD_AFTER_MS = 1_500
 
 const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
   { view: 'inbox', label: 'All chats', icon: <Inbox /> },
@@ -183,6 +189,28 @@ export function Sidebar({
   const read = (inbox ?? []).filter((c) => !isUnread(c))
   if (focused && labelId) read.sort((a, b) => b.row.lastMessageAt - a.row.lastMessageAt)
 
+  // The first few unread chats are the likeliest to be opened next: fetched ahead once the list
+  // has settled, so going through them is instant (data/chat-content.ts).
+  const nextUp = unread
+    .filter((c) => c.id !== selectedId)
+    .slice(0, WARM_UNREAD)
+    .map((c) => c.id)
+    .join()
+  const unreadRef = useRef(unread)
+  unreadRef.current = unread
+  useEffect(() => {
+    if (!nextUp) return
+    const ids = nextUp.split(',')
+    const timer = setTimeout(() => {
+      // Most likely last, so it's the one kept longest.
+      for (const id of [...ids].reverse()) {
+        const chat = unreadRef.current.find((c) => c.id === id)
+        if (chat) warmChat(chat)
+      }
+    }, WARM_UNREAD_AFTER_MS)
+    return () => clearTimeout(timer)
+  }, [nextUp])
+
   // Scheduled messages, each with its chat (when one of the loaded views has it) and its opened text.
   const scheduled = useMemo(
     () =>
@@ -269,7 +297,16 @@ export function Sidebar({
         <Button variant="ghost" size="icon" aria-label="New chat" onClick={onNewChat}>
           <SquarePen className="size-[17px]" />
         </Button>
-        <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="People"
+          // The address book is fetched ahead as the person reaches for it, so it opens full.
+          onPointerEnter={warmPeople}
+          onFocus={warmPeople}
+          onPointerDown={warmPeople}
+          onClick={onPeople}
+        >
           <Users className="size-[17px]" />
         </Button>
         <DropdownMenu>
@@ -428,6 +465,7 @@ export function Sidebar({
                 count={read.length}
                 more={main}
                 open={open.read}
+                ready
                 onToggle={() => setOpen((o) => ({ ...o, read: !o.read }))}
               >
                 {read.map((c) => row(c))}
@@ -563,6 +601,9 @@ function SectionHeader({ label, count, note }: { label: string; count: number | 
 /**
  * A collapsed section, like T3 Code's: label, count and a rule; click to open. Hidden only when
  * the view is empty to its end: a page can hold no rows yet more to come.
+ *
+ * Its rows stay drawn, out of sight, once it has been opened, and from the start when `ready`,
+ * so opening it shows them at once, their pictures already loaded, rather than drawing them then.
  */
 function Divider({
   label,
@@ -571,6 +612,7 @@ function Divider({
   total,
   more,
   open,
+  ready = false,
   onToggle,
   children,
 }: {
@@ -582,9 +624,14 @@ function Divider({
   /** The view has more chats than are loaded: the count reads "50+" and opening shows Load more. */
   more?: ChatList
   open: boolean
+  /** Draw its rows from the start, while it's still folded: for the section opened most. */
+  ready?: boolean
   onToggle: () => void
   children: ReactNode
 }) {
+  const [opened, setOpened] = useState(open)
+  if (open && !opened) setOpened(true)
+  const drawn = useIdle(ready) || opened
   if (count === 0 && !more?.canLoadMore && !total?.count) return null
   return (
     <>
@@ -603,10 +650,26 @@ function Divider({
         </span>
         <span className="h-px flex-1 bg-border-strong" />
       </Button>
-      {open ? children : null}
+      {drawn ? <div hidden={!open}>{children}</div> : null}
       {open && more ? <LoadMore list={more} /> : null}
     </>
   )
+}
+
+/** True once the browser has had a moment free, after `wanted` turns true: work that can wait. */
+function useIdle(wanted: boolean) {
+  const [idle, setIdle] = useState(false)
+  useEffect(() => {
+    if (!wanted || idle) return
+    // Safari has no requestIdleCallback; a short wait does as well there.
+    if ('requestIdleCallback' in window) {
+      const handle = window.requestIdleCallback(() => setIdle(true), { timeout: 2_000 })
+      return () => window.cancelIdleCallback(handle)
+    }
+    const timer = setTimeout(() => setIdle(true), 500)
+    return () => clearTimeout(timer)
+  }, [wanted, idle])
+  return idle
 }
 
 /**

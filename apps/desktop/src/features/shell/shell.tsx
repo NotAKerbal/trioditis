@@ -5,6 +5,7 @@ import { useChat, useChatActions, type Chat, type ChatId } from '~/data/chats.ts
 import { NOTHING_READ, readOnOpen } from '~/data/read-on-open.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
+import { WarmChats, WarmPeople } from '~/features/chat/warm-chats.tsx'
 import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
 import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
@@ -155,6 +156,8 @@ export function Shell() {
       <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />
       <NewChatDialog open={newChat} onOpenChange={setNewChat} onStarted={openStarted} />
       <UpdateNotice />
+      <WarmChats />
+      <WarmPeople />
     </div>
   )
 }

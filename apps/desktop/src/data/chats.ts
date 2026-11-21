@@ -163,7 +163,12 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
   })
   const chats = useMemo(
     () =>
-      !enabled || status === 'LoadingFirstPage' ? undefined : results.map((row) => toChat(row as ChatRow, session)),
+      !enabled || status === 'LoadingFirstPage'
+        ? undefined
+        : results.map((row) => {
+            remember(row as ChatRow, session)
+            return toChat(row as ChatRow, session)
+          }),
     [enabled, status, results, session],
   )
   return {
@@ -174,7 +179,25 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
   }
 }
 
-export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
+// The latest row seen for each chat, from the list or the chat itself, so a chat opens at once
+// with what the sidebar already showed while the server is asked for it (useOpenChat). Rows are
+// sealed, and only this page's memory holds them.
+const knownRows = new Map<string, ChatRow>()
+const rowKey = (session: Session, chatId: string) => `${session.userId}/${chatId}`
+
+function remember(row: ChatRow, session: Session) {
+  knownRows.set(rowKey(session, row._id), row)
+}
+
+/** The open chat, and whether the server has answered for it yet. */
+export interface OpenChatState {
+  /** Undefined while it loads with nothing known of it; null when it's gone or not the person's. */
+  chat: Chat | null | undefined
+  /** False while what's shown is the sidebar's copy, not yet the server's answer. */
+  confirmed: boolean
+}
+
+export function useOpenChat(chatId: ChatId | undefined): OpenChatState {
   const session = useSession()
   // 'skip', not `enabled: false`: the Convex adapter subscribes to any query it's given.
   const { data, error } = useQuery({
@@ -182,14 +205,23 @@ export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
     retry: false,
   })
   return useMemo(() => {
-    if (!chatId) return null
+    if (!chatId) return { chat: null, confirmed: true }
     // A ConvexError is the server saying the chat is gone or not the person's. Any other error
     // is the server not answering in time, as when every query is asked again at once after the
     // computer wakes: a chat already on screen stays open, with what it last showed, rather
     // than closing under the person.
-    if (error && (error instanceof ConvexError || !data)) return null
-    return data ? toChat(data as ChatRow, session) : undefined
+    if (error && (error instanceof ConvexError || !data)) return { chat: null, confirmed: true }
+    if (data) {
+      remember(data as ChatRow, session)
+      return { chat: toChat(data as ChatRow, session), confirmed: true }
+    }
+    const known = knownRows.get(rowKey(session, chatId))
+    return { chat: known ? toChat(known, session) : undefined, confirmed: false }
   }, [chatId, data, error, session])
+}
+
+export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
+  return useOpenChat(chatId).chat
 }
 
 export function useChatCounts() {

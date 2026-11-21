@@ -68,7 +68,8 @@ import { usePage } from '~/features/people/paging.ts'
 import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId } from '~/data/google-contacts.ts'
 import { canSignInToGoogle, GoogleSignInError, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
 import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
-import { Group, Loading } from '~/features/settings/layout.tsx'
+import { Group } from '~/features/settings/layout.tsx'
+import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
 
@@ -160,6 +161,10 @@ function People({
   }, [people, contacts, suggestions])
   const byContact = useMemo(() => contactsByKey(contacts), [contacts])
   const selected = view.startsWith('p:') ? sorted.find((p) => `p:${p.personKey}` === view) : undefined
+  // The list shows once the cards and the contacts are both here: the rows for suggested links
+  // and contacts not in People come from the two together, and would push the list down after.
+  const listed = !!people && !!contacts
+  const connected = useConnected()
 
   /** Runs a write, saying so if it fails. True once it's saved. */
   async function attempt(write: () => Promise<unknown>, failure: string) {
@@ -298,7 +303,7 @@ function People({
       >
         <DialogTitle className="sr-only">People</DialogTitle>
         {/* On a narrow window the list is full width, under the window's close button. */}
-        <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border pr-14 pl-2.5 md:px-2.5">
+        <div className="relative flex h-14 shrink-0 items-center gap-1 border-b border-border pr-14 pl-2.5 md:px-2.5">
           <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
             <Input
               value={query}
@@ -347,6 +352,7 @@ function People({
               if (file) void importFile(file)
             }}
           />
+          <SyncBar active={!listed || !connected} offline={!connected} />
           <GoogleGuide
             open={googleGuide}
             onOpenChange={setGoogleGuide}
@@ -356,8 +362,10 @@ function People({
             }}
           />
         </div>
-        <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2" aria-label="People" aria-busy={busy || !people}>
-          {suggestions.length && !query ? (
+        <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2" aria-label="People" aria-busy={busy || !listed}>
+          {!listed ? (
+            <PeopleSkeleton />
+          ) : suggestions.length && !query ? (
             <NavRow
               icon={<Link2 />}
               active={view === 'suggested'}
@@ -377,11 +385,7 @@ function People({
               Not in People
             </NavRow>
           ) : null}
-          {!people ? (
-            <div className="px-2">
-              <Loading />
-            </div>
-          ) : shown.length ? (
+          {!listed ? null : shown.length ? (
             shown.map((p) => (
               <Button
                 variant="bare"
@@ -1219,5 +1223,20 @@ function PersonForm({
         </Button>
       </div>
     </form>
+  )
+}
+
+/** Where the list of people will be, while it loads: rows' shapes, as the list will sit. */
+function PeopleSkeleton() {
+  return (
+    // It waits a moment first, so a list that loads quickly never shows it.
+    <div aria-label="Loading people" className="animate-fade-in-late">
+      {Array.from({ length: 8 }, (_, i) => (
+        <div key={i} className="flex h-11 items-center gap-2.5 px-2">
+          <span className="size-7 shrink-0 rounded-full bg-muted" />
+          <span className="h-3 flex-1 rounded bg-muted" />
+        </div>
+      ))}
+    </div>
   )
 }

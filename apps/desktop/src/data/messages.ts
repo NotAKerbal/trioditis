@@ -136,7 +136,9 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
     return () => clearTimeout(timer)
   }, [shown, expires])
   const data = useMemo(() => Object.fromEntries([...shown].map(([id, s]) => [id, s.list])) as ReactionAnswer, [shown])
-  return useMemo(() => {
+  // Some of these messages have had no answer yet.
+  const pending = results.some((r) => r.pending)
+  const reactions = useMemo(() => {
     const out = new Map<string, Reaction[]>()
     for (const [messageId, list] of Object.entries(data)) {
       // The server gives a message's first 100 reactions at most: at that, any count may be more.
@@ -152,6 +154,7 @@ export function useReactions(chatId: ChatId, messages: { id: Id<'messages'>; at:
     }
     return out
   }, [data])
+  return { reactions, pending }
 }
 
 /**

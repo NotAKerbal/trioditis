@@ -11,7 +11,8 @@ import {
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { AlarmClock, Archive, ArchiveRestore, Bell, BellOff, Check, Pin } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
+import { warmChat } from '~/data/chat-content.ts'
 import { networkName, type Chat } from '~/data/chats.ts'
 import { useDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
@@ -19,6 +20,9 @@ import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { ChatAvatar } from '~/features/chat/chat-avatar.tsx'
 import { usePrefs } from '~/lib/prefs.ts'
 import { rowPreview } from './row-preview.ts'
+
+/** How long the pointer rests on a row before its chat is fetched ahead: a pass over the list doesn't. */
+const WARM_AFTER_MS = 80
 
 /** What a row's hover actions do. The sidebar decides; the row only offers them. */
 export interface RowActions {
@@ -55,11 +59,22 @@ export function ChatRow({
     network: networkName(chat.network),
   })
   const snoozed = chat.row.snoozedUntil !== null && !chat.row.woke
+  // Its chat is fetched ahead once the person shows they may open it, so a click opens it at once
+  // (data/chat-content.ts): the pointer resting on it, a key moving to it, or a press starting.
+  const resting = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const warm = () => warmChat(chat)
   return (
     <div className="group relative">
       <Button
         variant="bare"
         type="button"
+        onPointerEnter={() => {
+          clearTimeout(resting.current)
+          resting.current = setTimeout(warm, WARM_AFTER_MS)
+        }}
+        onPointerLeave={() => clearTimeout(resting.current)}
+        onPointerDown={warm}
+        onFocus={warm}
         onClick={onOpen}
         aria-current={selected ? 'true' : undefined}
         className={cn(

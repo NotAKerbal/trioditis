@@ -14,8 +14,11 @@ import {
 import { sealJson, type Envelope } from '@trioditis/crypto'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
-import { useMutation, usePaginatedQuery } from 'convex/react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useMutation } from 'convex/react'
+// The cached hook keeps the address book's pages subscribed for a while after the People window
+// closes (main.tsx), so opening it again shows everyone at once, already up to date.
+import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useAccounts } from '~/data/chats.ts'
 import { errorCode } from '~/lib/errors.ts'
 import { newClientId, openCached } from '~/lib/sealed.ts'
@@ -133,6 +136,38 @@ export function useNetworkContacts(): NetworkContact[] | undefined {
       ]
     })
   }, [contacts.results, contacts.status, identifiers.results, identifiers.status, session])
+}
+
+// The People window's lists, fetched ahead while the person reaches for it (WarmPeople), and for
+// a minute after, so it opens with everyone there.
+const WARM_PEOPLE_MS = 60_000
+let warmUntil = 0
+const warmListeners = new Set<() => void>()
+
+/** Fetches the address book ahead, for the next minute. */
+export function warmPeople() {
+  const was = warmUntil > Date.now()
+  warmUntil = Date.now() + WARM_PEOPLE_MS
+  if (!was) warmListeners.forEach((l) => l())
+}
+
+/** Whether the address book is being fetched ahead now; false again a minute after the last ask. */
+export function usePeopleWarm(): boolean {
+  const until = useSyncExternalStore(
+    (onChange) => {
+      warmListeners.add(onChange)
+      return () => warmListeners.delete(onChange)
+    },
+    () => warmUntil,
+  )
+  const [, setTick] = useState(0)
+  const left = until - Date.now()
+  useEffect(() => {
+    if (left <= 0) return
+    const timer = setTimeout(() => setTick((t) => t + 1), left + 50)
+    return () => clearTimeout(timer)
+  }, [left, until])
+  return left > 0
 }
 
 /** Contacts by `contactKey`, for showing a card's links. */
