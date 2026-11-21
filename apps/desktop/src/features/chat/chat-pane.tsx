@@ -480,7 +480,17 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
             // person chose to risk a duplicate on the network, once each time (send-again.ts).
             const text = m.body?.body
             const state = m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined
-            if (!text || !state || !bridgeKey) return
+            if (!text || !state) return
+            // The retry state can load before the bridge key on a cold start: say why nothing
+            // happened rather than ignore the click.
+            if (!bridgeKey)
+              return toast(
+                bridge.status === 'loading'
+                  ? 'Still connecting to the server. Try again in a moment.'
+                  : bridge.status === 'error'
+                    ? 'The server’s bridge key couldn’t be loaded, so nothing can be sent. Reload to try again.'
+                    : 'This server has no bridge key yet, so nothing can be sent.',
+              )
             void sendAgain(state, (nextId) => {
               const sealed = sealText(text, nextId, session.userId, session.keyPair.publicKey, bridgeKey)
               return sendAgainMutation({
