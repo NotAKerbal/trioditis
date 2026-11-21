@@ -41,6 +41,15 @@ export function isExternalAllowed(target: string): boolean {
   }
 }
 
+/**
+ * Whether closing the last window quits the app. A Mac keeps running for notifications, as Mac
+ * apps do; elsewhere it quits, except mid-change of server, when the old server's window has
+ * closed and the new one's is about to open.
+ */
+export function quitsWhenAllClosed(platform: string, changingServer: boolean): boolean {
+  return platform !== 'darwin' && !changingServer
+}
+
 export function sameOrigin(target: string, origin: string): boolean {
   try {
     return new URL(target).origin === origin

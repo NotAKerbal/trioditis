@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isExternalAllowed, normalizeServer, sameOrigin, serverKind } from '../electron/server.ts'
+import { isExternalAllowed, normalizeServer, quitsWhenAllClosed, sameOrigin, serverKind } from '../electron/server.ts'
 
 describe('the desktop app’s server address', () => {
   it('takes a bare host as https, and keeps only the origin', () => {
@@ -43,5 +43,18 @@ describe('where the app goes', () => {
     expect(isExternalAllowed('mailto:a@example.com')).toBe(true)
     expect(isExternalAllowed('file:///etc/passwd')).toBe(false)
     expect(isExternalAllowed('smb://host/share')).toBe(false)
+  })
+})
+
+describe('closing the last window', () => {
+  it('quits on Windows and Linux, but not on a Mac', () => {
+    expect(quitsWhenAllClosed('win32', false)).toBe(true)
+    expect(quitsWhenAllClosed('linux', false)).toBe(true)
+    expect(quitsWhenAllClosed('darwin', false)).toBe(false)
+  })
+
+  it('doesn’t quit while the app changes server, as an invitation link does', () => {
+    expect(quitsWhenAllClosed('win32', true)).toBe(false)
+    expect(quitsWhenAllClosed('linux', true)).toBe(false)
   })
 })
