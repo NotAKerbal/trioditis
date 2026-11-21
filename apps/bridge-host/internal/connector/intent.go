@@ -525,27 +525,41 @@ func (c *Connector) requestState(ctx context.Context, o *owner, request bool) (s
 	}, nil
 }
 
+// setMembership records a member joining or leaving a chat after it was created, and chooses
+// the chat's collage again.
 func (c *Connector) setMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) error {
+	changed, err := c.recordMembership(ctx, roomID, mxid, membership)
+	if err != nil || !changed {
+		return err
+	}
+	if _, isGhost := ids.ParseGhostMXID(mxid); isGhost {
+		c.refreshCollageOrLog(ctx, roomID, collageChange{})
+	}
+	return nil
+}
+
+// recordMembership records a member joining or leaving, and says whether it changed anything.
+func (c *Connector) recordMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) (bool, error) {
 	switch membership {
 	case event.MembershipJoin, event.MembershipInvite:
 		added, err := c.Store.AddMember(ctx, string(roomID), string(mxid))
 		if err != nil || !added {
-			return err
+			return false, err
 		}
 		if ghost, ok := ids.ParseGhostMXID(mxid); ok {
 			o, err := c.owner(ctx, roomID)
 			if errors.Is(err, errNotPortal) {
-				return nil
+				return true, nil
 			} else if err != nil {
-				return err
+				return true, err
 			}
-			return c.ensureContact(ctx, o, ghost)
+			return true, c.ensureContact(ctx, o, ghost)
 		}
-		return nil
+		return true, nil
 	case event.MembershipLeave, event.MembershipBan:
-		return c.Store.RemoveMember(ctx, string(roomID), string(mxid))
+		return true, c.Store.RemoveMember(ctx, string(roomID), string(mxid))
 	default:
-		return nil
+		return false, nil
 	}
 }
 
@@ -714,8 +728,9 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 		return id.RoomID("!local_" + string(ids.LocalEventID("room", strconv.FormatInt(time.Now().UnixNano(), 10)))[1:] + ":" + ids.ServerName), nil
 	}
 	members := append(append([]id.UserID{}, req.BeeperInitialMembers...), req.Invite...)
+	// Recorded only: the collage is chosen once they're all in.
 	for _, member := range members {
-		if err := in.c.setMembership(ctx, roomID, member, event.MembershipJoin); err != nil {
+		if _, err := in.c.recordMembership(ctx, roomID, member, event.MembershipJoin); err != nil {
 			return "", err
 		}
 	}
@@ -738,6 +753,11 @@ func (in *Intent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (i
 	}
 	if err := in.c.emitChat(ctx, roomID, override); err != nil && !errors.Is(err, errNotPortal) {
 		return "", err
+	}
+	if kind != "dm" {
+		// After the chat, which the collage belongs to. bridgev2 hasn't saved the portal yet,
+		// so it's said here that this is a group.
+		in.c.refreshCollageOrLog(ctx, roomID, collageChange{group: true})
 	}
 	return roomID, nil
 }
@@ -933,6 +953,7 @@ func (c *Connector) DescribeDirectChats(ctx context.Context) error {
 		return err
 	}
 	failed := 0
+	sent := map[id.RoomID]describedAs{}
 	for _, portal := range portals {
 		if err = ctx.Err(); err != nil {
 			return err
@@ -957,12 +978,51 @@ func (c *Connector) DescribeDirectChats(ctx context.Context) error {
 		}
 		if err = c.emitChat(ctx, portal.MXID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {
 			failed++
+		} else if err == nil {
+			sent[portal.MXID] = describedAsOf(portal)
+		}
+	}
+	// bridgev2 sends a chat's new name or picture before it saves it, so one changing while this
+	// ran could have been described from the database's older copy after its new one went out.
+	// Once such a change has had time to be saved, a chat whose saved copy differs from the one
+	// it was described from is described again, from the saved one.
+	settle := c.DescribeSettle
+	if settle == 0 {
+		settle = 5 * time.Second
+	}
+	if len(sent) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(settle):
+		}
+	}
+	for roomID, was := range sent {
+		portal, err := c.Bridge.DB.Portal.GetByMXID(ctx, roomID)
+		if err != nil {
+			failed++
+		} else if portal != nil && describedAsOf(portal) != was {
+			if err = c.emitChat(ctx, roomID, chatOverride{}); err != nil && !errors.Is(err, errNotPortal) {
+				failed++
+			}
 		}
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d direct chats couldn't be described again", failed)
 	}
 	return c.Store.SetDescribedDirectChats(ctx)
+}
+
+// describedAs is what a chat's description is made from, as the database has it.
+type describedAs struct {
+	name, topic string
+	avatar      id.ContentURIString
+	otherUser   networkid.UserID
+	request     bool
+}
+
+func describedAsOf(p *database.Portal) describedAs {
+	return describedAs{p.Name, p.Topic, p.AvatarMXC, p.OtherUserID, p.MessageRequest}
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
@@ -1215,6 +1275,9 @@ func (c *Connector) ghostProfileChanged(ctx context.Context, ghost networkid.Use
 		if err = c.emitContact(ctx, o, ghost, name, avatar); err != nil {
 			return err
 		}
+	}
+	if avatar != nil {
+		c.pictureChanged(ctx, ghost, *avatar != "", rooms)
 	}
 	return nil
 }

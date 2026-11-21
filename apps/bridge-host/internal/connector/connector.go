@@ -50,6 +50,9 @@ type Options struct {
 	SendTimeout time.Duration
 	// Signin, if set, runs cookie login steps in the sign-in browser.
 	Signin *signin.Launcher
+	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
+	// before checking them; five seconds if zero.
+	DescribeSettle time.Duration
 }
 
 // Connector implements bridgev2.MatrixConnector.
@@ -80,6 +83,13 @@ type Connector struct {
 	// starting holds a lock per login (networkid.UserLoginID → *sync.Mutex), so one login's
 	// startChat commands run one at a time.
 	starting sync.Map
+	// collageLocks holds a lock per room (id.RoomID → *sync.Mutex), so a chat's collage is
+	// chosen, sent and recorded by one caller at a time, and the record is what was sent last.
+	collageLocks sync.Map
+	// pictures holds, for each ghost whose picture was set or removed in this process, whether
+	// they have one now (networkid.UserID → bool): newer than the saved ghost until bridgev2
+	// saves it, and never older after.
+	pictures sync.Map
 	wake     chan struct{}
 }
 

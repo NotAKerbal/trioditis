@@ -13,6 +13,7 @@ import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import type { ChatCollagePlaintext } from '@trioditis/core'
 import {
   openCached,
   tryOpen,
@@ -42,6 +43,8 @@ export interface Chat {
   avatar: Attachment | undefined
   /** The network the picture is fetched through, when it isn't the chat's own (a conversation's). */
   avatarNetwork?: Network | undefined
+  /** For a group: the members (ghost IDs) whose pictures make one when it has none of its own. */
+  collage: string[]
   /** False until the bridge host has described the chat (or if this device can't open it). */
   described: boolean
   unread: number
@@ -154,6 +157,34 @@ export function avatarOf(
   return kept.get(key)
 }
 
+/** The most members a collage shows. */
+const COLLAGE_SIZE = 4
+
+// Opened collages (openCached), apart from metadata: a different object.
+const collageCache = new Map<string, ChatCollagePlaintext | null>()
+
+/** The members a chat's collage shows, as far as the bridge host named them well. */
+export function collageOf(collage: Pick<ChatCollagePlaintext, 'ghosts'> | null): string[] {
+  if (!Array.isArray(collage?.ghosts)) return []
+  const ids = collage.ghosts.filter((id): id is string => typeof id === 'string' && id !== '')
+  return [...new Set(ids)].slice(0, COLLAGE_SIZE)
+}
+
+function openCollage(row: ChatRow, session: Session): string[] {
+  if (row.kind === 'dm' || !row.sealedCollage) return []
+  return collageOf(
+    openCached<ChatCollagePlaintext>(
+      collageCache,
+      row.sealedCollage,
+      session.keyPair,
+      session.kid,
+      'chat',
+      session.userId,
+      `${row.portalId}/collage`,
+    ),
+  )
+}
+
 export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
   const meta = openMeta(row, session)
   const own = meta?.name?.trim()
@@ -167,6 +198,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     named: !!own,
     topic: meta?.topic,
     avatar: avatarOf(`${session.userId}/${row._id}`, meta),
+    collage: openCollage(row, session),
     described: !!meta,
     unread: row.unreadCount,
     hasUnread: row.unreadCount > 0 || row.markedUnread,

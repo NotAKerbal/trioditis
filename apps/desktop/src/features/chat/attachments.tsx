@@ -5,7 +5,6 @@ import { Dialog, DialogContent, DialogTitle } from '@trioditis/ui/dialog'
 import { cn } from '@trioditis/ui/lib/utils'
 import { Download, FileIcon, Play } from 'lucide-react'
 import { useEffect, useState, type ComponentProps } from 'react'
-import type { Chat } from '~/data/chats.ts'
 import { isAudio, isImage, isVideo, loadsByItself, playable, saveMedia, useMedia } from '~/data/media.ts'
 import { useSession } from '~/lib/session.tsx'
 
@@ -19,27 +18,6 @@ export function MediaAvatar({
 }: Omit<ComponentProps<typeof Avatar>, 'src'> & { network: Network; picture: Attachment | undefined }) {
   const media = useMedia(network, picture, !!picture && isImage(picture))
   return <Avatar {...props} src={media.url} />
-}
-
-/**
- * A chat's avatar: a direct chat's person's own People picture when their card has one, else
- * the picture the network gives the chat. People get circles, groups rounded squares.
- */
-export function ChatAvatar({
-  chat,
-  ...props
-}: Omit<ComponentProps<typeof Avatar>, 'src' | 'name' | 'shape'> & { chat: Chat }) {
-  const shape = chat.row.kind === 'dm' ? 'circle' : 'square'
-  if (chat.person?.photo) return <Avatar {...props} name={chat.name} shape={shape} src={chat.person.photo} />
-  return (
-    <MediaAvatar
-      {...props}
-      network={chat.avatarNetwork ?? chat.network}
-      picture={chat.avatar}
-      name={chat.name}
-      shape={shape}
-    />
-  )
 }
 
 const sizeFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 })

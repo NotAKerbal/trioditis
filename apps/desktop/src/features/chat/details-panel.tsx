@@ -21,7 +21,7 @@ import {
 } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
 import { PersonProfile, type ContactRef } from '~/features/people/profile.tsx'
-import { ChatAvatar } from './attachments.tsx'
+import { ChatAvatar } from './chat-avatar.tsx'
 import { labelName, MAX_LABEL_NAME, renamedLabel } from './labels.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { LABEL_COLORS, newClientId, sealLabel, type LabelColor } from '~/lib/sealed.ts'

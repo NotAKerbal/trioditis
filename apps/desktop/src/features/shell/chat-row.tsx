@@ -16,7 +16,7 @@ import { membersOf, networkName, type Chat } from '~/data/chats.ts'
 import { useFirstDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
-import { ChatAvatar } from '~/features/chat/attachments.tsx'
+import { ChatAvatar } from '~/features/chat/chat-avatar.tsx'
 import { usePrefs } from '~/lib/prefs.ts'
 import { rowPreview } from './row-preview.ts'
 

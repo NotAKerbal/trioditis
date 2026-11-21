@@ -121,6 +121,7 @@ var eventShapes = map[string]eventShape{
 	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted", "isRequest"}},
 	EventContact:            {[]string{"ghostId", "sealed"}, nil},
 	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
+	EventChatCollage:        {[]string{"portalId", "sealed"}, nil},
 	EventChatStarted:        {[]string{"requestId"}, []string{"portalId", "error"}},
 	EventLoginState:         {[]string{"state"}, []string{"error", "sealed"}},
 	EventLoginStep:          {[]string{"loginSessionId", "step"}, nil},
@@ -258,7 +259,7 @@ func (e *Event) Validate() error {
 	}
 	if e.Sealed != nil {
 		limit := MaxMessageSealedBytes
-		if e.Type == EventChat || e.Type == EventContact || e.Type == EventContactIdentifiers || e.Type == EventLoginState {
+		if e.Type == EventChat || e.Type == EventChatCollage || e.Type == EventContact || e.Type == EventContactIdentifiers || e.Type == EventLoginState {
 			limit = MaxMetadataSealedBytes
 		}
 		if seal.DecodedLen(e.Sealed.CT) > limit {
@@ -288,6 +289,9 @@ const (
 	EventContact        = "contact"
 	// EventContactIdentifiers carries what one of the person's own logins knows a contact by.
 	EventContactIdentifiers = "contactIdentifiers"
+	// EventChatCollage says which members' pictures make a group's picture when it has none
+	// of its own (ChatCollagePlaintext).
+	EventChatCollage = "chatCollage"
 	// EventChatStarted is a startChat command's outcome: the chat, or why there is none.
 	EventChatStarted  = "chatStarted"
 	EventLoginState   = "loginState"
@@ -521,6 +525,15 @@ type ChatPlaintext struct {
 	// whose profile and People card the chat is with. Sealed, so the server never learns who a
 	// chat is with.
 	DMGhostID string `json:"dmGhostId,omitempty"`
+}
+
+// ChatCollagePlaintext is a chatCollage event's sealed content (kind chat, object ID
+// <portalId>/collage, sealed to the person only): the contacts, by opaque ghost ID, whose
+// pictures clients put together for a group with no picture of its own. Up to four members other
+// than the person, those with a picture first; empty for a direct chat. It is apart from the
+// chat's metadata so that choosing again never sends that metadata, which may be changing.
+type ChatCollagePlaintext struct {
+	Ghosts []string `json:"ghosts"`
 }
 
 // ContactPlaintext is a contact's sealed profile.

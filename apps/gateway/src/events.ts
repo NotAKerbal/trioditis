@@ -93,6 +93,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'chat',
   'contact',
   'contactIdentifiers',
+  'chatCollage',
   'chatStarted',
   'loginState',
   'loginStep',

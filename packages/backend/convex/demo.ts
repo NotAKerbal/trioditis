@@ -279,6 +279,7 @@ async function insertChat(
     portalId: string
     kind: 'dm' | 'group' | 'channel' | 'space'
     sealed: typeof envelope.type
+    sealedCollage?: typeof envelope.type | undefined
     unread: number
     isRequest: boolean
     snoozed: boolean
@@ -294,6 +295,7 @@ async function insertChat(
     portalId: chat.portalId,
     kind: chat.kind,
     sealedMeta: chat.sealed,
+    ...(chat.sealedCollage ? { sealedCollage: chat.sealedCollage } : {}),
     lastMessageAt: chat.lastMessageAt,
     unreadCount: chat.unread,
     pinned: chat.pinned,
@@ -311,6 +313,7 @@ export const writeChat = internalMutation({
     portalId: v.string(),
     kind: chatKind,
     sealed: envelope,
+    sealedCollage: v.optional(envelope),
     unread: v.number(),
     isRequest: v.boolean(),
     snoozed: v.boolean(),
@@ -423,6 +426,10 @@ export const seedForMe = action({
           'chat',
           chat.portalId,
         ),
+        // A demo group has no picture, so its members make one, as a bridge host would say.
+        ...(chat.kind === 'group'
+          ? { sealedCollage: seal({ ghosts: chat.people }, 'chat', `${chat.portalId}/collage`) }
+          : {}),
         unread: chat.unread,
         isRequest: chat.isRequest ?? false,
         snoozed: chat.snoozed ?? false,

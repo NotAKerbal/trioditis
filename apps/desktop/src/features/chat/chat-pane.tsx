@@ -81,7 +81,7 @@ import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sea
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel, type PanelView } from './details-panel.tsx'
-import { ChatAvatar } from './attachments.tsx'
+import { ChatAvatar } from './chat-avatar.tsx'
 import { MessageList } from './message-list.tsx'
 import { ReadWhileOpen } from './read-while-open.tsx'
 import type { ReadOnOpen } from '~/data/read-on-open.ts'
@@ -533,7 +533,11 @@ function OpenChat({
             <ChatAvatar
               chat={shown}
               size={38}
-              badge={<NetworkBadge network={sendChat.network} label={networkName(sendChat.network)} size={16} />}
+              badge={
+                lost ? undefined : (
+                  <NetworkBadge network={sendChat.network} label={networkName(sendChat.network)} size={16} />
+                )
+              }
               className="[--avatar-ring:var(--surface)]"
             />
           </Button>

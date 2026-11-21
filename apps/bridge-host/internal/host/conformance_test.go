@@ -162,6 +162,7 @@ var eventFields = map[string][2][]string{
 	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted", "isRequest"}},
 	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
 	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventChatCollage:        {{"portalId", "sealed"}, nil},
 	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
 	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
 	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
@@ -375,6 +376,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
 	case protocol.EventContactIdentifiers:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
+	case protocol.EventChatCollage:
+		ctx.Kind, ctx.ObjectID = seal.KindChat, evt.PortalID+"/collage"
 	case protocol.EventLoginState:
 		ctx.Kind, ctx.ObjectID = seal.KindAccount, evt.LoginID
 	default:
@@ -468,6 +471,19 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Chat family" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+		// A group's collage is the members other than alice: here the one.
+		collage := gw.waitFor(t, "collage event", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventChatCollage && e.PortalID == portalID
+		})
+		var collagePlain protocol.ChatCollagePlaintext
+		h.open("alice", collage, &collagePlain)
+		if !slices.Equal(collagePlain.Ghosts, []string{first.Sender.GhostID}) {
+			t.Fatalf("collage %q, want the other member %q", collagePlain.Ghosts, first.Sender.GhostID)
+		}
+		var other protocol.ChatCollagePlaintext
+		if err := seal.OpenJSON(collage.Sealed, gw.keys["bob"], seal.Context{Kind: seal.KindChat, OwnerUserID: "alice", ObjectID: portalID + "/collage"}, &other); err == nil {
+			t.Fatal("bob opened alice's collage")
 		}
 		contact := gw.waitFor(t, "contact event", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventContact && e.GhostID == first.Sender.GhostID && e.UserID == "alice"
@@ -584,6 +600,10 @@ func TestConformance(t *testing.T) {
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
 		}
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventChatCollage && e.PortalID == msg.PortalID }); n != 0 {
+			t.Fatalf("a direct chat has %d collages", n)
+		}
+
 		// Who it's with, as the same opaque ID their messages carry, so a client can match it to
 		// their contact and People card.
 		if chatPlain.DMGhostID == "" || chatPlain.DMGhostID != msg.Sender.GhostID {
@@ -598,11 +618,27 @@ func TestConformance(t *testing.T) {
 		}
 		isCarol := func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == msg.PortalID }
 		before := gw.count(isCarol)
+		// A name that changes while the pass runs, saved after it read the chat, is described
+		// again from the saved copy once the pass has let it settle.
+		h.host.Connector.DescribeSettle = 500 * time.Millisecond
+		renamed := make(chan error, 1)
+		go func() {
+			deadline := time.Now().Add(5 * time.Second)
+			for gw.count(isCarol) == before && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			_, err := h.host.Bridge.DB.RawDB.ExecContext(ctx, `UPDATE portal SET name='Carol Renamed' WHERE mxid=$1`, chatRoom(t, h, msg.PortalID))
+			renamed <- err
+		}()
 		if err := h.host.Connector.DescribeDirectChats(ctx); err != nil {
 			t.Fatal(err)
 		}
+		if err := <-renamed; err != nil {
+			t.Fatal(err)
+		}
+		// Described once, then again with the name saved meanwhile.
 		deadline := time.Now().Add(15 * time.Second)
-		for gw.count(isCarol) == before && time.Now().Before(deadline) {
+		for gw.count(isCarol) < before+2 && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		var again *protocol.Event
@@ -616,8 +652,8 @@ func TestConformance(t *testing.T) {
 		}
 		var againPlain protocol.ChatPlaintext
 		h.open("alice", again, &againPlain)
-		if againPlain.DMGhostID != msg.Sender.GhostID || againPlain.Name != "Carol" {
-			t.Fatalf("described again as %+v", againPlain)
+		if againPlain.DMGhostID != msg.Sender.GhostID || againPlain.Name != "Carol Renamed" {
+			t.Fatalf("described last as %+v", againPlain)
 		}
 		// Once is enough: the next start leaves the chats alone.
 		if err := h.host.Connector.DescribeDirectChats(ctx); err != nil {
@@ -1357,3 +1393,13 @@ var testLogLevel = func() zerolog.Level {
 	}
 	return zerolog.WarnLevel
 }()
+
+// chatRoom is the room a chat's opaque portal ID stands for, in bridgev2's database.
+func chatRoom(t *testing.T, h *harness, portalID string) string {
+	t.Helper()
+	room, err := h.host.Store.LookupID(context.Background(), portalID, ids.KindPortal)
+	if err != nil || room == "" {
+		t.Fatalf("room of %s: %q %v", portalID, room, err)
+	}
+	return room
+}
