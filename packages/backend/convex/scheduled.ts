@@ -151,7 +151,7 @@ async function ownScheduled(ctx: MutationCtx, scheduledId: Doc<'scheduledSends'>
 }
 
 /** Sends a scheduled message now. If its time already came, it is already on its way. */
-async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>) {
+export async function sendScheduled(ctx: MutationCtx, row: Doc<'scheduledSends'>) {
   if (row.state !== 'scheduled') return
   const payload = await payloadOf(ctx, row._id)
   if (payload) await ctx.db.delete(payload._id)

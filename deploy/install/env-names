@@ -1,8 +1,8 @@
 # The settings install.sh writes to deploy/.env, which `deploy/trioditis backup` copies into a
-# backup's secrets.env: only these, one per line. The other two names it writes,
-# BRIDGE_PRIVATE_KEY and AGENT_ACCESS_PRIVATE_KEY, never go into a backup (they're kept
-# apart with `deploy/trioditis keys export`). A name the installer starts writing must be
-# added here or to those two; deploy/test/install-settings.sh fails until it is.
+# backup's secrets.env: only these, one per line. The other three names it writes,
+# BRIDGE_PRIVATE_KEY, AGENT_ACCESS_PRIVATE_KEY and BACKUP_KEY, never go into a backup (they're
+# kept apart with `deploy/trioditis keys export`). A name the installer starts writing must be
+# added here or to those three; deploy/test/install-settings.sh fails until it is.
 INSTALL_MODE
 INSTALL_DOMAIN
 PROXY_URL
@@ -45,3 +45,6 @@ TELEGRAM_API_HASH
 META_PROXY
 BRIDGE_EGRESS_DENY
 INSTAGRAM_PROXY
+LOGIN_BROWSER_MAX
+DEBIAN_SNAPSHOT
+UPDATE_BACKUP_DIR

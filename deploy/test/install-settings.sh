@@ -353,5 +353,42 @@ rm -rf "$work/.git"
   check ok "inside another repository, the updater is off, saying why" ||
   { check fail "inside another repository, the updater is off, saying why"; tail -2 "$work/out" >&2; }
 
+# A fresh install makes the backup key, in the form of a key.
+checkout
+install || true
+printf '%s\n' "$(value BACKUP_KEY)" | grep -qxE '[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]' &&
+  check ok "a fresh install makes BACKUP_KEY" || check fail "a fresh install makes BACKUP_KEY"
+
+# deploy/runtime a symlink (to a directory that doesn't exist yet): refused before anything is
+# made there.
+checkout
+ln -s "$work/elsewhere" "$work/checkout/deploy/runtime"
+if install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "deploy/runtime is a symlink" "$work/out" && [ ! -e "$work/elsewhere" ] &&
+  check ok "a symlinked deploy/runtime is refused before mkdir follows it" ||
+  { check fail "a symlinked deploy/runtime is refused before mkdir follows it"; tail -2 "$work/out" >&2; }
+
+# Settings an operator writes by hand, held to their form: LOGIN_BROWSER_MAX a whole number from
+# 1 to 64, DEBIAN_SNAPSHOT a snapshot time, UPDATE_BACKUP_DIR an absolute path. Each bad one
+# stops the install, leaving deploy/.env as it was.
+for setting in LOGIN_BROWSER_MAX=0 LOGIN_BROWSER_MAX=65 LOGIN_BROWSER_MAX=lots LOGIN_BROWSER_MAX=04 LOGIN_BROWSER_MAX=-1 \
+  DEBIAN_SNAPSHOT=yesterday DEBIAN_SNAPSHOT=20261101 UPDATE_BACKUP_DIR=backups UPDATE_BACKUP_DIR=/srv/../etc; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  cp "$work/checkout/deploy/.env" "$work/env.before"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "has a value that isn't literal" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.before" &&
+    check ok "$setting stops the install, unchanged" || { check fail "$setting stops the install, unchanged"; tail -2 "$work/out" >&2; }
+done
+for setting in LOGIN_BROWSER_MAX=1 LOGIN_BROWSER_MAX=64 DEBIAN_SNAPSHOT=20261101T000000Z UPDATE_BACKUP_DIR=/srv/trioditis-backups; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  install || true
+  grep -qx "$setting" "$work/checkout/deploy/.env" && ! grep -q "isn't literal" "$work/out" &&
+    check ok "$setting is kept" || { check fail "$setting is kept"; tail -2 "$work/out" >&2; }
+done
+
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]
