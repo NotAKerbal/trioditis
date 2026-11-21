@@ -1152,6 +1152,39 @@ Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a se
 sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
 then try again.`
 
+## Agents
+
+People's own agents connect over MCP at `<site>/mcp` (`convex/mcp.ts`; docs/PLAN.md, Agents).
+`@convex-dev/mcp` is the OAuth 2.1 server: an agent registers itself and sends the person to
+`<site>/agents/connect?request=<id>`, the app's consent page.
+
+- **Scopes.** Only scopes a tool uses are offered: today `read`, for `list_networks`. An agent
+  asking for any other is refused at `/mcp/oauth/authorize` (`invalid_scope`); one asking for
+  none gets `read`. Drafting, sending and channels come with their tools. A request still
+  waiting with a scope the server no longer offers can't be approved: `mcp.authorize` throws
+  `This agent asked for access Trioditis doesn’t offer yet…`; denying it still works.
+- **The consent page** runs behind the app gate, so the person is a signed-in member with their
+  key unlocked. A person who must sign in first comes back to it: the page keeps the request ID
+  in this tab's `sessionStorage` for ten minutes, and sign-in opens only `/agents/connect` with
+  it. It refuses to show the choice inside a frame. It shows `api.mcp.getAuthRequest({ requestId })`:
+  `clientName` (the agent's own, unchecked; labelled so), where approval returns
+  (`redirectUri`'s host), the scopes with their descriptions, and the account's email. Allow or
+  Deny calls `api.mcp.authorize({ requestId, approve, sessionId })` (bound to the page's session,
+  Key writes are bound to the page's session) and sends the browser to the `redirectUrl` it
+  returns, which carries the agent's `state`. A request already answered or expired is
+  refused (`…has expired`). The device flow is off.
+- **Connections.** The agent's connection exists once it trades the code for its token; it is
+  owned by the approving account and acts only as it. Settings → Agents lists
+  `api.mcp.listConnections({})`: `{ id, kind, name, clientId, scopes, createdAt, lastUsedAt? }`,
+  newest first, only the caller's. `api.mcp.revokeConnection({ id })` disconnects one at once,
+  ending its tokens; it returns false for an ID that isn't the caller's.
+- **`list_networks`** returns `{ networks: [{ accountId, network, name, state, bridgeOnline,
+connected, disconnecting, connectedAt, lastHealthyAt }] }`. `accountId` is the account's
+  opaque ID, which tells apart two accounts on one network; never the network's login ID.
+  `connected` is true only when `state` is `CONNECTED` and the network's bridge host was heard
+  from in the last two minutes, the same age the app's status uses (`networks.ts`); otherwise
+  `state` may be out of date.
+
 ## Server updates
 
 Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the

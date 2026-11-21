@@ -25,6 +25,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import {
   Bell,
+  Bot,
   Eye,
   KeyRound,
   Network as NetworkIcon,
@@ -35,7 +36,7 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useRef, useState, useSyncExternalStore, type RefObject } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import { useSidebarLayout } from '~/data/chats.ts'
 import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
@@ -53,8 +54,9 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
-import { Group, Heading, Loading, Setting } from './layout.tsx'
 import { Accounts } from './accounts-section.tsx'
+import { Agents } from './agents-section.tsx'
+import { Group, Heading, Setting } from './layout.tsx'
 import { Members } from './members-section.tsx'
 import { Networks } from './networks.tsx'
 import { Updates } from './updates.tsx'
@@ -69,6 +71,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'notifications', name: 'Notifications', icon: <Bell /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
+  { id: 'agents', name: 'Agents', icon: <Bot /> },
   { id: 'networks', name: 'Networks', icon: <NetworkIcon />, admin: true },
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
@@ -140,6 +143,8 @@ export function SettingsDialog({
             <Notifications />
           ) : current.id === 'accounts' ? (
             <Accounts connect={connect} />
+          ) : current.id === 'agents' ? (
+            <Agents />
           ) : current.id === 'networks' ? (
             <Networks />
           ) : current.id === 'members' ? (
