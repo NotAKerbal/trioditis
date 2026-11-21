@@ -35,9 +35,9 @@ beforeEach(() => {
 })
 
 describe('notification preferences', () => {
-  it('show neither sender nor text until the person chooses more', async () => {
+  it('show the sender and the message until the person chooses less', async () => {
     const { currentPrefs } = await freshTab()
-    expect(currentPrefs().notificationDetail).toBe('hidden')
+    expect(currentPrefs().notificationDetail).toBe('message')
   })
 
   it('show the least for a stored value this version doesn’t know', async () => {
@@ -102,5 +102,29 @@ describe('two tabs changing preferences', () => {
     expect(tab.currentPrefs().notifications).toBe(false)
     tab.setPref('theme', 'light')
     expect(tab.currentPrefs()).toMatchObject({ notifications: false, theme: 'light' })
+  })
+
+  it('keep a choice storage refused to save, though storage still reads the old one', async () => {
+    stored.set(KEY, JSON.stringify({ notifications: true, notificationDetail: 'message' }))
+    const tab = await freshTab()
+    // Storage reads, but every write fails (full, say).
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: () => {
+        throw new Error('quota')
+      },
+    })
+    tab.setPref('notificationDetail', 'hidden')
+    tab.setPref('notifications', false)
+    // A notification is due: what's stored says previews, but the person turned them off.
+    expect(tab.currentPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
+    expect(tab.shownPrefs()).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
+    // Once a save goes through, the choices are stored.
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, v),
+    })
+    tab.setPref('theme', 'dark')
+    expect(JSON.parse(stored.get(KEY)!)).toMatchObject({ notifications: false, notificationDetail: 'hidden' })
   })
 })

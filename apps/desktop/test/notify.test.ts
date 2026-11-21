@@ -95,7 +95,7 @@ describe('what a notification says', () => {
     expect(notificationText(chat, 'See you at 7', 'sender')).toEqual({ title: 'Alice', body: 'New message' })
   })
 
-  it('by default shows neither who nor what', () => {
+  it('with nothing chosen, shows neither who nor what', () => {
     expect(notificationText(chat, 'See you at 7', 'hidden')).toEqual({ title: 'Trioditis', body: 'New message' })
   })
 })

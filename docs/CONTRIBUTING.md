@@ -229,12 +229,12 @@ forward and open the server picker, each checked in the main process. Opening th
 changes nothing by itself: the person still types the address, and the picker checks it.
 
 Notifications follow `messages.arrivals` (client-api.md, Arrivals). They are on by default in
-the desktop app; a browser asks first (Settings → Notifications). The system can keep them in
-its notification history, outside the sealing, so by default they say only that a message
-came. Settings → Notifications → Show adds who sent it (the chat's name; a group's own name,
-until member names exist), or who and what they said; never the network. Each tab reads the
-choice from storage again when a notification is due, so turning them off or down in one tab
-holds in every other.
+the desktop app; a browser asks first (Settings → Notifications). They show who sent the
+message (the chat's name; a group's own name, until member names exist) and what it says,
+never the network. The system can keep them in its notification history, outside the
+sealing: a deliberate exception (AGENTS.md). Settings → Notifications → Show offers less:
+the sender only, or nothing but that a message came. Each tab reads the choice from storage
+again when a notification is due, so turning them off or down in one tab holds in every other.
 The unread badge is a count on the Mac's Dock and on Linux launchers that show one (Ubuntu's
 dock does, for an installed app), and a red dot on the app's Windows taskbar button.
 
