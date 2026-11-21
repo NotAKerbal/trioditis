@@ -100,10 +100,12 @@ footer {
 
 .bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  height: 72px;
+  gap: 8px 16px;
+  min-height: 72px;
+  padding-block: 12px;
 }
 
 .brand {

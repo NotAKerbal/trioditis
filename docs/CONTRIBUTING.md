@@ -298,9 +298,10 @@ pnpm --filter @trioditis/desktop package:dir     # this system's app, unpacked, 
 app comes from the server. Each build is made on its own system (a Mac build needs a Mac). None
 are signed with a certificate, since the project has no Apple Developer ID or Windows
 code-signing certificate: Gatekeeper and SmartScreen warn, a Mac must be told to open the app
-the first time (**Open Anyway** in System Settings → Privacy & Security), and a Mac also needs a
-signed app for its own passkeys. The Mac apps are ad-hoc signed, because Apple silicon calls an
-app with a broken signature damaged and won't open it at all. The AppImage needs
+the first time (**Open Anyway** in System Settings → Privacy & Security), and passkeys stay
+unavailable on a Mac (above), which needs an app signed with a Developer ID for them. The Mac
+apps are ad-hoc signed and not notarized: an ad-hoc signature proves nothing about who made the
+app, but Apple silicon calls an app with a broken signature damaged and won't open it at all. The AppImage needs
 `--no-sandbox` where unprivileged user namespaces are restricted (Ubuntu 24.04 and later); the
 `.deb` doesn't.
 

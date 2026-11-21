@@ -127,18 +127,36 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+    # One publish at a time across every tag, so two releases can't both decide they're the
+    # newest (Publish, below).
+    concurrency:
+      group: desktop-release-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: installers-*
           path: installers
           merge-multiple: true
+      # Every file the site links to, and nothing else: a rerun after one system's artifacts
+      # expired would otherwise publish a release without them.
+      - name: Check the installers
+        working-directory: installers
+        run: |
+          expected="Trioditis-linux-amd64.deb Trioditis-linux-x86_64.AppImage Trioditis-mac-arm64.dmg Trioditis-mac-arm64.zip Trioditis-mac-x64.dmg Trioditis-mac-x64.zip Trioditis-windows-x64.exe"
+          actual="$(LC_ALL=C ls -1 | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Expected exactly: $expected"
+            echo "::error::Got: $actual"
+            exit 1
+          fi
       - name: Checksums
         working-directory: installers
         run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      # gh uploads every file before it publishes, so the release is never seen half-made. A
-      # tag with a suffix (v0.2.0-beta.1) is a prerelease, which leaves "latest", and so the
-      # site's links, on the last full release.
+      # gh uploads every file before it publishes, so the release is never seen half-made.
+      # "Latest", which the site's links follow, moves only to a full release newer than the
+      # current one: a tag with a suffix (v0.2.0-beta.1) is a prerelease, and an older tag
+      # published late, or rerun, doesn't take the links back.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,6 +164,18 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           flags=()
-          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
+          if [[ "$TAG" == *-* ]]; then
+            flags+=(--prerelease --latest=false)
+          else
+            # Empty when there's no release yet; gh fails then, so that isn't an error.
+            current="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
+            newest="$(printf '%s\n%s\n' "${current#v}" "${TAG#v}" | sort -V | tail -n 1)"
+            if [ -z "$current" ] || { [ "$newest" = "${TAG#v}" ] && [ "$current" != "$TAG" ]; }; then
+              flags+=(--latest)
+            else
+              echo "Leaving $current as the latest release"
+              flags+=(--latest=false)
+            fi
+          fi
           gh release create "$TAG" installers/* \
             --repo "$REPO" --verify-tag --title "Trioditis ${TAG#v}" --generate-notes "${flags[@]}"
