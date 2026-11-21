@@ -128,9 +128,10 @@ const USERNAME_NETWORKS: Record<string, Network> = {
 /**
  * The ways a card offers to start a chat on these accounts, as each network's connector can
  * (START_TARGETS): its linked contacts first, on each account there, those that sent them
- * first (the chat they already have, or a new one), then its numbers on networks that find people by number, and
- * its usernames on their own network, each on the first account there. A number or username
- * goes as written; the bridge host puts it in the form the network takes.
+ * first (the chat they already have, or a new one), then its numbers on networks that find
+ * people by number, and its usernames on their own network, on each account a linked contact
+ * doesn't cover. A number or username goes as written; the bridge host puts it in the form
+ * the network takes.
  */
 export function chatOptions(
   card: PersonPlaintext,
@@ -138,7 +139,14 @@ export function chatOptions(
   byContact: ReadonlyMap<string, NetworkContact>,
 ): ChatOption[] {
   const out: ChatOption[] = []
-  const first = (network: Network) => accounts.find((a) => a.network === network)
+  const onNetwork = (network: Network) => accounts.filter((a) => a.network === network)
+  // "Account 2" is the same account everywhere: numbered in the order the person connected them.
+  const named = (label: string, network: Network, account: StartableAccount) => {
+    const all = onNetwork(network)
+    return all.length > 1 ? `${label} (account ${all.indexOf(account) + 1})` : label
+  }
+  // Accounts a linked contact came from, where starting from the contact works for sure.
+  const covered = new Set<string>()
   for (const link of card.links ?? []) {
     if (!START_TARGETS[link.network]?.contact) continue
     const contact = byContact.get(contactKey(link))
@@ -147,23 +155,30 @@ export function chatOptions(
     // some networks' contact IDs belong to one login, so with more than one account the person
     // chooses, rather than the app guessing and failing quietly.
     const sent = new Set(contact?.networkAccountIds ?? [])
-    const onNetwork = accounts
-      .filter((a) => a.network === link.network)
-      .sort((x, y) => Number(sent.has(y.networkAccountId)) - Number(sent.has(x.networkAccountId)))
-    onNetwork.forEach((account, i) =>
+    const ordered = [...onNetwork(link.network)].sort(
+      (x, y) => Number(sent.has(y.networkAccountId)) - Number(sent.has(x.networkAccountId)),
+    )
+    for (const account of ordered) {
+      if (sent.has(account.networkAccountId)) covered.add(account.networkAccountId)
       out.push({
         network: link.network,
         networkAccountId: account.networkAccountId,
-        label: onNetwork.length > 1 ? `${label} (account ${i + 1})` : label,
+        label: named(label, link.network, account),
         target: { ghostId: link.ghostId },
-      }),
-    )
+      })
+    }
   }
-  const linked = new Set(out.map((o) => o.network))
+  // A number or username works from any account, so it's offered on each one a linked contact
+  // doesn't already cover.
   const add = (network: Network, label: string, identifier: string) => {
-    const account = first(network)
-    if (account && !linked.has(network)) {
-      out.push({ network, networkAccountId: account.networkAccountId, label, target: { identifier } })
+    for (const account of onNetwork(network)) {
+      if (covered.has(account.networkAccountId)) continue
+      out.push({
+        network,
+        networkAccountId: account.networkAccountId,
+        label: named(label, network, account),
+        target: { identifier },
+      })
     }
   }
   for (const network of Object.keys(START_TARGETS) as Network[]) {
