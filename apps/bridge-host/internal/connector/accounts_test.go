@@ -22,23 +22,21 @@ func testAccount(id networkid.UserLoginID, userID string) *bridgev2.UserLogin {
 }
 
 func useTestAccounts(t *testing.T) {
-	old := cachedLogin
+	oldCached, oldRun, oldGone := cachedLogin, runDiscard, loginGone
 	cachedLogin = func(_ *bridgev2.Bridge, id networkid.UserLoginID) *bridgev2.UserLogin { return testAccounts[id] }
-	t.Cleanup(func() { cachedLogin = old })
+	runDiscard = func(f func()) { f() }
+	loginGone = func(*Connector, context.Context, networkid.UserLoginID) (bool, error) { return true, nil }
+	t.Cleanup(func() { cachedLogin, runDiscard, loginGone = oldCached, oldRun, oldGone })
 }
 
-// A cancelled login's kept record goes only once its logout has finished, and a kept account
-// is logged out only while it is still that login's and the same person's.
+// A cancelled login's kept record goes only once bridgev2 no longer has the login, and a kept
+// account is logged out only while it is still that login's and the same person's.
 func TestADiscardedAccountIsLoggedOutOnlyWhileStillThatLoginsAndPersons(t *testing.T) {
 	useTestAccounts(t)
 	ctx := context.Background()
-	var done []func()
 	var loggedOut []networkid.UserLoginID
 	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin, finished func()) {
-		loggedOut = append(loggedOut, login.ID)
-		done = append(done, finished)
-	}
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) { loggedOut = append(loggedOut, login.ID) }
 	t.Cleanup(func() { logoutDiscarded = old })
 	kept := func(c *Connector) int {
 		rows, err := c.Store.Discarded(ctx)
@@ -48,7 +46,8 @@ func TestADiscardedAccountIsLoggedOutOnlyWhileStillThatLoginsAndPersons(t *testi
 		return len(rows)
 	}
 
-	// Still the cancelled login's: logged out, and the record kept until the logout returns.
+	// Still the cancelled login's: logged out. bridgev2 only logs a failure to delete the
+	// login, so while it still has it the record stays, for the next start to try again.
 	c := testConnector(t)
 	testAccount("acct-1", "alice")
 	if err := c.Store.PutActivation(ctx, "acct-1", store.Activation{SessionID: "cancelled", UserID: "alice"}); err != nil {
@@ -57,16 +56,48 @@ func TestADiscardedAccountIsLoggedOutOnlyWhileStillThatLoginsAndPersons(t *testi
 	if err := c.Store.PutDiscarded(ctx, store.DiscardedLogin{SessionID: "cancelled", UserID: "alice", LoginID: "acct-1"}); err != nil {
 		t.Fatal(err)
 	}
+	loginGone = func(*Connector, context.Context, networkid.UserLoginID) (bool, error) { return false, nil }
 	if err := c.SettleDiscardedAtStart(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(loggedOut) != 1 || kept(c) != 1 {
-		t.Fatalf("logouts %v, kept %d; want one logout, record still kept", loggedOut, kept(c))
+		t.Fatalf("logouts %v, kept %d; want one logout, record kept while the login remains", loggedOut, kept(c))
 	}
-	done[0]()
-	if kept(c) != 0 {
-		t.Fatal("the record outlived the finished logout")
+	loginGone = func(*Connector, context.Context, networkid.UserLoginID) (bool, error) { return true, nil }
+	if err := c.SettleDiscardedAtStart(ctx); err != nil {
+		t.Fatal(err)
 	}
+	if len(loggedOut) != 2 || kept(c) != 0 {
+		t.Fatalf("logouts %v, kept %d; want it tried again and the record gone", loggedOut, kept(c))
+	}
+
+	// A login of the person's starts between the decision and the logout: the logout, made
+	// under the person's lock, sees it and waits for it rather than racing its completion.
+	loggedOut = nil
+	c = testConnector(t)
+	testAccount("acct-5", "alice")
+	if err := c.Store.PutActivation(ctx, "acct-5", store.Activation{SessionID: "cancelled", UserID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Store.PutDiscarded(ctx, store.DiscardedLogin{SessionID: "cancelled", UserID: "alice", LoginID: "acct-5"}); err != nil {
+		t.Fatal(err)
+	}
+	mu := c.userLock("alice")
+	mu.Lock()
+	var pending []func()
+	runDiscard = func(f func()) { pending = append(pending, f) }
+	if err := c.SettleDiscardedAtStart(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.logins.Store("retry", &loginSession{c: c, id: "retry", userID: "alice"})
+	mu.Unlock()
+	for _, f := range pending {
+		f()
+	}
+	if len(loggedOut) != 0 || kept(c) != 1 {
+		t.Fatalf("a logout racing a new login: logouts %v, kept %d", loggedOut, kept(c))
+	}
+	runDiscard = func(f func()) { f() }
 
 	// Another member's now (the account was connected again by someone else): left alone.
 	loggedOut = nil

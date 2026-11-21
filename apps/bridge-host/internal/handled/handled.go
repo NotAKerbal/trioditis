@@ -27,6 +27,7 @@ type Handling struct {
 	lock      sync.Mutex
 	done      bool
 	succeeded bool
+	failed    bool
 	messages  []Message
 }
 
@@ -135,6 +136,16 @@ func Messages(remote any) ([]Message, bool) {
 	return append([]Message(nil), h.messages...), true
 }
 
+// Fail marks remote's handling failed, whatever bridgev2 reports for it: something the
+// host had to settle before it started couldn't be.
+func Fail(remote any) {
+	if h := find(remote); h != nil {
+		h.lock.Lock()
+		h.failed = true
+		h.lock.Unlock()
+	}
+}
+
 // Finished reports how bridgev2's handling of remote ended. The event stays watched until
 // then, even after its handler stopped waiting, so a handling that ends late is still settled.
 func Finished(remote any, succeeded bool) {
@@ -144,7 +155,7 @@ func Finished(remote any, succeeded bool) {
 	}
 	h.lock.Lock()
 	if !h.done {
-		h.done, h.succeeded = true, succeeded
+		h.done, h.succeeded = true, succeeded && !h.failed
 		close(h.finished)
 	}
 	h.lock.Unlock()

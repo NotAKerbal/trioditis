@@ -246,9 +246,8 @@ func TestLoginCancelAndCompleteRaceEndsOnce(t *testing.T) {
 func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 	var loggedOut []*bridgev2.UserLogin
 	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin, done func()) {
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) {
 		loggedOut = append(loggedOut, login)
-		done()
 	}
 	useTestAccounts(t)
 	t.Cleanup(func() { logoutDiscarded = old })
@@ -332,9 +331,8 @@ func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 func TestADisconnectedAccountsCancelledRepairIsLoggedOut(t *testing.T) {
 	var loggedOut []*bridgev2.UserLogin
 	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin, done func()) {
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) {
 		loggedOut = append(loggedOut, login)
-		done()
 	}
 	useTestAccounts(t)
 	t.Cleanup(func() { logoutDiscarded = old })

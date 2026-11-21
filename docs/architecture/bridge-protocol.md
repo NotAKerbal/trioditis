@@ -270,7 +270,9 @@ that one attempt, not of the retry they kept. The backend applies the same rule 
 `complete` step or `loginState` for a cancelled login session. A logout put off for a retry
 is kept by the bridge host (`trioditis_discarded`) until it has finished, across restarts, and
 happens only while the account is still what that cancelled attempt connected, for the same
-person (`trioditis_activation`, cleared when the account is logged out).
+person (`trioditis_activation`, cleared when the account is logged out). The check and the
+logout run under a per-person lock that a login of theirs also takes as it starts and as it
+completes, and the record goes only once bridgev2 no longer has the login.
 
 A step itself may also carry `expiresAt` (bridge host time, ms); both are optional and the
 backend takes either. The client also hides any code from a host not heard from in two minutes.
