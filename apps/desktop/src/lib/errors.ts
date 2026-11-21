@@ -32,6 +32,25 @@ export function tooManyAttempts(error: unknown, retryAfterSeconds: number | null
   return `Too many attempts. Try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}.`
 }
 
+export const UNREACHABLE = 'The server couldn’t be reached. Check your connection, then try again.'
+
+/**
+ * Runs an auth call that answers `{ data, error }`, and answers the same way when it throws
+ * instead: a request the network or the browser rejected (offline, a proxy refusing it, the
+ * password derivation failing). So a form always gets an answer to show, and never stays busy.
+ */
+export async function attempt<D, E>(
+  call: () => Promise<{ data: D; error: E }>,
+): Promise<{ data: D; error: E } | { data: null; error: unknown }> {
+  try {
+    return await call()
+  } catch (error) {
+    // fetch rejects with a TypeError ("Failed to fetch") when the request never got an answer.
+    if (error instanceof TypeError || !error) return { data: null, error: new Error(UNREACHABLE) }
+    return { data: null, error }
+  }
+}
+
 /** The `code` of a ConvexError thrown with `{ code, message }`, if that's what it is. */
 export function errorCode(error: unknown): string | undefined {
   const data = dataOf(error)

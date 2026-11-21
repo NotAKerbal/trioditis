@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { INVITE_HEADER, authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
-import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
+import { attempt, errorMessage, tooManyAttempts } from '~/lib/errors.ts'
 import { Field, FormError } from './auth-card.tsx'
 
 /**
@@ -17,11 +17,14 @@ export function SignUpForm({
   email: fixedEmail,
   askToken,
   submitLabel,
+  onCreated,
 }: {
   token?: string
   email?: string
   askToken?: boolean
   submitLabel: string
+  /** The account was made: the token is used up. */
+  onCreated?: () => void
 }) {
   const navigate = useNavigate()
   const [name, setName] = useState('')
@@ -35,18 +38,23 @@ export function SignUpForm({
     event.preventDefault()
     setBusy(true)
     setError(null)
-    const { data, error } = await authClient.signUp.email({
-      name: name.trim() || email.split('@')[0]!,
-      email,
-      password: await derivedAuthPassword(password, email),
-      fetchOptions: { headers: { [INVITE_HEADER]: setupToken.trim() } },
-    })
+    const result = await attempt(async () =>
+      authClient.signUp.email({
+        name: name.trim() || email.split('@')[0]!,
+        email,
+        password: await derivedAuthPassword(password, email),
+        fetchOptions: { headers: { [INVITE_HEADER]: setupToken.trim() } },
+      }),
+    )
     setBusy(false)
-    if (error || !data) {
+    if (result.error || !result.data) {
       return setError(
-        tooManyAttempts(error, lastRetryAfter()) ?? errorMessage(error, 'That account couldn’t be created.'),
+        tooManyAttempts(result.error, lastRetryAfter()) ??
+          errorMessage(result.error, 'That account couldn’t be created.'),
       )
     }
+    const { data } = result
+    onCreated?.()
     announceAccountChange()
     // The same password protects the identity key backup, made on the next screen.
     holdPassword(password, data.user.id)

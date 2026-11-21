@@ -8,7 +8,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useConvexAuth } from 'convex/react'
 import { useState } from 'react'
 import { AuthCard, Field, FormError } from '~/features/auth/auth-card.tsx'
-import { errorMessage, tooManyAttempts } from '~/lib/errors.ts'
+import { attempt, errorMessage, tooManyAttempts, UNREACHABLE } from '~/lib/errors.ts'
 import { authClient, derivedAuthPassword, lastRetryAfter } from '~/lib/auth-client.ts'
 import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { desktop, passkeysUnavailable, serverSwitcher } from '~/lib/desktop.ts'
@@ -40,16 +40,21 @@ function SignIn() {
     event.preventDefault()
     setBusy('password')
     setError(null)
-    const { data, error } = await authClient.signIn.email({
-      email,
-      password: await derivedAuthPassword(password, email),
-    })
+    // A request the network rejected comes back as an error too, so the form is never left busy.
+    const result = await attempt(async () =>
+      authClient.signIn.email({
+        email,
+        password: await derivedAuthPassword(password, email),
+      }),
+    )
     setBusy(null)
-    if (error || !data) {
+    if (result.error || !result.data) {
       return setError(
-        tooManyAttempts(error, lastRetryAfter()) ?? errorMessage(error, 'That email and password didn’t match.'),
+        tooManyAttempts(result.error, lastRetryAfter()) ??
+          errorMessage(result.error, 'That email and password didn’t match.'),
       )
     }
+    const { data } = result
     announceAccountChange()
     // The same password unlocks the identity key on the next screen.
     holdPassword(password, data.user.id)
@@ -59,7 +64,9 @@ function SignIn() {
   async function withPasskey() {
     setBusy('passkey')
     setError(null)
-    const result = await signInWithPasskey()
+    const result = await signInWithPasskey().catch((error: unknown) => ({
+      error: error instanceof TypeError ? new Error(UNREACHABLE) : error,
+    }))
     setBusy(null)
     if ('error' in result)
       return setError(
@@ -100,6 +107,7 @@ function SignIn() {
       }
       footer={
         <>
+          <p className="mb-2">Forgot your password? Ask your server’s admin for a reset link.</p>
           Setting up a new server?{' '}
           <Link to="/setup" className="font-semibold text-primary hover:underline">
             Create the admin account

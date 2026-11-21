@@ -115,8 +115,8 @@ describe('identity key setup', () => {
     const sam = await fresh(t)
     expect((await sam.query(api.keys.identity, {})).state).toBe('none')
     const device = firstDevice('sam', 'correct horse battery')
-    expect(await setUp(sam, device)).toEqual({ kid: device.kid })
-    expect(await setUp(sam, device)).toEqual({ kid: device.kid })
+    expect(await setUp(sam, device)).toEqual({ kid: device.kid, stored: ['password', 'recovery'] })
+    expect(await setUp(sam, device)).toEqual({ kid: device.kid, stored: [] })
 
     const { state, publicKey, kid, backups } = await sam.query(api.keys.identity, {})
     expect(state).toBe('ready')
@@ -216,6 +216,33 @@ describe('identity key setup', () => {
     await sam.mutation(api.keys.setup, { ...device.args, proof: await proofFrom(sam, identity) })
     expect((await sam.query(api.keys.identity, {})).state).toBe('ready')
   })
+
+  it('tells two devices finishing setup at once which one’s recovery key was kept', async () => {
+    const t = setup()
+    const sam = await fresh(t)
+    const identity = generateKeyPair()
+    await t.run(async (ctx) => {
+      const member = (await ctx.db.query('members').first())!
+      await ctx.db.patch(member._id, {
+        identityPublicKey: toBase64Url(identity.publicKey),
+        identityKid: keyId(identity.publicKey),
+      })
+    })
+    // Two devices holding the key, each with its own new recovery key, racing to finish.
+    const a = firstDevice('sam', 'correct horse battery', identity)
+    const b = firstDevice('sam', 'correct horse battery', identity)
+    const [proofA, proofB] = [await proofFrom(sam, identity), await proofFrom(sam, identity)]
+    const results = await Promise.all([
+      sam.mutation(api.keys.setup, { ...a.args, proof: proofA }),
+      sam.mutation(api.keys.setup, { ...b.args, proof: proofB }),
+    ])
+    const stored = results.map((r) => r.stored)
+    expect(stored).toContainEqual(['password', 'recovery'])
+    expect(stored).toContainEqual([])
+    const winner = results[0]!.stored.length ? a : b
+    const kept = (await sam.query(api.keys.identity, {})).backups.find((row) => row.kind === 'recovery')!
+    expect(kept.ct).toBe(winner.args.recovery.ct)
+  })
 })
 
 describe('replacing backups', () => {
@@ -257,6 +284,33 @@ describe('replacing backups', () => {
         device.identity.publicKey,
       ).privateKey,
     ).toEqual(device.identity.privateKey)
+  })
+
+  it('lets one of two racing recovery-key rotations win, and refuses the other with nothing changed', async () => {
+    const t = setup()
+    const { sam, device } = await ready_(t)
+    const rotation = async () => {
+      const recovery = generateRecoveryKey()
+      const wrap = wrapIdentityKey(device.identity.privateKey, recovery.bytes, {
+        userId: 'sam',
+        kid: device.kid,
+        kind: 'recovery',
+      })
+      return { wrap, proof: await proofFrom(sam, device.identity) }
+    }
+    // Both read revision 1 before either wrote.
+    const [a, b] = [await rotation(), await rotation()]
+    const results = await Promise.allSettled([
+      sam.mutation(api.keys.putBackup, { kind: 'recovery', ...a.wrap, proof: a.proof, expectedRevision: 1 }),
+      sam.mutation(api.keys.putBackup, { kind: 'recovery', ...b.wrap, proof: b.proof, expectedRevision: 1 }),
+    ])
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(String(refused.reason)).toMatch(/another device/)
+    const winner = results[0]!.status === 'fulfilled' ? a : b
+    const recoveries = (await sam.query(api.keys.identity, {})).backups.filter((row) => row.kind === 'recovery')
+    expect(recoveries).toHaveLength(1)
+    expect(recoveries[0]).toMatchObject({ ct: winner.wrap.ct, revision: 2 })
   })
 
   it('never reuses a revision, even for a passkey backup removed and made again', async () => {
@@ -755,11 +809,14 @@ describe('key writes bound to a session', () => {
       sessionId,
     })
     const proof = toBase64Url(openSealedBox(fromBase64Url(sealed), device.identity))
-    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({ kid: device.kid })
+    expect(await alice.mutation(api.keys.setup, { ...device.args, proof, sessionId })).toEqual({
+      kid: device.kid,
+      stored: ['password', 'recovery'],
+    })
 
     const bob = await fresh(t, 'bob')
     const bobDevice = firstDevice('bob', 'bob password!!!!')
-    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid })
+    expect(await setUp(bob, bobDevice)).toEqual({ kid: bobDevice.kid, stored: ['password', 'recovery'] })
   })
 
   it('refuses, writing nothing, when the shared client has switched to another account', async () => {
