@@ -82,14 +82,14 @@ jobs:
         run: go test ./...
         env:
           CHROMIUM_PATH: google-chrome
-      # The bridge host builds against a patched copy of mautrix-signal
-      # (apps/bridge-host/third_party/README.md); this fails unless the copy is upstream at
-      # go.mod's version plus third_party/mautrix-signal.patch, so the patch is the whole change.
+      # The bridge host builds against patched copies of mautrix-signal and mautrix
+      # (apps/bridge-host/third_party/README.md); this fails unless each copy is upstream at
+      # go.mod's version plus its patch (third_party/<name>.patch), so the patch is the whole change.
       - if: steps.module.outputs.present == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - if: steps.module.outputs.present == 'true'
-        name: mautrix-signal copy matches its patch
+        name: mautrix-signal and mautrix copies match their patches
         working-directory: .
         run: node scripts/signal-fork.mjs check

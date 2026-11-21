@@ -35,3 +35,22 @@ that plus the patch.
 5. Run the tests with libsignal on the linker path (`LIBRARY_PATH`): the bridge host's,
    `go test -tags libsignal ./internal/networks/`, and the patch's own, which `./...` doesn't
    reach: `go test go.mau.fi/mautrix-signal/pkg/signalmeow`.
+
+## mautrix
+
+`mautrix/` is `maunium.net/go/mautrix` (bridgev2, which every connector runs on) at the
+version `../go.mod` requires (v0.33.0), with `mautrix.patch` applied, replaced the same way.
+The same script keeps it: `node scripts/signal-fork.mjs check` checks both copies, and
+`diff mautrix` / `update mautrix` work on this one alone.
+
+**Why:** bridgev2 stops waiting for an event's handler after its handler limit and reports an
+assumed success, while handling carries on. WhatsApp and Signal acknowledge an incoming message
+on that success, so a message the process then stops before saving in full is lost, and one
+whose handling then fails part way is dropped as a duplicate when redelivered. The patch adds
+`bridgev2.RemoteEventDone`, called with each remote event's real outcome when its handler
+returns, which the host waits on (`internal/handled`). Every change is marked `Trioditis:`.
+
+**Updating mautrix:** change its version in `../go.mod`, `node scripts/signal-fork.mjs update
+mautrix`, check that `handleSingleEventWithDelayLogging` (`bridgev2/portal.go`) still hands
+every remote event's outcome to the callback the patch hooks, then `go mod tidy` and run the
+bridge host's tests, the libsignal-tagged ones included.

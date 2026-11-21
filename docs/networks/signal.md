@@ -259,9 +259,10 @@ answers Signal's server for the envelope (acknowledging it, and clearing its pla
 success. So the bridge host wraps signalmeow's handler (its exported `EventHandler`, replaced
 in `internal/networks/signal.go` when each login loads; no patch needed), as for WhatsApp
 (sealing.md): a chat event (a message, edit, reaction or deletion) whose handling took that
-long is acknowledged only once its own write is journaled with none failed or running, and
-not at all if that doesn't happen within 20 minutes or the host is stopping, so Signal
-delivers it again. Other signalmeow events (receipts, calls, decryption errors, sync
+long is acknowledged only once bridgev2 reports its handling ended in success (the host's
+patched bridgev2, `third_party/mautrix.patch`), and not at all if it failed, doesn't end
+within 20 minutes, or the host is stopping, so Signal delivers it again, and a message cut off
+part way is bridged whole then (sealing.md). Other signalmeow events (receipts, calls, decryption errors, sync
 messages) aren't held back; a call notice or decryption-error notice backgrounded past the
 limit can still be lost to a crash.
 

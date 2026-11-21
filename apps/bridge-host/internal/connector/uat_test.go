@@ -19,31 +19,28 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
-// What tells a waiting handler its event is journaled is the event's own write, never one
-// bridgev2 makes on the side.
-func TestOnlyAnEventsOwnWriteCountsAsJournaled(t *testing.T) {
+// Only a part of the message a remote event brings is recorded as in flight: never an error
+// notice bridgev2 writes on the side, an edit, or a reaction.
+func TestOnlyAMessagesOwnPartsAreInFlight(t *testing.T) {
 	message := &simplevent.Message[string]{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventMessage}, ID: "m1"}
 	part := &bridgev2.MatrixSendExtra{MessageMeta: &database.Message{ID: "m1"}}
 	text := &event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}}
-	if !ownWrite(message, event.EventMessage, text, part) {
-		t.Fatal("a part of the message is its own write")
+	if !messagePart(message, event.EventMessage, text, part) {
+		t.Fatal("a part of the message is its own")
 	}
 	// bridgev2's notice after a failed conversion has no message metadata.
 	notice := &event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgNotice, Body: "An error occurred"}}
-	if ownWrite(message, event.EventMessage, notice, &bridgev2.MatrixSendExtra{}) {
+	if messagePart(message, event.EventMessage, notice, &bridgev2.MatrixSendExtra{}) {
 		t.Fatal("an error notice counted as the message")
 	}
-	if ownWrite(message, event.EventMessage, text, &bridgev2.MatrixSendExtra{MessageMeta: &database.Message{ID: "other"}}) {
+	if messagePart(message, event.EventMessage, text, &bridgev2.MatrixSendExtra{MessageMeta: &database.Message{ID: "other"}}) {
 		t.Fatal("another message's part counted")
 	}
 	reaction := &simplevent.Reaction{EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventReaction}}
-	if ownWrite(reaction, event.EventRedaction, &event.Content{Parsed: &event.RedactionEventContent{}}, nil) {
-		t.Fatal("taking away the replaced reaction counted as the new one")
+	if messagePart(reaction, event.EventReaction, &event.Content{Parsed: &event.ReactionEventContent{}}, nil) {
+		t.Fatal("a reaction counted as a message part")
 	}
-	if !ownWrite(reaction, event.EventReaction, &event.Content{Parsed: &event.ReactionEventContent{}}, nil) {
-		t.Fatal("the reaction is its own write")
-	}
-	if ownWrite(nil, event.EventMessage, text, part) {
+	if messagePart(nil, event.EventMessage, text, part) {
 		t.Fatal("a write with no remote event counted")
 	}
 }
@@ -292,6 +289,37 @@ func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 	first.advance(completes(), nil)
 	if len(loggedOut) != 0 {
 		t.Fatal("a late cancelled attempt logged out while a retry was going")
+	}
+	// The retry then ends without connecting it (cancelled too): the decision put off is made.
+	cancel(c, "retry")
+	if len(loggedOut) != 1 {
+		t.Fatalf("once the retry settled, the cancelled attempt's account must be logged out; %d logouts", len(loggedOut))
+	}
+
+	// The retry connects a different account: the cancelled attempt's is still its own.
+	loggedOut = nil
+	c = testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	first, retry = startedSession(c, "first"), startedSession(c, "retry")
+	cancel(c, "first")
+	first.advance(completes(), nil)
+	other := &bridgev2.UserLogin{}
+	retry.advance(&bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
+		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15550009999", UserLogin: other}}, nil)
+	if len(loggedOut) != 1 || loggedOut[0] != account {
+		t.Fatalf("logged out %v, want only the cancelled attempt's account", loggedOut)
+	}
+
+	// The retry connects the same account later: it stays.
+	loggedOut = nil
+	c = testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	first, retry = startedSession(c, "first"), startedSession(c, "retry")
+	cancel(c, "first")
+	first.advance(completes(), nil)
+	retry.advance(completes(), nil)
+	if len(loggedOut) != 0 {
+		t.Fatal("the account the retry went on to connect was logged out")
 	}
 }
 

@@ -469,6 +469,32 @@ func (n *Network) Incoming(loginID networkid.UserLoginID, chatID networkid.Porta
 	return resultError(res)
 }
 
+// IncomingParts delivers a message in several parts (as a caption and its pictures arrive),
+// one text part per entry, with part IDs p0, p1, …. It returns the remote event bridgev2 was
+// given, so a test can follow its handling.
+func (n *Network) IncomingParts(loginID networkid.UserLoginID, chatID networkid.PortalID, senderID networkid.UserID, msgID networkid.MessageID, texts []string) (bridgev2.RemoteEvent, error) {
+	ul, err := n.login(loginID)
+	if err != nil {
+		return nil, err
+	}
+	evt := &simplevent.Message[[]string]{
+		EventMeta: meta(bridgev2.RemoteEventMessage, ul, chatID, senderID, time.Time{}),
+		Data:      texts,
+		ID:        msgID,
+		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data []string) (*bridgev2.ConvertedMessage, error) {
+			converted := &bridgev2.ConvertedMessage{}
+			for i, text := range data {
+				converted.Parts = append(converted.Parts, &bridgev2.ConvertedMessagePart{
+					ID: networkid.PartID(fmt.Sprintf("p%d", i)), Type: event.EventMessage,
+					Content: &event.MessageEventContent{MsgType: event.MsgText, Body: text},
+				})
+			}
+			return converted, nil
+		},
+	}
+	return evt, resultError(ul.QueueRemoteEvent(evt))
+}
+
 // IncomingMention delivers a text message that mentions the person, written as connectors
 // write a mention of the login itself: the person's Matrix ID.
 func (n *Network) IncomingMention(loginID networkid.UserLoginID, chatID networkid.PortalID, senderID networkid.UserID, msgID networkid.MessageID, text string) error {

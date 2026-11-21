@@ -172,3 +172,7 @@ replace github.com/imroc/req/v3 => github.com/beeper/req/v3 v3.0.0-2026092513571
 // mautrix-signal at the version required above, patched so a message send is never
 // resubmitted after an ambiguous outcome. See third_party/README.md.
 replace go.mau.fi/mautrix-signal => ./third_party/mautrix-signal
+
+// mautrix (bridgev2) at the version required above, patched so the host learns how handling a
+// remote event really ended after bridgev2 stopped waiting for it. See third_party/README.md.
+replace maunium.net/go/mautrix => ./third_party/mautrix

@@ -785,7 +785,9 @@ var countryCodeFirst = map[string]bool{"whatsapp": true}
 func (c *Connector) canonicalIdentifier(identifier string) string {
 	targets := startTargets[c.Network]
 	text := strings.TrimSpace(identifier)
-	meantAsNumber := !usernameish.MatchString(trailingExtension.ReplaceAllString(phoneScheme.ReplaceAllString(text, ""), ""))
+	// A valid number is one, extension and all (";ext=89" has letters); otherwise letters, an @ or
+	// an underscore make it a username. The client decides the same way (startIdentifier).
+	meantAsNumber := normalPhone(text) != "" || !usernameish.MatchString(trailingExtension.ReplaceAllString(phoneScheme.ReplaceAllString(text, ""), ""))
 	switch {
 	case meantAsNumber && !targets.phone && targets.username && onlyDigits.MatchString(text):
 		// Digits alone can be a username where only usernames work (X allows it).

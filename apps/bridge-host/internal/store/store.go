@@ -107,7 +107,48 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_avatar_ref (owner_user_id TEXT NOT NULL, avatar_uri TEXT NOT NULL, sealed TEXT NOT NULL, PRIMARY KEY (owner_user_id, avatar_uri))`,
 		})
 	}).
+	WithRaw(5, 6, 0, "Messages being bridged", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A message a network will send again if it isn't acknowledged, from its first part
+		// until bridgev2 says how handling it ended: one left at start-up was cut off, and its
+		// parts are forgotten so the redelivery bridges them all (connector, RecoverInflight).
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_inflight (receiver TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (receiver, message_id))`,
+		})
+	}).
 	Finish()
+
+// InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
+type InflightMessage struct{ Receiver, MessageID string }
+
+// PutInflight records that a message's parts are being bridged.
+func (s *Store) PutInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO trioditis_inflight (receiver, message_id) VALUES ($1, $2) ON CONFLICT (receiver, message_id) DO NOTHING`, m.Receiver, m.MessageID)
+	return err
+}
+
+// DeleteInflight records that a message's handling ended.
+func (s *Store) DeleteInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID)
+	return err
+}
+
+// Inflight lists the messages whose handling hadn't ended when the host last stopped.
+func (s *Store) Inflight(ctx context.Context) ([]InflightMessage, error) {
+	rows, err := s.DB.Query(ctx, `SELECT receiver, message_id FROM trioditis_inflight`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InflightMessage
+	for rows.Next() {
+		var m InflightMessage
+		if err = rows.Scan(&m.Receiver, &m.MessageID); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
 
 // ReactorKey is how the reaction index keeps who gave a reaction, from bridgev2's record of
 // it: `self` for the person (their Matrix user), `ghost:` and the network's ID for anyone

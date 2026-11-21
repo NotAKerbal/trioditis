@@ -207,10 +207,14 @@ protobuf (content included) from decryption until its handler returns success, a
 whatsmeow then clears the plaintext and acknowledges the message. That is once the bridge
 host has journaled it sealed (usually moments). bridgev2 reports success when its 5-minute
 handler limit passes, while handling carries on in the background, so the bridge host wraps
-the handler: one that took that long says success only once the message's own write (a part
-of the message, the reaction, the edit; not an error notice or a replaced reaction's removal)
-is journaled with no write still running or failed, and failure if a write fails, if that
-doesn't happen within 20 minutes, or if the host is stopping. It is kept on purpose: a
+the handler: one that took that long says what bridgev2's handling really ended with, which
+the host's patched bridgev2 reports when the handler returns (`third_party/mautrix.patch`):
+success once every part of the message is journaled and saved, and failure if handling failed,
+if it doesn't end within 20 minutes, or if the host is stopping. A message whose handling
+failed part way, or that a stop cut off (`trioditis_inflight` lists the messages being
+bridged), has its saved parts forgotten, so bridgev2 doesn't drop the redelivery as a
+duplicate of them and bridges it whole; the parts already journaled come again with the same
+event IDs and are applied once. It is kept on purpose: a
 message can be decrypted only once, so without it a crash mid-message would lose that
 message. Plaintext stays in a row only when:
 

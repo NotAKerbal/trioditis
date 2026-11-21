@@ -182,10 +182,11 @@ export function startIdentifier(
   targets: { phone: boolean; username: boolean },
 ): { identifier: string } | { problem: StartIdentifierProblem } {
   const text = raw.trim()
-  // Letters or an `@` make it a username; otherwise it was meant as a number.
-  const meantAsNumber = !/[a-z@_]/i.test(
-    text.replace(/^(?:tel|sms):/i, '').replace(/\s*(?:x|ext\.?|extension)\s*\d+$/i, ''),
-  )
+  // A valid number is one, extension and all (`;ext=89` has letters); otherwise letters or an
+  // `@` make it a username. The bridge host decides the same way (canonicalIdentifier).
+  const meantAsNumber =
+    normalPhone(text) !== null ||
+    !/[a-z@_]/i.test(text.replace(/^(?:tel|sms):/i, '').replace(/\s*(?:x|ext\.?|extension)\s*\d+$/i, ''))
   // Where only usernames work, digits alone can be one (X allows it); a `+` or a number's
   // punctuation can't.
   if (meantAsNumber && !targets.phone && targets.username && /^\d+$/.test(text)) return { identifier: text }

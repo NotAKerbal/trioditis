@@ -26,6 +26,7 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/keys"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
@@ -67,6 +68,9 @@ type Connector struct {
 	// did (networkid.UserLoginID → login session ID), so a cancelled attempt that finishes late
 	// doesn't log out the account a later attempt connected.
 	connectedBy sync.Map
+	// discarded holds the accounts cancelled logins connected, until settleDiscarded decides
+	// (login session ID → *discardedLogin).
+	discarded sync.Map
 	// browserSteps holds the login steps the sign-in browser submitted ("<login session
 	// ID>/<step ID>" → struct{}), for as long as the process runs: a paste of one that arrives
 	// later is dropped rather than refused.
@@ -128,11 +132,66 @@ func New(opts Options) *Connector {
 func (c *Connector) Init(br *bridgev2.Bridge) {
 	c.Bridge = br
 	c.Log = br.Log.With().Str("component", "trioditis connector").Logger()
+	// One connector per process: the patched bridgev2 tells it how each remote event's
+	// handling really ended (third_party/mautrix.patch).
+	bridgev2.RemoteEventDone = c.remoteEventDone
 }
 
-func (c *Connector) Start(ctx context.Context) error { return nil }
-func (c *Connector) PreStop()                        {}
-func (c *Connector) Stop()                           {}
+// Start runs after bridgev2 has upgraded its database and before any login connects, so a
+// message cut off by the last stop is undone before its network sends it again.
+func (c *Connector) Start(ctx context.Context) error { return c.RecoverInflight(ctx) }
+
+// remoteEventDone settles the messages a watched remote event was bridging (handled): once
+// handling ended, they're no longer in flight, and if it failed, what of them bridgev2 saved is
+// forgotten. bridgev2 drops a redelivered message as a duplicate once any part of it is saved,
+// so without that a message whose second part failed would never get it; the parts already
+// journaled come again with the same event IDs and are applied once.
+func (c *Connector) remoteEventDone(evt bridgev2.RemoteEvent, res bridgev2.EventHandlingResult) {
+	messages, watched := handled.Finished(evt, res.Success)
+	if !watched {
+		return
+	}
+	ctx := context.Background()
+	if c.Bridge != nil && c.Bridge.BackgroundCtx != nil {
+		ctx = context.WithoutCancel(c.Bridge.BackgroundCtx)
+	}
+	for _, m := range messages {
+		if err := c.settleInflight(ctx, store.InflightMessage{Receiver: m.Receiver, MessageID: m.ID}, !res.Success); err != nil {
+			c.Log.Err(err).Msg("Settling a bridged message failed; it is settled at the next start")
+		}
+	}
+}
+
+// settleInflight ends a message's in-flight record, first forgetting its saved parts if undo.
+func (c *Connector) settleInflight(ctx context.Context, m store.InflightMessage, undo bool) error {
+	if undo {
+		if err := c.Bridge.DB.Message.DeleteAllParts(ctx, networkid.UserLoginID(m.Receiver), networkid.MessageID(m.MessageID)); err != nil {
+			return err
+		}
+	}
+	return c.Store.DeleteInflight(ctx, m)
+}
+
+// RecoverInflight undoes the messages whose handling the last stop cut off: they weren't
+// acknowledged, so their network sends them again, and bridgev2 must not take that for a
+// duplicate of the parts it had saved.
+func (c *Connector) RecoverInflight(ctx context.Context) error {
+	messages, err := c.Store.Inflight(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list messages being bridged: %w", err)
+	}
+	for _, m := range messages {
+		if err = c.settleInflight(ctx, m, true); err != nil {
+			return fmt.Errorf("failed to undo a message cut off by the last stop: %w", err)
+		}
+	}
+	if len(messages) > 0 {
+		c.Log.Info().Int("messages", len(messages)).Msg("Undid messages cut off by the last stop, for their redelivery")
+	}
+	return nil
+}
+func (c *Connector) PreStop() {}
+func (c *Connector) Stop()    {}
 
 // BotIntent satisfies the unexported interface bridgev2.NewBridge asserts.
 func (c *Connector) BotIntent() bridgev2.MatrixAPI { return c.bot }

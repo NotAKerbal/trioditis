@@ -5,7 +5,7 @@ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } fr
 import { constantTimeEqual, sha256Hex } from './lib/hash'
 import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
-import { Unmappable, applyEvent, startMeter } from './lib/ingest'
+import { Unmappable, applyEvent, settleCancelledLogins, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
 import { browserStepOpen } from './logins'
@@ -265,6 +265,7 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
   const now = Date.now()
   if (payload.type === 'loginCancel') {
     await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: now })
+    await settleCancelledLogins(ctx, session.userId, session.network)
     return
   }
   const waitingOnIt =
@@ -277,6 +278,7 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
     step: { stepId: 'expired', type: 'error', error: 'expired' },
     updatedAt: now,
   })
+  await settleCancelledLogins(ctx, session.userId, session.network)
 }
 
 /**
@@ -391,6 +393,7 @@ async function failLogin(ctx: MutationCtx, command: Doc<'outbox'>, error: Doc<'o
     step: { stepId: 'rejected', type: 'error', error: error ?? 'invalid_command' },
     updatedAt: Date.now(),
   })
+  await settleCancelledLogins(ctx, session.userId, session.network)
 }
 
 /**
