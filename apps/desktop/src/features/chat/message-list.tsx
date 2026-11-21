@@ -18,6 +18,7 @@ import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
+import { againState, useSendAgainStates, type SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
@@ -156,6 +157,8 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
+  const sentAgain = useSendAgainStates()
+  const clientIds = new Set(messages.flatMap((m) => (m.clientMessageId ? [m.clientMessageId] : [])))
   let lastDay = ''
 
   return (
@@ -347,7 +350,12 @@ export function MessageList(props: MessageListProps) {
                     </div>
                   ) : null}
                   {m.self ? (
-                    <DeliveryProblem m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} />
+                    <DeliveryProblem
+                      m={m}
+                      again={againState(m.clientMessageId, sentAgain, clientIds)}
+                      onSendAgain={props.onSendAgain}
+                      onDiscard={props.onDiscard}
+                    />
                   ) : null}
                   {!m.pending && !m.deleted ? (
                     // Beside the bubble, nearest first, on the side away from its sender.
@@ -536,20 +544,36 @@ function DeliveryIcon({ delivery }: { delivery: Message['delivery'] }) {
 /** A send that failed or may not have gone, with what the person can do about it. */
 function DeliveryProblem({
   m,
+  again,
   onSendAgain,
   onDiscard,
 }: {
   m: Message
+  /** Its one replacement: on its way, or gone. Either way it isn't offered again. */
+  again: SendAgainState | undefined
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
 }) {
+  const sendAgain = (label: string) =>
+    again === 'sent' ? (
+      <span className="font-medium text-muted-foreground">Sent again</span>
+    ) : (
+      <Button
+        variant="link"
+        size="sm"
+        className="h-auto text-xs"
+        disabled={again === 'sending'}
+        aria-busy={again === 'sending'}
+        onClick={() => onSendAgain(m)}
+      >
+        {again === 'sending' ? 'Sending…' : label}
+      </Button>
+    )
   if (m.delivery === 'failed')
     return (
       <span className="mx-2.5 mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-danger">
         <AlertCircle className="size-3" /> Not sent
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-          Retry
-        </Button>
+        {sendAgain('Retry')}
         <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onDiscard(m)}>
           Delete
         </Button>
@@ -562,9 +586,7 @@ function DeliveryProblem({
         title="The network didn’t confirm this message. Trioditis never resends on its own."
       >
         <AlertCircle className="size-3" /> May not have sent
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-          Send again
-        </Button>
+        {sendAgain('Send again')}
         <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onDiscard(m)}>
           Discard
         </Button>

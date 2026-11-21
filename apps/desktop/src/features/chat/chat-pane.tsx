@@ -62,6 +62,7 @@ import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
 import { MediaAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
+import { sendAgain } from './send-again.ts'
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
@@ -130,9 +131,12 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
     [pending, scheduledTexts],
   )
 
-  async function sendText(text: string, reply?: string) {
-    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
-    const clientMessageId = newClientId()
+  async function sendText(text: string, reply?: string, clientMessageId = newClientId()) {
+    // Thrown, not only said, so a send again that couldn't go can be tried again.
+    if (!bridgeKey) {
+      toast('This server has no bridge key yet, so nothing can be sent.')
+      throw new Error('No bridge key')
+    }
     const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
     try {
       await send({ chatId: chat.id, clientMessageId, ...sealed, ...(reply ? { replyTo: reply } : {}) })
@@ -344,8 +348,11 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
           onSendAgain={(m) => {
-            // A new send with a new client message ID: the person chose to risk a duplicate.
-            if (m.body?.body) void sendText(m.body.body, m.replyTo).catch(() => undefined)
+            // One replacement per message, whatever the clicks: the person chose to risk a
+            // duplicate on the network, once (send-again.ts).
+            const text = m.body?.body
+            if (text && m.clientMessageId)
+              void sendAgain(m.clientMessageId, (id) => sendText(text, m.replyTo, id))
           }}
           onDiscard={(m) => {
             if (m.clientMessageId)
