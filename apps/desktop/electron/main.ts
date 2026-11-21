@@ -575,6 +575,11 @@ app.on('open-url', (event, url) => {
   openLink(url)
 })
 
+// No HTTP cache anywhere, not only in the servers' sessions (partitionFor): the default session,
+// which shows the server picker, would otherwise keep one in the app's data folder too. It has to
+// be set before the app is ready.
+app.commandLine.appendSwitch('disable-http-cache')
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -594,6 +599,8 @@ if (!app.requestSingleInstanceLock()) {
     else showConnect()
   })
   void app.whenReady().then(async () => {
+    // What the default session cached before the switch above is cleared.
+    void session.defaultSession.clearCache()
     buildMenu()
     settings = await loadSettings()
     const asked = serverArgument()
