@@ -61,6 +61,7 @@ import {
   whileSending,
 } from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
+import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -84,6 +85,7 @@ interface ChatPaneProps {
 }
 
 export function ChatPane({ chatId, onGone, onBack, act }: ChatPaneProps) {
+  const session = useSession()
   const chat = useChat(chatId)
   useEffect(() => {
     if (chatId && chat === null) onGone()
@@ -101,13 +103,41 @@ export function ChatPane({ chatId, onGone, onBack, act }: ChatPaneProps) {
       </main>
     )
   }
-  return <OpenChat key={chat.id} chat={chat} act={act} onBack={onBack} />
+  // A page of messages the server couldn't answer in time (a busy server, or every query asked
+  // again at once after the computer wakes) takes down only this pane, which then tries again.
+  // The draft lives in the draft store, so it's still there when the chat comes back.
+  return (
+    <RetryBoundary
+      key={chat.id}
+      offline={session.offline}
+      fallback={(say, retry) => (
+        <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
+          <Button variant="ghost" size="icon" aria-label="Back to chats" className="m-1.5 md:hidden" onClick={onBack}>
+            <ChevronLeft className="size-5" />
+          </Button>
+          <LoadError say={say('Couldn’t load this chat.')} onRetry={retry} />
+        </main>
+      )}
+    >
+      {(attempt) => <OpenChat chat={chat} attempt={attempt} act={act} onBack={onBack} />}
+    </RetryBoundary>
+  )
 }
 
-function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']; onBack: () => void }) {
+function OpenChat({
+  chat,
+  attempt,
+  act,
+  onBack,
+}: {
+  chat: Chat
+  attempt: number
+  act: ChatPaneProps['act']
+  onBack: () => void
+}) {
   const session = useSession()
   const actions = useChatActions()
-  const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id)
+  const { messages, loading, canLoadMore, loadingMore, loadMore } = useMessages(chat.id, attempt)
   // Where focus goes back to when the details sheet closes.
   const detailsButton = useRef<HTMLButtonElement>(null)
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for

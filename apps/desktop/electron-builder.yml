@@ -2,9 +2,13 @@
 # main process, preload and server picker: the web app comes from the server it connects to, so
 # none of this package's web dependencies go in.
 #
-# Nothing here is signed: the project has no Apple or Windows signing certificates. macOS
-# Gatekeeper and Windows SmartScreen warn about these builds, and a Mac must be told to open it
-# (right-click → Open) the first time.
+# Nothing here is signed with a certificate: the project has no Apple Developer ID or Windows
+# code-signing certificate. macOS Gatekeeper and Windows SmartScreen warn about these builds the
+# first time they're opened.
+#
+# Releases (docs/CONTRIBUTING.md, Desktop releases) attach the installers under fixed names, with
+# no version in them, so trioditis.app can link to the latest release's files directly
+# (releases/latest/download/<name>). Keep apps/site/index.html in step with these names.
 appId: org.trioditis.desktop
 productName: Trioditis
 executableName: trioditis
@@ -36,14 +40,21 @@ mac:
   target:
     - dmg
     - zip
-  # Unsigned: there is no Developer ID to sign with, and so no notarizing.
-  identity: null
+  artifactName: ${productName}-mac-${arch}.${ext}
+  # Ad-hoc signed ("-"): there is no Developer ID to sign with, and so no notarizing. Apple
+  # silicon refuses to run an app whose signature is broken, which renaming Electron's bundle
+  # does, and reports it as damaged; an ad-hoc signature makes it the usual unidentified
+  # developer warning instead. The hardened runtime is only for notarized apps, and with an
+  # ad-hoc signature it would refuse Electron's own frameworks.
+  identity: '-'
+  hardenedRuntime: false
 
 win:
   target:
     - nsis
 
 nsis:
+  artifactName: ${productName}-windows-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -52,6 +63,7 @@ linux:
   category: Network
   synopsis: Your chat networks in one place
   maintainer: Trioditis contributors
+  artifactName: ${productName}-linux-${arch}.${ext}
   target:
     - AppImage
     - deb

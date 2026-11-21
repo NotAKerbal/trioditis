@@ -128,3 +128,4 @@ export interface ContactIdentifiersPlaintext {
 export * from './client.ts'
 export * from './people.ts'
 export * from './vcard.ts'
+export * from './google.ts'

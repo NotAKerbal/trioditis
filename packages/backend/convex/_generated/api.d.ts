@@ -16,6 +16,7 @@ import type * as contacts from "../contacts.js";
 import type * as crons from "../crons.js";
 import type * as demo from "../demo.js";
 import type * as gateway from "../gateway.js";
+import type * as google from "../google.js";
 import type * as http from "../http.js";
 import type * as keys from "../keys.js";
 import type * as labels from "../labels.js";
@@ -67,6 +68,7 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   demo: typeof demo;
   gateway: typeof gateway;
+  google: typeof google;
   http: typeof http;
   keys: typeof keys;
   labels: typeof labels;

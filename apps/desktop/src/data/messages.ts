@@ -3,11 +3,11 @@ import type { Doc, Id } from '@trioditis/backend/dataModel'
 import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMutation } from 'convex/react'
+import { useMutation, usePaginatedQuery } from 'convex/react'
 // The cached hook keeps a chat's pages subscribed for a while after its pane closes (main.tsx),
 // so going back to a chat shows its latest messages at once, already up to date, instead of
 // loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
-import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
+import { usePaginatedQuery as useCachedPaginatedQuery } from 'convex-helpers/react/cache/hooks'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
@@ -58,17 +58,30 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
   }
 }
 
-/** A chat's messages, oldest first for display, loading older pages on request. */
-export function useMessages(chatId: ChatId) {
+const PAGE = 50
+
+/**
+ * A chat's messages, oldest first for display, loading older pages on request. `attempt` counts
+ * the retries after a page couldn't load (RetryBoundary). The cached hook keeps a page's
+ * subscription, its error too, for minutes after it's let go, under a key made from its
+ * arguments (its pagination ID is always 0): asked again the same way, a failed page fails
+ * again, and every page it keeps is asked again at once when the connection comes back. So a
+ * retry uses Convex's own hook instead, which asks under a new pagination ID each time it mounts
+ * and lets its pages go as soon as it unmounts.
+ */
+export function useMessages(chatId: ChatId, attempt = 0) {
   const session = useSession()
-  const { results, status, loadMore } = usePaginatedQuery(api.messages.list, { chatId }, { initialNumItems: 50 })
+  const retrying = attempt > 0
+  const cached = useCachedPaginatedQuery(api.messages.list, retrying ? 'skip' : { chatId }, { initialNumItems: PAGE })
+  const fresh = usePaginatedQuery(api.messages.list, retrying ? { chatId } : 'skip', { initialNumItems: PAGE })
+  const { results, status, loadMore } = retrying ? fresh : cached
   const messages = useMemo(() => [...results].reverse().map((m) => toMessage(m, session)), [results, session])
   return {
     messages,
     loading: status === 'LoadingFirstPage',
     canLoadMore: status === 'CanLoadMore',
     loadingMore: status === 'LoadingMore',
-    loadMore: () => loadMore(50),
+    loadMore: () => loadMore(PAGE),
   }
 }
 

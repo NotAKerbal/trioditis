@@ -1,8 +1,10 @@
 import { generateKeyPair, keyId, ready } from '@trioditis/crypto'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { coldSession, forgetVerified, readVerified, rememberVerified } from '../src/lib/verified-session.ts'
 
-beforeAll(ready)
+// Before the suites are collected: the first one makes its key pair as it's defined, before any
+// beforeAll would run, and libsodium isn't usable until it has loaded.
+await ready()
 
 function store() {
   const map = new Map<string, string>()

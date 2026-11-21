@@ -916,7 +916,7 @@ export function assertLocalBackend({ requireConfigured = true, dir = backendDir,
   if (problems.length > 0) {
     throw new Error(
       `pnpm dev only works with this checkout's own local backend, and won't touch any other:\n  - ${problems.join('\n  - ')}\n` +
-        'Move those files aside, or start over (docs/CONTRIBUTING.md, "Starting over").',
+        'Move those files aside, or start over (apps/docs/src/content/docs/contributing/local-development.mdx).',
     )
   }
 }
@@ -995,7 +995,7 @@ export function libsignalDir(module = resolve(bridgeDir, 'third_party/mautrix-si
   const pinned = readFileSync(resolve(module, 'pkg/libsignalgo/signalversion/version.go'), 'utf8')
   const version = /const Version = "v(\d+\.\d+\.\d+)"/.exec(pinned)?.[1]
   if (!version) throw new Error(`Couldn't tell which libsignal version mautrix-signal needs (${module}).`)
-  const how = `Build libsignal v${version} (docs/networks/signal.md) and put its libsignal_ffi.a there, or set LIBSIGNAL_FFI_DIR to the directory that has it.`
+  const how = `Build libsignal v${version} (apps/docs/src/content/docs/networks/signal.md) and put its libsignal_ffi.a there, or set LIBSIGNAL_FFI_DIR to the directory that has it.`
   const library = resolve(dir, 'libsignal_ffi.a')
   if (!existsSync(library))
     throw new Error(`Signal's bridge host links libsignal, and ${library} doesn't exist. ${how}`)
@@ -1118,7 +1118,7 @@ export async function ensureTester({ authUrl, origin, setupToken, password = TES
   }
   if (signUp.status === 403) {
     throw new Error(
-      `This backend already has an admin who isn't the test account. Sign in as that admin, or start this checkout's backend over with "pnpm dev --setup --reset" (docs/CONTRIBUTING.md, "Starting over").`,
+      `This backend already has an admin who isn't the test account. Sign in as that admin, or start this checkout's backend over with "pnpm dev --setup --reset" (apps/docs/src/content/docs/contributing/local-development.mdx).`,
     )
   }
   throw new Error(`Creating the test account failed (${signUp.status}): ${await signUp.text()}`)

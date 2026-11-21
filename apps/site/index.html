@@ -6,7 +6,7 @@
     <title>Trioditis: every chat, on your own server</title>
     <meta
       name="description"
-      content="An open-source, self-hostable alternative to Beeper. One app for WhatsApp, Signal, Google Messages, Telegram and more, running on a server you own."
+      content="An open-source, self-hosted universal messaging hub. One app for WhatsApp, Signal, Google Messages, Telegram and more, running on a server you own."
     />
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)" />
@@ -30,11 +30,15 @@
   <body>
     <header class="bar">
       <a class="brand" href="/" aria-label="Trioditis home">
-        <img src="/icon.svg" width="28" height="28" alt="" />
-        <span>Trioditis</span>
+        <picture>
+          <source srcset="/lockup-dark.svg" media="(prefers-color-scheme: dark)" />
+          <img src="/lockup.svg" height="28" alt="Trioditis" />
+        </picture>
       </a>
       <nav aria-label="Main">
+        <a href="#download">Download</a>
         <a href="#self-host">Self-host</a>
+        <a href="https://docs.trioditis.app">Docs</a>
         <a href="https://github.com/NotAKerbal/trioditis">GitHub</a>
       </nav>
     </header>
@@ -43,12 +47,12 @@
       <section class="hero">
         <h1>Every chat, in one app, on a server you&nbsp;own.</h1>
         <p class="lead">
-          Trioditis is an open-source, self-hostable alternative to Beeper. Bring WhatsApp, Signal, Google Messages,
+          Trioditis is an open-source, self-hosted universal messaging hub. Bring WhatsApp, Signal, Google Messages,
           Telegram and more into one inbox, and invite the people you message with.
         </p>
         <div class="actions">
           <a class="button primary" href="#self-host">Run your own server</a>
-          <a class="button" href="https://github.com/NotAKerbal/trioditis">View the source</a>
+          <a class="button" href="https://docs.trioditis.app">Read the docs</a>
         </div>
         <p class="status">In early development: expect rough edges.</p>
       </section>
@@ -94,7 +98,7 @@
               unreadable, even to whoever runs the server. The exceptions: messages pass through the server's bridges in
               the clear on their way in and out, and a chat you give an agent read access to becomes readable by the
               server on that agent's behalf.
-              <a href="https://github.com/NotAKerbal/trioditis/blob/dev/docs/architecture/sealing.md">How it works</a>
+              <a href="https://docs.trioditis.app/security/sealing/">How it works</a>
             </p>
           </div>
           <div>
@@ -121,6 +125,55 @@
         </div>
       </section>
 
+      <section id="download" aria-labelledby="download-heading">
+        <h2 id="download-heading">Download</h2>
+        <p>The desktop app opens your Trioditis server in its own window, with notifications and an unread badge.</p>
+        <!-- Each link is to the latest release's file of that name (electron-builder.yml). -->
+        <div class="downloads">
+          <div>
+            <h3>macOS</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-arm64.dmg"
+              >Apple silicon</a
+            >
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-x64.dmg"
+              >Intel</a
+            >
+          </div>
+          <div>
+            <h3>Windows</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-windows-x64.exe"
+              >Installer</a
+            >
+          </div>
+          <div>
+            <h3>Linux</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-x86_64.AppImage"
+              >AppImage</a
+            >
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-amd64.deb"
+              >.deb</a
+            >
+          </div>
+        </div>
+        <p class="note">
+          The builds aren't signed with a certificate yet, so macOS and Windows warn the first time you open one. On a
+          Mac, choose
+          <strong>Open Anyway</strong> in System Settings → Privacy &amp; Security. On Ubuntu 24.04 and later, use the
+          .deb.
+          <a href="https://github.com/NotAKerbal/trioditis/releases">All releases</a>
+        </p>
+      </section>
+
       <section id="self-host" aria-labelledby="self-host-heading">
         <h2 id="self-host-heading">Run your own</h2>
         <p>
@@ -135,8 +188,8 @@ deploy/install/install.sh</code></pre>
         </div>
         <p>
           The installer prints a one-time link to create the admin account. Set up HTTPS before you open it from another
-          device. To upgrade, run <code>git pull</code> and the installer again.
-          <a href="https://github.com/NotAKerbal/trioditis/blob/dev/docs/deploy.md">Full guide</a>
+          device. To upgrade, update from Admin settings or run <code>git pull</code> and the installer again.
+          <a href="https://docs.trioditis.app/self-hosting/installation/">Full guide</a>
         </p>
       </section>
     </main>
@@ -144,6 +197,7 @@ deploy/install/install.sh</code></pre>
     <footer>
       <p><em>Trioditis</em>, "of the three roads": a crossroads for all of your conversations.</p>
       <p>
+        <a href="https://docs.trioditis.app">Docs</a>
         <a href="https://github.com/NotAKerbal/trioditis/blob/dev/LICENSE">AGPL-3.0</a>
         <a href="https://github.com/NotAKerbal/trioditis">GitHub</a>
       </p>

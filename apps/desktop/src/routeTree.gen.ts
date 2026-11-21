@@ -150,6 +150,4 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   AgentsConnectRoute: AgentsConnectRoute,
 }
-export const routeTree = rootRouteImport
-  ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>()
+export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>()

@@ -13,6 +13,11 @@ export interface DesktopBridge {
    * app can be newer than the installed desktop app, which may not have it.
    */
   changeServer?: () => void
+  /**
+   * Google Contacts' sign-in (google-sign-in.ts), in the system's browser, answering with the
+   * token once Google hands it back. Optional, as `changeServer` is.
+   */
+  googleSignIn?: (url: string) => Promise<{ accessToken?: string; error?: string }>
 }
 
 export const desktop = (window as { trioditisDesktop?: DesktopBridge }).trioditisDesktop
