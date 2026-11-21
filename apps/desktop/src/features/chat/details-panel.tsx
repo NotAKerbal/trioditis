@@ -18,7 +18,7 @@ import {
   type LabelId,
 } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
-import { MediaAvatar } from './attachments.tsx'
+import { ChatAvatar } from './chat-avatar.tsx'
 import { labelName, MAX_LABEL_NAME, renamedLabel } from './labels.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { LABEL_COLORS, newClientId, sealLabel, type LabelColor } from '~/lib/sealed.ts'
@@ -59,14 +59,7 @@ export function DetailsPanel({
   const body = (
     <>
       <div className="px-5 pt-6 pb-2 text-center">
-        <MediaAvatar
-          network={chat.network}
-          picture={chat.avatar}
-          name={chat.name}
-          size={68}
-          shape={chat.row.kind === 'dm' ? 'circle' : 'square'}
-          className="mx-auto"
-        />
+        <ChatAvatar chat={chat} size={68} className="mx-auto" />
         <h2 className="mt-2.5 text-lg font-bold">{chat.name}</h2>
         <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-subtle-foreground">
           <NetworkBadge network={chat.network} label={networkName(chat.network)} size={14} />{' '}

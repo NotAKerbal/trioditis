@@ -162,6 +162,7 @@ var eventFields = map[string][2][]string{
 	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted", "isRequest"}},
 	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
 	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
+	protocol.EventChatCollage:        {{"portalId", "sealed"}, nil},
 	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
 	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
 	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
@@ -375,6 +376,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
 	case protocol.EventContactIdentifiers:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
+	case protocol.EventChatCollage:
+		ctx.Kind, ctx.ObjectID = seal.KindChat, evt.PortalID+"/collage"
 	case protocol.EventLoginState:
 		ctx.Kind, ctx.ObjectID = seal.KindAccount, evt.LoginID
 	default:
@@ -468,6 +471,19 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Chat family" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+		// A group's collage is the members other than alice: here the one.
+		collage := gw.waitFor(t, "collage event", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventChatCollage && e.PortalID == portalID
+		})
+		var collagePlain protocol.ChatCollagePlaintext
+		h.open("alice", collage, &collagePlain)
+		if !slices.Equal(collagePlain.Ghosts, []string{first.Sender.GhostID}) {
+			t.Fatalf("collage %q, want the other member %q", collagePlain.Ghosts, first.Sender.GhostID)
+		}
+		var other protocol.ChatCollagePlaintext
+		if err := seal.OpenJSON(collage.Sealed, gw.keys["bob"], seal.Context{Kind: seal.KindChat, OwnerUserID: "alice", ObjectID: portalID + "/collage"}, &other); err == nil {
+			t.Fatal("bob opened alice's collage")
 		}
 		contact := gw.waitFor(t, "contact event", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventContact && e.GhostID == first.Sender.GhostID && e.UserID == "alice"
@@ -583,6 +599,9 @@ func TestConformance(t *testing.T) {
 		h.open("alice", chat, &chatPlain)
 		if chatPlain.Name != "Carol" {
 			t.Fatalf("chat name %q", chatPlain.Name)
+		}
+		if n := gw.count(func(e *protocol.Event) bool { return e.Type == protocol.EventChatCollage && e.PortalID == msg.PortalID }); n != 0 {
+			t.Fatalf("a direct chat has %d collages", n)
 		}
 	})
 

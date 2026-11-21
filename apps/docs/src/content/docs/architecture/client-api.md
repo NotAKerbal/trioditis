@@ -127,7 +127,7 @@ Every chat belongs to exactly one view (ordered highest priority first):
 | `inbox`    | Everything else (including woken snoozes with `woke: true`) |
 
 - `api.chats.list({ view?, network?, labelId?, paginationOpts })` pages up to 50 `ChatRow`s (8 MiB limit), pinned first then most recent.
-- Each `ChatRow` includes `sealedMeta` (open with kind `chat`, object ID `portalId`) and `lastMessage` (newest message preview up to 4 KiB sealed; open with kind `message`, object ID `lastMessage.objectId`).
+- Each `ChatRow` includes `sealedMeta` (open with kind `chat`, object ID `portalId`), `sealedCollage` (for a group, the members whose contacts' pictures make its picture when it has none: open with kind `chat`, object ID `<portalId>/collage`, plaintext `ChatCollagePlaintext`; `null` until sent) and `lastMessage` (newest message preview up to 4 KiB sealed; open with kind `message`, object ID `lastMessage.objectId`).
 - `api.chats.counts` returns `{ inbox, requests, woke }` capped at 99 with a `more` flag.
 - Chat actions: `chats.markRead`, `chats.markUnread`, `chats.setArchived`, `chats.setPinned`, `chats.setMuted`, `chats.snooze`, `chats.wake`, `chats.acceptRequest`, `chats.setBlocked`, `chats.setLabels` (up to 20 labels per chat).
 

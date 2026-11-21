@@ -520,6 +520,16 @@ async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type
   })
 }
 
+/** A group's collage, kept apart from its metadata so neither replaces the other. */
+async function applyChatCollage(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'chatCollage' }>,
+  network: Network,
+) {
+  const chat = await chatFor(ctx, event, network)
+  await ctx.db.patch(chat._id, { sealedCollage: event.sealed })
+}
+
 /** The most accounts one contact records (contacts.accountIds). */
 const MAX_CONTACT_ACCOUNTS = 10
 
@@ -874,6 +884,7 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     const limit =
       event.type === 'chat' ||
+      event.type === 'chatCollage' ||
       event.type === 'contact' ||
       event.type === 'contactIdentifiers' ||
       event.type === 'loginState'
@@ -903,6 +914,8 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
       return await applyContact(ctx, event, network)
     case 'contactIdentifiers':
       return await applyContactIdentifiers(ctx, event, network)
+    case 'chatCollage':
+      return await applyChatCollage(ctx, event, network)
     case 'chatStarted':
       return await applyChatStarted(ctx, event, origin)
     case 'loginState':
