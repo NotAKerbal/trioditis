@@ -671,30 +671,40 @@ function KeySetup({
       return
     }
     let kid: string
+    let stored: readonly string[]
     onSaving()
     try {
       const call = setup({ ...job.setup.args, proof, sessionId })
       onBackup(call)
-      kid = (await call).kid
+      const result = await call
+      kid = result.kid
+      stored = result.stored
     } catch (e) {
       if (sessionChanged(e)) return window.location.reload()
       if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
-    await check(kid, job)
+    await check(kid, job, false, stored)
   }
 
   /**
    * keys.setup stores only what's missing, so if another device holding this key installed a
-   * recovery key a moment before, the one shown here isn't it. Which one the server kept is
-   * checked, and only a match, or a clear mismatch, goes on; a failed check can be tried again.
+   * recovery key a moment before, the one shown here isn't it. When the call says it stored this
+   * recovery key (`stored`, decided in the transaction that wrote it), that settles it. Otherwise
+   * (another device's won, or an earlier try of this one stored it and its answer was lost) which
+   * one the server kept is checked, and only a match, or a clear mismatch, goes on; a failed check
+   * can be tried again.
    */
-  async function check(kid: string, job: NonNullable<typeof prepared>, fresh = false) {
+  async function check(kid: string, job: NonNullable<typeof prepared>, fresh = false, stored?: readonly string[]) {
     setBusy(true)
     setError(null)
     let lost = false
-    if (job.showRecovery) {
+    if (job.showRecovery && stored?.includes('recovery')) {
+      setRecoveryLost(false)
+      onRecoveryLost(false)
+      clearPendingRecoveryCheck()
+    } else if (job.showRecovery) {
       const identity = await readIdentity(fresh)
       const installed = identity?.backups.find((b) => b.kind === 'recovery')
       if (!installed) {

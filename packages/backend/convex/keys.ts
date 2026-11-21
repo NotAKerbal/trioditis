@@ -212,6 +212,11 @@ export const challenge = mutation({
  *
  * The server can't open the wraps, so it can't check they hold this key; the client checks
  * that before calling (packages/crypto `makeKeySetup` does).
+ *
+ * It answers which of the two backups this call stored (`stored`), decided in the same
+ * transaction that writes them. Two devices finishing setup at once both succeed, but only the
+ * first stores its recovery key; the other learns from `stored` that the recovery key it showed
+ * isn't the one kept, without a second read that a change in between could fool.
  */
 export const setup = mutation({
   args: {
@@ -221,7 +226,7 @@ export const setup = mutation({
     proof: v.string(),
     sessionId: v.optional(v.string()),
   },
-  returns: v.object({ kid: v.string() }),
+  returns: v.object({ kid: v.string(), stored: v.array(v.union(v.literal('password'), v.literal('recovery'))) }),
   handler: async (ctx, args) => {
     await requireSessionIfGiven(ctx, args.sessionId)
     const member = await requireMember(ctx)
@@ -236,7 +241,7 @@ export const setup = mutation({
     const backups = await backupsOf(ctx, member.userId)
     const existing = backups.filter((row) => row.kid === kid)
     const missing = (['password', 'recovery'] as const).filter((kind) => !existing.some((row) => row.kind === kind))
-    if (missing.length === 0) return { kid }
+    if (missing.length === 0) return { kid, stored: [] }
     await consumeProof(ctx, member.userId, args.proof, args.publicKey)
     if (!member.identityPublicKey) {
       await ctx.db.patch(member._id, { identityPublicKey: args.publicKey, identityKid: kid })
@@ -248,7 +253,7 @@ export const setup = mutation({
       await ctx.db.insert('keyBackups', { userId: member.userId, kid, kind, ...wrap, revision, createdAt: now })
     }
     await audit(ctx, { kind: 'user', id: member.userId }, 'identity.setup', kid)
-    return { kid }
+    return { kid, stored: missing }
   },
 })
 
