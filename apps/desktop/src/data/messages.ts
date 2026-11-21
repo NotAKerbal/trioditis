@@ -216,12 +216,12 @@ export function useBridge(): { key: string | undefined; status: BridgeStatus } {
 }
 
 /**
- * How the person's sends with these client message IDs stand, by ID, for the ones used
- * (messages.sendStates): what sending a message again needs for attempts whose copies are gone.
+ * Where sending each of these sends again stands, by client message ID, as the server decides
+ * it (messages.retryStates): the same for every send of a chain.
  */
-export function useSendStates(clientMessageIds: string[]) {
+export function useRetryStates(clientMessageIds: string[]) {
   const { data } = useQuery({
-    ...convexQuery(api.messages.sendStates, { clientMessageIds }),
+    ...convexQuery(api.messages.retryStates, { clientMessageIds }),
     enabled: clientMessageIds.length > 0,
   })
   return data
@@ -230,6 +230,7 @@ export function useSendStates(clientMessageIds: string[]) {
 export function useSendMutations() {
   return {
     send: useMutation(api.messages.send),
+    sendAgain: useMutation(api.messages.sendAgain),
     discard: useMutation(api.messages.discardSend),
     schedule: useMutation(api.scheduled.create),
     cancelScheduled: useMutation(api.scheduled.cancel),
