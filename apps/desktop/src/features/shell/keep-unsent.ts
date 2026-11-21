@@ -71,7 +71,7 @@ export function useKeepUnsent() {
         known(chatId).w = draft.w
         // One that went already (its tab closed before removing it) isn't brought back.
         if (loaded.sent.get(chatId) === sendIdOf(draft)) continue
-        adoptDraft(chatId, draft.text, draft.reply, draft.id, draft.origins)
+        adoptDraft(chatId, draft.text, draft.reply, draft.id)
       }
       for (const { chatId, sendId, copy } of loaded.sending) {
         // Gone already, or still saved as the draft too (the page went before that was removed).
@@ -79,7 +79,7 @@ export function useKeepUnsent() {
         const gone = loaded.sent.get(chatId) === sendId || (asDraft && sendIdOf(asDraft) === sendId)
         // Under way when the page went: back as the same draft, to send again or not. Into a
         // composer with something in it already, it waits, saved, for the next load.
-        if (gone || adoptDraft(chatId, copy.text, copy.reply, copy.id, copy.origins)) known(chatId).sending.add(sendId)
+        if (gone || adoptDraft(chatId, copy.text, copy.reply, copy.id)) known(chatId).sending.add(sendId)
       }
       for (const chatId of knowns.keys()) unsaved.add(chatId)
       for (const [chatId, draft] of allDrafts()) if (known(chatId).w) revs.set(chatId, draft.rev)
@@ -94,7 +94,7 @@ export function useKeepUnsent() {
       const draft = getDraft<Reply>(chatId)
       const filled = !!draft.text.trim() || !!draft.reply
       return {
-        draft: filled ? { text: draft.text, reply: draft.reply, id: draft.id, origins: draft.origins } : null,
+        draft: filled ? { text: draft.text, reply: draft.reply, id: draft.id } : null,
         draftChanged: revs.get(chatId) !== draft.rev,
         sending: new Map(allSending<Reply>().filter(([, p]) => p.chatId === chatId)),
         sent: sentToNote.get(chatId) ?? [],

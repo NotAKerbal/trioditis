@@ -18,7 +18,7 @@ export function beatenBySend(delivery: string | null): string {
     case 'read':
       return 'Too late to cancel: it was sent.'
     case 'failed':
-      return 'Too late to cancel: it went out, and failed.'
+      return 'Too late to cancel, and it failed to send.'
     default:
       return 'Too late to cancel: it may have been sent. Check the chat.'
   }

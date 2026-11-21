@@ -368,8 +368,8 @@ export default defineSchema({
   /**
    * Messages to send later. At `sendAt` each becomes an ordinary send in the outbox. Until
    * then the sealed copies wait in `scheduledPayloads`, deleted when it goes out. A cancelled
-   * one keeps them, so its text can go back to the person's composer, until they're done with
-   * it (`scheduled.forget`, `forgottenAt` set) or 30 days pass.
+   * one keeps them, so its text can go back to the person's composer, until they discard it
+   * (`scheduled.forget`, `forgottenAt` set) or 30 days pass.
    */
   scheduledSends: defineTable({
     userId: v.string(),
