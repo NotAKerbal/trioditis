@@ -328,6 +328,7 @@ h3 {
   color: var(--fg-muted);
 }
 
+#download > p,
 #self-host > p,
 .note {
   margin: 0;
@@ -337,6 +338,24 @@ h3 {
 .note {
   margin-top: 20px;
   font-size: 15px;
+}
+
+.downloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 28px 40px;
+  margin-block: 28px;
+}
+
+.downloads > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.downloads h3 {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 p code {

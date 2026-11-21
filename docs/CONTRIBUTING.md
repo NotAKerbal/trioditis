@@ -296,11 +296,35 @@ pnpm --filter @trioditis/desktop package:dir     # this system's app, unpacked, 
 
 `electron-builder.yml` packages only the main process, preload and server picker: the web
 app comes from the server. Each build is made on its own system (a Mac build needs a Mac). None
-are signed, since the project has no Apple Developer ID or Windows code-signing certificate:
-Gatekeeper and SmartScreen warn, a Mac must be told to open the app the first time
-(right-click → Open), and a Mac also needs a signed app for its own passkeys. The AppImage
-needs `--no-sandbox` where unprivileged user namespaces are restricted (Ubuntu 24.04 and
-later); the `.deb` doesn't.
+are signed with a certificate, since the project has no Apple Developer ID or Windows
+code-signing certificate: Gatekeeper and SmartScreen warn, a Mac must be told to open the app
+the first time (**Open Anyway** in System Settings → Privacy & Security), and a Mac also needs a
+signed app for its own passkeys. The Mac apps are ad-hoc signed, because Apple silicon calls an
+app with a broken signature damaged and won't open it at all. The AppImage needs
+`--no-sandbox` where unprivileged user namespaces are restricted (Ubuntu 24.04 and later); the
+`.deb` doesn't.
+
+#### Desktop releases
+
+A release is a tag. Pushing `v<version>`, such as `v0.1.0`, runs
+`.github/workflows/desktop-release.yml`: it builds every installer on its own system (Linux and
+Windows x64, the Mac for Apple silicon and Intel), with the tag's version as the app's, and
+publishes them as the tag's GitHub release, with their SHA-256 sums and notes generated from
+the pull requests since the last release.
+
+```sh
+git tag v0.1.0 origin/main   # the release merge (Branches, below)
+git push origin v0.1.0
+```
+
+The installers keep the same names in every release, `Trioditis-mac-arm64.dmg`,
+`Trioditis-windows-x64.exe` and so on (`electron-builder.yml`), so the Download section on
+trioditis.app (`apps/site/index.html`) links to `releases/latest/download/<name>` and always
+gets the newest. Renaming one means changing both. A tag with a suffix, such as
+`v0.2.0-beta.1`, is a prerelease: it gets a release, but the site's links stay on the last full
+one. A pull request that changes the desktop app's packaging (its `electron/`, `build/`,
+`electron-builder.yml` or `package.json`, or the lockfile) runs the same builds without
+publishing, and keeps the installers as the run's artifacts for a week.
 
 ### Starting over
 

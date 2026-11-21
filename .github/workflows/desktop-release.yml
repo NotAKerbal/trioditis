@@ -1,0 +1,151 @@
+# Desktop app releases (docs/CONTRIBUTING.md, Desktop releases). Pushing a tag like v0.1.0
+# builds the installers on Linux, macOS and Windows and publishes them as that tag's GitHub
+# release, which trioditis.app links to. A pull request that changes the desktop app's
+# packaging builds them too, as the run's artifacts, so a broken build shows before a release.
+name: Desktop release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - apps/desktop/electron/**
+      - apps/desktop/build/**
+      - apps/desktop/electron-builder.yml
+      - apps/desktop/package.json
+      - pnpm-lock.yaml
+      - .github/workflows/desktop-release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  # A newer commit replaces a pull request's build; a release always runs to the end.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            args: --linux --x64
+          # macos-15 is Apple silicon; electron-builder builds the Intel app there too.
+          - name: macOS
+            os: macos-15
+            args: --mac --arm64 --x64
+          - name: Windows
+            os: windows-2025
+            args: --win --x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      # No dependency cache: a release is built from what the lockfile names, never from a cache
+      # another run could have written.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: pnpm install --frozen-lockfile --filter @trioditis/desktop...
+      # The app's version is the tag's, without the v; a pull request's build is 0.0.0-pr.<n>.
+      - name: Set the version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then version="${REF_NAME#v}"; else version="0.0.0-pr.$PR"; fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$REF_NAME isn't a version tag like v0.1.0 or v0.2.0-beta.1"
+            exit 1
+          fi
+          node -e '
+            const fs = require("node:fs")
+            const path = "apps/desktop/package.json"
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"))
+            pkg.version = process.argv[1]
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n")
+          ' "$version"
+          echo "Building $version"
+      - name: Build the installers
+        env:
+          ARGS: ${{ matrix.args }}
+          # Ad-hoc signing (electron-builder.yml) uses no secret, so a pull request's Mac build
+          # signs too, and the check below covers what a release ships.
+          CSC_FOR_PULL_REQUEST: 'true'
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        # ARGS is split into words on purpose.
+        run: pnpm --filter @trioditis/desktop run package $ARGS --publish never
+      - name: Check the Mac apps' signatures
+        if: runner.os == 'macOS'
+        run: |
+          for app in apps/desktop/release/mac-arm64/Trioditis.app apps/desktop/release/mac/Trioditis.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+          done
+      # Exactly the files the site links to, plus the Mac zips. A missing one fails here rather
+      # than as a broken link on trioditis.app.
+      - name: Collect the installers
+        env:
+          OS: ${{ runner.os }}
+        run: |
+          case "$OS" in
+            Linux) files="Trioditis-linux-x86_64.AppImage Trioditis-linux-amd64.deb" ;;
+            macOS) files="Trioditis-mac-arm64.dmg Trioditis-mac-x64.dmg Trioditis-mac-arm64.zip Trioditis-mac-x64.zip" ;;
+            Windows) files="Trioditis-windows-x64.exe" ;;
+          esac
+          mkdir -p installers
+          for file in $files; do
+            if [ ! -f "apps/desktop/release/$file" ]; then
+              echo "::error::electron-builder made no $file"
+              ls apps/desktop/release
+              exit 1
+            fi
+            cp "apps/desktop/release/$file" installers/
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ runner.os }}
+          path: installers/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+      - name: Checksums
+        working-directory: installers
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # gh uploads every file before it publishes, so the release is never seen half-made. A
+      # tag with a suffix (v0.2.0-beta.1) is a prerelease, which leaves "latest", and so the
+      # site's links, on the last full release.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
+          gh release create "$TAG" installers/* \
+            --repo "$REPO" --verify-tag --title "Trioditis ${TAG#v}" --generate-notes "${flags[@]}"

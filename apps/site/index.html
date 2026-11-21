@@ -34,6 +34,7 @@
         <span>Trioditis</span>
       </a>
       <nav aria-label="Main">
+        <a href="#download">Download</a>
         <a href="#self-host">Self-host</a>
         <a href="https://github.com/NotAKerbal/trioditis">GitHub</a>
       </nav>
@@ -119,6 +120,54 @@
             </p>
           </div>
         </div>
+      </section>
+
+      <section id="download" aria-labelledby="download-heading">
+        <h2 id="download-heading">Download</h2>
+        <p>The desktop app opens your Trioditis server in its own window, with notifications and an unread badge.</p>
+        <!-- Each link is to the latest release's file of that name (electron-builder.yml). -->
+        <div class="downloads">
+          <div>
+            <h3>macOS</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-arm64.dmg"
+              >Apple silicon</a
+            >
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-mac-x64.dmg"
+              >Intel</a
+            >
+          </div>
+          <div>
+            <h3>Windows</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-windows-x64.exe"
+              >Installer</a
+            >
+          </div>
+          <div>
+            <h3>Linux</h3>
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-x86_64.AppImage"
+              >AppImage</a
+            >
+            <a
+              class="button"
+              href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-amd64.deb"
+              >.deb</a
+            >
+          </div>
+        </div>
+        <p class="note">
+          The builds aren't signed yet, so macOS and Windows warn the first time you open one. On a Mac, choose
+          <strong>Open Anyway</strong> in System Settings → Privacy &amp; Security. On Ubuntu 24.04 and later, use the
+          .deb.
+          <a href="https://github.com/NotAKerbal/trioditis/releases">All releases</a>
+        </p>
       </section>
 
       <section id="self-host" aria-labelledby="self-host-heading">
