@@ -17,6 +17,8 @@ export interface AccountRow {
   state: LoginState
   logoutPending: boolean
   logoutError: ErrorCode | null
+  /** A login the person cancelled connected it anyway (logins.accounts). */
+  connectedAfterCancel?: boolean
 }
 
 export interface AccountView {
@@ -28,6 +30,8 @@ export interface AccountView {
   reconnect: boolean
   /** Logging it out: offered while it's still logged in anywhere, and not while one is on its way. */
   disconnect: boolean
+  /** Keeping it (logins.keep): offered for an account a cancelled login connected anyway. */
+  keep: boolean
 }
 
 // Why a disconnect didn't finish (`logoutError`). `expired`: no bridge host took it within 10
@@ -50,7 +54,19 @@ const STATE_NOTE: Record<LoginState, string | null> = {
   LOGGED_OUT: null,
 }
 
+/** The note for an account a login the person cancelled connected anyway. */
+export const AFTER_CANCEL_NOTE = 'You cancelled this login, but it finished connecting. Keep it or disconnect.'
+
 export function accountView(account: AccountRow, bridgeDown: boolean): AccountView {
+  const { state, logoutPending, connectedAfterCancel } = account
+  // Nothing decides for the person: it waits for them, unless they've already disconnected it.
+  if (connectedAfterCancel && state !== 'LOGGED_OUT' && !logoutPending) {
+    return { group: 'attention', note: AFTER_CANCEL_NOTE, warn: true, reconnect: false, disconnect: true, keep: true }
+  }
+  return { ...stateView(account, bridgeDown), keep: false }
+}
+
+function stateView(account: AccountRow, bridgeDown: boolean): Omit<AccountView, 'keep'> {
   const { state, logoutPending, logoutError } = account
   if (state === 'LOGGED_OUT') {
     return { group: 'loggedOut', note: null, warn: false, reconnect: true, disconnect: false }

@@ -82,8 +82,9 @@ type Host struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	workerDone chan struct{}
-	// postStart closes once bridgev2's post-start work is done.
-	postStart chan struct{}
+	// postStart closes once bridgev2's post-start work is done; stopPostStart cuts it short.
+	postStart     chan struct{}
+	stopPostStart context.CancelFunc
 }
 
 // BridgeConfig is bridgev2's configuration for Trioditis. See docs/PLAN.md, Bridge host.
@@ -220,10 +221,11 @@ func (h *Host) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
 	}
-	h.postStart = make(chan struct{})
+	postCtx, stopPostStart := context.WithCancel(bridgeCtx)
+	h.postStart, h.stopPostStart = make(chan struct{}), stopPostStart
 	go func() {
 		defer close(h.postStart)
-		h.Bridge.PostStart(bridgeCtx)
+		h.Bridge.PostStart(postCtx)
 	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,
 	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from
@@ -247,9 +249,6 @@ func (h *Host) Start(ctx context.Context) error {
 	}
 	if err = h.Connector.RecoverCommands(ctx); err != nil {
 		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)
-	}
-	if err = h.Connector.SettleDiscardedAtStart(ctx); err != nil {
-		return fmt.Errorf("host: failed to settle cancelled logins' accounts: %w", err)
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
@@ -302,15 +301,17 @@ func (h *Host) Stop() {
 		_ = h.httpServer.Shutdown(ctx)
 		cancel()
 	}
+	// bridgev2's post-start work (resending bridge info) uses the database, which bridgev2's stop
+	// closes: it is told to stop, and waited for, first.
+	if h.postStart != nil {
+		h.stopPostStart()
+		<-h.postStart
+	}
 	h.Bridge.StopWithTimeout(10 * time.Second)
 	if h.cancel != nil {
 		h.cancel()
 		<-h.done
 		<-h.workerDone
-	}
-	// bridgev2's post-start work (resending bridge info) uses the database; it must be done first.
-	if h.postStart != nil {
-		<-h.postStart
 	}
 	_ = h.DB.Close()
 }

@@ -105,6 +105,8 @@ export const loginStep = v.object({
     }),
   ),
   loginId: v.optional(v.string()),
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel: v.optional(v.boolean()),
   error: v.optional(errorCode),
 })
 

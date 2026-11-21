@@ -241,122 +241,34 @@ func TestLoginCancelAndCompleteRaceEndsOnce(t *testing.T) {
 	}
 }
 
-// A cancelled attempt that finishes late logs out the account it made, unless another attempt
-// connected that account or is still going: the person's retry is what they kept.
-func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
-	var loggedOut []*bridgev2.UserLogin
-	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) {
-		loggedOut = append(loggedOut, login)
+// A login the person cancelled that completes anyway isn't logged out on the host's own say:
+// it is reported as connected, marked afterCancel, for the person to decide. The login still
+// ends once (cancelled); the late completion is a report, not a second ending.
+func TestALoginCompletedAfterItsCancelIsReportedNotLoggedOut(t *testing.T) {
+	c := testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	late := startedSession(c, "late")
+	if err := c.handleLoginCancel(context.Background(), &protocol.Command{Type: protocol.CommandLoginCancel, UserID: "alice", LoginSessionID: "late"}, false); err != nil {
+		t.Fatal(err)
 	}
-	useTestAccounts(t)
-	t.Cleanup(func() { logoutDiscarded = old })
-	account := testAccount("15551234567", "alice")
-	completes := func() *bridgev2.LoginStep {
-		return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
-			CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
+	late.advance(&bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
+		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: &bridgev2.UserLogin{}}}, nil)
+	events, err := c.Store.After(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatal(err)
 	}
-	cancel := func(c *Connector, id string) {
-		if err := c.handleLoginCancel(context.Background(), &protocol.Command{Type: protocol.CommandLoginCancel, UserID: "alice", LoginSessionID: id}, false); err != nil {
-			t.Fatal(err)
+	var steps []*protocol.LoginStep
+	for _, evt := range events {
+		if evt.Type == protocol.EventLoginStep {
+			steps = append(steps, evt.Step)
 		}
 	}
-
-	// Alone: the late completion is logged out.
-	c := testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	lone := startedSession(c, "lone")
-	cancel(c, "lone")
-	lone.advance(completes(), nil)
-	if len(loggedOut) != 1 {
-		t.Fatalf("a cancelled login's new account must be logged out, got %d logouts", len(loggedOut))
+	if len(steps) != 2 || steps[0].Type != protocol.StepCancelled || steps[1].Type != protocol.StepComplete ||
+		!steps[1].AfterCancel || steps[1].LoginID == "" {
+		t.Fatalf("steps %+v; want the cancel, then a complete marked afterCancel with its login ID", steps)
 	}
-
-	// The retry completed the account first.
-	loggedOut = nil
-	c = testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	first, retry := startedSession(c, "first"), startedSession(c, "retry")
-	cancel(c, "first")
-	retry.advance(completes(), nil)
-	first.advance(completes(), nil)
-	if len(loggedOut) != 0 {
-		t.Fatal("a late cancelled attempt logged out the account the retry connected")
-	}
-
-	// The retry is still going.
-	c = testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	first, _ = startedSession(c, "first"), startedSession(c, "retry")
-	cancel(c, "first")
-	first.advance(completes(), nil)
-	if len(loggedOut) != 0 {
-		t.Fatal("a late cancelled attempt logged out while a retry was going")
-	}
-	// The retry then ends without connecting it (cancelled too): the decision put off is made.
-	cancel(c, "retry")
-	if len(loggedOut) != 1 {
-		t.Fatalf("once the retry settled, the cancelled attempt's account must be logged out; %d logouts", len(loggedOut))
-	}
-
-	// The retry connects a different account: the cancelled attempt's is still its own.
-	loggedOut = nil
-	c = testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	first, retry = startedSession(c, "first"), startedSession(c, "retry")
-	cancel(c, "first")
-	first.advance(completes(), nil)
-	other := testAccount("15550009999", "alice")
-	retry.advance(&bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
-		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15550009999", UserLogin: other}}, nil)
-	if len(loggedOut) != 1 || loggedOut[0] != account {
-		t.Fatalf("logged out %v, want only the cancelled attempt's account", loggedOut)
-	}
-
-	// The retry connects the same account later: it stays.
-	loggedOut = nil
-	c = testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	first, retry = startedSession(c, "first"), startedSession(c, "retry")
-	cancel(c, "first")
-	first.advance(completes(), nil)
-	retry.advance(completes(), nil)
-	if len(loggedOut) != 0 {
-		t.Fatal("the account the retry went on to connect was logged out")
-	}
-}
-
-// Signed in, then disconnected: the login that first connected the account no longer speaks
-// for it, so a cancelled re-pair of the same account that completes late is logged out.
-func TestADisconnectedAccountsCancelledRepairIsLoggedOut(t *testing.T) {
-	var loggedOut []*bridgev2.UserLogin
-	old := logoutDiscarded
-	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) {
-		loggedOut = append(loggedOut, login)
-	}
-	useTestAccounts(t)
-	t.Cleanup(func() { logoutDiscarded = old })
-	account := testAccount("15551234567", "alice")
-	completes := &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
-		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
-	c := testConnector(t)
-	c.Opaque = ids.NewOpaquer([]byte("test id key"))
-	startedSession(c, "signin").advance(completes, nil)
-	if err := c.SendBridgeStatus(context.Background(), &status.BridgeState{
-		StateEvent: status.StateLoggedOut, RemoteID: "15551234567", UserID: ids.UserMXID("alice"),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	repair := startedSession(c, "repair")
-	if err := c.handleLoginCancel(context.Background(), &protocol.Command{Type: protocol.CommandLoginCancel, UserID: "alice", LoginSessionID: "repair"}, false); err != nil {
-		t.Fatal(err)
-	}
-	repair.advance(completes, nil)
-	if len(loggedOut) != 1 {
-		t.Fatalf("the cancelled re-pair's account must be logged out; %d logouts", len(loggedOut))
-	}
-	if kept, err := c.Store.Discarded(context.Background()); err != nil || len(kept) != 0 {
-		t.Fatalf("decided, but still kept: %v %v", kept, err)
+	if has, err := c.Store.HasLoginSession(context.Background(), "late"); err != nil || has {
+		t.Fatalf("the login is still recorded as in progress (%v)", err)
 	}
 }
 

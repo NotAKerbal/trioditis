@@ -245,7 +245,7 @@ describe('settling after a restore', () => {
     expect(accounts.filter((row) => row.logoutPending)).toHaveLength(25)
   })
 
-  it("logs out a current member's account a cancelled login connected, once the queue is settled", async () => {
+  it("leaves a current member's account a cancelled login connected for them to decide", async () => {
     const { t } = await ready()
     // A login the person cancelled, whose cancel was still queued in the backup, and the account
     // it connected anyway.
@@ -283,17 +283,10 @@ describe('settling after a restore', () => {
         .unique(),
       (await ctx.db.query('outbox').collect()).filter((row) => row.payload.type === 'logout'),
     ])
-    // Its logout is queued after settling, not expired with the rest of the queue.
-    expect(logouts.map((row) => row.state)).toEqual(['queued'])
-    expect(account?.logoutPending).toBe(true)
-    // And settling again (a restore's installer run cut off and run again) leaves it with one
-    // logout waiting, not two.
-    await settle(t, Date.now())
-    expect(
-      (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter(
-        (row) => row.payload.type === 'logout' && row.state === 'queued',
-      ),
-    ).toHaveLength(1)
+    // Nothing logs it out on its own any more: a cancelled login's account is kept and flagged
+    // for the person to decide (lib/ingest.ts, completedAfterCancel), restore or not.
+    expect(logouts).toEqual([])
+    expect(account?.logoutPending).toBeFalsy()
   })
 
   it('works through more rows than one batch, and changes nothing when run again', async () => {

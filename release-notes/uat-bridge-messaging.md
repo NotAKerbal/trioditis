@@ -5,4 +5,4 @@ Fixed: A file that couldn't be saved now shows in its message as a failed file i
 Improved: New chats accept phone numbers as you'd write them, and say when a number is written wrong rather than that nobody has it.
 Fixed: Chat and contact pictures no longer turn back into initials after a name change.
 Fixed: A bridge that is shut down shows offline at once rather than two minutes later.
-Fixed: Cancelling a login just as it finishes no longer leaves it half connected.
+Improved: An account whose login you cancelled but that finished connecting anyway asks you to keep or disconnect it.

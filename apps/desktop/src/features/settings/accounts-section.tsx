@@ -24,6 +24,7 @@ export function Accounts({ connect }: { connect: boolean }) {
   const health = useNetworkHealth()
   const server = useServerInfo()
   const logout = useMutation(api.logins.logout)
+  const keep = useMutation(api.logins.keep)
   const [connecting, setConnecting] = useState<Login | null>(null)
   const [confirmRisk, setConfirmRisk] = useState<Login | null>(null)
   // The account whose login methods are open to reconnect it, and the one asked to disconnect.
@@ -140,6 +141,21 @@ export function Accounts({ connect }: { connect: boolean }) {
                         aria-expanded={methods.length > 1 ? choosing === a._id : undefined}
                       >
                         Reconnect
+                      </Button>
+                    ) : null}
+                    {view.keep ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={disconnecting !== null}
+                        onClick={() =>
+                          void keep({ networkAccountId: a._id }).catch((e: unknown) => {
+                            if (sessionChanged(e)) return window.location.reload()
+                            toast(`${name.full} couldn’t be kept. Try again.`)
+                          })
+                        }
+                      >
+                        Keep
                       </Button>
                     ) : null}
                     {view.disconnect ? (

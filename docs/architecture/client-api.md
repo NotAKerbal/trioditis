@@ -977,14 +977,19 @@ whether the network has them (Reacting).
 4. Cancel with `api.logins.cancel({ loginSessionId })`. The login is `cancelled` at once,
    and later steps for it are ignored; it returns `cancelled`, or `complete` or `error` if the
    login had already ended that way (then it changes nothing). Cancelling again is the same.
-   A login the bridge host finishes before the cancel reaches it is logged out when it
-   reports in, unless it reconnected an account the person already had, which stays connected.
+   A login the bridge host finishes anyway (before the cancel reached it) isn't logged out:
+   its account is kept with `connectedAfterCancel: true` (below), unless it reconnected an
+   account the person already had.
 
 Accounts: `api.logins.accounts` returns
-`[{ _id, network, state, error, lastHealthyAt, updatedAt, hint, logoutPending, logoutError }]`.
-`hint` tells the person's accounts on one network apart: the phone number on WhatsApp, whose
-login ID is one, otherwise `ID …` and the login ID's last four characters (no account name is
-stored). The login ID itself isn't returned.
+`[{ _id, network, state, error, lastHealthyAt, updatedAt, hint, sealedMeta, logoutPending, logoutError, connectedAfterCancel }]`.
+`connectedAfterCancel` is true for an account a login the person cancelled connected anyway:
+they decide, with `api.logins.keep({ networkAccountId })` (clears it) or a disconnect (which
+clears it too). A later normal login of the account clears it as well.
+`hint` tells the person's accounts on one network apart, as far as the backend can: `ID …` and the
+login ID's last four characters. `sealedMeta` (`{ sealed, objectId }`, kind `account`, sealed to
+the owner) carries the bridge host's own hint (the number or username), which the app shows in its
+place. The login ID itself isn't returned.
 `state` is `CONNECTED`, `CONNECTING`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` (reconnect
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
 one, returning `queued`, `pending` (one is already on its way) or `loggedOut` (nothing to do):

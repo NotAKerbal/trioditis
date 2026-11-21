@@ -64,12 +64,6 @@ type Connector struct {
 	logins  sync.Map // login session ID → *loginSession
 	// endedLogins holds the IDs of logins this process ended (login session ID → struct{}).
 	endedLogins sync.Map
-	// discarded holds the accounts cancelled logins connected, until settleDiscarded decides
-	// (login session ID → *discardedLogin).
-	discarded sync.Map
-	// userLocks serializes a person's logins starting and completing with the logout of a
-	// cancelled login's account (user ID → *sync.Mutex; userLock).
-	userLocks sync.Map
 	// messages serializes the attempts at one message, from handling to settling (messageLocks).
 	messages messageLocks
 	// browserSteps holds the login steps the sign-in browser submitted ("<login session
@@ -375,9 +369,6 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 		mapped, code = "UNKNOWN_ERROR", protocol.ErrInternal
 	case status.StateLoggedOut:
 		mapped = "LOGGED_OUT"
-		// The login that connected it is no longer what the account is: a cancelled re-pair of it
-		// later is logged out as any new account would be (settleDiscarded).
-		c.deactivated(ctx, networkid.UserLoginID(state.RemoteID))
 	default:
 		return nil
 	}

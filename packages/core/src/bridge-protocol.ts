@@ -186,6 +186,8 @@ export interface LoginStep {
   }
   loginId?: string
   error?: ErrorCode
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel?: boolean
 }
 
 export interface LoginStepEvent extends EventBase {

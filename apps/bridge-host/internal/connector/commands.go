@@ -621,8 +621,6 @@ func (c *Connector) handleLogout(ctx context.Context, cmd *protocol.Command, che
 	if err != nil || check {
 		return err
 	}
-	// Disconnected, the login that connected the account no longer speaks for it (settleDiscarded).
-	c.deactivated(ctx, t.login.ID)
 	go t.login.Logout(c.Bridge.BackgroundCtx)
 	return nil
 }
