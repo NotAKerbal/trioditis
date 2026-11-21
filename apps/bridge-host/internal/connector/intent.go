@@ -121,11 +121,46 @@ func (c *Connector) protocolSender(ctx context.Context, o *owner, s sender) (*pr
 // is journaled (or there was nothing to journal), a network handler waiting on the remote
 // event being handled is told (package handled), so it can acknowledge the event.
 func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
+	remote := bridgev2.GetRemoteEventFromContext(ctx)
+	ended := handled.Writing(remote)
 	resp, err := in.sendMessage(ctx, roomID, eventType, content, extra)
-	if err == nil {
-		handled.Journaled(bridgev2.GetRemoteEventFromContext(ctx))
-	}
+	ended(err, ownWrite(remote, eventType, content, extra))
 	return resp, err
+}
+
+// ownWrite says whether a write is the one a remote event exists for, which is what tells its
+// handler the event reached the journal: a part of the message itself, the edit, the reaction,
+// the removal. bridgev2 also writes on the side of some events (an error notice when a message
+// couldn't be converted, the removal of the reaction a new one replaces), and those don't
+// count: the event's own write may never come.
+func ownWrite(remote bridgev2.RemoteEvent, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) bool {
+	if remote == nil {
+		return false
+	}
+	isMessage := eventType == event.EventMessage || eventType == event.EventSticker
+	switch remote.GetType() {
+	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventMessageUpsert:
+		msg, ok := remote.(bridgev2.RemoteMessage)
+		return ok && isMessage && extra != nil && extra.MessageMeta != nil && extra.MessageMeta.ID == msg.GetID()
+	case bridgev2.RemoteEventEdit:
+		return isMessage && isEdit(content)
+	case bridgev2.RemoteEventReaction:
+		return eventType == event.EventReaction
+	case bridgev2.RemoteEventReactionRemove, bridgev2.RemoteEventMessageRemove:
+		return eventType == event.EventRedaction
+	default:
+		return true
+	}
+}
+
+// remoteSourceID is the network's own ID for the remote event being handled, where its
+// connector gives one (a WhatsApp reaction is a message with its own ID; Signal's is its
+// sender and millisecond timestamp), or "".
+func remoteSourceID(ctx context.Context) string {
+	if remote, ok := bridgev2.GetRemoteEventFromContext(ctx).(interface{ GetID() networkid.MessageID }); ok {
+		return string(remote.GetID())
+	}
+	return ""
 }
 
 func (in *Intent) sendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
@@ -142,7 +177,7 @@ func (in *Intent) sendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		eventID = ids.MessageEventID(extra.MessageMeta.Room, extra.MessageMeta.ID, extra.MessageMeta.PartID)
 	case extra.ReactionMeta != nil:
 		r := extra.ReactionMeta
-		eventID = ids.RemoteReactionEventID(r.Room, r.MessageID, r.MessagePartID, r.SenderID, r.EmojiID, r.Emoji, r.Timestamp)
+		eventID = ids.RemoteReactionEventID(r.Room, r.MessageID, r.MessagePartID, r.SenderID, r.EmojiID, r.Emoji, remoteSourceID(ctx), r.Timestamp)
 	default:
 		eventID = ids.LocalEventID(string(roomID), string(in.mxid), eventType.Type, strconv.FormatInt(ts.UnixNano(), 10), digest(content))
 	}

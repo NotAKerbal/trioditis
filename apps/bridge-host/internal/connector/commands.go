@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -694,47 +695,68 @@ const (
 	maxPhoneDigits = 15
 )
 
-// phoneSeparators are what people put between a number's digits, as typed or pasted from an
-// address book: spaces of every width, dashes of every length, dots, slashes and brackets.
-func phoneSeparator(r rune) bool {
-	switch r {
-	case ' ', '\t', '-', '.', '/', '(', ')', '[', ']',
-		'\u00a0', '\u2007', '\u2009', '\u200a', '\u202f', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2212':
+// Phone numbers are read exactly as the client reads them before sending one
+// (packages/core/src/people.ts, normalPhone and startIdentifier), so a number the app offers is
+// one the host takes. Both are checked against the same table of cases,
+// packages/core/test/fixtures/phone-identifiers.json.
+var (
+	phoneScheme = regexp.MustCompile(`(?i)^(?:tel|sms):`)
+	// From an extension on ("x12", "ext. 12", "#12", ";ext=12") is dropped.
+	phoneExtension = regexp.MustCompile(`(?i)[;,#]|\s*(?:x|ext\.?|extension)\s*\d`)
+	// "+44 (0)20 …", "0044 (0)20 …": the bracketed trunk 0 isn't dialled with the country code.
+	phoneTrunkZero = regexp.MustCompile(`^((?:\+|00)\s*\d{1,3})[\s\x{00a0}]*\(0\)`)
+	// Letters, an @ or an underscore make it a username; otherwise it was meant as a number.
+	usernameish       = regexp.MustCompile(`(?i)[a-z@_]`)
+	trailingExtension = regexp.MustCompile(`(?i)\s*(?:x|ext\.?|extension)\s*\d+$`)
+	onlyDigits        = regexp.MustCompile(`^[0-9]+$`)
+)
+
+// phonePunctuation is what people write between a number's digits: spaces of every width,
+// dots, slashes, brackets and dashes of every length.
+func phonePunctuation(r rune) bool {
+	switch {
+	case unicode.IsSpace(r), r >= '\u2000' && r <= '\u200b', r == '\u202f', r == '\ufeff',
+		r == '.', r == '/', r == '(', r == ')', r == '-', r >= '\u2010' && r <= '\u2015', r == '\u2212':
 		return true
 	}
 	return false
 }
 
-// normalizePhone takes the formatting off what may be a phone number: a tel: prefix, separators,
-// and the 00 international prefix most of the world dials (taken as +). It returns the
-// digits, whether the number had its country code marked, and whether it was a phone number at
-// all (digits and formatting only). A national number (no + or 00) is left as it is: which
-// country it belongs to can't be told from the number.
-func normalizePhone(identifier string) (digits string, international, ok bool) {
-	s := strings.TrimSpace(identifier)
-	s = strings.TrimPrefix(strings.TrimPrefix(s, "tel:"), "TEL:")
-	// "+44 (0)20 …": the bracketed 0 is the national prefix, dialled only from inside the
-	// country, so it goes when the country code is there.
-	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "00") {
-		s = strings.Replace(s, "(0)", "", 1)
+// normalPhone is a typed number as + and its digits, or its national digits as written; ""
+// if it isn't a number. A scheme (tel:, sms:) and an extension are dropped, then the
+// punctuation; a leading 00 is the international prefix, taken as +. A national number keeps
+// its trunk 0: which country it belongs to can't be told from it.
+func normalPhone(raw string) string {
+	text := phoneScheme.ReplaceAllString(strings.TrimSpace(raw), "")
+	if loc := phoneExtension.FindStringIndex(text); loc != nil {
+		text = text[:loc[0]]
 	}
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case (r == '+' || r == '\uff0b') && b.Len() == 0 && !international:
-			international = true
-		case phoneSeparator(r):
-		default:
-			return "", false, false
+	text = phoneTrunkZero.ReplaceAllString(strings.TrimSpace(text), "$1")
+	plus := strings.HasPrefix(text, "+")
+	digits := strings.Map(func(r rune) rune {
+		if phonePunctuation(r) {
+			return -1
 		}
+		return r
+	}, strings.TrimPrefix(text, "+"))
+	if !onlyDigits.MatchString(digits) {
+		return ""
 	}
-	digits = b.String()
-	if !international && strings.HasPrefix(digits, "00") {
+	international := plus
+	if !plus && strings.HasPrefix(digits, "00") {
 		digits, international = digits[2:], true
 	}
-	return digits, international, digits != ""
+	if len(digits) < minPhoneDigits || len(digits) > maxPhoneDigits {
+		return ""
+	}
+	if international {
+		// No country code starts with 0.
+		if strings.HasPrefix(digits, "0") {
+			return ""
+		}
+		return "+" + digits
+	}
+	return digits
 }
 
 // usernamePatterns are each network's own username grammar, after a leading @ is taken off:
@@ -762,24 +784,23 @@ var countryCodeFirst = map[string]bool{"whatsapp": true}
 // the network can say.
 func (c *Connector) canonicalIdentifier(identifier string) string {
 	targets := startTargets[c.Network]
-	if digits, plus, ok := normalizePhone(identifier); targets.phone && ok {
-		switch {
-		case len(digits) < minPhoneDigits || len(digits) > maxPhoneDigits:
+	text := strings.TrimSpace(identifier)
+	meantAsNumber := !usernameish.MatchString(trailingExtension.ReplaceAllString(phoneScheme.ReplaceAllString(text, ""), ""))
+	switch {
+	case meantAsNumber && !targets.phone && targets.username && onlyDigits.MatchString(text):
+		// Digits alone can be a username where only usernames work (X allows it).
+	case meantAsNumber && !targets.phone:
+		return ""
+	case meantAsNumber:
+		phone := normalPhone(text)
+		national := !strings.HasPrefix(phone, "+")
+		if phone == "" || national && internationalOnly[c.Network] || national && countryCodeFirst[c.Network] && strings.HasPrefix(phone, "0") {
 			return ""
-		case !plus && internationalOnly[c.Network]:
-			return ""
-		case !plus && countryCodeFirst[c.Network] && strings.HasPrefix(digits, "0"):
-			return ""
-		case plus && strings.HasPrefix(digits, "0"):
-			return ""
-		case plus:
-			return "+" + digits
-		default:
-			return digits
 		}
+		return phone
 	}
 	if pattern := usernamePatterns[c.Network]; targets.username && pattern != nil {
-		if name := strings.TrimPrefix(identifier, "@"); pattern.MatchString(name) {
+		if name := strings.TrimPrefix(text, "@"); pattern.MatchString(name) {
 			return name
 		}
 	}

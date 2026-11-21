@@ -118,9 +118,14 @@ func ReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, par
 // applies each reaction event once by. On networks where a person has one reaction per
 // message (WhatsApp, Signal) the emoji ID is empty, so the target, sender and emoji ID alone
 // would give a changed reaction, or one taken away and given again, the ID of the first, and
-// it would be dropped as a replay. The emoji and the network's timestamp tell those apart,
-// while a redelivery of the same reaction (same emoji, same timestamp) keeps its ID.
-func RemoteReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID, sender networkid.UserID, emojiID networkid.EmojiID, emoji string, ts time.Time) id.EventID {
+// it would be dropped as a replay. The network's own ID for the reaction (sourceID: a WhatsApp
+// reaction is a message with its own ID) tells those apart, and a redelivery of the same
+// reaction keeps it. Without one, the emoji and the network's timestamp do; WhatsApp's are
+// whole seconds, which is why its ID comes first.
+func RemoteReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID, sender networkid.UserID, emojiID networkid.EmojiID, emoji, sourceID string, ts time.Time) id.EventID {
+	if sourceID != "" {
+		return hashEventID("reaction/3", string(key.ID), string(key.Receiver), string(messageID), string(partID), string(sender), string(emojiID), emoji, sourceID)
+	}
 	var at string
 	if !ts.IsZero() {
 		at = strconv.FormatInt(ts.UnixMilli(), 10)

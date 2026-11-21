@@ -631,6 +631,8 @@ async function applyLoginState(
     updatedAt: event.at,
     ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
+    // Sealed to the owner; the backend only keeps it for their devices to open.
+    ...(event.sealed ? { sealedMeta: event.sealed } : {}),
   }
   let accountId = existing?._id
   if (existing) {
@@ -668,7 +670,24 @@ async function cancelledLogin(ctx: MutationCtx, userId: string, network: Network
     .withIndex('by_user', (q) => q.eq('userId', userId))
     .order('desc')
     .take(20)
-  return sessions.some((s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId)
+  return sessions.some(
+    (s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId && !retried(sessions, s, loginId),
+  )
+}
+
+/**
+ * Whether, among the person's recent `sessions`, a newer attempt on the same network than
+ * `cancelled` connected `loginId` or is still going (it may be about to). The cancel was of
+ * that one attempt: logging the account out would undo the retry the person kept.
+ */
+function retried(sessions: Doc<'loginSessions'>[], cancelled: Doc<'loginSessions'>, loginId: string) {
+  return sessions.some(
+    (s) =>
+      s._id !== cancelled._id &&
+      s.network === cancelled.network &&
+      s._creationTime > cancelled._creationTime &&
+      ((s.state === 'complete' && s.loginId === loginId) || s.state === 'pending' || s.state === 'active'),
+  )
 }
 
 /**
@@ -686,6 +705,12 @@ async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSession
   if (account && account._creationTime < session._creationTime) return
   // Kept so the account's own report, if it comes after this, is logged out too.
   await ctx.db.patch(session._id, { loginId })
+  const recent = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', session.userId))
+    .order('desc')
+    .take(20)
+  if (retried(recent, session, loginId)) return
   if (account) await queueLogout(ctx, account)
 }
 
@@ -815,10 +840,13 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
 export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
   const { network } = origin
   if (hasOversizedId(event)) throw new Unmappable('too_large')
-  if ('sealed' in event) {
+  if ('sealed' in event && event.sealed !== undefined) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     const limit =
-      event.type === 'chat' || event.type === 'contact' || event.type === 'contactIdentifiers'
+      event.type === 'chat' ||
+      event.type === 'contact' ||
+      event.type === 'contactIdentifiers' ||
+      event.type === 'loginState'
         ? MAX_METADATA_SEALED_BYTES
         : MAX_INCOMING_SEALED_BYTES
     if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')

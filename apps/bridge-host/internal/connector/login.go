@@ -381,6 +381,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 				log.Err(err).Msg("Failed to record login ID")
 			}
 			out.LoginID = loginID
+			s.c.connectedBy.Store(p.UserLoginID, s.id)
 		}
 		// Claimed above, so a cancel from here on leaves it complete.
 		s.c.forgetLogin(s.id)
@@ -455,13 +456,35 @@ func (s *loginSession) keepDisplay(stepID string, step *protocol.LoginStep) {
 // person asked for it not to be, and was told it wasn't. An account the person already had
 // (signing in to it again) is left as it is, since logging it out would lose more than the
 // cancel asked for.
+//
+// Another attempt by the person on the network may be what they meant to keep: one that
+// completed the same account, or one still going (it may be about to). The account is left
+// connected then, rather than logging out what that attempt connected.
 func (s *loginSession) discardCompleted(step *bridgev2.LoginStep) {
 	p := step.CompleteParams
 	if p == nil || p.UserLogin == nil || s.existing[p.UserLoginID] {
 		return
 	}
+	if by, ok := s.c.connectedBy.Load(p.UserLoginID); ok && by != s.id {
+		return
+	}
+	retrying := false
+	s.c.logins.Range(func(_, raw any) bool {
+		other := raw.(*loginSession)
+		retrying = other != s && other.userID == s.userID
+		return !retrying
+	})
+	if retrying {
+		s.c.Log.Info().Str("login_session_id", s.id).Msg("A login completed after it was cancelled while another is going; leaving the account connected")
+		return
+	}
 	s.c.Log.Info().Str("login_session_id", s.id).Msg("A login completed after it was cancelled; logging the new account out")
-	go p.UserLogin.Logout(s.c.Bridge.BackgroundCtx)
+	logoutDiscarded(s.c.Bridge.BackgroundCtx, p.UserLogin)
+}
+
+// logoutDiscarded logs out an account a cancelled login connected; tests replace it.
+var logoutDiscarded = func(ctx context.Context, login *bridgev2.UserLogin) {
+	go login.Logout(ctx)
 }
 
 // decodeCookies percent-decodes what was read from a browser cookie, as bridgev2's own cookie

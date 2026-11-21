@@ -73,7 +73,8 @@ func (wa *whatsappConnector) LoadUserLogin(ctx context.Context, login *bridgev2.
 		// No device yet (a login that is being set up): nothing receives messages.
 		return nil
 	}
-	acker := wabuffer.NewAcker(wa.Bridge.BackgroundCtx, login.Log.With().Str("component", "whatsapp ack").Logger())
+	// The bridge's logger, not the login's: that one carries the raw login ID, a phone number.
+	acker := wabuffer.NewAcker(wa.Bridge.BackgroundCtx, wa.Bridge.Log.With().Str("component", "whatsapp ack").Logger())
 	if err := wabuffer.WrapHandlers(client.Client, acker.Wrap); err != nil {
 		return fmt.Errorf("failed to wrap the WhatsApp event handler: %w", err)
 	}

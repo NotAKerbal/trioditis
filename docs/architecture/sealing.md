@@ -62,7 +62,7 @@ without padding.
   ciphertext into another without decryption failing.
 - **Encoding:** base64url without padding for every binary field.
 
-`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`, `person`. The object ID
+`kind` is one of `message`, `chat`, `contact`, `draft`, `outbound`, `media`, `label`, `person`, `account`. The object ID
 for each:
 
 | Object                              | Kind       | Object ID                         |
@@ -80,6 +80,7 @@ for each:
 | A label (name and colour)           | `label`    | its `labelKey`                    |
 | An address book card                | `person`   | its `personKey`                   |
 | An unsent draft, kept in a browser  | `draft`    | its chat's `_id`                  |
+| A network account's hint            | `account`  | its `loginId`                     |
 
 ## Recipients
 
@@ -206,8 +207,10 @@ protobuf (content included) from decryption until its handler returns success, a
 whatsmeow then clears the plaintext and acknowledges the message. That is once the bridge
 host has journaled it sealed (usually moments). bridgev2 reports success when its 5-minute
 handler limit passes, while handling carries on in the background, so the bridge host wraps
-the handler: one that took that long says success only once the message is journaled, and
-failure if it isn't within 20 minutes or the host is stopping. It is kept on purpose: a
+the handler: one that took that long says success only once the message's own write (a part
+of the message, the reaction, the edit; not an error notice or a replaced reaction's removal)
+is journaled with no write still running or failed, and failure if a write fails, if that
+doesn't happen within 20 minutes, or if the host is stopping. It is kept on purpose: a
 message can be decrypted only once, so without it a crash mid-message would lose that
 message. Plaintext stays in a row only when:
 
