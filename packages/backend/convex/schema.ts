@@ -234,6 +234,28 @@ export default defineSchema({
    * contacts on several networks. Everything on a card is sealed to the person (kind `person`,
    * object ID `personKey`, which the client chooses before sealing); see client-api.md, People.
    */
+  /**
+   * A request to start a chat (newChats.start), until the bridge host answers with the chat
+   * or why there's none. The identifier it was for is sealed to the bridge key and goes with
+   * the command; none of it is kept here.
+   */
+  chatStarts: defineTable({
+    userId: v.string(),
+    network: storedNetwork,
+    loginId: v.string(),
+    /** Picked by the client, as the sealed identifier's object ID. */
+    requestId: v.string(),
+    commandId: v.id('outbox'),
+    state: v.union(v.literal('pending'), v.literal('started'), v.literal('failed')),
+    chatId: v.optional(v.id('chats')),
+    error: v.optional(errorCode),
+    createdAt: v.number(),
+  })
+    .index('by_request', ['userId', 'requestId'])
+    .index('by_command', ['commandId'])
+    .index('by_user_createdAt', ['userId', 'createdAt'])
+    .index('by_createdAt', ['createdAt']),
+
   people: defineTable({
     userId: v.string(),
     personKey: v.string(),
@@ -325,6 +347,11 @@ export default defineSchema({
     network: storedNetwork,
     ghostId: v.string(),
     sealedProfile: envelope,
+    /**
+     * The accounts whose logins have sent the contact (at most 10): a chat with them starts on
+     * one of those, since some networks' contact IDs belong to one login (Google Messages').
+     */
+    accountIds: v.optional(v.array(v.id('networkAccounts'))),
   }).index('by_ghost', ['userId', 'network', 'ghostId']),
 
   /**

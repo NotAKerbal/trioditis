@@ -75,6 +75,7 @@ for each:
 | What a login knows a contact by     | `contact`  | `<ghostId>/identifiers/<loginId>` |
 | A `send` or `edit` command          | `outbound` | its `clientMessageId`             |
 | Login input                         | `outbound` | `<loginSessionId>/<stepId>`       |
+| Who a new chat is with              | `outbound` | its `requestId`                   |
 | A file                              | `media`    | its `mediaId`                     |
 | A label (name and colour)           | `label`    | its `labelKey`                    |
 | An address book card                | `person`   | its `personKey`                   |

@@ -34,6 +34,23 @@ export interface NetworkInfo {
  */
 export const CONTACT_LIST_NETWORKS: readonly Network[] = ['whatsapp']
 
+/**
+ * What a new chat can start from on each network (`newChats.start`): one of the person's
+ * contacts there, a phone number, or a username. Mirrors the bridge host's startTargets, which
+ * says why each network is as it is. A network missing here can't start chats.
+ */
+export const START_TARGETS: Partial<Record<Network, { contact: boolean; phone: boolean; username: boolean }>> = {
+  whatsapp: { contact: true, phone: true, username: false },
+  signal: { contact: true, phone: true, username: true },
+  gmessages: { contact: true, phone: true, username: false },
+  telegram: { contact: true, phone: false, username: false },
+  meta: { contact: true, phone: false, username: false },
+  instagram: { contact: true, phone: false, username: false },
+  slack: { contact: true, phone: false, username: false },
+  linkedin: { contact: true, phone: false, username: false },
+  twitter: { contact: false, phone: false, username: true },
+}
+
 /** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   whatsapp: {

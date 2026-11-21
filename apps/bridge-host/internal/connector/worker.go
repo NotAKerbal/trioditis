@@ -217,6 +217,15 @@ func (c *Connector) reportUnrun(ctx context.Context, cmd *protocol.Command, code
 		if !refused {
 			return c.endLoginWithError(ctx, cmd.UserID, cmd.LoginSessionID, protocol.ErrLoginFailed)
 		}
+	case protocol.CommandStartChat:
+		// Accepted, then couldn't run (its login went away, say): say so, rather than leave
+		// the request waiting for its deadline.
+		// Prepare's refusals came before it was accepted, so every refusal here is after.
+		if requestIDPattern.MatchString(cmd.RequestID) {
+			return c.emit(ctx, &protocol.Event{
+				Type: protocol.EventChatStarted, UserID: cmd.UserID, LoginID: cmd.LoginID, RequestID: cmd.RequestID, Error: code,
+			})
+		}
 	}
 	return nil
 }

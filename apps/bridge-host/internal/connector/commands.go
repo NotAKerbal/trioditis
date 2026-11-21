@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/provisionutil"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -214,6 +219,8 @@ func (c *Connector) handle(ctx context.Context, cmd *protocol.Command, check boo
 		return c.handleBackfill(ctx, cmd, check)
 	case protocol.CommandSyncContacts:
 		return c.handleSyncContacts(ctx, cmd, check)
+	case protocol.CommandStartChat:
+		return c.handleStartChat(ctx, cmd, check)
 	default:
 		return badRequest("unknown command type %q", cmd.Type)
 	}
@@ -646,6 +653,213 @@ func (c *Connector) handleSyncContacts(ctx context.Context, cmd *protocol.Comman
 		}
 	}()
 	return nil
+}
+
+// startChatPlaintext is what a client seals for a startChat command with an identifier.
+type startChatPlaintext struct {
+	Identifier string `json:"identifier"`
+}
+
+// requestIDPattern is what a startChat request ID may be: what clients pick for their IDs.
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+
+// maxIdentifierBytes bounds the phone number or username a startChat names.
+const maxIdentifierBytes = 512
+
+// startTargets is what a startChat can start a chat from on each network, per its connector:
+// one of the person's contacts there, a phone number, or a username. Each was audited:
+// mautrix-telegram's identifier lookup reads a phone table every login on the host shares, and
+// mautrix-gvoice's portal keys (which bridgev2 logs) are phone numbers, so neither starts from
+// an identifier (Google Voice not at all); mautrix-meta's resolves only numeric IDs, so
+// Messenger and Instagram start from contacts; mautrix-twitter's resolves screen names, not
+// the numeric IDs contacts have, so X starts from a username. WhatsApp and Google Messages
+// take only phone numbers: mautrix-whatsapp also resolves a LID, and fills in its phone number
+// from a map every login on the host shares. testnet is the conformance tests' connector.
+var startTargets = map[string]struct{ contact, phone, username bool }{
+	"whatsapp":  {contact: true, phone: true},
+	"signal":    {contact: true, phone: true, username: true},
+	"gmessages": {contact: true, phone: true},
+	"telegram":  {contact: true},
+	"meta":      {contact: true},
+	"instagram": {contact: true},
+	"slack":     {contact: true},
+	"linkedin":  {contact: true},
+	"twitter":   {username: true},
+	"testnet":   {contact: true, phone: true, username: true},
+}
+
+// phonePattern is what a phone number looks like as people write one.
+var phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 ().-]{5,}[0-9]$`)
+
+// usernamePatterns are each network's own username grammar, after a leading @ is taken off:
+// anything else could be an internal ID the connector resolves another way (a Signal ACI, say).
+var usernamePatterns = map[string]*regexp.Regexp{
+	"signal":  regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{2,31}\.[0-9]{2,9}$`),
+	"twitter": regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`),
+	"testnet": regexp.MustCompile(`^[a-z][a-z0-9-]*$`),
+}
+
+// internationalOnly are the networks that take a phone number only with its country code.
+var internationalOnly = map[string]bool{"signal": true}
+
+// canonicalIdentifier is the identifier as the network's connector gets it: a phone number as
+// digits with its leading + (never dots or spaces, which a connector could take for one of its
+// own IDs, as mautrix-gmessages does), or a username without its @. Empty if it's neither kind
+// the network takes.
+func (c *Connector) canonicalIdentifier(identifier string) string {
+	targets := startTargets[c.Network]
+	if targets.phone && phonePattern.MatchString(identifier) {
+		plus := strings.HasPrefix(identifier, "+")
+		if !plus && internationalOnly[c.Network] {
+			return ""
+		}
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, identifier)
+		if plus {
+			return "+" + digits
+		}
+		return digits
+	}
+	if pattern := usernamePatterns[c.Network]; targets.username && pattern != nil {
+		if name := strings.TrimPrefix(identifier, "@"); pattern.MatchString(name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// startChatTimeout bounds how long a network has to find someone and open the chat.
+const startChatTimeout = 2 * time.Minute
+
+// handleStartChat opens a direct chat on a login: with one of the person's contacts
+// (ghostId), or with whoever a sealed phone number or username belongs to, where the
+// network's connector can (startTargets). An existing chat is returned as it is. bridgev2's
+// provisioning helper does the work, as a Matrix client's "start a DM" would; the outcome is
+// a chatStarted event. One login's starts run one at a time, so two for the same new chat
+// don't both create it.
+func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, check bool) error {
+	if !requestIDPattern.MatchString(cmd.RequestID) {
+		return badRequest("requestId is required")
+	}
+	if (cmd.GhostID == "") == (cmd.Sealed == nil) {
+		return badRequest("give either ghostId or a sealed identifier")
+	}
+	targets := startTargets[c.Network]
+	if (cmd.GhostID != "" && !targets.contact) || (cmd.Sealed != nil && !targets.phone && !targets.username) {
+		return conflict(protocol.ErrUnsupported, "the network can't start chats that way")
+	}
+	t, err := c.resolve(ctx, cmd, false)
+	if err != nil {
+		return err
+	}
+	if _, ok := t.login.Client.(bridgev2.IdentifierResolvingNetworkAPI); !ok {
+		return conflict(protocol.ErrUnsupported, "the network can't start chats")
+	}
+	var identifier string
+	if cmd.GhostID != "" {
+		raw, err := c.Store.LookupID(ctx, cmd.GhostID, ids.KindGhost)
+		if err != nil {
+			return err
+		} else if raw == "" {
+			return conflict(protocol.ErrInvalidCommand, "unknown ghost")
+		}
+		// The helper takes a ghost's Matrix ID as "this user", and starts a chat with them
+		// directly where the connector can.
+		identifier = string(ids.GhostMXID(networkid.UserID(raw)))
+	} else {
+		var plain startChatPlaintext
+		if err := c.openOutbound(cmd, cmd.UserID, cmd.RequestID, &plain); err != nil {
+			return err
+		}
+		identifier = strings.TrimSpace(plain.Identifier)
+		if identifier == "" || len(identifier) > maxIdentifierBytes {
+			return badRequest("the identifier is empty or too long")
+		}
+		// Only the kinds the network's connector resolves safely; anything else is nobody here.
+		if identifier = c.canonicalIdentifier(identifier); identifier == "" {
+			return conflict(protocol.ErrNotFound, "the network doesn't start chats from that kind of identifier")
+		}
+	}
+	if check {
+		return nil
+	}
+	o := &owner{userID: cmd.UserID, login: t.login.ID, loginID: cmd.LoginID}
+	login := t.login
+	go func() {
+		bgCtx := c.Bridge.BackgroundCtx
+		evt := &protocol.Event{Type: protocol.EventChatStarted, UserID: o.userID, LoginID: o.loginID, RequestID: cmd.RequestID}
+		lock, _ := c.starting.LoadOrStore(login.ID, &sync.Mutex{})
+		lock.(*sync.Mutex).Lock()
+		defer lock.(*sync.Mutex).Unlock()
+		// The backend gave up on it at the deadline (a host that stopped after taking it, say),
+		// so it isn't started late, after the person was told it didn't.
+		if cmd.NotAfter > 0 && time.Now().UnixMilli() > cmd.NotAfter {
+			evt.Error = protocol.ErrExpired
+		} else {
+			evt.PortalID, evt.Error = c.startChat(bgCtx, login, identifier)
+		}
+		if err := c.emit(bgCtx, evt); err != nil {
+			c.Log.Err(err).Msg("Reporting a started chat failed")
+		}
+	}()
+	return nil
+}
+
+// startChat finds who an identifier (or a ghost's Matrix ID) is and opens the direct chat with
+// them, returning its portal ID or an error code. The connectors and bridgev2 log as they go,
+// and what they log can include the identifier (a number nobody has, a portal key that is a
+// phone number), so their logging is silenced for it.
+func (c *Connector) startChat(bgCtx context.Context, login *bridgev2.UserLogin, identifier string) (string, string) {
+	ctx, cancel := context.WithTimeout(zerolog.Nop().WithContext(bgCtx), startChatTimeout)
+	defer cancel()
+	resp, err := provisionutil.ResolveIdentifier(ctx, login, identifier, true)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "", protocol.ErrTimeout
+	case err != nil:
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Starting a chat failed")
+		return "", startChatErrorCode(err)
+	case resp == nil || resp.Portal == nil || resp.Portal.MXID == "":
+		return "", protocol.ErrNotFound
+	}
+	portalID, err := c.portalOpaqueForRoom(bgCtx, resp.Portal.MXID)
+	if err != nil {
+		c.Log.Err(err).Msg("Naming a started chat failed")
+		return "", protocol.ErrInternal
+	}
+	return portalID, ""
+}
+
+// startChatErrorCode is the code for why a chat couldn't be started. Connectors answer an
+// identifier nobody has with a Matrix "not found" (or a bad parameter, for one that can't be a
+// number or username at all).
+func startChatErrorCode(err error) string {
+	if errors.Is(err, bridgev2.ErrNotLoggedIn) {
+		return protocol.ErrNotConnected
+	}
+	// Connectors return mautrix's error type, and bridgev2 its own copy of it.
+	var code string
+	var matrixErr mautrix.RespError
+	var bridgeErr bridgev2.RespError
+	if errors.As(err, &matrixErr) {
+		code = matrixErr.ErrCode
+	} else if errors.As(err, &bridgeErr) {
+		code = bridgeErr.ErrCode
+	}
+	switch code {
+	case mautrix.MNotFound.ErrCode, mautrix.MInvalidParam.ErrCode:
+		return protocol.ErrNotFound
+	case mautrix.MUnrecognized.ErrCode:
+		return protocol.ErrUnsupported
+	case mautrix.MLimitExceeded.ErrCode:
+		return protocol.ErrRateLimited
+	default:
+		return protocol.ErrNetworkRejected
+	}
 }
 
 // maxBackfillLimit bounds one backfill command.
