@@ -67,7 +67,7 @@ async function delivery(t: T, n: number) {
   })
 }
 
-type Phase = 'scheduled' | 'queued' | 'claimed' | 'dispatched' | 'expired' | 'logouts'
+type Phase = 'scheduled' | 'queued' | 'claimed' | 'dispatched' | 'expired' | 'logouts' | 'cancelled'
 
 /** What the restore does: every phase, a batch at a time, until it's done. */
 async function settle(t: T, backupAt: number) {
@@ -219,6 +219,57 @@ describe('settling after a restore', () => {
     expect(outbox.filter((row) => row.state === 'expired')).toHaveLength(25)
     expect(outbox.filter((row) => row.state === 'queued')).toHaveLength(25)
     expect(accounts.filter((row) => row.logoutPending)).toHaveLength(25)
+  })
+
+  it("logs out a current member's account a cancelled login connected, once the queue is settled", async () => {
+    const { t } = await ready()
+    // A login the person cancelled, whose cancel was still queued in the backup, and the account
+    // it connected anyway.
+    await t.run(async (ctx) => {
+      const now = Date.now()
+      const sessionId = await ctx.db.insert('loginSessions', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        state: 'active',
+        loginId: 'l_cancelled',
+        updatedAt: now,
+      })
+      await ctx.db.insert('networkAccounts', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        loginId: 'l_cancelled',
+        state: 'CONNECTED',
+        updatedAt: now,
+      })
+      await ctx.db.insert('outbox', {
+        userId: 'user_a',
+        network: 'whatsapp',
+        payload: { type: 'loginCancel', loginSessionId: sessionId },
+        state: 'queued',
+        attempts: 0,
+        createdAt: now,
+        expiresAt: now + 60_000,
+      })
+    })
+    await settle(t, Date.now())
+    const [account, logouts] = await t.run(async (ctx) => [
+      await ctx.db
+        .query('networkAccounts')
+        .withIndex('by_login', (q) => q.eq('network', 'whatsapp').eq('loginId', 'l_cancelled'))
+        .unique(),
+      (await ctx.db.query('outbox').collect()).filter((row) => row.payload.type === 'logout'),
+    ])
+    // Its logout is queued after settling, not expired with the rest of the queue.
+    expect(logouts.map((row) => row.state)).toEqual(['queued'])
+    expect(account?.logoutPending).toBe(true)
+    // And settling again (a restore's installer run cut off and run again) leaves it with one
+    // logout waiting, not two.
+    await settle(t, Date.now())
+    expect(
+      (await t.run(async (ctx) => await ctx.db.query('outbox').collect())).filter(
+        (row) => row.payload.type === 'logout' && row.state === 'queued',
+      ),
+    ).toHaveLength(1)
   })
 
   it('works through more rows than one batch, and changes nothing when run again', async () => {

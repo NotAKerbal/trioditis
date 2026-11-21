@@ -50,3 +50,5 @@ DEBIAN_SNAPSHOT
 UPDATE_BACKUP_DIR
 # Written by deploy/trioditis restore, cleared by the installer once the restored sends are settled.
 RESTORE_PENDING
+# The last restore's ID, kept for good: each bridge host settles a restored queue once per ID.
+RESTORE_ID

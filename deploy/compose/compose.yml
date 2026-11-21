@@ -34,6 +34,9 @@ x-bridge-env: &bridge-env
   BRIDGE_PUBLIC_KEY: ${BRIDGE_PUBLIC_KEY:?}
   BRIDGE_PRIVATE_KEY: ${BRIDGE_PRIVATE_KEY:?}
   BRIDGE_DATABASE_TYPE: postgres
+  # The last restore's ID: a bridge host whose database hasn't settled it holds the backup's
+  # queue, and settles it rather than run it (docs/deploy.md, Restore).
+  TRIODITIS_RESTORE_ID: ${RESTORE_ID:-}
 
 # For the networks that sign in on their website: the sign-in browser, and the egress proxies
 # it reaches the web through, one per browser, at the name each such service gives as

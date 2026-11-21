@@ -438,7 +438,10 @@ updater stops the server, checks with Docker that nothing of it is still running
 says so, for you to restore the backup by hand; if it can't confirm the server stopped, the update
 stays in progress, as going back, and the updater tries again when it next starts. An update cut
 off while the server was being backed up (before anything was installed) starts the server again
-as it was when the updater next starts, and is reported as not installed. It
+as it was when the updater next starts, and is reported as not installed; until the server
+starts, the update stays in progress and the updater tries again on each start. While going
+back can't be confirmed, the page shows the update as still updating, so it can't be cancelled
+or replaced. It
 reports both the failure and the way back; a commit whose update failed
 isn't tried again automatically (Update now still tries it). The installer runs with `--no-setup-link`, since its
 output goes to the journal.
@@ -619,11 +622,13 @@ settings. It asks before it changes anything (`--yes` skips that). In order:
    modes as they were, and checks each against the manifest's count of entries and bytes. If that
    fails partway, it puts the copy from step 2 back and checks it the same way, and only then
    opens the gate and starts the server as it was; if that fails too, the gate stays closed.
-   Volumes the backup doesn't have (a network added since) are left as they are. Each bridge
-   host's volume gets a `restore-pending` marker: the bridge host's own queue of commands, in
-   its database, is the backup's too, so on its next start it records every send in it, queued
-   or started, as `unknown` instead of running it (and ends logins in progress), reports that
-   through its journal like any send status, and only then removes the marker.
+   Volumes the backup doesn't have (a network added since) are left as they are. Every restore has an ID of its own, kept for good in `deploy/.env` as `RESTORE_ID` and
+   given to every bridge host. Each bridge host's own queue of commands, in its database, is the
+   backup's too, and its database keeps the last restore it settled: on a start with a
+   `RESTORE_ID` it hasn't, it records every send in the queue, queued or started, as `unknown`
+   instead of running it (and ends logins in progress), reports that through its journal like
+   any send status, and only then records the ID. That follows the database itself, whichever
+   volumes the backup had.
 4. **It restores the settings**: the backup's, with this server's private keys and
    `BACKUP_KEY` (the backup has only the public halves, the same ones) and any setting you
    added by hand, which backups leave out.
@@ -645,7 +650,9 @@ after the backup can't be told apart: each shows in its chat as a send whose out
 known, for the person to send again or discard, and none goes out on its own. So does a send
 the backend marked failed as it started because its deadline passed while the backup sat on
 disk (it may have gone out meanwhile). Logins, logouts and new chats waiting on such a command
-end as if it expired, and can be started again.
+end as if it expired, and can be started again. A removed member's logout, or the logout a
+cancelled login's account gets, isn't queued again while the queue is settled (it would only be
+expired with the rest); each is queued once, after.
 
 What a restore can't bring back: anything that happened after the backup (messages that arrived
 since come in again only if the network sends its history again), and the networks' own view of
@@ -666,7 +673,10 @@ is sealed to, and the file's `BACKUP_KEY` opens the backup. A checkout with no i
 stop or back up another checkout's server, so if the backup's project already has volumes or
 containers on this Docker, or a volume of any of the names the backup's would take (labelled by
 Compose or not), the restore refuses: restore from that install's own checkout. If Docker's
-volumes or containers can't be listed, it refuses too. The restore writes `deploy/.env`
+volumes or containers can't be listed, it refuses too. The volumes it makes carry its restore
+ID (`trioditis.restore`), and it only ever empties one that does. If it's cut off, running it
+again with the same backup carries on from the volumes that run made (its marker,
+`deploy/.restore-settle`, names the backup and the run). The restore writes `deploy/.env`
 from the backup's settings and those keys, restores the volumes, and runs the installer, which
 builds the images and starts the server. Then update from the app as usual.
 

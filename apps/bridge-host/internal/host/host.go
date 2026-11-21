@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -34,15 +33,15 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
-// RestoreMarker is the file deploy/trioditis restore leaves in a restored bridge host's data
-// directory, so its first start settles the restored commands rather than running them.
-const RestoreMarker = "restore-pending"
-
 // Config configures one bridge host process.
 type Config struct {
 	Network string
 	HostID  string
 	DataDir string
+	// RestoreID names the last restore of this server (deploy/trioditis restore, RESTORE_ID in
+	// deploy/.env), if there was one: a database that hasn't settled that one yet holds the
+	// backup's queue, which is settled at start rather than run.
+	RestoreID string
 	// DatabaseType is "sqlite3-fk-wal" (default) or "postgres"; DatabaseURI defaults to a
 	// SQLite file in DataDir.
 	DatabaseType string
@@ -214,20 +213,25 @@ func (h *Host) Start(ctx context.Context) error {
 	if err = h.Bridge.Start(ctx); err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
 	}
-	// Just restored from a backup: the restore leaves RestoreMarker in the data directory, and
-	// nothing the restored queue holds runs (SettleRestored). The marker goes only once every
+	// Restored from a backup since this database last started: the queue in it is the backup's,
+	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from
+	// deploy/.env), and the database keeps the last one it settled, so the decision follows
+	// the queue itself, whichever volumes the backup had. The ID is recorded only once every
 	// such command is settled and its status is in the journal, which the pusher delivers; a
 	// start that stops before then settles again on the next one.
-	marker := filepath.Join(h.Config.DataDir, RestoreMarker)
-	if _, statErr := os.Stat(marker); statErr == nil {
-		if err = h.Connector.SettleRestored(ctx); err != nil {
-			return fmt.Errorf("host: failed to settle the restored commands: %w", err)
+	if h.Config.RestoreID != "" {
+		settled, err := h.Store.SettledRestore(ctx)
+		if err != nil {
+			return fmt.Errorf("host: failed to read the last restore settled: %w", err)
 		}
-		if err = os.Remove(marker); err != nil {
-			return fmt.Errorf("host: failed to clear the restore marker: %w", err)
+		if settled != h.Config.RestoreID {
+			if err = h.Connector.SettleRestored(ctx); err != nil {
+				return fmt.Errorf("host: failed to settle the restored commands: %w", err)
+			}
+			if err = h.Store.SetSettledRestore(ctx, h.Config.RestoreID); err != nil {
+				return fmt.Errorf("host: failed to record the restore as settled: %w", err)
+			}
 		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("host: failed to check for a restore: %w", statErr)
 	}
 	if err = h.Connector.RecoverCommands(ctx); err != nil {
 		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)

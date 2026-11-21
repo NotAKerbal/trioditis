@@ -559,6 +559,21 @@ case "${1:-}" in
     trap 'rm -rf "$work"' EXIT
     # The ID both files are bound to: each decrypts only as its own backup's archive or settings.
     id=$(backup_id "$source_dir") || refuse "The backup's backup.info isn't one backup writes."
+    # This restore's own ID: kept for good in deploy/.env as RESTORE_ID, which every bridge host
+    # compares with the last restore its database settled (so it settles the restored queue
+    # once, whichever volumes the backup had), and put on every volume it makes, so it only ever
+    # empties a volume it made. With no install, a run of the same backup cut off before (its
+    # marker names this backup) carries on with that run's ID and volumes.
+    resume_id=''
+    if [ "$fresh" = 1 ] && [ -n "$id" ] && [ -f "$here/.restore-settle" ] &&
+      [ "$(sed -n 's/^backup_id=//p' "$here/.restore-settle")" = "$id" ]; then
+      resume_id=$(sed -n 's/^restore_id=//p' "$here/.restore-settle" | grep -xE '[0-9]{1,12}-[0-9a-f]{16}' || true)
+    fi
+    restore_id=${resume_id:-$(date +%s)-$(random_hex)}
+    # restore_label VOLUME: the restore that made VOLUME, if one did.
+    restore_label() { docker volume inspect -f '{{index .Labels "trioditis.restore"}}' "$1" 2>/dev/null; }
+    # Whether VOLUME is one the run this one carries on from made.
+    resumed_volume() { [ -n "$resume_id" ] && [ "$(restore_label "$1")" = "$resume_id" ]; }
     # stream DIR: the backup's archive, decrypted, on stdout.
     stream() {
       if [ "$encrypted" = 1 ]; then
@@ -591,7 +606,11 @@ case "${1:-}" in
       docker_volumes=$(docker volume ls -q) || refuse "Couldn't read Docker's volumes, so can't check nothing would be overwritten."
       labelled=$(docker ps -aq --filter "label=com.docker.compose.project=$project") ||
         refuse "Couldn't read Docker's containers, so can't check nothing would be overwritten."
-      [ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")$labelled" ] ||
+      project_volumes_here=$(docker volume ls -q --filter "label=com.docker.compose.project=$project") ||
+        refuse "Couldn't read Docker's volumes, so can't check nothing would be overwritten."
+      foreign=$labelled
+      for volume in $project_volumes_here; do resumed_volume "$volume" || foreign="$foreign $volume"; done
+      [ -z "$foreign" ] ||
         refuse "Project $project already has volumes or containers on this Docker, from another checkout. Restore it from that checkout (deploy/trioditis restore there backs it up first), or remove that install first."
     else
       [ "$backup_project" = "$project" ] || refuse "The backup is of project $backup_project, and this install is $project."
@@ -653,7 +672,7 @@ case "${1:-}" in
       printf '%s\n' "$volume" | grep -qxE '[A-Za-z0-9][A-Za-z0-9_.-]*' || refuse "The backup's manifest names a volume oddly ($volume)."
       # With no install, a volume of that name already here (labelled by Compose or not) isn't
       # this restore's to empty.
-      [ "$fresh" = 0 ] || ! printf '%s\n' "$docker_volumes" | grep -qxF "$volume" ||
+      [ "$fresh" = 0 ] || ! printf '%s\n' "$docker_volumes" | grep -qxF "$volume" || resumed_volume "$volume" ||
         refuse "A volume named $volume is already on this Docker. Restore from the checkout it belongs to, or remove it first."
     done
     # shellcheck disable=SC2016 # expanded in the container
@@ -737,12 +756,15 @@ case "${1:-}" in
     trap '' INT TERM HUP
     write_marker() {
       marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX") &&
-        printf 'state=%s\nbackup_at=%s\n' "$1" "$backup_at" >"$marker_tmp" && mv -f "$marker_tmp" "$here/.restore-settle" ||
+        printf 'state=%s\nbackup_at=%s\nrestore_id=%s\nbackup_id=%s\n' "$1" "$backup_at" "$restore_id" "$id" >"$marker_tmp" &&
+        mv -f "$marker_tmp" "$here/.restore-settle" ||
         { rm -f "$marker_tmp"; echo "Couldn't write deploy/.restore-settle." >&2; return 1; }
     }
+    # Written before any volume is made, so a run cut off after making some carries on from them.
     write_marker loading || refuse "The restore couldn't mark itself as under way."
     if [ "$fresh" = 0 ]; then
-      { printf '%s\n' "$env_text" | grep -v '^RESTORE_PENDING=' || true; echo "RESTORE_PENDING=$backup_at"; } |
+      { printf '%s\n' "$env_text" | grep -vE '^(RESTORE_PENDING|RESTORE_ID)=' || true
+        echo "RESTORE_PENDING=$backup_at"; echo "RESTORE_ID=$restore_id"; } |
         sed '/^$/d' | env_write "$env_file" || { echo "Couldn't mark deploy/.env as restoring." >&2; exit 1; }
       compose rm -f -s gateway >/dev/null 2>&1 || { echo "Couldn't remove the gateway's container." >&2; exit 1; }
     fi
@@ -750,14 +772,16 @@ case "${1:-}" in
     # checks every one against the manifest's count of entries and bytes.
     load() {
       for volume in $2; do
-        # With no install, one made since the check above is someone else's.
-        if [ "$fresh" = 1 ] && docker volume inspect "$volume" >/dev/null 2>&1; then
-          echo "A volume named $volume appeared on this Docker during the restore; it's left as it is." >&2
-          return 1
-        fi
+        # A volume it makes carries this restore's ID. Docker's create succeeds on a name that's
+        # taken, so with no install what's checked is the label, after: a volume someone else made
+        # meanwhile (or ever) isn't this restore's to empty.
         docker volume inspect "$volume" >/dev/null 2>&1 ||
           docker volume create --label "com.docker.compose.project=$project" \
-            --label "com.docker.compose.volume=${volume#"${project}_"}" "$volume" >/dev/null || return 1
+            --label "com.docker.compose.volume=${volume#"${project}_"}" --label "trioditis.restore=$restore_id" "$volume" >/dev/null || return 1
+        if [ "$fresh" = 1 ] && [ "$(restore_label "$volume")" != "$restore_id" ]; then
+          echo "The volume $volume on this Docker isn't one this restore made; it's left as it is." >&2
+          return 1
+        fi
       done
       mounts=''
       for volume in $2; do mounts="$mounts -v $volume:/volumes/$volume"; done
@@ -800,26 +824,14 @@ case "${1:-}" in
       echo "Nothing was restored: the server is as it was." >&2
       exit 1
     fi
-    # Each bridge host's own queue of commands, in its database, is the backup's too, and may
-    # hold sends the original server went on to make: a marker in its data directory has its
-    # next start settle them as unknown instead of running them (bridge-host SettleRestored),
-    # and it removes the marker once that's recorded. Owned like the directory, so it can.
-    bridge_volumes=$(printf '%s\n' "$volumes" | grep -E "^${project}_bridge-" || true)
-    for volume in $bridge_volumes; do
-      docker run --rm --log-driver none -v "$volume:/data" --entrypoint sh "$tool" -c \
-        ': >/data/restore-pending && chown "$(stat -c %u:%g /data)" /data/restore-pending' || {
-        echo "Couldn't mark $volume's bridge queue to be settled. The volumes are the backup's; run the restore again." >&2
-        exit 1
-      }
-    done
-
     # The settings: the backup's, with this server's keys (the backup has only the public
     # halves, the same ones) and any setting the operator added by hand, which backups leave out.
     if [ "$fresh" = 1 ]; then keys_from=$key_file_text; else keys_from=$env_text; fi
     # RESTORE_PENDING stays set, for the installer to clear once it has settled the sends.
-    new_text=$(printf '%s\n' "$backup_env" | grep -vE "^($private_keys|RESTORE_PENDING)=" || true)
+    new_text=$(printf '%s\n' "$backup_env" | grep -vE "^($private_keys|RESTORE_PENDING|RESTORE_ID)=" || true)
     new_text="$new_text
-RESTORE_PENDING=$backup_at"
+RESTORE_PENDING=$backup_at
+RESTORE_ID=$restore_id"
     for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY BACKUP_KEY; do
       value=$(value_in "$name" "$keys_from")
       [ -z "$value" ] || new_text="$new_text
