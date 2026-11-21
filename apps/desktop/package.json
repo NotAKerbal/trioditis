@@ -2,16 +2,24 @@
   "name": "@trioditis/desktop",
   "version": "0.0.0",
   "private": true,
+  "description": "Trioditis: your chat networks in one place",
+  "author": "Trioditis contributors",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist-electron/main.js",
+  "desktopName": "trioditis.desktop",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
     "test": "vitest run",
-    "app": "tsc -p electron && node node_modules/electron/install.js && electron ."
+    "app": "tsc -p electron && node node_modules/electron/install.js && electron .",
+    "package": "tsc -p electron && electron-builder",
+    "package:dir": "tsc -p electron && electron-builder --dir",
+    "package:linux": "tsc -p electron && electron-builder --linux",
+    "package:mac": "tsc -p electron && electron-builder --mac",
+    "package:win": "tsc -p electron && electron-builder --win"
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.25",
@@ -41,6 +49,7 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.3.0",
     "electron": "45.2.3",
+    "electron-builder": "26.18.0",
     "tailwindcss": "4.3.5",
     "typescript": "7.0.2",
     "vite": "8.3.7",

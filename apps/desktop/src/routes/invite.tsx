@@ -2,6 +2,7 @@ import { Link, createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { AuthCard } from '~/features/auth/auth-card.tsx'
 import { SignUpForm } from '~/features/auth/sign-up-form.tsx'
+import { desktop, desktopInvitation } from '~/lib/desktop.ts'
 import { forgetFragmentToken, takeFragmentToken } from '~/lib/fragment.ts'
 
 // An invitation link, made in Settings → Members: /invite?email=…#token=…. The token is in the
@@ -30,6 +31,7 @@ function Invite() {
       </AuthCard>
     )
   }
+  const inApp = desktopInvitation(desktop, window.location, email, token)
   return (
     <AuthCard title="You’re invited" description={`Create your account for ${email}.`}>
       <SignUpForm
@@ -38,6 +40,13 @@ function Invite() {
         submitLabel="Create account"
         onCreated={() => forgetFragmentToken(remember)}
       />
+      {inApp ? (
+        <p className="mt-4 text-center text-sm">
+          <a href={inApp} className="font-semibold text-primary hover:underline">
+            Open in the desktop app
+          </a>
+        </p>
+      ) : null}
     </AuthCard>
   )
 }

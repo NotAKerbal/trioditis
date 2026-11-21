@@ -156,7 +156,13 @@ function SignIn() {
         or
         <span className="h-px flex-1 bg-border" />
       </div>
-      <Button size="lg" block onClick={withPasskey} loading={busy === 'passkey'} disabled={busy !== null}>
+      <Button
+        size="lg"
+        block
+        onClick={withPasskey}
+        loading={busy === 'passkey'}
+        disabled={busy !== null || !!passkeysUnavailable}
+      >
         <KeyRound className="size-4" /> Sign in with a passkey
       </Button>
       {passkeysUnavailable ? (

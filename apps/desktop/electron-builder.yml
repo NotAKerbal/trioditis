@@ -1,0 +1,58 @@
+# Installers for the desktop app (docs/CONTRIBUTING.md, The desktop app). The app ships only its
+# main process, preload and server picker: the web app comes from the server it connects to, so
+# none of this package's web dependencies go in.
+#
+# Nothing here is signed: the project has no Apple or Windows signing certificates. macOS
+# Gatekeeper and Windows SmartScreen warn about these builds, and a Mac must be told to open it
+# (right-click → Open) the first time.
+appId: org.trioditis.desktop
+productName: Trioditis
+executableName: trioditis
+copyright: Copyright © Trioditis contributors
+directories:
+  output: release
+  buildResources: build
+files:
+  - package.json
+  - dist-electron/**
+  - electron/connect.html
+  - electron/connect.css
+  - electron/connect.js
+  - '!node_modules/**'
+npmRebuild: false
+asar: true
+# Invitation links (electron/links.ts): declared in the Mac's Info.plist and Linux's .desktop
+# file. Windows' installer doesn't register schemes, so the app does as it starts (main.ts).
+protocols:
+  - name: Trioditis invitation
+    schemes:
+      - trioditis
+publish: null
+
+mac:
+  category: public.app-category.social-networking
+  target:
+    - dmg
+    - zip
+  # Unsigned: there is no Developer ID to sign with, and so no notarizing.
+  identity: null
+
+win:
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  category: Network
+  synopsis: Your chat networks in one place
+  maintainer: Trioditis contributors
+  target:
+    - AppImage
+    - deb
+  desktop:
+    entry:
+      StartupWMClass: Trioditis

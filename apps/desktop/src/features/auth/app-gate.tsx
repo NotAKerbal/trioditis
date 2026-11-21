@@ -1118,7 +1118,7 @@ function Unlock({
             block
             className="mt-2"
             loading={busy === 'passkey'}
-            disabled={busy !== null}
+            disabled={busy !== null || !!passkeysUnavailable}
             onClick={() => void unlockWithPasskey()}
           >
             <KeyRound className="size-4" /> Unlock with a passkey
