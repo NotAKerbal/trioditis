@@ -114,6 +114,7 @@ export function Shell() {
             selectedId={selectedId}
             openedUnreadId={openedUnreadId}
             onOpen={open}
+            onOpenId={select}
             onClose={() => select(undefined)}
             onAction={onSidebarAction}
             onPeople={() => openPeople('all')}

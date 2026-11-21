@@ -127,7 +127,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
   const pending = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
   const scheduledTexts = useScheduledTexts(pending.map((s) => s._id))
   const scheduled = useMemo(
-    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id) })),
+    () => pending.map((s) => ({ id: s._id, sendAt: s.sendAt, body: scheduledTexts.get(s._id), replyTo: s.replyTo })),
     [pending, scheduledTexts],
   )
 
@@ -190,6 +190,8 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
       }
     })
   }
+
+  const byEvent = (eventId: string) => messages.find((m) => m.eventId === eventId)
 
   const name = chat.name
   const muted = chat.muted
@@ -365,7 +367,7 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
               toast(errorMessage(e, 'That message couldn’t be sent.')),
             )
           }
-          onCancelScheduled={(id, body) =>
+          onCancelScheduled={({ id, body, replyTo }) =>
             // Counted like a send until its text is back in the composer: the server's copy is
             // gone once the cancel goes through, so a reload in between would lose it.
             void whileSending(() =>
@@ -376,8 +378,10 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
                   if (body === null) return toast('Cancelled. It won’t be sent.')
                   if (body === undefined)
                     return toast('Cancelled. Its text hadn’t loaded, so it isn’t in the composer.')
+                  // A reply goes back as one, to the message it answered, even one not loaded.
+                  const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo)) : null
                   toast(
-                    appendToDraft(chat.id, body)
+                    appendToDraft(chat.id, body, reply)
                       ? 'Cancelled. The message was added below your draft.'
                       : 'Cancelled. The message is back in the composer.',
                   )
@@ -401,4 +405,25 @@ function OpenChat({ chat, act }: { chat: Chat; act: ChatPaneProps['act'] }) {
       {details ? <DetailsPanel chat={chat} act={act} /> : null}
     </>
   )
+}
+
+/**
+ * The message a restored reply answers, when it isn't loaded: the composer shows "a message",
+ * and the send needs only its event ID.
+ */
+function replyStub(eventId: string): Message {
+  return {
+    id: '' as Message['id'],
+    eventId,
+    pending: false,
+    self: false,
+    ghostId: undefined,
+    at: 0,
+    body: null,
+    edited: false,
+    deleted: false,
+    replyTo: undefined,
+    clientMessageId: undefined,
+    delivery: undefined,
+  }
 }

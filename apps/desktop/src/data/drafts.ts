@@ -74,11 +74,14 @@ export function restoreDraft<Reply>(chatId: string, text: string, reply: Reply |
   change(chatId, { text: now.text ? `${text}\n${now.text}` : text, reply: now.reply ?? reply })
 }
 
-/** Adds a cancelled scheduled message's text below the draft. Says whether there was one already. */
-export function appendToDraft(chatId: string, text: string): boolean {
-  const now = getDraft(chatId).text
-  change(chatId, { text: now.trim() ? `${now}\n${text}` : text })
-  return !!now.trim()
+/**
+ * Adds a cancelled scheduled message's text below the draft, and its reply if the draft has
+ * none: a reply already set is the newer choice. Says whether there was a draft already.
+ */
+export function appendToDraft<Reply>(chatId: string, text: string, reply: Reply | null = null): boolean {
+  const now = getDraft<Reply>(chatId)
+  change<Reply>(chatId, { text: now.text.trim() ? `${now.text}\n${text}` : text, reply: now.reply ?? reply })
+  return !!now.text.trim()
 }
 
 function subscribe(listener: () => void) {

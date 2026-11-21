@@ -25,6 +25,8 @@ export interface ScheduledItem {
   /** Its text once its copy is opened here; null if the copy doesn't open here; undefined until then. */
   body: string | null | undefined
   sendAt: number
+  /** The event ID of the message it replies to, if it's a reply. */
+  replyTo: string | null
 }
 
 interface MessageListProps {
@@ -50,8 +52,8 @@ interface MessageListProps {
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
-  /** Cancels it; `body` is its text to put back: null if it can't be shown, undefined if not here yet. */
-  onCancelScheduled: (id: Id<'scheduledSends'>, body: string | null | undefined) => void
+  /** Cancels it, putting its text (when here) and reply back in the composer. */
+  onCancelScheduled: (item: ScheduledItem) => void
 }
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
@@ -282,7 +284,7 @@ export function MessageList(props: MessageListProps) {
                     )}
                   >
                     {quoted || m.replyTo ? (
-                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
+                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-90">
                         {(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
                       </span>
                     ) : null}
@@ -417,7 +419,7 @@ export function MessageList(props: MessageListProps) {
                 variant="link"
                 size="sm"
                 className="h-auto text-xs"
-                onClick={() => props.onCancelScheduled(s.id, s.body)}
+                onClick={() => props.onCancelScheduled(s)}
               >
                 {s.body === null ? 'Cancel send' : 'Cancel'}
               </Button>

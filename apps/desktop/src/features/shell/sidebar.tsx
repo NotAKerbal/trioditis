@@ -42,6 +42,7 @@ import {
   useScheduledTexts,
   useSidebarLayout,
   type Chat,
+  type ChatId,
   type ChatList,
   type ChatFilter,
   type LabelId,
@@ -62,6 +63,8 @@ interface SidebarProps {
   /** The chat opened while it had unread messages: it stays under Unread until another chat opens. */
   openedUnreadId: string | undefined
   onOpen: (chat: Chat) => void
+  /** Opens a chat by ID, for one the sidebar hasn't loaded (a scheduled message's). */
+  onOpenId: (chatId: ChatId) => void
   onClose: () => void
   onAction: (action: SidebarAction) => void
   onPeople: () => void
@@ -86,6 +89,7 @@ export function Sidebar({
   selectedId,
   openedUnreadId,
   onOpen,
+  onOpenId,
   onClose,
   onAction,
   onPeople,
@@ -449,10 +453,21 @@ export function Sidebar({
                       </>,
                     )
                   ) : (
-                    <p key={s._id} className="px-2.5 py-2 text-sm text-muted-foreground">
+                    // Its chat isn't in a loaded view (not scrolled to yet): it still opens it.
+                    <Button
+                      variant="bare"
+                      type="button"
+                      key={s._id}
+                      onClick={() => onOpenId(s.chatId)}
+                      className={cn(
+                        'block w-full truncate rounded-md px-2.5 py-2 text-left text-sm text-muted-foreground hover:bg-rail-hover hover:text-foreground',
+                        s.chatId === selectedId && 'bg-rail-hover text-foreground',
+                      )}
+                    >
+                      <Clock className="mr-1 inline size-3 align-[-1px]" />
                       {formatWhen(s.sendAt)}
                       {prefs.previews ? ` · ${s.body}` : ' · Scheduled message'}
-                    </p>
+                    </Button>
                   ),
                 )}
               </Divider>
