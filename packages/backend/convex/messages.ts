@@ -11,7 +11,7 @@ import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
 import { retryPlan, retryState } from './lib/retry'
-import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
 import { envelope } from './validators'
 
 /** The most messages one page holds. */
@@ -132,6 +132,7 @@ export const send = mutation({
   handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
+    refuseRetryId(input.clientMessageId)
     // Sending the same message again does nothing, whatever has changed since.
     const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
     if (used) return used

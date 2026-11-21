@@ -7,9 +7,13 @@ import { deliveryState } from '../validators'
 // chain from the original send: its outbox row records the original (`retryRoot`), the link
 // before it (`retryOf`) and its place (`retryIndex`). The next link's client message ID is
 // worked out here from the original and its place, so any tab, after any reload, asks for the
-// same next send, and the outbox's ID fence makes it one. Another attempt may be made only when
-// none has been made and the original failed or may not have gone, or the latest attempt
-// failed: never after one that may have gone (`unknown`), and never by itself.
+// same next send, and the outbox's ID fence makes it one. The first attempt may be made when
+// the original failed or may not have gone; a later one only when the latest attempt failed and
+// nothing else in the chain, the original included, was sent or may still go (any state but
+// failed): a send that turns out to have gone after all ends the chain. Never by itself.
+
+/** The prefix of every attempt's client message ID: no other send may take one. */
+export const RETRY_PREFIX = 'rt_'
 
 /** The most attempts a message can have. */
 export const MAX_ATTEMPTS = 8
@@ -37,7 +41,7 @@ const toBase64Url = (bytes: Uint8Array) =>
 /** The client message ID of attempt `index` (1, 2…) of the chain from `root`: 46 characters. */
 export async function retryId(root: string, index: number) {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`trioditis/retry/v1/${root}/${index}`))
-  return `rt_${toBase64Url(new Uint8Array(hash))}`
+  return `${RETRY_PREFIX}${toBase64Url(new Uint8Array(hash))}`
 }
 
 async function outboxRow(ctx: QueryCtx, userId: string, clientMessageId: string) {
@@ -48,6 +52,7 @@ async function outboxRow(ctx: QueryCtx, userId: string, clientMessageId: string)
 }
 
 const TROUBLED = new Set(['failed', 'unknown'])
+const SENT = new Set(['sent', 'delivered', 'read'])
 
 /**
  * Where the chain `clientMessageId` belongs to stands: it may be the original or any attempt.
@@ -58,19 +63,27 @@ export async function retryPlan(ctx: QueryCtx, userId: string, clientMessageId: 
   if (!row || row.payload.type !== 'send') return null
   const root = row.retryRoot ?? clientMessageId
   const original = row.retryRoot ? await outboxRow(ctx, userId, root) : row
+  // The whole chain, oldest first: there are at most MAX_ATTEMPTS attempts.
   const links = await ctx.db
     .query('outbox')
     .withIndex('by_retryRoot', (q) => q.eq('userId', userId).eq('retryRoot', root))
-    .order('desc')
-    .take(1)
-  const latest: Doc<'outbox'> | undefined = links[0]
+    .take(MAX_ATTEMPTS + 1)
+  const latest: Doc<'outbox'> | undefined = links.at(-1)
   const index = latest?.retryIndex ?? 0
+  const chain = [...(original ? [original] : []), ...links]
+  const went = chain.find((r) => SENT.has(r.delivery ?? ''))
   const allowed =
-    index < MAX_ATTEMPTS && (latest ? latest.delivery === 'failed' : TROUBLED.has(original?.delivery ?? ''))
+    index < MAX_ATTEMPTS &&
+    !went &&
+    (latest
+      ? latest.delivery === 'failed' && chain.every((r) => r.delivery === 'failed')
+      : TROUBLED.has(original?.delivery ?? ''))
+  // What the chain shows: the send that went, if one did, or else the latest attempt.
+  const shown = went ?? latest
   return {
     root,
-    latest: latest?.clientMessageId ?? null,
-    delivery: latest?.delivery ?? null,
+    latest: shown?.clientMessageId ?? null,
+    delivery: shown?.delivery ?? null,
     allowed,
     nextId: allowed ? await retryId(root, index + 1) : null,
     /** For making the next attempt. */

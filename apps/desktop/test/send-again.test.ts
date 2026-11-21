@@ -21,6 +21,10 @@ describe('a row’s Send again', () => {
       state: 'failed',
       canTry: true,
     })
+    // The original turned out to have gone: the chain says Sent, and offers nothing.
+    expect(
+      againView(chain({ latest: chain().root, delivery: 'sent', allowed: false, nextId: null }), new Set()),
+    ).toEqual({ state: 'original', canTry: false })
     // Nothing known of it (not a send): nothing offered.
     expect(againView(undefined, new Set())).toEqual({ state: undefined, canTry: false })
   })
@@ -67,6 +71,14 @@ describe('sending again', () => {
 
   it('takes the server’s word that nothing was made', async () => {
     expect(await sendAgain(chain(), async () => ({ created: false }))).toBe(false)
-    expect(await sendAgain(chain(), async () => Promise.reject(new Error('offline')))).toBe(false)
+  })
+
+  it('passes a real error on, for the chat to say, and can be tried again after', async () => {
+    await expect(
+      sendAgain(chain(), async () => Promise.reject(new Error('That message can’t be replied to.'))),
+    ).rejects.toThrow(/replied to/)
+    // Not left as on its way.
+    expect(againView(chain(), new Set()).canTry).toBe(true)
+    expect(await sendAgain(chain(), async () => ({ created: true }))).toBe(true)
   })
 })

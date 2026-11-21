@@ -622,6 +622,7 @@ function DeliveryIcon({ delivery }: { delivery: Message['delivery'] }) {
 }
 
 const AGAIN_SAYS: Record<Exclude<SendAgainState, 'sending'>, string> = {
+  original: 'Sent',
   going: 'Being sent again',
   sent: 'Sent again',
   maybe: 'May have been sent again',
