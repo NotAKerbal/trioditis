@@ -353,7 +353,7 @@ export const writeChat = internalMutation({
 
 /**
  * Loads the demo data for the signed-in person, once: a connected account on each of seven
- * networks, six contacts and eight chats (two groups, a pinned chat, a message request, a snoozed chat and an
+ * networks, six contacts and nine chats (two groups, Alice on two networks, a pinned chat, a message request, a snoozed chat and an
  * archived one) of 20 messages each. It needs `keys.setup` done first. Each contact batch and
  * each chat is written whole, so if it stops partway, calling it again finishes the rest;
  * once everything is there, calling it does nothing (`seeded: false`).

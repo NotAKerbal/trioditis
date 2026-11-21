@@ -76,13 +76,14 @@ describe('demo data', () => {
     expect(chats.every((chat) => accounts.some((a) => a.network === chat.network && a.loginId === chat.loginId))).toBe(
       true,
     )
-    expect(chats).toHaveLength(8)
+    // Eight, and Alice again on Signal, to link on one People card.
+    expect(chats).toHaveLength(9)
     expect(new Set(chats.map((chat) => chat.view))).toEqual(new Set(['inbox', 'requests', 'snoozed', 'archived']))
     expect(chats.filter((chat) => chat.kind === 'group')).toHaveLength(2)
     // The six contacts, on each network they have a chat on.
-    expect(contacts).toHaveLength(10)
+    expect(contacts).toHaveLength(11)
     expect(new Set(contacts.map((contact) => contact.ghostId)).size).toBe(6)
-    expect(messages).toHaveLength(160)
+    expect(messages).toHaveLength(180)
 
     const message = messages[0]!
     const body = openJson<{ body: string }>(message.sealed!, identity, {
@@ -99,6 +100,15 @@ describe('demo data', () => {
         objectId: chat.portalId,
       }).name,
     ).toBeTruthy()
+    // A direct chat says who it's with, sealed with the rest, as a bridge host's does.
+    for (const dm of chats.filter((c) => c.kind === 'dm')) {
+      const meta = openJson<{ dmGhostId?: string }>(dm.sealedMeta!, identity, {
+        kind: 'chat',
+        ownerUserId: 'demo_user',
+        objectId: dm.portalId,
+      })
+      expect(contacts.some((c) => c.network === dm.network && c.ghostId === meta.dmGhostId)).toBe(true)
+    }
     const contact = contacts[0]!
     expect(
       openJson(contact.sealedProfile, identity, {
@@ -140,7 +150,7 @@ describe('demo data', () => {
       await ctx.db.query('contacts').collect(),
       await ctx.db.query('messages').collect(),
     ])
-    expect([accounts.length, chats.length, contacts.length, messages.length]).toEqual([7, 8, 10, 160])
+    expect([accounts.length, chats.length, contacts.length, messages.length]).toEqual([7, 9, 11, 180])
   })
 
   it('needs the key set up first', async () => {
