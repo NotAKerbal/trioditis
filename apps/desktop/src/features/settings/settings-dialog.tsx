@@ -48,7 +48,6 @@ import {
   useServerInfo,
   useSidebarLayout,
 } from '~/data/chats.ts'
-import { canNotify, notificationsAvailable } from '~/features/shell/notifications.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { passkeysUnavailable } from '~/lib/desktop.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -67,6 +66,7 @@ import { useSession } from '~/lib/session.tsx'
 import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
+import { Notifications } from './notifications.tsx'
 import { Updates } from './updates.tsx'
 
 /** Puts focus back on a control once it's rendered again: an opener a form or reveal replaced. */
@@ -238,44 +238,6 @@ function Appearance() {
             checked={prefs.networkBadges}
             onCheckedChange={(v) => setPref('networkBadges', v)}
             aria-label="Network badges"
-          />
-        </Setting>
-      </Group>
-    </>
-  )
-}
-
-function Notifications() {
-  const prefs = usePrefs()
-  const supported = notificationsAvailable()
-  // The browser's answer, asked again only when the person turns notifications on.
-  const [allowed, setAllowed] = useState(canNotify)
-  async function turn(on: boolean) {
-    if (!on) return setPref('notifications', false)
-    const granted = allowed || (await Notification.requestPermission()) === 'granted'
-    setAllowed(granted)
-    if (granted) setPref('notifications', true)
-    else toast('Notifications are blocked for this site. Allow them in your browser’s site settings, then try again.')
-  }
-  return (
-    <>
-      <Heading title="Notifications" />
-      {/* Kept in view: a notification puts the sender and the message's text in the system's own history,
-          outside what Trioditis seals. */}
-      <Group>
-        <Setting
-          title="Desktop notifications"
-          about={
-            supported
-              ? 'Shows the sender and message text, which your system may keep.'
-              : 'This browser can’t show notifications.'
-          }
-        >
-          <Switch
-            checked={prefs.notifications && allowed}
-            disabled={!supported}
-            onCheckedChange={(v) => void turn(v)}
-            aria-label="Desktop notifications"
           />
         </Setting>
       </Group>
