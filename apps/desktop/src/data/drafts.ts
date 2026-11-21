@@ -7,7 +7,7 @@ import { useSyncExternalStore } from 'react'
 //
 // Sending and scheduling both take the text out of the draft when they start, so it can't go
 // out twice, and what's typed meanwhile is a new draft of its own. Until it settles it's kept
-// as a send under way (`beginSend`), saved like a draft, so a crash before the server has it
+// as a send under way (`takeForSend`), saved like a draft, so a crash before the server has it
 // loses nothing. Only if one doesn't go does its text come back, ahead of whatever is in the
 // composer by then.
 //
@@ -41,8 +41,6 @@ export interface PendingSend<Reply> extends DraftCopy<Reply> {
 
 const store = new Map<string, Draft<unknown>>()
 const sending = new Map<string, PendingSend<unknown>>()
-/** Messages waiting for their chat's composer to be free (a cancelled one that couldn't join the draft). */
-const held = new Map<string, DraftCopy<unknown>[]>()
 const listeners = new Set<() => void>()
 const sentListeners = new Set<(chatId: string, clientMessageId: string) => void>()
 const EMPTY: Draft<never> = { text: '', reply: null, rev: 0, id: '' }
@@ -71,7 +69,7 @@ export async function whileSending<T>(work: () => Promise<T>): Promise<T> {
 
 /** Whether a reload would lose text: a draft, a reply in progress, or a send not yet settled. */
 export function hasDrafts() {
-  if (inFlight > 0 || sending.size > 0 || held.size > 0) return true
+  if (inFlight > 0 || sending.size > 0) return true
   for (const draft of store.values()) if (filled(draft)) return true
   return false
 }
@@ -87,9 +85,6 @@ export function allDrafts<Reply>(): [string, Draft<Reply>][] {
 /** Every send or schedule under way, by client message ID. */
 export const allSending = <Reply>() => [...sending] as [string, PendingSend<Reply>][]
 
-/** Every chat's held messages. */
-export const allHeld = <Reply>() => [...held] as [string, DraftCopy<Reply>[]][]
-
 export function getDraft<Reply>(chatId: string): Draft<Reply> {
   return (store.get(chatId) as Draft<Reply> | undefined) ?? EMPTY
 }
@@ -98,22 +93,13 @@ export function getDraft<Reply>(chatId: string): Draft<Reply> {
  * Changes a draft. One that gets something in it after being empty is a new draft, with a new
  * identity unless `id` names the one it's coming back as. So is one whose text was cleared,
  * even with its reply kept: typing the same words to the same message again is a new message.
- * One left empty takes the next held message for its chat, if there is one.
  */
 function change<Reply>(chatId: string, next: Partial<Pick<Draft<Reply>, 'text' | 'reply'>>, id?: string) {
   const draft = getDraft<Reply>(chatId)
-  let merged = { ...draft, ...next }
-  let has = filled(merged)
+  const merged = { ...draft, ...next }
+  const has = filled(merged)
   const cleared = !!draft.text.trim() && !merged.text.trim()
-  let identity = !has ? '' : filled(draft) && draft.id && !cleared ? draft.id : (id ?? newDraftId())
-  const waiting = held.get(chatId)
-  if (!has && waiting?.length) {
-    const back = waiting.shift()!
-    if (!waiting.length) held.delete(chatId)
-    merged = { ...merged, text: back.text, reply: back.reply as Reply | null }
-    has = true
-    identity = back.id ?? newDraftId()
-  }
+  const identity = !has ? '' : filled(draft) && draft.id && !cleared ? draft.id : (id ?? newDraftId())
   // Kept even when empty, so the revision only ever goes up.
   store.set(chatId, { ...merged, rev: draft.rev + 1, id: identity })
   notify()
@@ -133,14 +119,23 @@ export function takeDraft<Reply>(chatId: string): { text: string; reply: Reply |
   return { text: text.trim(), reply, id }
 }
 
-/** Notes a taken draft as on its way, as `clientMessageId`, until `endSend`: saved meanwhile. */
-export function beginSend<Reply>(
+/**
+ * Takes the draft to send or schedule, as `takeDraft` does, and notes it as on its way, by the
+ * client message ID `sendIdOf` works out, until `endSend`. Both in one change: there's never a
+ * moment the composer is empty and the send under way not yet noted, so its saved copy is
+ * written before the draft's is cleared (I2 in saved-drafts.ts).
+ */
+export function takeForSend<Reply>(
   chatId: string,
-  clientMessageId: string,
-  taken: { text: string; reply: Reply | null; id: string },
-) {
+  sendIdOf: (taken: { text: string; reply: Reply | null; id: string }) => string,
+): { text: string; reply: Reply | null; id: string; clientMessageId: string } | null {
+  const { text, reply, id } = getDraft<Reply>(chatId)
+  if (!text.trim()) return null
+  const taken = { text: text.trim(), reply, id }
+  const clientMessageId = sendIdOf(taken)
   sending.set(clientMessageId, { ...taken, chatId })
-  notify()
+  change<Reply>(chatId, { text: '', reply: null })
+  return { ...taken, clientMessageId }
 }
 
 /**
@@ -178,19 +173,6 @@ export function adoptDraft<Reply>(chatId: string, text: string, reply: Reply | n
   return true
 }
 
-/**
- * Keeps a message for its chat's composer: in it now if it's empty, else as soon as it is (the
- * draft there sent or cleared). Held messages are saved like drafts.
- */
-export function holdDraft<Reply>(chatId: string, copy: DraftCopy<Reply>) {
-  // Its identity is fixed now and saved with it, so every tab that loads it comes to the same
-  // send ID, and sending it from two of them is one message.
-  const kept = { ...copy, id: copy.id || newDraftId() }
-  if (!filled(getDraft(chatId))) return change<Reply>(chatId, { text: kept.text, reply: kept.reply }, kept.id)
-  held.set(chatId, [...(held.get(chatId) ?? []), kept])
-  notify()
-}
-
 /** Empties a draft another tab has sent, unless `stillSame` says it has changed since. */
 export function clearSentDraft<Reply>(chatId: string, stillSame: (draft: Draft<Reply>) => boolean) {
   const now = getDraft<Reply>(chatId)
@@ -209,7 +191,7 @@ export function appendToDraft<Reply>(chatId: string, text: string, reply: Reply 
   return !!now.text.trim()
 }
 
-/** Calls `listener` after every change to any draft, send under way or held message. */
+/** Calls `listener` after every change to any draft or send under way. */
 export function subscribeDrafts(listener: () => void) {
   listeners.add(listener)
   return () => listeners.delete(listener)

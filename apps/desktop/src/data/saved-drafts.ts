@@ -9,7 +9,6 @@ import { tryOpen } from '~/lib/sealed.ts'
 //
 // Each chat has entries of its own, so tabs saving different chats never touch each other's:
 //   trioditis.draft.<user>.<chat>                   its draft, with which write it is (`w`)
-//   trioditis.draftHeld.<user>.<chat>.<id>          one message waiting for the composer
 //   trioditis.draftSending.<user>.<chat>.<sendId>   a send or schedule under way, until it settles
 //   trioditis.draftSent.<user>.<chat>               the last draft sent from it, by client message ID
 //
@@ -18,11 +17,15 @@ import { tryOpen } from '~/lib/sealed.ts'
 // I1. Every change to a chat's entries runs inside the Web Locks lock
 //     `trioditis.drafts.<user>.<chat>` (withChatLock), reading storage again inside it, so one
 //     tab's read-then-write never interleaves with another's. Without Web Locks, as before.
-// I2. Write before delete. A copy that moves (a send under way back to the draft, a held message
-//     into the composer, a scheduled message being cancelled into a held one) is deleted only
-//     once where it's going is written. A write that fails deletes nothing, and the chat stays
-//     unsaved, so leaving the page asks first. A tab deletes only entries it wrote or read
-//     itself: never one another tab saved that it hasn't seen.
+// I2. Write before delete. A draft taken to send is saved as a send under way before the
+//     composer's saved draft is cleared or replaced, and a send under way that comes back to
+//     the composer is deleted only once that draft is saved. A write that fails deletes and
+//     replaces nothing after it, and the chat stays unsaved, so leaving the page asks first. A
+//     tab deletes only entries it wrote or read itself: never one another tab saved that it
+//     hasn't seen.
+//
+// A cancelled scheduled message isn't kept here: the server keeps its sealed copy until the
+// client has saved its text as the draft and forgets it (scheduled.forget, client-api.md).
 
 export interface SavedDraft<Reply> {
   text: string
@@ -45,17 +48,16 @@ export interface DraftStorage {
   removeItem(key: string): void
 }
 
-type Kind = 'draft' | 'draftSending' | 'draftHeld' | 'draftSent'
+type Kind = 'draft' | 'draftSending' | 'draftSent'
 const prefix = (kind: Kind, userId: string) => `trioditis.${kind}.${userId}.`
 export const savedDraftKey = (userId: string, chatId: string) => `${prefix('draft', userId)}${chatId}`
 const sendingKey = (userId: string, chatId: string, sendId: string) =>
   `${prefix('draftSending', userId)}${chatId}.${sendId}`
-const heldKey = (userId: string, chatId: string, id: string) => `${prefix('draftHeld', userId)}${chatId}.${id}`
 const sentKey = (userId: string, chatId: string) => `${prefix('draftSent', userId)}${chatId}`
 
-/** What a storage key keeps for this person: its kind, chat and (held or sending) ID; or null. */
+/** What a storage key keeps for this person: its kind, chat and (for a send) ID; or null. */
 export function keyOf(userId: string, key: string | null): { kind: Kind; chatId: string; sub: string } | null {
-  for (const kind of ['draftSending', 'draftHeld', 'draftSent', 'draft'] as const) {
+  for (const kind of ['draftSending', 'draftSent', 'draft'] as const) {
     const p = prefix(kind, userId)
     if (!key?.startsWith(p)) continue
     const rest = key.slice(p.length)
@@ -134,14 +136,13 @@ export function parseSent(value: string | null): string | null {
 
 export interface Loaded<Reply> {
   drafts: Map<string, SavedDraft<Reply> & { w: string }>
-  held: { chatId: string; copy: SavedDraft<Reply> }[]
   sending: { chatId: string; sendId: string; copy: SavedDraft<Reply> }[]
   sent: Map<string, string>
 }
 
 /** Everything saved for this person that opens with their key. */
 export function loadAll<Reply>(storage: DraftStorage, owner: Owner): Loaded<Reply> {
-  const out: Loaded<Reply> = { drafts: new Map(), held: [], sending: [], sent: new Map() }
+  const out: Loaded<Reply> = { drafts: new Map(), sending: [], sent: new Map() }
   const keys: string[] = []
   for (let i = 0; i < storage.length; i++) keys.push(storage.key(i) ?? '')
   for (const key of keys) {
@@ -157,8 +158,6 @@ export function loadAll<Reply>(storage: DraftStorage, owner: Owner): Loaded<Repl
     if (!copy) continue
     const { w, ...draft } = copy
     if (at.kind === 'draft' && w) out.drafts.set(at.chatId, { ...draft, w })
-    // A held message's key names its identity: one whose doesn't match isn't trusted.
-    if (at.kind === 'draftHeld' && at.sub === draft.id) out.held.push({ chatId: at.chatId, copy: draft })
     if (at.kind === 'draftSending') out.sending.push({ chatId: at.chatId, sendId: at.sub, copy: draft })
   }
   return out
@@ -170,7 +169,6 @@ export interface ChatWant<Reply> {
   draft: SavedDraft<Reply> | null
   /** Whether the draft changed since this tab last saved it. */
   draftChanged: boolean
-  held: SavedDraft<Reply>[]
   sending: Map<string, SavedDraft<Reply>>
   /** Sends that took the chat's draft, to note for other tabs. */
   sent: string[]
@@ -180,11 +178,10 @@ export interface ChatWant<Reply> {
 export interface ChatKnown {
   /** The mark of the draft write this tab made or read. */
   w: string | undefined
-  held: Set<string>
   sending: Set<string>
 }
 
-export const newKnown = (): ChatKnown => ({ w: undefined, held: new Set(), sending: new Set() })
+export const newKnown = (): ChatKnown => ({ w: undefined, sending: new Set() })
 
 /**
  * Brings a chat's stored entries to what `want` says, under I2: everything to write first, and
@@ -200,22 +197,18 @@ export function syncChat<Reply>(
 ): boolean {
   const { userId } = owner
   try {
+    // A send under way first: the draft it was taken from is replaced or cleared only after.
+    for (const [sendId, copy] of want.sending)
+      if (!known.sending.has(sendId)) {
+        storage.setItem(sendingKey(userId, chatId, sendId), sealedCopy(owner, chatId, copy))
+        known.sending.add(sendId)
+      }
     for (const sent of want.sent) storage.setItem(sentKey(userId, chatId), JSON.stringify({ v: 1, sent }))
     if (want.draft && want.draftChanged) {
       const w = crypto.randomUUID()
       storage.setItem(savedDraftKey(userId, chatId), sealedCopy(owner, chatId, want.draft, { w }))
       known.w = w
     }
-    for (const copy of want.held)
-      if (!known.held.has(copy.id)) {
-        storage.setItem(heldKey(userId, chatId, copy.id), sealedCopy(owner, chatId, copy))
-        known.held.add(copy.id)
-      }
-    for (const [sendId, copy] of want.sending)
-      if (!known.sending.has(sendId)) {
-        storage.setItem(sendingKey(userId, chatId, sendId), sealedCopy(owner, chatId, copy))
-        known.sending.add(sendId)
-      }
   } catch {
     return false
   }
@@ -226,12 +219,6 @@ export function syncChat<Reply>(
       storage.removeItem(savedDraftKey(userId, chatId))
     known.w = undefined
   }
-  const heldNow = new Set(want.held.map((c) => c.id))
-  for (const id of known.held)
-    if (!heldNow.has(id)) {
-      storage.removeItem(heldKey(userId, chatId, id))
-      known.held.delete(id)
-    }
   for (const sendId of known.sending)
     if (!want.sending.has(sendId)) {
       storage.removeItem(sendingKey(userId, chatId, sendId))
@@ -239,11 +226,3 @@ export function syncChat<Reply>(
     }
   return true
 }
-
-/** Saves one held message on its own, before what it's a copy of goes (a scheduled cancel). */
-export function writeHeld<Reply>(storage: DraftStorage, owner: Owner, chatId: string, copy: SavedDraft<Reply>) {
-  storage.setItem(heldKey(owner.userId, chatId, copy.id), sealedCopy(owner, chatId, copy))
-}
-
-export const removeHeld = (storage: DraftStorage, userId: string, chatId: string, id: string) =>
-  storage.removeItem(heldKey(userId, chatId, id))

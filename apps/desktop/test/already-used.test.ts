@@ -1,17 +1,35 @@
 import { describe, expect, it } from 'vitest'
-import { wentAlready } from '../src/features/chat/already-used.ts'
+import { usedOutcome } from '../src/features/chat/already-used.ts'
 
 describe('a draft whose send ID was used already', () => {
-  it('is done when that send went, or may have, or a schedule still stands', () => {
-    for (const delivery of ['queued', 'claimed', 'submitted', 'sent', 'delivered', 'read', 'unknown'] as const)
-      expect(wentAlready({ already: 'send', delivery })).toBe(true)
-    expect(wentAlready({ already: 'scheduled', state: 'scheduled' })).toBe(true)
+  it('says it’s already sending while that send is on its way', () => {
+    for (const delivery of ['queued', 'claimed', 'submitted'] as const)
+      expect(usedOutcome({ already: 'send', delivery })).toMatchObject({
+        action: 'done',
+        say: expect.stringMatching(/already sending/),
+      })
   })
 
-  it('keeps its text when that use never went: cancelled, failed or discarded', () => {
-    expect(wentAlready({ already: 'scheduled', state: 'cancelled' })).toBe(false)
-    expect(wentAlready({ already: 'scheduled', state: 'failed' })).toBe(false)
-    expect(wentAlready({ already: 'send', delivery: 'failed' })).toBe(false)
-    expect(wentAlready({ already: 'send', delivery: null })).toBe(false)
+  it('says it’s already sent once it went', () => {
+    for (const delivery of ['sent', 'delivered', 'read'] as const)
+      expect(usedOutcome({ already: 'send', delivery })).toMatchObject({
+        action: 'done',
+        say: expect.stringMatching(/already sent/),
+      })
+    expect(usedOutcome({ already: 'scheduled', state: 'scheduled' })).toMatchObject({ action: 'done' })
+  })
+
+  it('asks the person to check the chat when it may have gone, offering nothing to send again', () => {
+    expect(usedOutcome({ already: 'send', delivery: 'unknown' })).toEqual({
+      action: 'check',
+      say: 'That message may already have been sent. Check the chat before sending it again.',
+    })
+    expect(usedOutcome({ already: 'send', delivery: null }).action).toBe('check')
+  })
+
+  it('offers it again as a new message when that use surely never went', () => {
+    expect(usedOutcome({ already: 'send', delivery: 'failed' }).action).toBe('again')
+    expect(usedOutcome({ already: 'scheduled', state: 'cancelled' }).action).toBe('again')
+    expect(usedOutcome({ already: 'scheduled', state: 'failed' }).action).toBe('again')
   })
 })

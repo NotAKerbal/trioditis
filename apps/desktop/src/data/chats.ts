@@ -299,6 +299,11 @@ export function useScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.list, chatId ? { chatId } : {})).data
 }
 
+/** Cancelled scheduled messages kept on the server until restored or discarded (scheduled.cancelled). */
+export function useCancelledScheduled(chatId?: ChatId) {
+  return useQuery(convexQuery(api.scheduled.cancelled, chatId ? { chatId } : {})).data
+}
+
 type ScheduledCopy = FunctionReturnType<typeof api.scheduled.copies>[number]
 // Outside the hook, so useQueries can keep its result while the answers don't change.
 const copiesOf = (results: { data?: ScheduledCopy[] | undefined; isError: boolean }[]) =>
@@ -316,7 +321,9 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
     queries: batches.map((scheduledIds) => convexQuery(api.scheduled.copies, { scheduledIds })),
     combine: copiesOf,
   })
-  const clientIds = useScheduled()
+  const scheduledIds = useScheduled()
+  const cancelledIds = useCancelledScheduled()
+  const clientIds = useMemo(() => [...(scheduledIds ?? []), ...(cancelledIds ?? [])], [scheduledIds, cancelledIds])
   return useMemo(() => {
     // Text once opened; null for a copy that doesn't open here or couldn't be fetched (it can
     // still be cancelled, with nothing to put back); missing while it loads.
@@ -325,7 +332,7 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
       if (answer.failed) for (const id of batches[i] ?? []) out.set(id, null)
     })
     for (const row of answers.flatMap((answer) => answer.rows ?? [])) {
-      const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
+      const clientMessageId = clientIds.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
       const body = tryOpen<MessagePlaintext>(
         row.copy,

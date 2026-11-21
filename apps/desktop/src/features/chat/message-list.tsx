@@ -18,7 +18,6 @@ import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
-import { cancelKind } from './cancel-scheduled.ts'
 import { againState, useSendAgainStates, type SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
@@ -28,6 +27,15 @@ export interface ScheduledItem {
   sendAt: number
   /** The event ID of the message it replies to, if it's a reply. */
   replyTo: string | null
+}
+
+/** A cancelled scheduled message the server keeps until it's restored or discarded. */
+export interface CancelledItem {
+  id: Id<'scheduledSends'>
+  body: string | null | undefined
+  replyTo: string | null
+  /** Its text went into the composer here already: only Discard is left. */
+  restored: boolean
 }
 
 interface MessageListProps {
@@ -42,6 +50,7 @@ interface MessageListProps {
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
   scheduled: ScheduledItem[]
+  cancelled: CancelledItem[]
   typing: number
   canLoadMore: boolean
   /** An earlier page is on its way. */
@@ -55,6 +64,8 @@ interface MessageListProps {
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
   /** Cancels it, putting its text (when here) and reply back in the composer. */
   onCancelScheduled: (item: ScheduledItem) => void
+  onRestoreCancelled: (item: CancelledItem) => void
+  onDiscardCancelled: (item: CancelledItem) => void
 }
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
@@ -414,9 +425,19 @@ export function MessageList(props: MessageListProps) {
               >
                 Send now
               </Button>
-              <CancelScheduled item={s} onCancel={props.onCancelScheduled} />
+              <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onCancelScheduled(s)}>
+                Cancel
+              </Button>
             </div>
           </div>
+        ))}
+        {props.cancelled.map((c) => (
+          <CancelledRow
+            key={c.id}
+            item={c}
+            onRestore={() => props.onRestoreCancelled(c)}
+            onDiscard={() => props.onDiscardCancelled(c)}
+          />
         ))}
         {props.typing > 0 ? (
           <div
@@ -454,36 +475,56 @@ export function MessageList(props: MessageListProps) {
 }
 
 /**
- * Cancels a scheduled message. Its text goes back to the composer, so Cancel waits until it has
- * opened; one this device can't open is discarded instead, once the person confirms, since
- * cancelling deletes the server's only copy.
+ * A cancelled scheduled message, kept on the server until its text is back in the composer or
+ * the person discards it, so a reload or crash in between loses nothing.
  */
-function CancelScheduled({ item, onCancel }: { item: ScheduledItem; onCancel: (item: ScheduledItem) => void }) {
+function CancelledRow({
+  item,
+  onRestore,
+  onDiscard,
+}: {
+  item: CancelledItem
+  onRestore: () => void
+  onDiscard: () => void
+}) {
   const [confirming, setConfirming] = useState(false)
-  const kind = cancelKind(item.body)
-  if (kind === 'discard' && confirming)
-    return (
-      <>
-        <span className="text-danger">Discard it for good?</span>
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(false)}>
-          Keep
-        </Button>
-        <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onCancel(item)}>
-          Discard
-        </Button>
-      </>
-    )
   return (
-    <Button
-      variant="link"
-      size="sm"
-      className="h-auto text-xs"
-      disabled={kind === 'wait'}
-      title={kind === 'wait' ? 'Its text is still opening' : undefined}
-      onClick={() => (kind === 'discard' ? setConfirming(true) : onCancel(item))}
-    >
-      {kind === 'discard' ? 'Discard' : 'Cancel'}
-    </Button>
+    <div className="mt-3 ml-auto flex w-fit max-w-[min(78%,38rem)] flex-col items-end">
+      <div className="rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap text-muted-foreground shadow-[inset_0_0_0_1.5px_var(--border-strong)] [overflow-wrap:anywhere]">
+        {item.body === undefined ? (
+          <span className="text-subtle-foreground">Opening…</span>
+        ) : item.body === null ? (
+          <span className="text-subtle-foreground italic">This cancelled message can’t be shown here.</span>
+        ) : (
+          item.body
+        )}
+      </div>
+      <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+        {item.restored ? 'Cancelled · in your draft' : 'Cancelled message'}
+        {confirming ? (
+          <>
+            <span className="text-danger">Discard it for good?</span>
+            <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(false)}>
+              Keep
+            </Button>
+            <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={onDiscard}>
+              Discard
+            </Button>
+          </>
+        ) : (
+          <>
+            {typeof item.body === 'string' && !item.restored ? (
+              <Button variant="link" size="sm" className="h-auto text-xs" onClick={onRestore}>
+                Restore
+              </Button>
+            ) : null}
+            <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(true)}>
+              Discard
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
   )
 }
 
