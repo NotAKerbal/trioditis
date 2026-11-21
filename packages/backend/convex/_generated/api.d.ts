@@ -39,6 +39,7 @@ import type * as members from "../members.js";
 import type * as messages from "../messages.js";
 import type * as migrations from "../migrations.js";
 import type * as networks from "../networks.js";
+import type * as newChats from "../newChats.js";
 import type * as people from "../people.js";
 import type * as preferences from "../preferences.js";
 import type * as rateLimits from "../rateLimits.js";
@@ -85,6 +86,7 @@ declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   migrations: typeof migrations;
   networks: typeof networks;
+  newChats: typeof newChats;
   people: typeof people;
   preferences: typeof preferences;
   rateLimits: typeof rateLimits;

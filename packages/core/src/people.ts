@@ -76,6 +76,8 @@ export interface NetworkContact {
   profile: ContactPlaintext
   /** What the person's own logins know them by (`ContactIdentifiersPlaintext`), if any has said. */
   identifiers?: string[]
+  /** The accounts whose logins have sent the contact, where a chat with them can start. */
+  networkAccountIds?: string[]
 }
 
 export const contactKey = (c: { network: Network; ghostId: string }) => `${c.network}/${c.ghostId}`

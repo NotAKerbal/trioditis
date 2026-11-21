@@ -21,6 +21,7 @@ export const ERROR_CODES = [
   'bad_credentials',
   'login_failed',
   'internal',
+  'not_found',
 ] as const
 export type ErrorCode = (typeof ERROR_CODES)[number]
 
@@ -125,6 +126,14 @@ export interface ContactEvent extends EventBase {
  * `<ghostId>/identifiers/<loginId>`, plaintext `ContactIdentifiersPlaintext`. Sent to that
  * login's owner only.
  */
+/** A `startChat` command's outcome: the chat (created if it's new), or why there is none. */
+export interface ChatStartedEvent extends EventBase {
+  type: 'chatStarted'
+  requestId: string
+  portalId?: string
+  error?: ErrorCode
+}
+
 export interface ContactIdentifiersEvent extends EventBase {
   type: 'contactIdentifiers'
   ghostId: string
@@ -200,6 +209,7 @@ export type BridgeEvent =
   | ChatEvent
   | ContactEvent
   | ContactIdentifiersEvent
+  | ChatStartedEvent
   | LoginStateEvent
   | LoginStepEvent
   | SendStatusEvent
@@ -267,6 +277,7 @@ export type BridgeCommand = CommandBase &
     | { type: 'logout' }
     | { type: 'backfill'; portalId: string; beforeEventId?: string; limit: number }
     | { type: 'syncContacts' }
+    | { type: 'startChat'; requestId: string; ghostId?: string; sealed?: Envelope }
   )
 
 export interface RecipientKeys {

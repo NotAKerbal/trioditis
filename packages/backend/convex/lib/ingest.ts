@@ -31,6 +31,7 @@ export type UnmappableReason =
   | 'unknown_send'
   | 'malformed_envelope'
   | 'too_large'
+  | 'unknown_chat_start'
 
 /** An event that can't be applied. Quarantined rather than blocking the feed. */
 export class Unmappable extends Error {
@@ -95,7 +96,7 @@ async function findChatRow(ctx: MutationCtx, userId: string, network: Network, p
  * The chat for a portal, created bare if the bridge host hasn't described it yet. Its
  * `chat` event fills it in when it comes.
  */
-async function chatFor(
+export async function chatFor(
   ctx: MutationCtx,
   event: { userId: string; loginId: string; portalId: string },
   network: Network,
@@ -449,20 +450,65 @@ async function applyChat(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type
   })
 }
 
+/** The most accounts one contact records (contacts.accountIds). */
+const MAX_CONTACT_ACCOUNTS = 10
+
 async function applyContact(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'contact' }>, network: Network) {
   const existing = await ctx.db
     .query('contacts')
     .withIndex('by_ghost', (q) => q.eq('userId', event.userId).eq('network', network).eq('ghostId', event.ghostId))
     .unique()
   charge(ctx, existing)
-  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed })
+  const loginId = event.loginId
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', loginId))
+    .unique()
+  const known = existing?.accountIds ?? []
+  // Every account that has sent the contact, newest last, so a chat can start on any of them.
+  const accountIds =
+    account?.userId === event.userId && !known.includes(account._id)
+      ? [...known, account._id].slice(-MAX_CONTACT_ACCOUNTS)
+      : known
+  if (existing) await ctx.db.patch(existing._id, { sealedProfile: event.sealed, accountIds })
   else
     await ctx.db.insert('contacts', {
       userId: event.userId,
       network,
       ghostId: event.ghostId,
       sealedProfile: event.sealed,
+      ...(accountIds.length ? { accountIds } : {}),
     })
+}
+
+/**
+ * A new chat's outcome settles its request (newChats.start): the chat, created bare if its
+ * `chat` event hasn't come yet, or why there is none. Only the request's own login can answer.
+ */
+async function applyChatStarted(
+  ctx: MutationCtx,
+  event: Extract<BridgeEventDoc, { type: 'chatStarted' }>,
+  origin: Origin,
+) {
+  const { network } = origin
+  const request = await ctx.db
+    .query('chatStarts')
+    .withIndex('by_request', (q) => q.eq('userId', event.userId).eq('requestId', event.requestId))
+    .unique()
+  charge(ctx, request)
+  if (!request || request.network !== network || request.loginId !== event.loginId) {
+    throw new Unmappable('unknown_chat_start')
+  }
+  // Only the host the command was handed to ran it, even if the login has moved since.
+  const command = await ctx.db.get(request.commandId)
+  if (command?.hostId !== origin.hostId) throw new Unmappable('foreign_host')
+  if (request.state !== 'pending') return
+  if (event.portalId) {
+    const chat = await chatFor(ctx, { userId: event.userId, loginId: event.loginId, portalId: event.portalId }, network)
+    await ctx.db.patch(request._id, { state: 'started', chatId: chat._id })
+  } else {
+    await ctx.db.patch(request._id, { state: 'failed', error: event.error ?? 'internal' })
+  }
 }
 
 /**
@@ -613,6 +659,7 @@ const ID_FIELDS = [
   'loginSessionId',
   'parentPortalId',
   'key',
+  'requestId',
 ] as const
 
 function hasOversizedId(event: BridgeEventDoc) {
@@ -642,6 +689,8 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
   // The outcome or echo of a send is checked against the host that send was handed to,
   // which may differ from the login's owner after the login moved hosts.
   if (event.type === 'sendStatus') return
+  // So is a new chat's: applyChatStarted checks it against the host its command went to.
+  if (event.type === 'chatStarted') return
   if (event.type === 'message' && 'self' in event.sender && event.clientMessageId) {
     const send = await findOutboxSend(ctx, event.userId, event.clientMessageId)
     if (send) return
@@ -687,6 +736,8 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
       return await applyContact(ctx, event, network)
     case 'contactIdentifiers':
       return await applyContactIdentifiers(ctx, event, network)
+    case 'chatStarted':
+      return await applyChatStarted(ctx, event, origin)
     case 'loginState':
       return await applyLoginState(ctx, event, origin)
     case 'loginStep':

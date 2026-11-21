@@ -26,6 +26,7 @@ import {
   Filter,
   Inbox,
   Search,
+  SquarePen,
   UserPlus,
   Users,
   X,
@@ -64,6 +65,7 @@ interface SidebarProps {
   onClose: () => void
   onAction: (action: SidebarAction) => void
   onPeople: () => void
+  onNewChat: () => void
   /**
    * Kept up to date with the on-screen order, for actions taken outside the sidebar; null
    * while the list is still loading, when there's nothing to compare against.
@@ -87,6 +89,7 @@ export function Sidebar({
   onClose,
   onAction,
   onPeople,
+  onNewChat,
   shownRef,
   chatsRef,
 }: SidebarProps) {
@@ -257,6 +260,9 @@ export function Sidebar({
             aria-label="Search chats"
           />
         </InputGroup>
+        <Button variant="ghost" size="icon" aria-label="New chat" onClick={onNewChat}>
+          <SquarePen className="size-[17px]" />
+        </Button>
         <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
           <Users className="size-[17px]" />
         </Button>

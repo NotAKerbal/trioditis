@@ -29,6 +29,7 @@ import { cn } from '@trioditis/ui/lib/utils'
 import {
   Download,
   Link2,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -39,8 +40,10 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { Id } from '@trioditis/backend/dataModel'
 import { networkName } from '~/data/chats.ts'
+import { chatOptions, useStartableAccounts, useStartChat } from '~/data/new-chat.ts'
 import {
   contactsByKey,
   download,
@@ -79,14 +82,17 @@ const REASON: Record<MatchReason, string> = {
 export function PeopleDialog({
   view,
   onViewChange,
+  onOpenChat,
 }: {
   view: PeopleView | undefined
   onViewChange: (view: PeopleView | undefined) => void
+  /** Opens a chat a card started, closing the window. */
+  onOpenChat: (chatId: Id<'chats'>) => void
 }) {
   return (
     <Dialog open={!!view} onOpenChange={(open) => !open && onViewChange(undefined)}>
       <DialogContent className="flex h-[660px] w-[min(980px,calc(100vw-32px))]" aria-describedby={undefined}>
-        {view ? <People view={view} onViewChange={onViewChange} /> : null}
+        {view ? <People view={view} onViewChange={onViewChange} onOpenChat={onOpenChat} /> : null}
       </DialogContent>
     </Dialog>
   )
@@ -104,7 +110,15 @@ function matches(card: PersonPlaintext, query: string) {
   )
 }
 
-function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view: PeopleView | undefined) => void }) {
+function People({
+  view,
+  onViewChange,
+  onOpenChat,
+}: {
+  view: PeopleView
+  onViewChange: (view: PeopleView | undefined) => void
+  onOpenChat: (chatId: Id<'chats'>) => void
+}) {
   const people = usePeople()
   const contacts = useNetworkContacts()
   const actions = usePeopleActions(people)
@@ -345,6 +359,7 @@ function People({ view, onViewChange }: { view: PeopleView; onViewChange: (view:
             onChange={run}
             onLink={(linked) => link(selected.personKey, linked)}
             onDelete={() => void remove(selected)}
+            onOpenChat={onOpenChat}
           />
         ) : view.startsWith('p:') && people ? (
           <p className="text-sm text-muted-foreground">That person isn’t here any more.</p>
@@ -418,6 +433,7 @@ function PersonDetail({
   onChange,
   onLink,
   onDelete,
+  onOpenChat,
 }: {
   person: StoredPerson
   byContact: Map<string, NetworkContact>
@@ -426,6 +442,7 @@ function PersonDetail({
   onChange: (change: Change, failure: string) => Promise<boolean>
   onLink: (contacts: NetworkContact[]) => Promise<boolean>
   onDelete: () => void
+  onOpenChat: (chatId: Id<'chats'>) => void
 }) {
   // The card as it was when editing began: saving checks nothing has changed it since.
   const [editing, setEditing] = useState<StoredPerson | null>(null)
@@ -460,6 +477,7 @@ function PersonDetail({
           <h2 className="truncate text-lg font-bold tracking-[-0.015em]">{cardTitle(card)}</h2>
           {subtitle ? <div className="truncate text-sm text-muted-foreground">{subtitle}</div> : null}
         </div>
+        <MessageButton card={card} byContact={byContact} onOpenChat={onOpenChat} />
         <Button size="sm" onClick={() => setEditing(person)}>
           <Pencil className="size-3.5" /> Edit
         </Button>
@@ -527,6 +545,42 @@ function PersonDetail({
         }}
       />
     </div>
+  )
+}
+
+/** Starts a chat with the person, on one of the ways their card offers (chatOptions). */
+function MessageButton({
+  card,
+  byContact,
+  onOpenChat,
+}: {
+  card: PersonPlaintext
+  byContact: Map<string, NetworkContact>
+  onOpenChat: (chatId: Id<'chats'>) => void
+}) {
+  const accounts = useStartableAccounts()
+  const start = useStartChat(onOpenChat)
+  const options = chatOptions(card, accounts, byContact)
+  useEffect(() => {
+    if (start.error) toast(start.error)
+  }, [start.error])
+  if (!options.length) return null
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="primary" loading={start.busy}>
+          <MessageSquare className="size-3.5" /> Message
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {options.map((o, i) => (
+          <DropdownMenuItem key={i} onSelect={() => void start.begin(o.network, o.networkAccountId, o.target)}>
+            <NetworkBadge network={o.network} label={networkName(o.network)} />
+            {o.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

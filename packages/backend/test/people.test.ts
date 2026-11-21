@@ -182,8 +182,10 @@ describe('contacts', () => {
       { type: 'contact', ghostId: 'g_1', sealed: sealed('profile') },
       { type: 'contact', ghostId: 'g_1', sealed: sealed('profile2') },
     ])
+    // The contact names the account that sent it, where a chat with them starts.
+    const account = await t.run(async (ctx) => (await ctx.db.query('networkAccounts').first())!)
     expect((await a.query(api.contacts.list, { paginationOpts: first })).page).toEqual([
-      { network: 'whatsapp', ghostId: 'g_1', sealedProfile: sealed('profile2') },
+      { network: 'whatsapp', ghostId: 'g_1', sealedProfile: sealed('profile2'), networkAccountIds: [account._id] },
     ])
     // Each login's are its own: another login's don't replace these, and a login's newer ones do.
     await ingest(t, [

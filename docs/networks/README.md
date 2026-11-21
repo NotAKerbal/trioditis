@@ -26,6 +26,13 @@ Every network here gets a bridge host on a self-hosted server (unless the operat
 that with the installer's `--networks`; Telegram also needs its API ID and hash), and admins
 install the ones people can connect in the app, under Admin settings → Networks.
 
+## Debug logging
+
+`--verbose` logs at debug level, and several connectors put what people send or who they are
+in their debug output. whatsmeow logs WhatsApp's protocol nodes, which name contacts by phone
+number (and the number someone starts a chat with); X, LinkedIn and Messenger are on their
+pages. Never run a network with `--verbose` in production.
+
 ## Adding a network
 
 1. Its file in `apps/bridge-host/internal/networks/`, registering how to make the

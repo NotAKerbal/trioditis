@@ -1030,6 +1030,50 @@ ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
 person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
 people at once.` · `You can have at most 10,000 people.`
 
+## New chats
+
+A chat starts on one of the person's connected accounts, with one of their contacts there or
+with whoever a phone number or username belongs to. The identifier is sealed to the
+bridge key (kind `outbound`, object ID `requestId`, plaintext `{ identifier }`), so the server
+never sees it.
+
+| Function          | Arguments                                                                                                  | Returns                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `newChats.start`  | `networkAccountId`, `requestId` (16 to 64 of `A-Za-z0-9_-`), `ghostId` or `sealedIdentifier`, `sessionId?` | null. The same `requestId` again does nothing                             |
+| `newChats.status` | `requestId`                                                                                                | `{ state: 'pending' \| 'started' \| 'failed', chatId?, error? }`, or null |
+
+The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
+already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
+on the network has that identifier), `unsupported`, `not_connected`, `rate_limited`,
+`network_rejected`, `timeout` (the network took over two minutes, or no host reported back), or
+`expired` (no bridge host took it in ten minutes; one that does later doesn't start it). Only
+the host the command went to can answer it.
+
+What a chat can start from depends on the network's connector (`START_TARGETS` in
+packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google Messages take a
+contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
+Instagram, Slack and LinkedIn a contact; X a username. The bridge host passes a number on as digits with
+its `+` (Signal needs the country code) and a username without its `@`, checked against the
+network's own username grammar; anything else is `not_found` (it could be one of the
+connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
+host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
+chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
+IDs and X's only screen names, so those are left out. A contact's chat can start on any of the person's accounts on
+that network; `contacts.list` gives the ones whose logins sent the contact (`networkAccountIds`),
+and the desktop app offers those first, letting the person choose when there's more than one
+account, since some networks' contact IDs belong to one login. The desktop app offers a card's linked
+contacts first, then its numbers on networks that take them, then its usernames on their own
+network, on the first account there. A `ghostId` must be one of the person's contacts on that
+account's network. A person can start 20 chats a minute; requests are kept a day. The bridge
+host silences connector logging while it resolves an identifier, since what connectors log can
+include it (whatsmeow's own debug output still names it: never run WhatsApp with `--verbose` in
+production).
+
+Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a sealed identifier.` ·
+`That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
+sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
+then try again.`
+
 ## Server updates
 
 Admin settings → Updates (`docs/deploy.md`, Updates). All of these are admins only, and the
@@ -1095,35 +1139,29 @@ here.
 3. **Last-message preview (built).** Chat rows have `lastMessage`, the newest message's own
    envelope (kind `message`, its `objectId`), up to 4 KiB: see The list, The last message. It
    replaced the `sealedPreview` planned here, so nothing new is sealed for it.
-4. **New chat.** Two bridge commands, `resolveIdentifier` (a phone number, username or
-   email, sealed to the bridge key) and `startChat`, following bridgev2's
-   `IdentifierResolvingNetworkAPI` and `CreateChatWithGhost`. The client calls
-   `api.chats.start({ networkAccountId, sealedIdentifier })` and watches the returned
-   `commandId` until it gives a `chatId` or an error code (`not_found`, `unsupported`).
-   Networks that can't resolve identifiers report `unsupported`, and the button stays
-   disabled for them (`api.networks.list` gains `canStartChats`). Fallback: "New message"
-   disabled.
+4. **New chat (built).** See New chats.
 5. **Media.** Files only ever leave the bridge host as ciphertext; the key and nonce stay in the
    sealed message (see `sealing.md`, Media).
    - **Download (built):** the bridge host keeps each incoming file encrypted in its media
-     store, and the client fetches it from the gateway on the app's own origin: `GET
-/media/<mediaId>` with `Authorization: Bearer <token>`, which Caddy forwards to the
+     store, and the client fetches it from the gateway on the app's own origin:
+     `GET /media/<mediaId>` with `Authorization: Bearer <token>`, which Caddy forwards to the
      gateway's public listener. The token comes from `api.media.access({ network })`
      (`{ token, expiresAt }`, good for an hour; ask again before it runs out, or after a
      `401`): it is signed with `GATEWAY_SECRET` and names the person and the network's bridge
      hosts, and the gateway asks those hosts for the file (bridge-protocol.md, Media), each of
      which gives a person only their own. The answer is the ciphertext as
-     `application/octet-stream`, `no-store`, so no cache answers for the gateway's checks; a `404` means no host has
-     it for this person, `502` a host failed, `503` too many files at once (retry after a
-     second). The client decrypts it with `decryptMedia(ciphertext, key, nonce, userId,
-mediaId)` from `@trioditis/crypto` and keeps it only in memory: it shows pictures, video and
-     sound (and SVG is not a picture here) from `data:` URLs, never a Blob, which the browser
-     may page to disk. A file becomes a Blob only when the person saves it, and then as
-     `application/octet-stream`, so it never opens as a page on the app's origin. A chat's or
-     a contact's `avatar` is fetched the same way.
+     `application/octet-stream` with `no-store`, so no cache answers in place of the gateway's
+     checks; a `404` means no host has it for this person, `502` a host failed, `503` too many
+     files at once (retry after a second). The client decrypts it with
+     `decryptMedia(ciphertext, key, nonce, userId, mediaId)` from `@trioditis/crypto` and keeps
+     it only in memory: it shows pictures, video and sound (and SVG is not a picture here) from
+     `data:` URLs, never a Blob, which the browser may page to disk. A file becomes a Blob only
+     when the person saves it, and then as `application/octet-stream`, so it never opens as a
+     page on the app's origin. A chat's or a contact's `avatar` is fetched the same way.
    - The desktop app shows pictures up to 25 MiB in place (trying again a few times when one
-     fails), holding only those within about two screens of the view and letting the rest go, plays video and sound up to 50 MiB when asked, and saves other files. A picture with no caption has its file name as its `body`, which
-     is not shown as a caption.
+     fails), holding only those within about two screens of the view and letting the rest go;
+     it plays video and sound up to 50 MiB when asked, and saves other files. A picture with no
+     caption has its file name as its `body`, which is not shown as a caption.
    - **Upload (planned):** `api.media.uploadUrl({ chatId, size, mime })` (at most 100 MiB) gives a
      URL for the encrypted file; the send's attachment names the returned `mediaId`, and
      the bridge host fetches it through the gateway and decrypts it with the key in the

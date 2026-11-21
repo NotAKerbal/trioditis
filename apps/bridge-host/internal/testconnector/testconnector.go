@@ -176,7 +176,22 @@ var (
 	_ bridgev2.ReadReceiptHandlingNetworkAPI = (*Client)(nil)
 	_ bridgev2.TypingHandlingNetworkAPI      = (*Client)(nil)
 	_ bridgev2.BackfillingNetworkAPI         = (*Client)(nil)
+	_ bridgev2.IdentifierResolvingNetworkAPI = (*Client)(nil)
 )
+
+// ResolveIdentifier finds a user by ID, or by "testnet:<id>". "nobody" is no one, so a
+// test can see a not-found answer. The direct chat with a user is "dm-<id>".
+func (c *Client) ResolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
+	user := networkid.UserID(strings.TrimPrefix(identifier, "testnet:"))
+	if user == "" || user == "nobody" {
+		return nil, nil
+	}
+	resp := &bridgev2.ResolveIdentifierResponse{UserID: user}
+	if createChat {
+		resp.Chat = &bridgev2.CreateChatResponse{PortalKey: networkid.PortalKey{ID: networkid.PortalID("dm-" + string(user)), Receiver: c.login.ID}}
+	}
+	return resp, nil
+}
 
 func (c *Client) Connect(ctx context.Context) {
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
