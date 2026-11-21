@@ -1152,6 +1152,23 @@ Matching happens on the device, since only it can open both sides (packages/core
   CSV. Importing a card whose UID matches one already here replaces its fields with the file's,
   keeping its links (and its photo, if the file has none); a UID the file repeats is one card.
   `toVCards` writes vCard 3.0. The desktop app makes imported photos 128 pixels at most.
+- **Google Contacts.** Where an admin has set up a Google OAuth client (`google.contacts`), the
+  client reads the person's contacts from Google itself: it signs in to Google for read-only
+  access (`contacts.readonly`, the token returned in the fragment of the server's
+  `/google-contacts.html`), reads `people.connections.list`, and imports the cards as a file's
+  would (`cardFromGoogle`; each card's UID is `google:<resourceName>`, so reading the account again
+  updates them). The token stays in the page's memory for that one import: the server never
+  sees it or the contacts. As with everything sealed (sealing.md, Goal and limits), this holds
+  for the app as the server serves it: an operator who changes the served page could read the
+  token, as they could read what the page opens. In a browser the sign-in is a popup, which answers its opener over a
+  `BroadcastChannel`, by the state it asked with. The desktop app opens it in the system's
+  browser, and `/google-contacts.html` hands the answer back as
+  `trioditis://<server>/google-contacts#state=…&access_token=…`, which the app gives only to the
+  server that asked, with the same state. The app only asks where the system has it as the
+  scheme's handler; where it isn't (a development run, an AppImage without desktop integration),
+  and where there's no client ID, People says how to export a vCard file from Google and import
+  it. On Windows and Linux the system hands the link over in the app's launch arguments, which
+  other programs of the same user can read while it starts.
 - **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
   phone number, email or username with it, or failing that has exactly the same name as one
   card. Numbers match with or without their country code (the shorter must end the longer;
@@ -1167,6 +1184,21 @@ Errors: `Your people changed on another device. Try again.` (`people_changed`) �
 ID isn’t valid.` · `That person isn’t sealed, or is too long.` · `Each
 person can be saved once per call.` · `Save at most 100 people at once.` · `Delete at most 100
 people at once.` · `You can have at most 10,000 people.`
+
+### Google Contacts
+
+| Function             | Arguments                                       | Returns                                             |
+| -------------------- | ----------------------------------------------- | --------------------------------------------------- |
+| `google.contacts`    |                                                 | `{ clientId }`: the Google OAuth client ID, or null |
+| `google.setContacts` | `clientId` (or null to remove it), `sessionId?` | null. Admins only                                   |
+
+The client ID is for a Google Cloud OAuth client of type Web application, with the People API
+turned on, the server's origin as an authorized JavaScript origin, and
+`<origin>/google-contacts.html` as an authorized redirect URI (Admin settings → Contacts shows
+both). A client ID isn't a secret; no client secret is used.
+
+Errors: `Only an admin can do that.` · `That isn’t a Google OAuth client ID. It ends in
+.apps.googleusercontent.com.`
 
 ## New chats
 
