@@ -234,6 +234,11 @@ export interface ChatRow {
   sealedMeta: Envelope | null
   portalId: string
   unreadCount: number
+  /**
+   * Goes up by one with every message counted unread, so two answers with the same count can
+   * still be told apart: one at 1, marked read, then another at 1.
+   */
+  unreadRev: number
   /** Unread messages that mention the person, as the bridge host flags them. */
   mentionCount: number
   /** Set by the person, whatever the unread count. */

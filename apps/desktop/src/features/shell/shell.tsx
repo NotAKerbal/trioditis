@@ -171,7 +171,12 @@ function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId)
   const visible = useSyncExternalStore(subscribeSeen, seen)
   const done = useRef(NOTHING_READ)
   useEffect(() => {
-    const open = chat && { id: chat.id, unread: chat.unread, markedUnread: chat.row.markedUnread }
+    const open = chat && {
+      id: chat.id,
+      unread: chat.unread,
+      unreadRev: chat.row.unreadRev,
+      markedUnread: chat.row.markedUnread,
+    }
     const next = readOnOpen(open, visible, done.current)
     done.current = next.done
     if (next.mark && chat) void markRead(chat.id)

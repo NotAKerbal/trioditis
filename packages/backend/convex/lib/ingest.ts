@@ -263,6 +263,7 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
     ...(fromSomeoneElse
       ? {
           unreadCount: chat.unreadCount + 1,
+          unreadRev: (chat.unreadRev ?? 0) + 1,
           ...(event.mentionsMe ? { mentionCount: (chat.mentionCount ?? 0) + 1 } : {}),
           // A new message wakes a snoozed chat early.
           ...(chat.snoozedUntil !== undefined && !chat.woke ? { woke: true } : {}),
