@@ -9,6 +9,7 @@ import { audit } from './lib/audit'
 import { queueLoginCancel, queueLogout } from './lib/outbox'
 import { issueReset } from './account'
 import { deleteAllAuthRows } from './lib/authRows'
+import { noteCleanup } from './lib/formerMembers'
 
 // Who is on this server. Accounts start from an invitation; the first account, the admin,
 // starts from the setup token the installer generates (TRIODITIS_SETUP_TOKEN).
@@ -329,14 +330,9 @@ export const removeMember = mutation({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .take(REMOVE_LIMIT)
     for (const account of accounts) await queueLogout(ctx, account)
-    if (accounts.some((account) => account.state !== 'LOGGED_OUT')) {
-      await ctx.db.insert('removedMembers', {
-        userId,
-        ...(user?.email ? { email: user.email } : {}),
-        removedBy: admin.userId,
-        removedAt: Date.now(),
-      })
-    }
+    // Always: a login still under way can finish after this and report an account (lib/ingest.ts),
+    // whose logout then belongs to this cleanup too.
+    await noteCleanup(ctx, userId, { ...(user?.email ? { email: user.email } : {}), removedBy: admin.userId })
     const logins = await ctx.db
       .query('loginSessions')
       .withIndex('by_user', (q) => q.eq('userId', userId))

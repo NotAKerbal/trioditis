@@ -38,7 +38,7 @@ describe('the last confirmed session, for a cold start offline', () => {
   })
 
   it('opens only with this device’s key for that account, and the same key', () => {
-    expect(coldSession(verified, { kid, keyPair })).toEqual({ ...verified, keyPair })
+    expect(coldSession(verified, { kid, keyPair })).toEqual({ ...verified, keyPair, offline: true })
     // Signed out here (the key is gone), or another key: nothing to open with.
     expect(coldSession(verified, null)).toBeNull()
     expect(coldSession(verified, { kid: 'other', keyPair })).toBeNull()

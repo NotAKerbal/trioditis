@@ -54,6 +54,7 @@ import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
 import { searchScope } from './search-scope.ts'
 import { usePrefs } from '~/lib/prefs.ts'
+import { useSession } from '~/lib/session.tsx'
 
 /** What the sidebar asks the shell to do to a chat. The shell owns selection and auto-advance. */
 export type SidebarAction =
@@ -99,6 +100,7 @@ export function Sidebar({
   chatsRef,
 }: SidebarProps) {
   const [layout] = useSidebarLayout()
+  const session = useSession()
   const prefs = usePrefs()
   const [query, setQuery] = useState('')
   const [network, setNetwork] = useState<Network | undefined>()
@@ -365,7 +367,12 @@ export function Sidebar({
 
         <FailedScheduled rows={failedSends} />
         {inbox === undefined ? (
-          <ListSkeleton />
+          // Opened before the server answered (app-gate.tsx): nothing is kept here to show.
+          session.offline ? (
+            <Empty>Can’t reach your server. Nothing shows until it’s back; still trying.</Empty>
+          ) : (
+            <ListSkeleton />
+          )
         ) : searching ? (
           <>
             <SectionHeader label={searchLabel} count={results.length} />

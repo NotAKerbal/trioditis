@@ -70,8 +70,13 @@ function Consent({ requestId }: { requestId: string }) {
   // Back to the agent, once decided; the page stays as it is until the browser leaves.
   const [leaving, setLeaving] = useState<'allowed' | 'denied' | null>(null)
 
-  // Reached the choice signed in: sign-in has nowhere to bring this tab back to now.
-  useEffect(() => dropConsentReturn(), [])
+  // Reached the choice signed in: sign-in has nowhere to bring this tab back to now. Only once the
+  // server has answered for this account, not on mount: the app can open from this device before
+  // the server confirms anyone (app-gate.tsx, useColdSession), and a sign-in then must still come back.
+  const answered = request !== undefined
+  useEffect(() => {
+    if (answered) dropConsentReturn()
+  }, [answered])
 
   async function decide(approve: boolean) {
     setBusy(approve ? 'allow' : 'deny')

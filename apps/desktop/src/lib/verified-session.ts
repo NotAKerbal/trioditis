@@ -75,5 +75,5 @@ export function coldSession(
   kept: { kid: string; keyPair: KeyPair } | null,
 ): Session | null {
   if (!verified || !kept || kept.kid !== verified.kid) return null
-  return { ...verified, keyPair: kept.keyPair }
+  return { ...verified, keyPair: kept.keyPair, offline: true }
 }
