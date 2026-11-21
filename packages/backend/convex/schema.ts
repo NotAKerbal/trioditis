@@ -159,6 +159,11 @@ export default defineSchema({
     updatedAt: v.number(),
     /** What the bridge host last said tells the account apart, sealed to its owner (kind `account`, object ID `loginId`). */
     sealedMeta: v.optional(envelope),
+    /**
+     * A login the person cancelled connected it anyway. Kept until they decide (logins.keep, or a
+     * disconnect), and cleared by any normal login of the account.
+     */
+    connectedAfterCancel: v.optional(v.boolean()),
     /** A logout was asked for and hasn't been confirmed yet. */
     logoutPending: v.optional(v.boolean()),
     /** The command of that pending logout: only its own outcome or timeout ends it. */

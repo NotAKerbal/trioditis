@@ -336,6 +336,9 @@ type LoginStep struct {
 	Cookies      *LoginCookies `json:"cookies,omitempty"`
 	LoginID      string        `json:"loginId,omitempty"`
 	Error        string        `json:"error,omitempty"`
+	// AfterCancel marks a complete step for a login the person had cancelled: it connected the
+	// account anyway, and they decide whether to keep it.
+	AfterCancel bool `json:"afterCancel,omitempty"`
 }
 
 // Login step types.

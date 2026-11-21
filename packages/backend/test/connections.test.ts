@@ -175,71 +175,56 @@ describe('cancelling a login', () => {
     expect(await logoutsQueued(t)).toEqual([])
   })
 
-  it('logs out a new account whose login finished after it was cancelled, step first', async () => {
+  it('keeps a new account whose login finished after it was cancelled, flagged, step first', async () => {
     const { t, a, loginSessionId } = await started()
     await a.mutation(api.logins.cancel, { loginSessionId })
-    await ingest(t, [complete(loginSessionId, '15550100'), loginState('15550100')])
+    await ingest(t, [complete(loginSessionId, 'l_late'), loginState('l_late')])
     expect((await a.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
-    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ logoutPending: true }])
-    expect(await logoutsQueued(t)).toEqual(['15550100'])
-  })
-
-  it('logs out a new account whose login finished after it was cancelled, account first', async () => {
-    const { t, a, loginSessionId } = await started()
-    await a.mutation(api.logins.cancel, { loginSessionId })
-    await ingest(t, [loginState('15550100'), complete(loginSessionId, '15550100')])
-    expect((await a.query(api.logins.session, { loginSessionId }))!.state).toBe('cancelled')
-    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ logoutPending: true }])
-    expect(await logoutsQueued(t)).toEqual(['15550100'])
-  })
-
-  it('leaves the account a retry connected when the cancelled attempt finishes late', async () => {
-    const { t, a, loginSessionId: first } = await started()
-    await a.mutation(api.logins.cancel, { loginSessionId: first })
-    vi.useFakeTimers()
-    vi.advanceTimersByTime(1000)
-    const retry = await a.mutation(api.logins.start, { network: 'whatsapp' })
-    await claim(t)
-    await ingest(t, [complete(retry, 'l_same'), loginState('l_same'), complete(first, 'l_same')])
-    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ state: 'CONNECTED', logoutPending: false }])
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([
+      { state: 'CONNECTED', connectedAfterCancel: true, logoutPending: false },
+    ])
     expect(await logoutsQueued(t)).toEqual([])
   })
 
-  it('leaves the account alone while a retry is still going', async () => {
+  it('keeps a new account whose login finished after it was cancelled, flagged, account first', async () => {
+    const { t, a, loginSessionId } = await started()
+    await a.mutation(api.logins.cancel, { loginSessionId })
+    await ingest(t, [loginState('l_late'), complete(loginSessionId, 'l_late')])
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ connectedAfterCancel: true, logoutPending: false }])
+    expect(await logoutsQueued(t)).toEqual([])
+  })
+
+  it('stops asking once the person keeps it, or disconnects it', async () => {
+    const { t, a, loginSessionId } = await started()
+    await a.mutation(api.logins.cancel, { loginSessionId })
+    await ingest(t, [complete(loginSessionId, 'l_late'), loginState('l_late')])
+    const [account] = await a.query(api.logins.accounts, {})
+    await a.mutation(api.logins.keep, { networkAccountId: account!._id })
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ connectedAfterCancel: false }])
+    expect(await logoutsQueued(t)).toEqual([])
+
+    const second = await started()
+    await second.a.mutation(api.logins.cancel, { loginSessionId: second.loginSessionId })
+    await ingest(second.t, [complete(second.loginSessionId, 'l_late'), loginState('l_late')])
+    const [flagged] = await second.a.query(api.logins.accounts, {})
+    await second.a.mutation(api.logins.logout, { networkAccountId: flagged!._id })
+    expect(await second.a.query(api.logins.accounts, {})).toMatchObject([
+      { connectedAfterCancel: false, logoutPending: true },
+    ])
+  })
+
+  it('clears the flag when a later login of theirs connects the account normally', async () => {
     const { t, a, loginSessionId: first } = await started()
     await a.mutation(api.logins.cancel, { loginSessionId: first })
-    vi.useFakeTimers()
-    vi.advanceTimersByTime(1000)
-    await a.mutation(api.logins.start, { network: 'whatsapp' })
-    await claim(t)
     await ingest(t, [complete(first, 'l_same'), loginState('l_same')])
-    expect(await logoutsQueued(t)).toEqual([])
-  })
-
-  it('logs the cancelled attempt’s account out once the retry ends without it', async () => {
-    const { t, a, loginSessionId: first } = await started()
-    await a.mutation(api.logins.cancel, { loginSessionId: first })
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ connectedAfterCancel: true }])
     vi.useFakeTimers()
     vi.advanceTimersByTime(1000)
     const retry = await a.mutation(api.logins.start, { network: 'whatsapp' })
     await claim(t)
-    await ingest(t, [complete(first, 'l_first'), loginState('l_first')])
+    await ingest(t, [complete(retry, 'l_same'), loginState('l_same')])
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ connectedAfterCancel: false }])
     expect(await logoutsQueued(t)).toEqual([])
-    // The retry is cancelled too: nothing is left to keep the first attempt's account.
-    await a.mutation(api.logins.cancel, { loginSessionId: retry })
-    expect(await logoutsQueued(t)).toEqual(['l_first'])
-  })
-
-  it('logs the cancelled attempt’s account out when the retry connects a different one', async () => {
-    const { t, a, loginSessionId: first } = await started()
-    await a.mutation(api.logins.cancel, { loginSessionId: first })
-    vi.useFakeTimers()
-    vi.advanceTimersByTime(1000)
-    const retry = await a.mutation(api.logins.start, { network: 'whatsapp' })
-    await claim(t)
-    await ingest(t, [complete(first, 'l_first'), loginState('l_first')])
-    await ingest(t, [complete(retry, 'l_other'), loginState('l_other')])
-    expect(await logoutsQueued(t)).toEqual(['l_first'])
   })
 
   it('leaves an account the person already had when a cancelled reconnect finishes anyway', async () => {

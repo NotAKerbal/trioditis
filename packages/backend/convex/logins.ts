@@ -10,7 +10,6 @@ import { audit } from './lib/audit'
 import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand, queueLoginCancel, queueLogout } from './lib/outbox'
 import { offeredNetworks, retired } from './lib/networks'
-import { settleCancelledLogins } from './lib/ingest'
 import { envelope, errorCode, loginState, loginStep, network } from './validators'
 
 // Connecting a network account. The bridge host drives the login's steps (QR codes,
@@ -51,6 +50,8 @@ export const accounts = query({
       logoutPending: v.boolean(),
       /** Why the last logout didn't happen, if it didn't. */
       logoutError: v.union(v.null(), errorCode),
+      /** A login the person cancelled connected it anyway: they keep it (logins.keep) or disconnect it. */
+      connectedAfterCancel: v.boolean(),
     }),
   ),
   handler: async (ctx) => {
@@ -72,6 +73,7 @@ export const accounts = query({
         sealedMeta: row.sealedMeta ? { sealed: row.sealedMeta, objectId: row.loginId } : null,
         logoutPending: row.logoutPending ?? false,
         logoutError: row.logoutError ?? null,
+        connectedAfterCancel: row.connectedAfterCancel ?? false,
       }))
   },
 })
@@ -315,8 +317,6 @@ export const cancel = mutation({
     await queueLoginCancel(ctx, session)
     if (session.state === 'error') return 'error'
     await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: Date.now() })
-    // A cancelled login's account may have been waiting for this one to settle.
-    await settleCancelledLogins(ctx, session.userId, session.network)
     return 'cancelled'
   },
 })
@@ -334,9 +334,27 @@ export const logout = mutation({
     const member = await requireMember(ctx)
     const account = await ctx.db.get(networkAccountId)
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
+    // Decided: whatever a cancelled login did, the person chose to disconnect it.
+    if (account.connectedAfterCancel) await ctx.db.patch(account._id, { connectedAfterCancel: undefined })
     if (account.state === 'LOGGED_OUT') return 'loggedOut'
     if (!(await queueLogout(ctx, account))) return 'pending'
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
     return 'queued'
+  },
+})
+
+/**
+ * Keeps an account a login the person cancelled connected anyway (`connectedAfterCancel`):
+ * they've decided it stays, so it stops asking.
+ */
+export const keep = mutation({
+  args: { networkAccountId: v.id('networkAccounts') },
+  returns: v.null(),
+  handler: async (ctx, { networkAccountId }) => {
+    const member = await requireMember(ctx)
+    const account = await ctx.db.get(networkAccountId)
+    if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
+    if (account.connectedAfterCancel) await ctx.db.patch(account._id, { connectedAfterCancel: undefined })
+    return null
   },
 })

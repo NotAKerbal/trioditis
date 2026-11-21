@@ -15,12 +15,10 @@ import (
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
-	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
 // loginSession is one run of a network's login flow, driven by loginStart, loginSubmit and
@@ -34,8 +32,6 @@ type loginSession struct {
 	process bridgev2.LoginProcess
 	ctx     context.Context
 	cancel  context.CancelFunc
-	// existing are the person's accounts on the network when the login started.
-	existing map[networkid.UserLoginID]bool
 
 	lock   sync.Mutex
 	step   *bridgev2.LoginStep
@@ -94,17 +90,8 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command,
 		return err
 	}
 	sessionCtx, cancel := context.WithCancel(c.Bridge.BackgroundCtx)
-	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel,
-		existing: make(map[networkid.UserLoginID]bool)}
-	// After any logout of a cancelled login's account of theirs has finished (userLock), and
-	// registered before it lets go, so a logout decided after this waits for this login.
-	mu := c.userLock(cmd.UserID)
-	mu.Lock()
-	for _, loginID := range user.GetUserLoginIDs() {
-		s.existing[loginID] = true
-	}
+	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel}
 	c.logins.Store(s.id, s)
-	mu.Unlock()
 	go func() {
 		step, err := process.Start(sessionCtx)
 		s.advance(step, err)
@@ -232,11 +219,9 @@ func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command
 		return nil
 	}
 	c.endedLogins.Store(s.id, struct{}{})
-	// A cancelled login's account may have been waiting for this one to settle.
-	defer c.settleDiscarded(s.userID)
 	// The login may have completed at the same moment: whichever ends it first is the outcome
-	// reported, and the other changes nothing (a completion that loses logs the new account
-	// back out, see advance).
+	// reported, and the other changes nothing (a completion that loses is reported afterCancel,
+	// see advance).
 	if !s.finish() {
 		return nil
 	}
@@ -320,7 +305,7 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	if s.done {
 		s.lock.Unlock()
 		if completed {
-			s.discardCompleted(step)
+			s.reportAfterCancel(step)
 		}
 		return
 	}
@@ -389,11 +374,6 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 				log.Err(err).Msg("Failed to record login ID")
 			}
 			out.LoginID = loginID
-			// Under the person's lock, so a cancelled login's logout checking this account sees it.
-			mu := s.c.userLock(s.userID)
-			mu.Lock()
-			s.c.activated(s.c.Bridge.BackgroundCtx, p.UserLoginID, s.id, s.userID)
-			mu.Unlock()
 		}
 		// Claimed above, so a cancel from here on leaves it complete.
 		s.c.forgetLogin(s.id)
@@ -464,206 +444,28 @@ func (s *loginSession) keepDisplay(stepID string, step *protocol.LoginStep) {
 	}
 }
 
-// discardCompleted logs out an account a login connected after it was cancelled: the
-// person asked for it not to be, and was told it wasn't. An account the person already had
-// (signing in to it again) is left as it is, since logging it out would lose more than the
-// cancel asked for.
-//
-// Another attempt by the person on the network may be what they meant to keep: one that
-// completed the same account, or one still going (it may be about to). The account is left
-// connected then, rather than logging out what that attempt connected.
-func (s *loginSession) discardCompleted(step *bridgev2.LoginStep) {
+// reportAfterCancel says a login the person cancelled connected an account anyway, as a
+// `complete` step marked afterCancel. The account isn't logged out on the host's own say: that
+// guessed wrong too often (a retry of theirs connecting the same account). It is kept and
+// reported as connected, and the backend flags it so the person decides whether to keep it.
+func (s *loginSession) reportAfterCancel(step *bridgev2.LoginStep) {
 	p := step.CompleteParams
-	if p == nil || p.UserLogin == nil || s.existing[p.UserLoginID] {
+	if p == nil || p.UserLoginID == "" {
 		return
 	}
 	ctx := context.WithoutCancel(s.c.Bridge.BackgroundCtx)
-	// This login is what the account now is, cancelled or not: it is logged out only while that
-	// stays so (settleDiscarded). Both are kept first, so a restart before it is decided decides
-	// it then (SettleDiscardedAtStart).
-	// Unless another login connected it first: then that is the one the person kept. Checked
-	// and recorded under the person's lock, as a completing login records its own.
-	mu := s.c.userLock(s.userID)
-	mu.Lock()
-	if current, err := s.c.Store.GetActivation(ctx, string(p.UserLoginID)); err == nil && current.SessionID != s.id {
-		mu.Unlock()
-		return
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Reading which login connected an account failed")
-	}
-	s.c.activated(ctx, p.UserLoginID, s.id, s.userID)
-	if err := s.c.Store.PutDiscarded(ctx, store.DiscardedLogin{SessionID: s.id, UserID: s.userID, LoginID: string(p.UserLoginID)}); err != nil {
-		s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Keeping a cancelled login's account to log out failed")
-	}
-	s.c.discarded.Store(s.id, &discardedLogin{sessionID: s.id, userID: s.userID, loginID: p.UserLoginID, login: p.UserLogin})
-	mu.Unlock()
-	s.c.settleDiscarded(s.userID)
-}
-
-// activated records that a login session connected an account, for whom.
-func (c *Connector) activated(ctx context.Context, loginID networkid.UserLoginID, sessionID, userID string) {
-	if err := c.Store.PutActivation(context.WithoutCancel(ctx), string(loginID), store.Activation{SessionID: sessionID, UserID: userID}); err != nil {
-		c.Log.Err(err).Str("login_session_id", sessionID).Msg("Recording which login connected an account failed")
-	}
-}
-
-// deactivated records that an account was logged out: the login that connected it no longer
-// speaks for it, so a cancelled re-pair of it later is logged out as any new account would be.
-func (c *Connector) deactivated(ctx context.Context, loginID networkid.UserLoginID) {
-	if err := c.Store.DeleteActivation(context.WithoutCancel(ctx), string(loginID)); err != nil {
-		c.Log.Err(err).Msg("Forgetting which login connected an account failed")
-	}
-}
-
-// discardedLogin is an account a cancelled login connected, to be logged out once no other
-// attempt of the person's could be the one that connected it.
-type discardedLogin struct {
-	sessionID, userID string
-	loginID           networkid.UserLoginID
-	// login is the account bridgev2 loaded, or nil for one kept from before a restart, which
-	// is looked up when it is logged out.
-	login *bridgev2.UserLogin
-}
-
-// SettleDiscardedAtStart decides the accounts cancelled logins connected that were still
-// waiting when the host last stopped. Every login in progress then is over now (RecoverLogins
-// ends them), so none is left to wait for: each is logged out, if it is still what that
-// cancelled login connected. It runs once bridgev2 has loaded the logins.
-func (c *Connector) SettleDiscardedAtStart(ctx context.Context) error {
-	kept, err := c.Store.Discarded(ctx)
+	loginID, err := s.c.loginOpaque(ctx, p.UserLoginID)
 	if err != nil {
-		return fmt.Errorf("failed to list cancelled logins' accounts: %w", err)
-	}
-	users := map[string]bool{}
-	for _, d := range kept {
-		c.discarded.LoadOrStore(d.SessionID, &discardedLogin{sessionID: d.SessionID, userID: d.UserID, loginID: networkid.UserLoginID(d.LoginID)})
-		users[d.UserID] = true
-	}
-	for userID := range users {
-		c.settleDiscarded(userID)
-	}
-	return nil
-}
-
-// settleDiscarded decides, for each account a cancelled login of userID's connected, whether
-// to log it out: not while another of their attempts is going (it may be about to connect the
-// same account); never once it isn't that login's any more (another login connected it, it
-// was logged out, or it now belongs to someone else); and otherwise yes. It runs when a
-// cancelled login completes and again whenever one of the person's logins ends, so a decision
-// put off for a retry is made once the retry settles, whichever way. The kept record goes only
-// once the logout has finished (or there is nothing to log out), so a stop in between logs it
-// out at the next start.
-func (c *Connector) settleDiscarded(userID string) {
-	ctx := context.WithoutCancel(c.Bridge.BackgroundCtx)
-	going := c.loginGoing(userID)
-	c.discarded.Range(func(key, raw any) bool {
-		d := raw.(*discardedLogin)
-		if d.userID != userID {
-			return true
-		}
-		if !c.stillDiscarded(ctx, d) {
-			c.discarded.Delete(key)
-			return true
-		}
-		if going {
-			c.Log.Info().Str("login_session_id", d.sessionID).Msg("A cancelled login's account waits for another login to settle")
-			return true
-		}
-		c.discarded.Delete(key)
-		runDiscard(func() { c.logoutDiscardedLogin(ctx, d) })
-		return true
-	})
-}
-
-// loginGoing reports whether one of userID's logins is in progress.
-func (c *Connector) loginGoing(userID string) bool {
-	going := false
-	c.logins.Range(func(_, raw any) bool {
-		going = raw.(*loginSession).userID == userID
-		return !going
-	})
-	return going
-}
-
-// stillDiscarded reports whether a cancelled login's account is still that login's to undo:
-// still the activation it made, for the same person. One that isn't any more (logged out
-// meanwhile, or connected again by another login) has its record forgotten.
-func (c *Connector) stillDiscarded(ctx context.Context, d *discardedLogin) bool {
-	current, err := c.Store.GetActivation(ctx, string(d.loginID))
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		c.Log.Err(err).Str("login_session_id", d.sessionID).Msg("Reading which login connected an account failed; deciding later")
-		return true
-	}
-	if err != nil || current.SessionID != d.sessionID || current.UserID != d.userID {
-		c.forgetDiscarded(ctx, d)
-		return false
-	}
-	return true
-}
-
-func (c *Connector) forgetDiscarded(ctx context.Context, d *discardedLogin) {
-	if err := c.Store.DeleteDiscarded(ctx, d.sessionID); err != nil {
-		c.Log.Err(err).Str("login_session_id", d.sessionID).Msg("Forgetting a decided cancelled login failed; it is decided again at the next start")
-	}
-}
-
-// userLock is held while one of userID's cancelled logins' accounts is logged out, and taken
-// by a login of theirs as it starts and as it completes: a login can't start, or connect an
-// account, between the check that the account is still the cancelled login's and its logout.
-func (c *Connector) userLock(userID string) *sync.Mutex {
-	mu, _ := c.userLocks.LoadOrStore(userID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
-}
-
-// logoutDiscardedLogin logs out a cancelled login's account, checking again under the
-// person's lock that it is still that login's and nobody's login is going. The record goes
-// only once bridgev2 no longer has the login (its logout reports no failure of its own, so
-// that is checked); otherwise it stays, and the next start tries again.
-func (c *Connector) logoutDiscardedLogin(ctx context.Context, d *discardedLogin) {
-	mu := c.userLock(d.userID)
-	mu.Lock()
-	defer mu.Unlock()
-	if !c.stillDiscarded(ctx, d) {
+		s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Failed to record login ID")
 		return
 	}
-	if c.loginGoing(d.userID) {
-		// A login started meanwhile: wait for it, as settleDiscarded would have.
-		c.discarded.Store(d.sessionID, d)
-		return
+	s.c.Log.Info().Str("login_session_id", s.id).Msg("A login completed after it was cancelled; keeping the account for the person to decide")
+	if err = s.c.emit(ctx, &protocol.Event{
+		Type: protocol.EventLoginStep, UserID: s.userID, LoginID: loginID, LoginSessionID: s.id,
+		Step: &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepComplete, LoginID: loginID, AfterCancel: true},
+	}); err != nil {
+		s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Failed to report a login that completed after it was cancelled")
 	}
-	login := cachedLogin(c.Bridge, d.loginID)
-	if login == nil || login.UserMXID != ids.UserMXID(d.userID) {
-		// Gone, or someone else's now: nothing of this person's to log out.
-		c.forgetDiscarded(ctx, d)
-		return
-	}
-	c.Log.Info().Str("login_session_id", d.sessionID).Msg("A login completed after it was cancelled; logging the new account out")
-	logoutDiscarded(ctx, login)
-	if gone, err := loginGone(c, ctx, d.loginID); err != nil || !gone {
-		c.Log.Warn().Str("login_session_id", d.sessionID).Msg("A cancelled login's account is still there after its logout; trying again at the next start")
-		return
-	}
-	c.forgetDiscarded(ctx, d)
-}
-
-// runDiscard runs a cancelled login's logout away from the caller; tests run it in place.
-var runDiscard = func(f func()) { go f() }
-
-// cachedLogin is the login bridgev2 runs now for an account, or nil; tests replace it.
-var cachedLogin = func(br *bridgev2.Bridge, id networkid.UserLoginID) *bridgev2.UserLogin {
-	return br.GetCachedUserLoginByID(id)
-}
-
-// logoutDiscarded logs out an account a cancelled login connected: the network logout, then
-// bridgev2's deletion of the login. Tests replace it.
-var logoutDiscarded = func(ctx context.Context, login *bridgev2.UserLogin) {
-	login.Logout(ctx)
-}
-
-// loginGone reports whether bridgev2's database no longer has a login; tests replace it.
-var loginGone = func(c *Connector, ctx context.Context, id networkid.UserLoginID) (bool, error) {
-	login, err := c.Bridge.DB.UserLogin.GetByID(ctx, id)
-	return login == nil, err
 }
 
 // decodeCookies percent-decodes what was read from a browser cookie, as bridgev2's own cookie
@@ -698,7 +500,6 @@ func (c *Connector) endLoginWithError(ctx context.Context, userID, loginSessionI
 	c.endedLogins.Store(loginSessionID, struct{}{})
 	if raw, ok := c.logins.LoadAndDelete(loginSessionID); ok {
 		raw.(*loginSession).finish()
-		c.settleDiscarded(userID)
 	}
 	return c.endLogin(ctx, userID, loginSessionID, &protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
 }
@@ -707,8 +508,5 @@ func (c *Connector) endLoginWithError(ctx context.Context, userID, loginSessionI
 // arriving before its record is deleted isn't taken for a login a restart lost.
 func (c *Connector) forgetLogin(id string) {
 	c.endedLogins.Store(id, struct{}{})
-	if raw, ok := c.logins.LoadAndDelete(id); ok {
-		// A cancelled login's account may have been waiting for this one to settle.
-		c.settleDiscarded(raw.(*loginSession).userID)
-	}
+	c.logins.Delete(id)
 }

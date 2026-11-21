@@ -131,6 +131,14 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_activation (login_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_id TEXT NOT NULL)`,
 		})
 	}).
+	WithRaw(8, 9, 0, "Drop the cancelled-login cleanup tables", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A cancelled login's account is no longer logged out on the host's own say: it is kept,
+		// reported afterCancel, and the person decides. Nothing reads these any more.
+		return execAll(ctx, db, []string{
+			`DROP TABLE trioditis_discarded`,
+			`DROP TABLE trioditis_activation`,
+		})
+	}).
 	Finish()
 
 // InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
@@ -153,69 +161,6 @@ func (s *Store) IsInflight(ctx context.Context, m InflightMessage) (bool, error)
 	var n int
 	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID).Scan(&n)
 	return n > 0, err
-}
-
-// DiscardedLogin is an account a cancelled login connected, waiting to be logged out until no
-// other login of the person's could be the one they kept.
-type DiscardedLogin struct{ SessionID, UserID, LoginID string }
-
-// PutDiscarded keeps a decision put off, so a restart doesn't strand the account connected.
-func (s *Store) PutDiscarded(ctx context.Context, d DiscardedLogin) error {
-	_, err := s.DB.Exec(ctx, `INSERT INTO trioditis_discarded (session_id, user_id, login_id) VALUES ($1, $2, $3) ON CONFLICT (session_id) DO NOTHING`, d.SessionID, d.UserID, d.LoginID)
-	return err
-}
-
-// DeleteDiscarded forgets a decision once made.
-func (s *Store) DeleteDiscarded(ctx context.Context, sessionID string) error {
-	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_discarded WHERE session_id=$1`, sessionID)
-	return err
-}
-
-// Activation is which login session last connected an account (by its network login ID),
-// and for whom.
-type Activation struct{ SessionID, UserID string }
-
-// PutActivation records that a login session connected an account, replacing the last.
-func (s *Store) PutActivation(ctx context.Context, loginID string, a Activation) error {
-	_, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_activation (login_id, session_id, user_id) VALUES ($1, $2, $3)
-		 ON CONFLICT (login_id) DO UPDATE SET session_id=excluded.session_id, user_id=excluded.user_id`,
-		loginID, a.SessionID, a.UserID)
-	return err
-}
-
-// GetActivation is an account's current activation, or ErrNotFound once it was logged out.
-func (s *Store) GetActivation(ctx context.Context, loginID string) (Activation, error) {
-	var a Activation
-	err := s.DB.QueryRow(ctx, `SELECT session_id, user_id FROM trioditis_activation WHERE login_id=$1`, loginID).Scan(&a.SessionID, &a.UserID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return a, ErrNotFound
-	}
-	return a, err
-}
-
-// DeleteActivation records that an account was logged out.
-func (s *Store) DeleteActivation(ctx context.Context, loginID string) error {
-	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_activation WHERE login_id=$1`, loginID)
-	return err
-}
-
-// Discarded lists the decisions still put off.
-func (s *Store) Discarded(ctx context.Context) ([]DiscardedLogin, error) {
-	rows, err := s.DB.Query(ctx, `SELECT session_id, user_id, login_id FROM trioditis_discarded`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []DiscardedLogin
-	for rows.Next() {
-		var d DiscardedLogin
-		if err = rows.Scan(&d.SessionID, &d.UserID, &d.LoginID); err != nil {
-			return nil, err
-		}
-		out = append(out, d)
-	}
-	return out, rows.Err()
 }
 
 // Inflight lists the messages whose handling hadn't ended when the host last stopped.

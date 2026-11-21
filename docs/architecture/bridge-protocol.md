@@ -263,16 +263,11 @@ within 90 seconds of its host going down. Clients hide a display past its `expir
 
 A `loginCancel` and the network completing the login can cross. Exactly one ends it, with
 whichever came first: a cancel after the login completed changes nothing, and a completion
-after the cancel is reported as nothing more; the account it connected is logged back out,
-unless it is one the person already had (signing in to it again), which is left as it was, or
-another of their attempts on the network connected it or is still going: the cancel was of
-that one attempt, not of the retry they kept. The backend applies the same rule to a late
-`complete` step or `loginState` for a cancelled login session. A logout put off for a retry
-is kept by the bridge host (`trioditis_discarded`) until it has finished, across restarts, and
-happens only while the account is still what that cancelled attempt connected, for the same
-person (`trioditis_activation`, cleared when the account is logged out). The check and the
-logout run under a per-person lock that a login of theirs also takes as it starts and as it
-completes, and the record goes only once bridgev2 no longer has the login.
+after the cancel doesn't end it again. Neither side logs out the account a completion after
+the cancel connected: the bridge host reports it with a `complete` step marked
+`"afterCancel": true` (with its `loginId`), the account reports in as usual, and the backend
+keeps it, flagged `connectedAfterCancel`, for the person to keep or disconnect. An account the
+person already had (signing in to it again) isn't flagged.
 
 A step itself may also carry `expiresAt` (bridge host time, ms); both are optional and the
 backend takes either. The client also hides any code from a host not heard from in two minutes.

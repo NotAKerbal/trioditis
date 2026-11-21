@@ -657,10 +657,9 @@ async function applyLoginState(
     return
   }
   // A login the person cancelled that finished on the bridge host anyway, whose `complete`
-  // step came first: they said no to it, so it's logged out rather than left connected.
+  // step came first: kept, and flagged, so the person decides whether to keep it.
   if (!existing && event.state !== 'LOGGED_OUT' && (await cancelledLogin(ctx, event.userId, network, event.loginId))) {
-    await queueLogout(ctx, (await ctx.db.get(accountId!))!)
-    return
+    await ctx.db.patch(accountId!, { connectedAfterCancel: true })
   }
   // An account on a network an admin removed is logged out, whenever it reports in: one whose
   // login finished as the network was removed, or whose logout didn't take. A network that was
@@ -672,7 +671,8 @@ async function applyLoginState(
 
 /**
  * Whether one of the person's logins on `loginId` was cancelled and then finished on the
- * bridge host anyway (completedAfterCancel kept its login ID).
+ * bridge host anyway (completedAfterCancel kept its login ID), with no login of theirs
+ * connecting it normally since.
  */
 async function cancelledLogin(ctx: MutationCtx, userId: string, network: Network, loginId: string) {
   const sessions = await ctx.db
@@ -680,31 +680,26 @@ async function cancelledLogin(ctx: MutationCtx, userId: string, network: Network
     .withIndex('by_user', (q) => q.eq('userId', userId))
     .order('desc')
     .take(20)
-  return sessions.some(
-    (s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId && !retried(sessions, s, loginId),
-  )
-}
-
-/**
- * Whether, among the person's recent `sessions`, a newer attempt on the same network than
- * `cancelled` connected `loginId` or is still going (it may be about to). The cancel was of
- * that one attempt: logging the account out would undo the retry the person kept.
- */
-function retried(sessions: Doc<'loginSessions'>[], cancelled: Doc<'loginSessions'>, loginId: string) {
-  return sessions.some(
-    (s) =>
-      s._id !== cancelled._id &&
-      s.network === cancelled.network &&
-      s._creationTime > cancelled._creationTime &&
-      ((s.state === 'complete' && s.loginId === loginId) || s.state === 'pending' || s.state === 'active'),
+  const cancelled = sessions.find((s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId)
+  return (
+    cancelled !== undefined &&
+    !sessions.some(
+      (s) =>
+        s.state === 'complete' &&
+        s.network === network &&
+        s.loginId === loginId &&
+        s._creationTime > cancelled._creationTime,
+    )
   )
 }
 
 /**
  * A login the person cancelled (logins.cancel ends it at once) that the bridge host finished
- * before the cancel reached it. It stays cancelled, as the person last saw it, and the new
- * account it made is logged out. An account the person already had, which the login only
- * reconnected, is left as it now is: logging it out would undo more than they asked.
+ * anyway. It stays cancelled, as the person last saw it, and the account it connected is kept
+ * but flagged (`connectedAfterCancel`), so the person decides whether to keep or disconnect
+ * it: logging it out on its own guessed wrong too often (a retry of theirs connecting the same
+ * account, say). An account the person already had, which the login only reconnected, is left
+ * as it is.
  */
 async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSessions'>, loginId: string) {
   const account = await ctx.db
@@ -713,15 +708,9 @@ async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSession
     .unique()
   if (account && account.userId !== session.userId) return
   if (account && account._creationTime < session._creationTime) return
-  // Kept so the account's own report, if it comes after this, is logged out too.
+  // Kept so the account's own report, if it comes after this, is flagged too.
   await ctx.db.patch(session._id, { loginId })
-  const recent = await ctx.db
-    .query('loginSessions')
-    .withIndex('by_user', (q) => q.eq('userId', session.userId))
-    .order('desc')
-    .take(20)
-  if (retried(recent, session, loginId)) return
-  if (account) await queueLogout(ctx, account)
+  if (account) await ctx.db.patch(account._id, { connectedAfterCancel: true })
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
@@ -757,32 +746,16 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
     updatedAt: event.at,
     ...(event.step.loginId ? { loginId: event.step.loginId } : {}),
   })
-  if (state !== 'active') await settleCancelledLogins(ctx, session.userId, session.network)
-}
-
-/**
- * Decides, for the accounts the person's cancelled logins connected anyway, whether to log them
- * out now. One was left while another attempt on the network was going (retried); this runs
- * whenever one of their logins ends, so it is decided once that attempt settles: logged out
- * unless a newer attempt connected the same account (the one the person kept), or one is
- * still going.
- */
-export async function settleCancelledLogins(ctx: MutationCtx, userId: string, network: Network) {
-  const sessions = await ctx.db
-    .query('loginSessions')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .order('desc')
-    .take(20)
-  for (const s of sessions) {
-    if (s.state !== 'cancelled' || s.network !== network || !s.loginId || retried(sessions, s, s.loginId)) continue
-    const loginId = s.loginId
+  // Connected normally: whatever a cancelled login of theirs did to the account, it's theirs now.
+  if (state === 'complete' && event.step.loginId) {
+    const loginId = event.step.loginId
     const account = await ctx.db
       .query('networkAccounts')
-      .withIndex('by_login', (q) => q.eq('network', network).eq('loginId', loginId))
+      .withIndex('by_login', (q) => q.eq('network', session.network).eq('loginId', loginId))
       .unique()
-    // Only an account that attempt made: one the person had before it is left as it is.
-    if (!account || account.userId !== userId || account._creationTime < s._creationTime) continue
-    await queueLogout(ctx, account)
+    if (account?.connectedAfterCancel && account.userId === session.userId) {
+      await ctx.db.patch(account._id, { connectedAfterCancel: undefined })
+    }
   }
 }
 

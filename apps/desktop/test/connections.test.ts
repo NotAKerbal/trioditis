@@ -102,6 +102,26 @@ describe('new chat account choice', () => {
 describe('accounts in Settings', () => {
   const base = { logoutPending: false, logoutError: null }
 
+  it('asks about an account a cancelled login connected anyway, with Keep and Disconnect', () => {
+    expect(accountView({ ...base, state: 'CONNECTED', connectedAfterCancel: true }, false)).toEqual({
+      group: 'attention',
+      note: 'You cancelled this login, but it finished connecting. Keep it or disconnect.',
+      warn: true,
+      reconnect: false,
+      disconnect: true,
+      keep: true,
+    })
+    // Once they've asked to disconnect it, or it's logged out, it stops asking.
+    expect(
+      accountView({ ...base, state: 'CONNECTED', connectedAfterCancel: true, logoutPending: true }, false),
+    ).toMatchObject({ note: 'Disconnecting…', keep: false })
+    expect(accountView({ ...base, state: 'LOGGED_OUT', connectedAfterCancel: true }, false)).toMatchObject({
+      group: 'loggedOut',
+      keep: false,
+    })
+    expect(accountView({ ...base, state: 'CONNECTED' }, false)).toMatchObject({ group: 'connected', keep: false })
+  })
+
   it('groups accounts by what is really so, with only actions that do something', () => {
     expect(accountView({ ...base, state: 'CONNECTED' }, false)).toMatchObject({
       group: 'connected',
