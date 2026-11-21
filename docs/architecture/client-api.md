@@ -822,8 +822,13 @@ whether the network has them (Reacting).
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
-   `{ _id, network, state, step, updatedAt }`, or `null` for a login that doesn't exist or
-   isn't the person's. `state` is one of `pending`, `active`, `complete`, `cancelled` or
+   `{ _id, network, state, step, updatedAt, hostLastSeenAt }`, or `null` for a login that
+   doesn't exist or isn't the person's. `hostLastSeenAt` is when the bridge host running it
+   (before one has it, the network's most recently seen host) was last heard from, or `null`:
+   once that is more than two minutes ago (`BRIDGE_HOST_STALE_MS`) by the client's clock, the
+   host has gone, and a QR or pairing code it showed won't work, so hide it. Likewise a
+   `step.expiresAt` or `display.expiresAt` (bridge host time, ms) that has passed, where the
+   bridge host sends one. `state` is one of `pending`, `active`, `complete`, `cancelled` or
    `error`. `step` is `null` until the bridge host sends the first step (while `pending`);
    then render it (the `LoginStep` type in `@trioditis/core/bridge-protocol`):
    - `displayAndWait`: with `display.type` `qr`, draw `display.data` as a QR code; with
@@ -854,14 +859,21 @@ whether the network has them (Reacting).
    })
    ```
 
-4. Cancel with `api.logins.cancel({ loginSessionId })`. It's best effort: a login that
-   completes while the cancel is on its way still connects.
+4. Cancel with `api.logins.cancel({ loginSessionId })`. The login is `cancelled` at once,
+   and later steps for it are ignored; it returns `cancelled`, or `complete` or `error` if the
+   login had already ended that way (then it changes nothing). Cancelling again is the same.
+   A login the bridge host finishes before the cancel reaches it is logged out when it
+   reports in, unless it reconnected an account the person already had, which stays connected.
 
 Accounts: `api.logins.accounts` returns
-`[{ _id, network, state, error, lastHealthyAt, updatedAt, logoutPending, logoutError }]`.
+`[{ _id, network, state, error, lastHealthyAt, updatedAt, hint, logoutPending, logoutError }]`.
+`hint` tells the person's accounts on one network apart: the phone number on WhatsApp, whose
+login ID is one, otherwise `ID …` and the login ID's last four characters (no account name is
+stored). The login ID itself isn't returned.
 `state` is `CONNECTED`, `CONNECTING`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` (reconnect
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
-one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
+one, returning `queued`, `pending` (one is already on its way) or `loggedOut` (nothing to do):
+`logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
 bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
 hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why. Both
 happen on time whether or not a gateway is running, with the same two exceptions as sends: a
@@ -881,7 +893,7 @@ a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login do
 ### Health
 
 `api.networks.health` returns, for each network in `networks.list`,
-`{ network, bridgeOnline, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
+`{ network, bridgeOnline, bridgeLastSeenAt, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
 
 | `status`   | Means                                                                      |
 | ---------- | -------------------------------------------------------------------------- |
@@ -891,7 +903,10 @@ a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login do
 | `none`     | The person hasn't connected this network                                   |
 
 `bridgeOnline` goes false two minutes after the bridge host's last heartbeat. Queries rerun
-when data changes, not when time passes, so recheck on focus.
+when data changes, not when time passes, so a host that stops heartbeating stays
+`bridgeOnline` in an answer already given: judge it again from `bridgeLastSeenAt` (null if
+never heard from) against `BRIDGE_HOST_STALE_MS` as time passes, and recompute `status` with
+`networkStatus` from `@trioditis/core`.
 
 ### Installing networks (admins)
 
@@ -900,7 +915,7 @@ one for every network unless the operator narrows it; docs/deploy.md). Admins ch
 those people can connect:
 
 - `api.networks.catalog` lists every network Trioditis knows, for the admin panel:
-  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, accounts }[]`.
+  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, bridgeLastSeenAt, accounts }[]`.
   `bridged` says the server runs its bridge host; one it doesn't can't be installed, and the
   operator adds it with the installer (Telegram also needs its API ID and hash). `accounts`
   counts the accounts connected to it, everyone's together; never whose.

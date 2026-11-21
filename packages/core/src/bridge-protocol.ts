@@ -160,7 +160,10 @@ export interface LoginStep {
   stepId: string
   type: 'displayAndWait' | 'userInput' | 'cookies' | 'complete' | 'cancelled' | 'error'
   instructions?: string
-  display?: { type: 'qr' | 'code' | 'emoji' | 'nothing'; data?: string }
+  /** `expiresAt`: when the code stops working (bridge host time, ms), where the network says. */
+  display?: { type: 'qr' | 'code' | 'emoji' | 'nothing'; data?: string; expiresAt?: number }
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt?: number
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
   cookies?: {
     url: string

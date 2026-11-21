@@ -78,8 +78,12 @@ export const loginStep = v.object({
     v.object({
       type: v.union(v.literal('qr'), v.literal('code'), v.literal('emoji'), v.literal('nothing')),
       data: v.optional(v.string()),
+      /** When the code stops working (bridge host time, ms), where the network says. */
+      expiresAt: v.optional(v.number()),
     }),
   ),
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt: v.optional(v.number()),
   fields: v.optional(
     v.array(
       v.object({

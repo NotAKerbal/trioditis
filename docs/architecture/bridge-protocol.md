@@ -250,6 +250,10 @@ Pairing data shown to the person (a QR code, a pairing code) is scrubbed from th
 host's journal once the gateway has acknowledged the step, so a replay of that step has an
 empty `display.data`.
 
+A step may say when it stops working, as `expiresAt` (bridge host time, ms) on the step or on
+its `display`; both are optional, and the backend takes either. The client hides a code
+whose time has passed, and any code from a host not heard from in two minutes.
+
 What a person types or pastes into a login step (phone numbers, codes, cookies) is a
 credential. The client seals it to the bridge key, so the outbox never holds it in
 plaintext; the bridge host opens it, uses it and discards it. A `cookies` step's values

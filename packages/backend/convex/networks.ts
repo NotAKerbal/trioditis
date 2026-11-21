@@ -1,5 +1,5 @@
 import { ConvexError, v } from 'convex/values'
-import { NETWORK_INFO, type Network } from '@trioditis/core'
+import { BRIDGE_HOST_STALE_MS, NETWORK_INFO, networkStatus, type Network } from '@trioditis/core'
 import { internal } from './_generated/api'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
@@ -12,8 +12,6 @@ import { errorCode, loginState, network } from './validators'
 // The networks this server offers, how to connect each, and how each is doing for the person;
 // and, for admins, installing and removing them.
 
-/** A bridge host heard from within this long is online; it heartbeats every 30 seconds. */
-const HOST_STALE_MS = 2 * 60_000
 /** How many accounts, or login sessions, one batch of a removal goes through. */
 const REMOVE_BATCH = 100
 /** How many accounts `catalog` counts per network before saying "at least". */
@@ -46,11 +44,22 @@ export const list = query({
   },
 })
 
-async function onlineHosts(ctx: QueryCtx) {
-  const now = Date.now()
+/**
+ * When each network's bridge host was last heard from, the most recent of its hosts. A query's
+ * answer only changes when the rows it read do, not as time passes, so a host that stops
+ * heartbeating would stay "online" here for as long as the client watched. The client judges
+ * liveness from this time against its own clock instead (data/bridge-liveness.ts);
+ * `bridgeOnline` is only how it looked when the query ran.
+ */
+async function hostsLastSeen(ctx: QueryCtx) {
   const hosts = await ctx.db.query('bridgeHosts').take(100)
-  return new Set(hosts.filter((host) => now - host.lastSeenAt <= HOST_STALE_MS).map((host) => host.network))
+  const seen = new Map<string, number>()
+  for (const host of hosts) seen.set(host.network, Math.max(seen.get(host.network) ?? 0, host.lastSeenAt))
+  return seen
 }
+
+const isLive = (lastSeenAt: number | undefined, now: number) =>
+  lastSeenAt !== undefined && now - lastSeenAt <= BRIDGE_HOST_STALE_MS
 
 /**
  * For each installed network: whether its bridge host is online, and the person's accounts on
@@ -64,6 +73,8 @@ export const health = query({
     v.object({
       network,
       bridgeOnline: v.boolean(),
+      /** When its bridge host was last heard from, to judge `bridgeOnline` again as time passes. */
+      bridgeLastSeenAt: v.union(v.null(), v.number()),
       accounts: v.array(
         v.object({
           networkAccountId: v.id('networkAccounts'),
@@ -77,13 +88,15 @@ export const health = query({
   ),
   handler: async (ctx) => {
     const member = await requireMember(ctx)
-    const online = await onlineHosts(ctx)
+    const seen = await hostsLastSeen(ctx)
+    const now = Date.now()
     const accounts = await ctx.db
       .query('networkAccounts')
       .withIndex('by_user', (q) => q.eq('userId', member.userId))
       .take(100)
     return [...(await offeredNetworks(ctx))].map((name) => {
-      const bridgeOnline = online.has(name)
+      const bridgeLastSeenAt = seen.get(name) ?? null
+      const bridgeOnline = isLive(seen.get(name), now)
       const mine = accounts
         .filter((account) => account.network === name && account.state !== 'LOGGED_OUT')
         .map((account) => ({
@@ -92,16 +105,7 @@ export const health = query({
           error: account.error ?? null,
           lastHealthyAt: account.lastHealthyAt ?? null,
         }))
-      const connected = mine.filter((account) => account.state === 'CONNECTED').length
-      const status: 'online' | 'degraded' | 'offline' | 'none' =
-        mine.length === 0
-          ? 'none'
-          : !bridgeOnline || connected === 0
-            ? 'offline'
-            : connected < mine.length
-              ? 'degraded'
-              : 'online'
-      return { network: name, bridgeOnline, accounts: mine, status }
+      return { network: name, bridgeOnline, bridgeLastSeenAt, accounts: mine, status: networkStatus(mine, bridgeOnline) }
     })
   },
 })
@@ -132,6 +136,7 @@ export const catalog = query({
       installed: v.boolean(),
       bridged: v.boolean(),
       bridgeOnline: v.boolean(),
+      bridgeLastSeenAt: v.union(v.null(), v.number()),
       accounts: v.number(),
     }),
   ),
@@ -139,7 +144,8 @@ export const catalog = query({
     await requireAdmin(ctx)
     const installed = await installedNetworks(ctx)
     const bridged = bridgedNetworks()
-    const online = await onlineHosts(ctx)
+    const seen = await hostsLastSeen(ctx)
+    const now = Date.now()
     const result = []
     for (const info of Object.values(NETWORK_INFO)) {
       result.push({
@@ -149,7 +155,8 @@ export const catalog = query({
         termsRisk: info.termsRisk,
         installed: installed.has(info.network),
         bridged: bridged.has(info.network),
-        bridgeOnline: online.has(info.network),
+        bridgeOnline: isLive(seen.get(info.network), now),
+        bridgeLastSeenAt: seen.get(info.network) ?? null,
         accounts: await liveAccounts(ctx, info.network),
       })
     }

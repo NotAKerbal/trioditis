@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import type { Doc } from './_generated/dataModel'
-import { NETWORK_INFO } from '@trioditis/core'
-import { mutation, query } from './_generated/server'
+import { NETWORK_INFO, type Network } from '@trioditis/core'
+import { mutation, query, type QueryCtx } from './_generated/server'
 import { requireSessionIfGiven } from './auth'
 import { requireMember } from './lib/access'
 import { backupsOf, keyState } from './keys'
@@ -16,6 +16,21 @@ import { envelope, errorCode, loginState, loginStep, network } from './validator
 // pairing codes, cookies), which arrive as `loginStep` events on the session. What the
 // person types is sealed to the bridge key, never stored in plaintext.
 
+// Networks whose login ID is the account's phone number, digits only (bridgev2's WhatsApp
+// connector uses the JID's user part), so it can be shown as one.
+const PHONE_LOGIN_IDS: ReadonlySet<Network> = new Set(['whatsapp'])
+
+/**
+ * How the person tells two of their accounts on one network apart. No name or handle is kept
+ * for an account (a network's closing words name it, and those aren't stored), so this comes
+ * from its login ID, which the backend already holds: the phone number where the ID is one,
+ * otherwise its last few characters. Only the account's owner is ever given it.
+ */
+export function accountHint(network: Network, loginId: string): string {
+  if (PHONE_LOGIN_IDS.has(network) && /^\d{6,15}$/.test(loginId)) return `+${loginId}`
+  return loginId.length > 4 ? `ID …${loginId.slice(-4)}` : loginId ? `ID ${loginId}` : ''
+}
+
 /** The person's connected network accounts, including ones that need attention. */
 export const accounts = query({
   args: {},
@@ -27,6 +42,8 @@ export const accounts = query({
       error: v.union(v.null(), errorCode),
       lastHealthyAt: v.union(v.null(), v.number()),
       updatedAt: v.number(),
+      /** What tells it apart from the person's other accounts on the network (accountHint). */
+      hint: v.string(),
       /** A logout was asked for and hasn't been confirmed yet. */
       logoutPending: v.boolean(),
       /** Why the last logout didn't happen, if it didn't. */
@@ -48,6 +65,7 @@ export const accounts = query({
         error: row.error ?? null,
         lastHealthyAt: row.lastHealthyAt ?? null,
         updatedAt: row.updatedAt,
+        hint: accountHint(row.network, row.loginId),
         logoutPending: row.logoutPending ?? false,
         logoutError: row.logoutError ?? null,
       }))
@@ -74,6 +92,12 @@ export const session = query({
       ),
       step: v.union(v.null(), loginStep),
       updatedAt: v.number(),
+      /**
+       * When the bridge host running the login (or, before one has it, the network's most
+       * recently seen host) was last heard from; null if none ever was. The stepper compares it
+       * with its own clock, so a QR or pairing code from a host that has gone away isn't left up.
+       */
+      hostLastSeenAt: v.union(v.null(), v.number()),
     }),
   ),
   handler: async (ctx, { loginSessionId }) => {
@@ -86,9 +110,24 @@ export const session = query({
       state: session.state,
       step: session.step ?? null,
       updatedAt: session.updatedAt,
+      hostLastSeenAt: await hostLastSeenAt(ctx, session),
     }
   },
 })
+
+async function hostLastSeenAt(ctx: QueryCtx, session: Doc<'loginSessions'>) {
+  const hostId = session.hostId
+  if (hostId) {
+    const host = await ctx.db
+      .query('bridgeHosts')
+      .withIndex('by_hostId', (q) => q.eq('hostId', hostId))
+      .first()
+    return host?.lastSeenAt ?? null
+  }
+  const hosts = await ctx.db.query('bridgeHosts').take(100)
+  const seen = hosts.filter((host) => host.network === session.network).map((host) => host.lastSeenAt)
+  return seen.length ? Math.max(...seen) : null
+}
 
 export const start = mutation({
   args: { network, flowId: v.optional(v.string()), sessionId: v.optional(v.string()) },
@@ -249,32 +288,45 @@ export const openBrowser = mutation({
   },
 })
 
+/**
+ * Cancels a login, and says how it ended: `cancelled`, or `complete` or `error` when it had
+ * already ended that way. Asking twice changes nothing. The login ends here, not only when
+ * the bridge host confirms, so a step it sends meanwhile can't bring it back; one that
+ * finished on the bridge host anyway is logged out when it reports in (lib/ingest.ts).
+ */
 export const cancel = mutation({
   args: { loginSessionId: v.id('loginSessions') },
-  returns: v.null(),
+  returns: v.union(v.literal('cancelled'), v.literal('complete'), v.literal('error')),
   handler: async (ctx, { loginSessionId }) => {
     const member = await requireMember(ctx)
     const session = await ctx.db.get(loginSessionId)
     if (!session || session.userId !== member.userId) throw new ConvexError('That login doesn’t exist.')
-    if (session.state === 'complete' || session.state === 'cancelled') return null
+    if (session.state === 'complete' || session.state === 'cancelled') return session.state
+    // One that ended in an error here (a command that timed out) may still be running on the
+    // bridge host, so it's told to stop too, but the error stays what the person sees.
     await queueLoginCancel(ctx, session)
-    return null
+    if (session.state === 'error') return 'error'
+    await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: Date.now() })
+    return 'cancelled'
   },
 })
 
 /**
  * Disconnects a network account: the bridge host logs it out of the network. The account's
  * chats stay in Trioditis; its state becomes `LOGGED_OUT` when the bridge host reports it.
+ * Says what happened, so the app doesn't announce a disconnect that wasn't asked for again:
+ * `queued`, or `pending` when one is already on its way, or `loggedOut` when it already is.
  */
 export const logout = mutation({
   args: { networkAccountId: v.id('networkAccounts') },
-  returns: v.null(),
+  returns: v.union(v.literal('queued'), v.literal('pending'), v.literal('loggedOut')),
   handler: async (ctx, { networkAccountId }) => {
     const member = await requireMember(ctx)
     const account = await ctx.db.get(networkAccountId)
     if (!account || account.userId !== member.userId) throw new ConvexError('That account doesn’t exist.')
-    if (!(await queueLogout(ctx, account))) return null
+    if (account.state === 'LOGGED_OUT') return 'loggedOut'
+    if (!(await queueLogout(ctx, account))) return 'pending'
     await audit(ctx, { kind: 'user', id: member.userId }, 'login.logout', account.network)
-    return null
+    return 'queued'
   },
 })

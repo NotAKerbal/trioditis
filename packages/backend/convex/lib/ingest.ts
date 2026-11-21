@@ -575,6 +575,12 @@ async function applyLoginState(
       loginId: event.loginId,
       ...fields,
     })
+    // A login the person cancelled that finished on the bridge host anyway, whose `complete`
+    // step came first: they said no to it, so it's logged out rather than left connected.
+    if (event.state !== 'LOGGED_OUT' && (await cancelledLogin(ctx, event.userId, network, event.loginId))) {
+      await queueLogout(ctx, (await ctx.db.get(accountId))!)
+      return
+    }
   }
   // An account on a network an admin removed is logged out, whenever it reports in: one whose
   // login finished as the network was removed, or whose logout didn't take. A network that was
@@ -582,6 +588,37 @@ async function applyLoginState(
   if (event.state !== 'LOGGED_OUT' && (await removedNetwork(ctx, network))) {
     await queueLogout(ctx, (await ctx.db.get(accountId!))!)
   }
+}
+
+/**
+ * Whether one of the person's logins on `loginId` was cancelled and then finished on the
+ * bridge host anyway (completedAfterCancel kept its login ID).
+ */
+async function cancelledLogin(ctx: MutationCtx, userId: string, network: Network, loginId: string) {
+  const sessions = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .order('desc')
+    .take(20)
+  return sessions.some((s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId)
+}
+
+/**
+ * A login the person cancelled (logins.cancel ends it at once) that the bridge host finished
+ * before the cancel reached it. It stays cancelled, as the person last saw it, and the new
+ * account it made is logged out. An account the person already had, which the login only
+ * reconnected, is left as it now is: logging it out would undo more than they asked.
+ */
+async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSessions'>, loginId: string) {
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', session.network).eq('loginId', loginId))
+    .unique()
+  if (account && account.userId !== session.userId) return
+  if (account && account._creationTime < session._creationTime) return
+  // Kept so the account's own report, if it comes after this, is logged out too.
+  await ctx.db.patch(session._id, { loginId })
+  if (account) await queueLogout(ctx, account)
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
@@ -595,6 +632,10 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
     throw new Unmappable('foreign_host')
   }
   // A login that has ended stays ended, whatever step arrives late.
+  if (session.state === 'cancelled' && event.step.type === 'complete' && event.step.loginId) {
+    await completedAfterCancel(ctx, session, event.step.loginId)
+    return
+  }
   if (session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
   // Login steps are instructions, a code or a QR string, and a few fields: never this big.
   if (byteSize(event.step) > MAX_LOGIN_STEP_BYTES) throw new Unmappable('too_large')
