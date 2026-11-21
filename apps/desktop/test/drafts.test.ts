@@ -8,7 +8,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
   it('takes a draft once: what was taken can’t be taken again', () => {
     const a = chat()
     setDraftText(a, 'happy birthday')
-    expect(takeDraft(a)).toEqual({ text: 'happy birthday', reply: null })
+    expect(takeDraft(a)).toMatchObject({ text: 'happy birthday', reply: null })
     // A second schedule, or a send, finds nothing to send.
     expect(takeDraft(a)).toBeNull()
   })
@@ -24,7 +24,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
     // A doesn't go and comes back; then B's schedule succeeds, leaving it out of the composer.
     restoreDraft(a, sent.text, sent.reply)
     expect(getDraft(a).text).toBe('A')
-    expect(takeDraft(a)).toEqual({ text: 'A', reply: null })
+    expect(takeDraft(a)).toMatchObject({ text: 'A', reply: null })
   })
 
   it('keeps text typed after a schedule began, even across leaving the chat and coming back', () => {
@@ -44,7 +44,7 @@ describe('drafts, wherever the action that changes them finishes', () => {
     setDraftText(a, '  first  ')
     setDraftReply(a, { id: 'm1' })
     const taken = takeDraft<{ id: string }>(a)
-    expect(taken).toEqual({ text: 'first', reply: { id: 'm1' } })
+    expect(taken).toMatchObject({ text: 'first', reply: { id: 'm1' } })
     expect(getDraft(a)).toMatchObject({ text: '', reply: null })
     setDraftText(a, 'second')
     setDraftReply(a, { id: 'm2' })

@@ -49,6 +49,7 @@ import {
 import {
   appendToDraft,
   getDraft,
+  markDraftSent,
   restoreDraft,
   setDraftReply,
   setDraftText,
@@ -64,6 +65,7 @@ import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
 import { MediaAvatar } from './attachments.tsx'
 import { MessageList } from './message-list.tsx'
+import { draftSendId } from '~/data/saved-drafts.ts'
 import { cancelKind, restoreConflict } from './cancel-scheduled.ts'
 import { sendAgain } from './send-again.ts'
 
@@ -167,9 +169,15 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     const chatId = chat.id
     const taken = takeDraft<Message>(chatId)
     if (!taken) return
+    // The draft's own send ID: the same draft sent again, from another tab or after a reload,
+    // is the same send (saved-drafts.ts).
+    const clientMessageId = draftSendId(taken.id, taken.text, taken.reply?.eventId)
     // Put the text and reply back if the send didn't reach the server, keeping anything newer.
     await whileSending(() =>
-      sendText(taken.text, taken.reply?.eventId).catch(() => restoreDraft(chatId, taken.text, taken.reply)),
+      sendText(taken.text, taken.reply?.eventId, clientMessageId).then(
+        () => markDraftSent(chatId, clientMessageId),
+        () => restoreDraft(chatId, taken.text, taken.reply, taken.id),
+      ),
     )
   }
 
@@ -188,7 +196,7 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
     if (!taken) return
     await whileSending(async () => {
       try {
-        const clientMessageId = newClientId()
+        const clientMessageId = draftSendId(taken.id, taken.text, taken.reply?.eventId)
         const sealed = sealText(taken.text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
         await schedule({
           chatId,
@@ -197,9 +205,10 @@ function OpenChat({ chat, act, onBack }: { chat: Chat; act: ChatPaneProps['act']
           ...sealed,
           ...(taken.reply ? { replyTo: taken.reply.eventId } : {}),
         })
+        markDraftSent(chatId, clientMessageId)
         toast(`Scheduled for ${formatWhen(sendAt)}`)
       } catch (e) {
-        restoreDraft(chatId, taken.text, taken.reply)
+        restoreDraft(chatId, taken.text, taken.reply, taken.id)
         toast(errorMessage(e, 'That message couldn’t be scheduled.'))
       }
     })
