@@ -7,6 +7,7 @@ import { deletePayload, queueLogout } from './outbox'
 import { removedNetwork } from './networks'
 import { patchChat } from './chatView'
 import { onLoggedOut } from './commandOutcome'
+import { isMember, noteCleanup } from './formerMembers'
 import { internal } from '../_generated/api'
 import { MAX_MESSAGE_ROW_BYTES, byteSize } from './bounded'
 import { noteMessage } from './lastMessage'
@@ -639,6 +640,18 @@ async function applyLoginState(
   if (existing) {
     await ctx.db.patch(existing._id, fields)
     if (event.state === 'LOGGED_OUT') await onLoggedOut(ctx, existing)
+  } else if (event.state !== 'LOGGED_OUT' && !(await isMember(ctx, event.userId))) {
+    // A login that finished after its person was removed (members.removeMember): logged out at
+    // once, and tracked with the rest of their cleanup so a logout that fails can be retried.
+    accountId = await ctx.db.insert('networkAccounts', {
+      userId: event.userId,
+      network,
+      loginId: event.loginId,
+      ...fields,
+    })
+    await queueLogout(ctx, (await ctx.db.get(accountId))!)
+    await noteCleanup(ctx, event.userId)
+    return
   } else {
     accountId = await ctx.db.insert('networkAccounts', {
       userId: event.userId,

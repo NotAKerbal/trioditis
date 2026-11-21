@@ -128,6 +128,39 @@ describe('after a member is removed', () => {
     expect(await admin.mutation(api.members.retryCleanup, { userId: samId })).toEqual({ queued: 0, left: 0 })
   })
 
+  it('tracks an account from a login that finished after the removal, with a retry if its logout fails', async () => {
+    const t = setup()
+    const admin = await signIn(t, await user(t, 'admin@x.test'), 'admin')
+    const samId = await user(t, 'sam@x.test')
+    await signIn(t, samId)
+    // No account yet, only a login under way.
+    await t.run(async (ctx) => {
+      await ctx.db.insert('loginSessions', { userId: samId, network: 'whatsapp', state: 'active', updatedAt: 1 })
+    })
+    await admin.mutation(api.members.removeMember, { userId: samId })
+    // The login finishes on the bridge host anyway.
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      hostId: 'whatsapp-1',
+      network: 'whatsapp',
+      events: [{ seq: 1, type: 'loginState', userId: samId, loginId: 'late', at: Date.now(), state: 'CONNECTED' }],
+    })
+    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([
+      { userId: samId, email: 'sam@x.test', accounts: 1, pending: 1 },
+    ])
+    const logout = (await claim(t)).find((c) => c.payload.type === 'logout')!
+    expect(logout).toMatchObject({ loginId: 'late' })
+    await t.mutation(api.gateway.commandResult, {
+      secret: GATEWAY_SECRET,
+      commandId: logout.commandId,
+      lease: logout.lease,
+      accepted: false,
+      error: 'invalid_command',
+    })
+    expect(await admin.query(api.members.removedCleanup, {})).toMatchObject([{ failed: 1 }])
+    expect(await admin.mutation(api.members.retryCleanup, { userId: samId })).toEqual({ queued: 1, left: 1 })
+  })
+
   it('refuses an agent connection approved before the removal, and revokes it on first use', async () => {
     const t = setup()
     const samId = await user(t, 'sam@x.test')

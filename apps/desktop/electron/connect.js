@@ -13,10 +13,14 @@ function showError(message) {
   error.hidden = !message
 }
 
-showError(new URLSearchParams(window.location.search).get('error'))
+const startError = new URLSearchParams(window.location.search).get('error')
+showError(startError)
+// Sent back here because the saved server couldn't be reached: connecting again is a retry.
+const idleLabel = () => (startError && input.value ? 'Retry' : 'Connect')
 
 void bridge.current().then(({ address, open }) => {
   if (address && !input.value) input.value = address
+  submit.textContent = idleLabel()
   // Changing servers: the current one is still open behind this window.
   cancel.hidden = !open
 })
@@ -35,6 +39,6 @@ form.addEventListener('submit', async (event) => {
     showError('Something went wrong. Try again.')
   } finally {
     submit.disabled = false
-    submit.textContent = 'Connect'
+    submit.textContent = idleLabel()
   }
 })

@@ -279,7 +279,7 @@ function openServer(origin: string, url = `${origin}/`) {
     if (!isMainFrame || loaded || code === -3 || serverWindow !== win) return
     serverWindow = null
     // The picker opens first: with no window left for a moment, the app would quit.
-    showConnect(`Couldn’t open ${origin} (${description}).`)
+    showConnect(`Couldn’t reach your server at ${origin} (${description}). Check your connection, then retry.`)
     win.destroy()
   })
   // On a Mac, closing the window keeps the app running for notifications, as Mac apps do.
