@@ -85,8 +85,11 @@ export function Attachments({
 }) {
   return (
     <div className={cn('flex flex-col gap-1', className)}>
-      {attachments.map((a) =>
-        isImage(a) ? (
+      {attachments.map((a, i) =>
+        a.failed ? (
+          // A failed file has no media ID, so it's told apart by its place in the message.
+          <UnavailableTile key={`failed-${i}`} attachment={a} />
+        ) : isImage(a) ? (
           <Picture key={a.mediaId} network={network} attachment={a} />
         ) : (
           <FileTile key={a.mediaId} network={network} attachment={a} />
@@ -311,6 +314,25 @@ function FileTile({ network, attachment, note }: { network: Network; attachment:
         name={name}
         className="size-7 justify-center rounded-full"
       />
+    </span>
+  )
+}
+
+/**
+ * A file that arrived but the bridge host couldn't keep: its name says what was sent, and there's
+ * nothing to open, play or save, so it offers none of those.
+ */
+function UnavailableTile({ attachment }: { attachment: Attachment }) {
+  const name =
+    attachment.name ||
+    (isImage(attachment) ? 'Photo' : isVideo(attachment) ? 'Video' : isAudio(attachment) ? 'Audio' : 'File')
+  return (
+    <span className="flex max-w-[320px] items-center gap-3 rounded-[14px] bg-surface px-3 py-2.5 text-foreground shadow-[0_0_0_1px_var(--border)]">
+      <FileIcon className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium">{name}</span>
+        <span className="block text-xs text-subtle-foreground">Not available</span>
+      </span>
     </span>
   )
 }

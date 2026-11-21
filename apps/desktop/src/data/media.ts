@@ -143,6 +143,7 @@ export function mediaUrl(userId: string, network: Network, attachment: Attachmen
  * becomes a Blob, as a plain download, so it can never open as a page here.
  */
 export async function saveMedia(userId: string, network: Network, attachment: Attachment, name: string) {
+  if (attachment.failed) throw new Error('This file wasn’t kept.')
   const bytes = await decrypted(userId, network, attachment)
   const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }))
   const link = document.createElement('a')
@@ -172,7 +173,8 @@ export function useMedia(
   const [state, setState] = useState<MediaState & { mediaId?: string }>({ state: 'idle' })
   const retries = useRef({ mediaId: '', count: 0 })
   const mediaId = attachment?.mediaId
-  const wanted = !!attachment && active && (auto || asked > 0)
+  // A file the bridge host couldn't store has nothing to fetch (`failed` on Attachment).
+  const wanted = !!attachment && !attachment.failed && active && (auto || asked > 0)
   useEffect(() => {
     if (!attachment || !wanted) return setState({ state: 'idle' })
     let current = true
