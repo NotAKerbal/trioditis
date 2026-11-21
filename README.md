@@ -1,6 +1,9 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
-
-# Trioditis
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img src="assets/brand/lockup.svg" height="56" alt="Trioditis">
+  </picture>
+</h1>
 
 _"Of the three roads": a crossroads for all of your conversations._
 

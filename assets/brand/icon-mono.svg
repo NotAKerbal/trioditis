@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <mask id="trioditis-cut">
+    <rect width="64" height="64" fill="#fff"/>
+    <g fill="none" stroke="#000" stroke-width="7">
+      <path d="M37 -4C37 14 30 20 30 34"/>
+      <path d="M-4 31C10 31 18 32 30 34"/>
+      <path d="M61 68C56 52 41 47 30 34"/>
+    </g>
+    <circle cx="30" cy="34" r="10.5" fill="#000"/>
+    <circle cx="30" cy="34" r="4.5" fill="#fff"/>
+  </mask>
+  <rect width="64" height="64" rx="14" fill="currentColor" mask="url(#trioditis-cut)"/>
+</svg>

@@ -120,10 +120,6 @@ footer {
   color: var(--fg);
 }
 
-.brand img {
-  border-radius: 7px;
-}
-
 nav {
   display: flex;
   gap: 24px;

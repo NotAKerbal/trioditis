@@ -50,15 +50,9 @@ main {
 }
 
 .mark {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 44px;
   height: 44px;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 22px;
-  font-weight: 600;
 }
 
 h1 {
