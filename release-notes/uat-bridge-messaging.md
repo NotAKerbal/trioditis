@@ -1,0 +1,8 @@
+Fixed: A WhatsApp message that took over five minutes to bridge is no longer lost if the bridge stops before it's saved; WhatsApp sends it again.
+Fixed: Changing a WhatsApp or Signal reaction, or adding it back after removing it, now shows instead of being dropped.
+Fixed: Messages that mention you and message requests now show in the Mentions and Requests views.
+Fixed: A file that couldn't be saved now shows in its message as a failed file instead of vanishing.
+Improved: New chats accept phone numbers as you'd write them, and say when a number is written wrong rather than that nobody has it.
+Fixed: Chat and contact pictures no longer turn back into initials after a name change.
+Fixed: A bridge that is shut down shows offline at once rather than two minutes later.
+Fixed: Cancelling a login just as it finishes no longer leaves it half connected.

@@ -16,7 +16,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/id"
@@ -110,6 +112,20 @@ func MessageEventID(key networkid.PortalKey, messageID networkid.MessageID, part
 // ReactionEventID is the deterministic event ID for a reaction.
 func ReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID, sender networkid.UserID, emojiID networkid.EmojiID) id.EventID {
 	return hashEventID("reaction", string(key.ID), string(key.Receiver), string(messageID), string(partID), string(sender), string(emojiID))
+}
+
+// RemoteReactionEventID is the event ID for a reaction from the network, the dedup key Convex
+// applies each reaction event once by. On networks where a person has one reaction per
+// message (WhatsApp, Signal) the emoji ID is empty, so the target, sender and emoji ID alone
+// would give a changed reaction, or one taken away and given again, the ID of the first, and
+// it would be dropped as a replay. The emoji and the network's timestamp tell those apart,
+// while a redelivery of the same reaction (same emoji, same timestamp) keeps its ID.
+func RemoteReactionEventID(key networkid.PortalKey, messageID networkid.MessageID, partID networkid.PartID, sender networkid.UserID, emojiID networkid.EmojiID, emoji string, ts time.Time) id.EventID {
+	var at string
+	if !ts.IsZero() {
+		at = strconv.FormatInt(ts.UnixMilli(), 10)
+	}
+	return hashEventID("reaction/2", string(key.ID), string(key.Receiver), string(messageID), string(partID), string(sender), string(emojiID), emoji, at)
 }
 
 // OutgoingEventID is the event ID of a message the person sent from Trioditis. It is

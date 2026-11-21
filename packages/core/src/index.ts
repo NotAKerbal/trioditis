@@ -51,6 +51,11 @@ export interface Attachment {
   width?: number
   height?: number
   durationMs?: number
+  /**
+   * The file arrived but the bridge host couldn't store it: `mediaId`, `key` and `nonce` are
+   * empty and there is nothing to fetch. The rest says what the file was.
+   */
+  failed?: boolean
 }
 
 /** A message's sealed content. See docs/architecture/sealing.md, Message plaintext. */

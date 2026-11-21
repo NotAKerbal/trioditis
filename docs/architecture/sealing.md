@@ -131,19 +131,34 @@ file.
 `truncated` is set only when the bridge host cut a message down to fit the 256 KiB sealed
 limit (see bridge-protocol.md, Sizes): its `html` was dropped and its `body` may end early.
 
+An attachment with `"failed": true` arrived but couldn't be stored: its upload was gone, or
+writing its sealed copy still failed after the bridge host tried again (three more times over
+about four seconds). It has empty `mediaId`, `key` and `nonce`, so there is nothing to fetch,
+and keeps what the file was (`mime`, `size`, `name`, dimensions), so the message says a file
+was sent rather than arriving without it.
+
 Chat and contact metadata carry their avatar as an attachment (with its key and nonce)
 in `avatar`, for the same reason. When the avatar is unchanged but the bridge host can't
 include it this time, the metadata says `avatarUnchanged: true` instead, and clients keep
-the avatar they have (a device seeing the chat for the first time has none until it
-changes).
+the avatar they have.
+
+An avatar's upload lives only minutes, but its sealed copy stays in the media store. So the
+bridge host keeps the first copy's attachment (its media ID, key and nonce) for each owner,
+sealed to the bridge key only (kind `avatarRef`, object ID the avatar's content URI, table
+`trioditis_avatar_ref`), and attaches it again to later metadata once the upload is gone: a
+change to the chat's name alone still carries the avatar, and a device that never saw it gets
+it. `avatarUnchanged` is left for an avatar from before references were kept, or one whose
+reference can't be opened (sealed to an earlier bridge key).
 
 Unknown fields are preserved by readers, so newer writers can add fields without a
 version bump.
 
 ## Bridge key exposure
 
-Anything sealed to the bridge key (outbound sends, login input) can be opened by whoever has
-both the stored ciphertext and `BRIDGE_PRIVATE_KEY`. The ciphertext is in the Convex
+Anything sealed to the bridge key (outbound sends, login input, kept avatar references) can
+be opened by whoever has both the stored ciphertext and `BRIDGE_PRIVATE_KEY`. Avatar
+references are in the bridge host's own database, not Convex, and open only the avatar's
+sealed copy in its media store. The ciphertext is in the Convex
 database, so a database backup or snapshot is one source of it. The key is not in the
 database: it is in the bridge host's environment, which is the server's `deploy/.env` in the
 self-hosted bundle and `.data/dev.env` in development.
@@ -187,23 +202,25 @@ login tables (chat names, contact names, phone numbers), WhatsApp's history-sync
 history until it is imported), whatsmeow's contacts, and whatsmeow's decrypted-event buffer
 (`whatsmeow_event_buffer`). That buffer holds each incoming WhatsApp message's decrypted
 protobuf (content included) from decryption until its handler returns success, and
-whatsmeow then clears the plaintext. That is normally once the bridge host has journaled it
-sealed (usually moments), but bridgev2 also reports success when its 5-minute handler limit
-passes, while handling carries on (see below). It is kept on purpose: a message can be decrypted only once, so without it a
-crash mid-message would lose that message. Plaintext stays in a row only when:
+whatsmeow then clears the plaintext and acknowledges the message. That is once the bridge
+host has journaled it sealed (usually moments). bridgev2 reports success when its 5-minute
+handler limit passes, while handling carries on in the background, so the bridge host wraps
+the handler: one that took that long says success only once the message is journaled, and
+failure if it isn't within 20 minutes or the host is stopping. It is kept on purpose: a
+message can be decrypted only once, so without it a crash mid-message would lose that
+message. Plaintext stays in a row only when:
 
-- handling failed, or the process stopped before it finished: the message wasn't
-  acknowledged, so WhatsApp redelivers it, and the buffered copy is bridged and cleared then;
+- handling failed, the process stopped before it finished, or a backgrounded message
+  wasn't journaled in time: the message wasn't acknowledged, so WhatsApp redelivers it, and
+  the buffered copy is bridged and cleared then (a copy that did reach the journal meanwhile
+  is the same event ID, so it is applied once);
 - clearing the plaintext failed with a database error: whatsmeow still acknowledges the
   message, so no redelivery clears it.
 
 Either way the row is deleted, plaintext and all, by the first sweep that succeeds once it
 is about 14 days old (WhatsApp's redelivery window); the bridge host sweeps at start-up and
-hourly, and a sweep that fails leaves the row for the next. One case loses a message rather than
-keeping it: after bridgev2's 5-minute handler limit it reports success while handling
-carries on in the background, so whatsmeow clears the plaintext and acknowledges the
-message; if the process stops before the sealed event is journaled, WhatsApp doesn't
-redeliver it. See the bridge host README, Plaintext at rest.
+hourly, and a sweep that fails leaves the row for the next. See the bridge host README,
+Plaintext at rest.
 
 ### The other networks
 

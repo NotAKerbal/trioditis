@@ -25,6 +25,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // SendMode controls what happens to the next sends.
@@ -216,9 +217,12 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 		name = DisplayName(other)
 		roomType = database.RoomTypeDM
 	}
+	// A chat whose ID starts "request-" is a message request, until AcceptRequest.
+	request := strings.HasPrefix(string(portal.ID), "request-")
 	return &bridgev2.ChatInfo{
-		Name: &name,
-		Type: &roomType,
+		Name:           &name,
+		Type:           &roomType,
+		MessageRequest: &request,
 		Members: &bridgev2.ChatMemberList{IsFull: true, OtherUserID: other, Members: []bridgev2.ChatMember{
 			{EventSender: bridgev2.EventSender{IsFromMe: true, Sender: c.self()}, Membership: event.MembershipJoin},
 			{EventSender: bridgev2.EventSender{Sender: other}, Membership: event.MembershipJoin},
@@ -461,6 +465,42 @@ func (n *Network) Incoming(loginID networkid.UserLoginID, chatID networkid.Porta
 			}
 			return textMessage(data), nil
 		},
+	})
+	return resultError(res)
+}
+
+// IncomingMention delivers a text message that mentions the person, written as connectors
+// write a mention of the login itself: the person's Matrix ID.
+func (n *Network) IncomingMention(loginID networkid.UserLoginID, chatID networkid.PortalID, senderID networkid.UserID, msgID networkid.MessageID, text string) error {
+	ul, err := n.login(loginID)
+	if err != nil {
+		return err
+	}
+	res := ul.QueueRemoteEvent(&simplevent.Message[string]{
+		EventMeta: meta(bridgev2.RemoteEventMessage, ul, chatID, senderID, time.Time{}),
+		Data:      text,
+		ID:        msgID,
+		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data string) (*bridgev2.ConvertedMessage, error) {
+			converted := textMessage(data)
+			converted.Parts[0].Content.Mentions = &event.Mentions{UserIDs: []id.UserID{ul.UserMXID}}
+			return converted, nil
+		},
+	})
+	return resultError(res)
+}
+
+// AcceptRequest says, as the network would, that the person accepted a message request.
+func (n *Network) AcceptRequest(loginID networkid.UserLoginID, chatID networkid.PortalID) error {
+	ul, err := n.login(loginID)
+	if err != nil {
+		return err
+	}
+	accepted := false
+	evtMeta := meta(bridgev2.RemoteEventChatInfoChange, ul, chatID, networkid.UserID(ul.ID), time.Time{})
+	evtMeta.CreatePortal = false
+	res := ul.QueueRemoteEvent(&simplevent.ChatInfoChange{
+		EventMeta:      evtMeta,
+		ChatInfoChange: &bridgev2.ChatInfoChange{ChatInfo: &bridgev2.ChatInfo{MessageRequest: &accepted}},
 	})
 	return resultError(res)
 }

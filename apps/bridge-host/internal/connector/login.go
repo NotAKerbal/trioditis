@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
@@ -32,6 +33,8 @@ type loginSession struct {
 	process bridgev2.LoginProcess
 	ctx     context.Context
 	cancel  context.CancelFunc
+	// existing are the person's accounts on the network when the login started.
+	existing map[networkid.UserLoginID]bool
 
 	lock   sync.Mutex
 	step   *bridgev2.LoginStep
@@ -90,7 +93,11 @@ func (c *Connector) handleLoginStart(ctx context.Context, cmd *protocol.Command,
 		return err
 	}
 	sessionCtx, cancel := context.WithCancel(c.Bridge.BackgroundCtx)
-	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel}
+	s := &loginSession{c: c, id: cmd.LoginSessionID, userID: cmd.UserID, process: process, ctx: sessionCtx, cancel: cancel,
+		existing: make(map[networkid.UserLoginID]bool)}
+	for _, loginID := range user.GetUserLoginIDs() {
+		s.existing[loginID] = true
+	}
 	c.logins.Store(s.id, s)
 	go func() {
 		step, err := process.Start(sessionCtx)
@@ -218,20 +225,29 @@ func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command
 	if !c.logins.CompareAndDelete(cmd.LoginSessionID, s) {
 		return nil
 	}
-	s.finish()
+	c.endedLogins.Store(s.id, struct{}{})
+	// The login may have completed at the same moment: whichever ends it first is the outcome
+	// reported, and the other changes nothing (a completion that loses logs the new account
+	// back out, see advance).
+	if !s.finish() {
+		return nil
+	}
 	return s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepCancelled})
 }
 
-func (s *loginSession) finish() {
+// finish ends the login, unless something else already did. It reports whether this call
+// ended it, so exactly one last step is reported.
+func (s *loginSession) finish() bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if s.done {
-		return
+		return false
 	}
 	s.done = true
 	s.cancel()
 	s.process.Cancel()
 	s.closeBrowser()
+	return true
 }
 
 // maxLoginStepBytes is the most a login step may hold, as the backend requires.
@@ -241,7 +257,9 @@ func (s *loginSession) emit(step *protocol.LoginStep) error {
 	if data, err := json.Marshal(step); err == nil && len(data) > maxLoginStepBytes {
 		// A network asking to show something this big can't be shown; the login ends instead.
 		s.c.forgetLogin(s.id)
-		s.finish()
+		if !s.finish() {
+			return nil
+		}
 		return s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: protocol.ErrLoginFailed})
 	}
 	return s.c.emit(s.c.Bridge.BackgroundCtx, &protocol.Event{
@@ -277,18 +295,41 @@ func (c *Connector) endLogin(ctx context.Context, userID, loginSessionID string,
 // keeps waiting in the background until the network moves on.
 func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	log := s.c.Log.With().Str("login_session_id", s.id).Logger()
-	s.lock.Lock()
-	if s.done {
-		s.lock.Unlock()
-		return
-	}
-	s.lock.Unlock()
 	if err == nil && step == nil {
 		err = errors.New("login process returned no step")
 	}
+	completed := err == nil && step.Type == bridgev2.LoginStepTypeComplete
+	stepID := ""
+	if err == nil {
+		if stepID = step.TxnID; stepID == "" {
+			stepID = randomStepID()
+		}
+	}
+	// Checked and claimed in one go, so a cancel can't slip in between: either the cancel ended
+	// the login first and this step changes nothing, or a completion has claimed it and the
+	// cancel does.
+	s.lock.Lock()
+	if s.done {
+		s.lock.Unlock()
+		if completed {
+			s.discardCompleted(step)
+		}
+		return
+	}
+	if completed {
+		s.done = true
+	}
+	if err == nil {
+		s.step, s.stepID = step, stepID
+		// The last step's browser has nothing more to do.
+		s.closeBrowser()
+	}
+	s.lock.Unlock()
 	if err != nil {
 		s.c.forgetLogin(s.id)
-		s.finish()
+		if !s.finish() {
+			return
+		}
 		// Only the error's type is logged: a connector's error text can quote what the person
 		// typed. The person sees a code.
 		log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Login failed")
@@ -301,21 +342,15 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		}
 		return
 	}
-	stepID := step.TxnID
-	if stepID == "" {
-		stepID = randomStepID()
-	}
-	s.lock.Lock()
-	s.step, s.stepID = step, stepID
-	// The last step's browser has nothing more to do.
-	s.closeBrowser()
-	s.lock.Unlock()
 	out := &protocol.LoginStep{StepID: stepID, Instructions: step.Instructions}
 	switch step.Type {
 	case bridgev2.LoginStepTypeDisplayAndWait:
 		out.Type = protocol.StepDisplayAndWait
 		if p := step.DisplayAndWaitParams; p != nil {
 			out.Display = &protocol.LoginDisplay{Type: string(p.Type), Data: p.Data}
+			if p.Data != "" {
+				out.Display.ExpiresAt = time.Now().Add(DisplayLifetime).UnixMilli()
+			}
 		}
 	case bridgev2.LoginStepTypeUserInput:
 		out.Type = protocol.StepUserInput
@@ -347,10 +382,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			}
 			out.LoginID = loginID
 		}
+		// Claimed above, so a cancel from here on leaves it complete.
 		s.c.forgetLogin(s.id)
-		s.lock.Lock()
-		s.done = true
-		s.lock.Unlock()
 		s.cancel()
 	default:
 		s.advance(nil, errors.New("this login step type isn't supported: "+string(step.Type)))
@@ -362,6 +395,9 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 	}
 	if err := report(out); err != nil {
 		log.Err(err).Msg("Failed to report login step")
+	}
+	if out.Display != nil && out.Display.ExpiresAt != 0 {
+		go s.keepDisplay(stepID, out)
 	}
 	if p := step.CookiesParams; step.Type == bridgev2.LoginStepTypeCookies && p != nil && p.Hidden && s.c.Signin != nil {
 		s.runHidden(stepID)
@@ -377,6 +413,55 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			s.advance(next, err)
 		}()
 	}
+}
+
+// DisplayLifetime is how long a QR or pairing code is shown without the bridge host saying it
+// is still good. While the code is the login's current step the host says so every half of
+// it, so a code only disappears early when the host has stopped, or the login has moved on.
+var DisplayLifetime = 90 * time.Second
+
+// keepDisplay reports a display step again, with its expiry moved on, every half of
+// DisplayLifetime for as long as it is the login's current step. It reports under the login's
+// lock, so it can't land after the step that replaces it.
+func (s *loginSession) keepDisplay(stepID string, step *protocol.LoginStep) {
+	ticker := time.NewTicker(DisplayLifetime / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.lock.Lock()
+		if s.done || s.stepID != stepID {
+			s.lock.Unlock()
+			return
+		}
+		display := *step.Display
+		display.ExpiresAt = time.Now().Add(DisplayLifetime).UnixMilli()
+		refreshed := *step
+		refreshed.Display = &display
+		err := s.c.emit(s.c.Bridge.BackgroundCtx, &protocol.Event{
+			Type: protocol.EventLoginStep, UserID: s.userID, LoginSessionID: s.id, Step: &refreshed,
+		})
+		s.lock.Unlock()
+		if err != nil {
+			s.c.Log.Err(err).Str("login_session_id", s.id).Msg("Failed to report that a login code is still good")
+		}
+	}
+}
+
+// discardCompleted logs out an account a login connected after it was cancelled: the
+// person asked for it not to be, and was told it wasn't. An account the person already had
+// (signing in to it again) is left as it is, since logging it out would lose more than the
+// cancel asked for.
+func (s *loginSession) discardCompleted(step *bridgev2.LoginStep) {
+	p := step.CompleteParams
+	if p == nil || p.UserLogin == nil || s.existing[p.UserLoginID] {
+		return
+	}
+	s.c.Log.Info().Str("login_session_id", s.id).Msg("A login completed after it was cancelled; logging the new account out")
+	go p.UserLogin.Logout(s.c.Bridge.BackgroundCtx)
 }
 
 // decodeCookies percent-decodes what was read from a browser cookie, as bridgev2's own cookie

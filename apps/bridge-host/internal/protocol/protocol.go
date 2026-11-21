@@ -49,6 +49,9 @@ type Event struct {
 	ReplyTo         string         `json:"replyTo,omitempty"`
 	ThreadRoot      string         `json:"threadRoot,omitempty"`
 	ClientMessageID string         `json:"clientMessageId,omitempty"`
+	// MentionsMe says a message mentions the person (by name, or the whole chat): the bridge
+	// host can tell, as it sees the plaintext. It feeds the inbox's Mentions view.
+	MentionsMe bool `json:"mentionsMe,omitempty"`
 
 	Key string `json:"key,omitempty"`
 
@@ -59,6 +62,9 @@ type Event struct {
 	Kind           string `json:"kind,omitempty"`
 	ParentPortalID string `json:"parentPortalId,omitempty"`
 	Deleted        bool   `json:"deleted,omitempty"`
+	// IsRequest is whether the network says the chat is a message request the person hasn't
+	// accepted. Nil leaves what the backend has alone.
+	IsRequest *bool `json:"isRequest,omitempty"`
 
 	GhostID string `json:"ghostId,omitempty"`
 
@@ -105,14 +111,14 @@ type eventShape struct{ required, optional []string }
 // against before sending it on: a field it doesn't expect, or a required one missing, gets
 // the event quarantined.
 var eventShapes = map[string]eventShape{
-	EventMessage:            {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId"}},
+	EventMessage:            {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId", "mentionsMe"}},
 	EventEdit:               {[]string{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, []string{"clientMessageId"}},
 	EventReaction:           {[]string{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
 	EventReactionRemove:     {[]string{"portalId", "targetEventId", "sender", "key"}, nil},
 	EventRedaction:          {[]string{"portalId", "targetEventId", "sender", "networkTs"}, nil},
 	EventReceipt:            {[]string{"portalId", "sender", "upToEventId", "networkTs"}, nil},
 	EventTyping:             {[]string{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted"}},
+	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted", "isRequest"}},
 	EventContact:            {[]string{"ghostId", "sealed"}, nil},
 	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
 	EventChatStarted:        {[]string{"requestId"}, []string{"portalId", "error"}},
@@ -146,6 +152,10 @@ func (e *Event) field(name string) (any, bool) {
 		return str(e.ThreadRoot)
 	case "clientMessageId":
 		return str(e.ClientMessageID)
+	case "mentionsMe":
+		return e.MentionsMe, e.MentionsMe
+	case "isRequest":
+		return e.IsRequest, e.IsRequest != nil
 	case "key":
 		return str(e.Key)
 	case "upToEventId":
@@ -209,7 +219,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 // value still has the right type. A missing object or flag is left out instead.
 func writesZero(name string) bool {
 	switch name {
-	case "sender", "sealed", "historical", "typing", "timeoutMs", "step", "more":
+	case "sender", "sealed", "historical", "typing", "timeoutMs", "step", "more", "mentionsMe", "isRequest":
 		return false
 	}
 	return true
@@ -311,6 +321,9 @@ const (
 	ErrInternal        = "internal"
 	// ErrNotFound: the network has no one by that phone number, email or username.
 	ErrNotFound = "not_found"
+	// ErrInvalidIdentifier: what a startChat named isn't a phone number or username the
+	// network takes (too few digits, say), so nobody was looked up.
+	ErrInvalidIdentifier = "invalid_identifier"
 )
 
 // LoginStep is one step of a login flow, rendered by the app's generic login stepper.
@@ -338,6 +351,10 @@ const (
 type LoginDisplay struct {
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"`
+	// ExpiresAt (ms since the epoch) is when a QR or pairing code stops being shown. The host
+	// moves it on while the code is still good, so the code from a host that went down
+	// disappears instead of staying up for a scan that can't work.
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
 }
 
 type LoginField struct {
@@ -378,6 +395,9 @@ type EventBatch struct {
 	Network     string   `json:"network"`
 	CommandAddr string   `json:"commandAddr"`
 	Events      []*Event `json:"events"`
+	// Stopping marks the last heartbeat of a host that is shutting down, so it shows offline at
+	// once rather than once two minutes of missed heartbeats have passed.
+	Stopping bool `json:"stopping,omitempty"`
 }
 
 type EventBatchResponse struct {
@@ -471,6 +491,7 @@ type MessagePlaintext struct {
 }
 
 type Attachment struct {
+	// MediaID, Key and Nonce are empty on a Failed attachment.
 	MediaID    string `json:"mediaId"`
 	Mime       string `json:"mime"`
 	Size       int    `json:"size"`
@@ -480,6 +501,9 @@ type Attachment struct {
 	Width      int    `json:"width,omitempty"`
 	Height     int    `json:"height,omitempty"`
 	DurationMS int    `json:"durationMs,omitempty"`
+	// Failed means the file arrived but couldn't be stored: the message keeps a record of it
+	// (type, size, name) with nothing to fetch, rather than losing it without a trace.
+	Failed bool `json:"failed,omitempty"`
 }
 
 // ChatPlaintext is a chat's sealed metadata.
