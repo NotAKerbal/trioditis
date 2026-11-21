@@ -336,11 +336,15 @@ export function importPlanner(imported: readonly PersonPlaintext[]) {
   const keys = imported.map(() => newClientId())
   const own = new Set(keys)
   const done = new Set<number>()
-  const entriesOf = new Map<string, number[]>()
+  // Which entries the latest plan put on each card. Only the latest: a plan worked out again
+  // after another device's change can move an entry to another card, and a write of the card
+  // it was on before mustn't count it as written.
+  let entriesOf = new Map<string, number[]>()
   // The entries the latest plan left out because each could be more than one card.
   let ambiguous = new Set<number>()
   return {
     plan: (existing: readonly Person[]) => {
+      entriesOf = new Map()
       ambiguous = new Set()
       const pending = imported.flatMap((card, index) => (done.has(index) ? [] : [{ card, index }]))
       const planned = planImport(
