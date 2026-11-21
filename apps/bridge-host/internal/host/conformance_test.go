@@ -621,13 +621,14 @@ func TestConformance(t *testing.T) {
 		// A name that changes while the pass runs, saved after it read the chat, is described
 		// again from the saved copy once the pass has let it settle.
 		h.host.Connector.DescribeSettle = 500 * time.Millisecond
+		room := chatRoom(t, h, msg.PortalID)
 		renamed := make(chan error, 1)
 		go func() {
 			deadline := time.Now().Add(5 * time.Second)
 			for gw.count(isCarol) == before && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
 			}
-			_, err := h.host.Bridge.DB.RawDB.ExecContext(ctx, `UPDATE portal SET name='Carol Renamed' WHERE mxid=$1`, chatRoom(t, h, msg.PortalID))
+			_, err := h.host.Bridge.DB.RawDB.ExecContext(ctx, `UPDATE portal SET name='Carol Renamed' WHERE mxid=$1`, room)
 			renamed <- err
 		}()
 		if err := h.host.Connector.DescribeDirectChats(ctx); err != nil {
