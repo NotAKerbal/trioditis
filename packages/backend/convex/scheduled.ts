@@ -103,7 +103,8 @@ export const copies = query({
 
 /**
  * Schedules a message. Sealed exactly as for `messages.send`. `clientMessageId` is the send's
- * ID when it goes out, so scheduling the same ID twice does nothing.
+ * ID when it goes out, so scheduling the same ID twice does nothing. Returns the scheduled ID,
+ * or what the ID was used for already (`sent`, `scheduled`).
  */
 export const create = mutation({
   args: {
@@ -114,11 +115,12 @@ export const create = mutation({
     sendAt: v.number(),
     replyTo: v.optional(v.string()),
   },
-  returns: v.union(v.null(), v.id('scheduledSends')),
+  returns: v.union(v.literal('sent'), v.literal('scheduled'), v.id('scheduledSends')),
   handler: async (ctx, { chatId, sendAt, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
-    if (await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)) return null
+    const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
+    if (used) return used
     const now = Date.now()
     if (!Number.isFinite(sendAt) || sendAt <= now) throw new ConvexError('Pick a time in the future.')
     if (sendAt > now + MAX_AHEAD_MS) throw new ConvexError('Pick a time within a year.')

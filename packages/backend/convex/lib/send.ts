@@ -23,18 +23,25 @@ export interface SendInput {
   replyTo?: string
 }
 
-/** Whether `clientMessageId` has been used by this person, as a send or a scheduled send. */
-export async function clientMessageIdUsed(ctx: QueryCtx, userId: string, clientMessageId: string) {
+/**
+ * What `clientMessageId` has been used for by this person: a send, a scheduled send, or
+ * nothing yet (null). A scheduled send that has gone out was a send too, and says so.
+ */
+export async function clientMessageIdUsed(
+  ctx: QueryCtx,
+  userId: string,
+  clientMessageId: string,
+): Promise<'sent' | 'scheduled' | null> {
   const sent = await ctx.db
     .query('outbox')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  if (sent) return true
+  if (sent) return 'sent'
   const scheduled = await ctx.db
     .query('scheduledSends')
     .withIndex('by_clientMessageId', (q) => q.eq('userId', userId).eq('clientMessageId', clientMessageId))
     .first()
-  return scheduled !== null
+  return scheduled ? 'scheduled' : null
 }
 
 /** Refuses a send that can't go out as given. */
