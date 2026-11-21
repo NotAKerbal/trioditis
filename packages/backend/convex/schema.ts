@@ -215,6 +215,11 @@ export default defineSchema({
      * late but sorts at or before it doesn't count as unread.
      */
     readSortKey: v.optional(v.string()),
+    /**
+     * The `sortKey` of the newest message someone else's read receipt has covered. Only moves
+     * forward. The person's own messages up to it are `read`, including one that arrives late.
+     */
+    theirReadSortKey: v.optional(v.string()),
     /** Hidden from the inbox until then, or until a new message wakes it. */
     snoozedUntil: v.optional(v.number()),
     woke: v.optional(v.boolean()),

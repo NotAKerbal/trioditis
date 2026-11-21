@@ -667,4 +667,56 @@ describe('read watermark and receipts', () => {
     await ingest(t, [theirReceipt('e2', 2_100)])
     expect(await deliveries(t)).toEqual({ o1: 'read', e2: undefined, 'pending:x': 'unknown' })
   })
+
+  it('marks the person’s own message read when it arrives late behind someone’s receipt', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), own('o3', 3_000), theirReceipt('o3', 3_500)])
+    // Sent from the phone at 2,000, but the network delivered it to the bridge after the receipt.
+    await ingest(t, [own('o2', 2_000), own('o4', 4_000)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', o2: 'read', o3: 'read', o4: undefined })
+  })
+
+  it('looks past one already read for older ones the receipt covers', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), own('o2', 2_000), own('o3', 3_000)])
+    // A status already said o2 was read; o1, before it, wasn't.
+    await t.run(async (ctx) => {
+      const o2 = (await ctx.db.query('messages').collect()).find((row) => row.eventId === 'o2')!
+      await ctx.db.patch(o2._id, { delivery: 'read' })
+    })
+    await ingest(t, [theirReceipt('o3', 3_500)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', o2: 'read', o3: 'read' })
+  })
+
+  it('carries on past one transaction’s worth of messages', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o0', 0)])
+    await t.run(async (ctx) => {
+      const { chatId } = (await ctx.db.query('messages').first())!
+      for (let i = 1; i <= 150; i++) {
+        const eventId = `o${i}`
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId,
+          networkTs: i,
+          sortKey: `${String(i).padStart(16, '0')}:${eventId}`,
+          sender: { self: true },
+          sealed: sealed(eventId),
+          sealedObjectId: eventId,
+          historical: false,
+        })
+      }
+    })
+    await ingest(t, [theirReceipt('o150', 200)])
+    const before = Object.values(await deliveries(t)).filter((delivery) => delivery === 'read').length
+    expect(before).toBeLessThan(151)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(Object.values(await deliveries(t)).every((delivery) => delivery === 'read')).toBe(true)
+  })
 })

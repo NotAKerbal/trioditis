@@ -5,7 +5,6 @@ const chat = (overrides: Partial<OpenChat> = {}): OpenChat => ({
   id: 'c1',
   unread: 0,
   markedUnread: false,
-  lastMessageId: 'm1',
   ...overrides,
 })
 
@@ -36,14 +35,39 @@ describe('marking the open chat read', () => {
     ).toEqual([false, false, true])
   })
 
-  it('marks it read again for each message that arrives while it’s open, once', () => {
+  it('marks it read again for each message that arrives while it’s open, once per count', () => {
     expect(
       run([
         [chat({ unread: 1 }), true],
         // The mark is on its way: the count hasn't come back as 0 yet.
         [chat({ unread: 1 }), true],
         [chat({ unread: 0 }), true],
-        [chat({ unread: 1, lastMessageId: 'm2' }), true],
+        [chat({ unread: 1 }), true],
+        [chat({ unread: 0 }), true],
+      ]),
+    ).toEqual([true, false, false, true, false])
+  })
+
+  it('marks a count that rises while the preview stays the same', () => {
+    // A late message sorts before the person's own copy still sending, which stays the preview:
+    // only the count says something arrived.
+    expect(
+      run([
+        [chat(), true],
+        [chat({ unread: 1 }), true],
+        // Another arrives before the first mark's answer.
+        [chat({ unread: 2 }), true],
+      ]),
+    ).toEqual([false, true, true])
+  })
+
+  it('doesn’t send a failed mark again until the count changes', () => {
+    expect(
+      run([
+        [chat({ unread: 1 }), true],
+        [chat({ unread: 1 }), false],
+        [chat({ unread: 1 }), true],
+        [chat({ unread: 2 }), true],
       ]),
     ).toEqual([true, false, false, true])
   })
@@ -52,9 +76,9 @@ describe('marking the open chat read', () => {
     expect(
       run([
         [chat(), true],
-        [chat({ unread: 1, lastMessageId: 'm2' }), false],
-        [chat({ unread: 2, lastMessageId: 'm3' }), false],
-        [chat({ unread: 2, lastMessageId: 'm3' }), true],
+        [chat({ unread: 1 }), false],
+        [chat({ unread: 2 }), false],
+        [chat({ unread: 2 }), true],
       ]),
     ).toEqual([false, false, false, true])
   })
@@ -64,7 +88,7 @@ describe('marking the open chat read', () => {
       run([
         [chat(), true],
         [chat({ markedUnread: true }), true],
-        [chat({ unread: 1, markedUnread: true, lastMessageId: 'm2' }), true],
+        [chat({ unread: 1, markedUnread: true }), true],
       ]),
     ).toEqual([false, false, false])
   })

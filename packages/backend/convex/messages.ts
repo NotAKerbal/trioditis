@@ -2,10 +2,11 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v, type Infer } from 'convex/values'
 import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
 import type { Id } from './_generated/dataModel'
-import { mutation, query } from './_generated/server'
+import { internalMutation, mutation, query } from './_generated/server'
 import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
+import { markOwnReadRange as markRange } from './lib/ingest'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
@@ -285,6 +286,19 @@ export const reactions = query({
         .map(({ key, senderKey }) => ({ key, senderKey }))
     }
     return out
+  },
+})
+
+/**
+ * The rest of a read receipt's marking of the person's own messages, when one transaction
+ * couldn't look through them all (lib/ingest.ts, markOwnReadRange).
+ */
+export const markOwnReadRange = internalMutation({
+  args: { chatId: v.id('chats'), after: v.union(v.null(), v.string()), upTo: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, after, upTo }) => {
+    await markRange(ctx, chatId, after, upTo)
+    return null
   },
 })
 
