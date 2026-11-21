@@ -232,8 +232,13 @@ for (const size of [16, 32, 48, 64, 128, 180, 192, 256, 512, 1024]) {
 const favicon = await pngToIco([16, 32, 48].map((size) => png(icon, size)))
 write('assets/brand/favicon.ico', favicon)
 
-// The web app serves its own copies from its public directory.
-write('apps/desktop/public/icon.svg', icon)
-write('apps/desktop/public/favicon.ico', favicon)
-write('apps/desktop/public/apple-touch-icon.png', png(icon, 180))
+// The web app and the project site each serve their own copies, and the desktop app's windows
+// and connect page load theirs from beside its main process.
+for (const dir of ['apps/desktop/public', 'apps/site']) {
+  write(`${dir}/icon.svg`, icon)
+  write(`${dir}/favicon.ico`, favicon)
+  write(`${dir}/apple-touch-icon.png`, png(icon, 180))
+}
+write('apps/desktop/electron/icon.svg', icon)
+write('apps/desktop/electron/icon.png', png(icon, 512))
 write('packages/ui/src/components/wordmark.tsx', wordmarkComponent)

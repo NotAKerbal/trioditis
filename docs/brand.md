@@ -57,5 +57,6 @@ it, then run:
 pnpm --filter @trioditis/brand generate
 ```
 
-It rewrites the files in `assets/brand/`, the web app's icons in `apps/desktop/public/` and
+It rewrites the files in `assets/brand/`, the icons the web app, the project site and the desktop
+app serve (`apps/desktop/public/`, `apps/site/`, `apps/desktop/electron/`) and
 `packages/ui/src/components/wordmark.tsx`. Commit them together.

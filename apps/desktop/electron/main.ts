@@ -30,6 +30,8 @@ if (process.platform === 'win32') app.setAppUserModelId('org.trioditis.desktop')
 const here = import.meta.dirname
 const preload = path.join(here, 'preload.cjs')
 const connectPage = path.join(here, '../electron/connect.html')
+// The window and taskbar icon on Linux and Windows; macOS takes the dock icon from the app bundle.
+const icon = path.join(here, '../electron/icon.png')
 const webPreferences = { preload, contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false }
 // Windows open at once, in the theme's background (the tokens' --bg), rather than waiting for
 // ready-to-show: on some Wayland compositors a hidden window never paints, so it never fires.
@@ -133,6 +135,7 @@ function openServer(origin: string) {
     minWidth: 720,
     minHeight: 480,
     title: 'Trioditis',
+    icon,
     backgroundColor: background(),
     webPreferences: { ...webPreferences, partition: partitionFor(origin), spellcheck: true },
   })
@@ -243,6 +246,7 @@ function showConnect(error?: string) {
     maximizable: false,
     fullscreenable: false,
     title: 'Connect to a server',
+    icon,
     backgroundColor: background(),
     webPreferences,
   })

@@ -2,13 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file:; style-src file:" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src file:; style-src file:; img-src file:"
+    />
     <title>Connect to a server</title>
     <link rel="stylesheet" href="connect.css" />
   </head>
   <body>
     <main>
-      <div class="mark" aria-hidden="true">T</div>
+      <img class="mark" src="icon.svg" alt="" />
       <h1>Connect to your server</h1>
       <p class="lead">Enter the address you open Trioditis at in a browser.</p>
       <form id="form" novalidate>
