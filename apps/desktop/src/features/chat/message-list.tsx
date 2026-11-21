@@ -27,6 +27,8 @@ export interface ScheduledItem {
   sendAt: number
   /** The event ID of the message it replies to, if it's a reply. */
   replyTo: string | null
+  /** Its cancel is on its way: Cancel is off until the server answers. */
+  cancelling: boolean
 }
 
 /** A cancelled scheduled message the server keeps until it's restored or discarded. */
@@ -34,7 +36,7 @@ export interface CancelledItem {
   id: Id<'scheduledSends'>
   body: string | null | undefined
   replyTo: string | null
-  /** Its text went into the composer here already: only Discard is left. */
+  /** Its text is in this chat's draft: Restore would double it, so only Discard is offered. */
   restored: boolean
 }
 
@@ -59,7 +61,8 @@ interface MessageListProps {
   onReply: (m: Message) => void
   /** Adds the person's reaction with this key, or takes it away if it's theirs already. */
   onReact: (m: Message, key: string) => void
-  onSendAgain: (m: Message) => void
+  /** Sends it again once; `asNew` after the server said that one failed, as a new message. */
+  onSendAgain: (m: Message, asNew?: boolean) => void
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
   /** Cancels it, putting its text (when here) and reply back in the composer. */
@@ -425,8 +428,15 @@ export function MessageList(props: MessageListProps) {
               >
                 Send now
               </Button>
-              <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => props.onCancelScheduled(s)}>
-                Cancel
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto text-xs"
+                disabled={s.cancelling}
+                aria-busy={s.cancelling}
+                onClick={() => props.onCancelScheduled(s)}
+              >
+                {s.cancelling ? 'Cancelling…' : 'Cancel'}
               </Button>
             </div>
           </div>
@@ -620,16 +630,21 @@ function DeliveryProblem({
   m: Message
   /** Its one replacement: on its way, or gone. Either way it isn't offered again. */
   again: SendAgainState | undefined
-  onSendAgain: (m: Message) => void
+  onSendAgain: (m: Message, asNew?: boolean) => void
   onDiscard: (m: Message) => void
 }) {
   const sendAgain = (label: string) =>
-    again === 'sent' ? (
-      <span className="font-medium text-muted-foreground">Sent again</span>
-    ) : again === 'used' ? (
-      <span className="font-medium" role="alert">
-        Already sent again
+    again === 'sent' || again === 'going' || again === 'maybe' ? (
+      <span className="font-medium text-muted-foreground" role={again === 'maybe' ? 'alert' : undefined}>
+        {again === 'sent' ? 'Sent again' : again === 'going' ? 'Being sent again' : 'May have been sent again'}
       </span>
+    ) : again === 'failed' ? (
+      <>
+        <span className="font-medium">Sending again failed</span>
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m, true)}>
+          Send as new
+        </Button>
+      </>
     ) : (
       <Button
         variant="link"

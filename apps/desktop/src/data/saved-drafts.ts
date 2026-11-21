@@ -32,6 +32,8 @@ export interface SavedDraft<Reply> {
   reply: Reply | null
   /** The draft's identity (drafts.ts). */
   id: string
+  /** Cancelled scheduled messages restored into it (drafts.ts). */
+  origins?: string[]
 }
 
 export interface Owner {
@@ -102,7 +104,12 @@ const seal = (value: unknown, owner: Owner, chatId: string) =>
   })
 
 const sealedCopy = <Reply>(owner: Owner, chatId: string, copy: SavedDraft<Reply>, extra: object = {}) =>
-  JSON.stringify({ v: 1, id: copy.id, sealed: seal({ text: copy.text, reply: copy.reply }, owner, chatId), ...extra })
+  JSON.stringify({
+    v: 1,
+    id: copy.id,
+    sealed: seal({ text: copy.text, reply: copy.reply, origins: copy.origins ?? [] }, owner, chatId),
+    ...extra,
+  })
 
 function openCopy<Reply>(
   value: string | null,
@@ -112,7 +119,7 @@ function openCopy<Reply>(
   const entry = json(value)
   if (entry?.v !== 1 || typeof entry.id !== 'string' || !entry.id || !entry.sealed || typeof entry.sealed !== 'object')
     return null
-  const opened = tryOpen<{ text: unknown; reply?: Reply }>(
+  const opened = tryOpen<{ text: unknown; reply?: Reply; origins?: unknown }>(
     entry.sealed as Envelope,
     owner.keyPair,
     'draft',
@@ -124,6 +131,7 @@ function openCopy<Reply>(
     text: opened.text,
     reply: opened.reply ?? null,
     id: entry.id,
+    origins: Array.isArray(opened.origins) ? opened.origins.filter((o): o is string => typeof o === 'string') : [],
     ...(typeof entry.w === 'string' ? { w: entry.w } : {}),
   }
 }

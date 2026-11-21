@@ -61,10 +61,34 @@ describe('sending again', () => {
   })
 
   it('goes by what the server says, not by what the list shows, so leaving the chat changes nothing', async () => {
-    // The server had the ID already: nothing went this time.
-    expect(await sendAgain('cccccccccccccccc1', async () => ({ already: 'send' }))).toBe('used')
-    expect(await sendAgain('cccccccccccccccc2', async () => ({ already: 'scheduled' }))).toBe('used')
+    // The server had the ID already: nothing went this time, and it says how that one stands.
+    const used = (delivery: string | null) => async () => ({ already: 'send' as const, delivery })
+    expect(await sendAgain('cccccccccccccccc1', used('queued'))).toBe('going')
+    expect(await sendAgain('cccccccccccccccc2', used('delivered'))).toBe('sent')
+    expect(await sendAgain('cccccccccccccccc4', used('unknown'))).toBe('maybe')
+    expect(await sendAgain('cccccccccccccccc5', used('failed'))).toBe('failed')
     expect(await sendAgain('cccccccccccccccc3', async () => 'queued' as const)).toBe('sent')
+  })
+
+  it('offers a failed one as a new message, under a new ID, and only then', async () => {
+    const ids: string[] = []
+    const failed = async (id: string) => {
+      ids.push(id)
+      return { already: 'send' as const, delivery: 'failed' }
+    }
+    expect(await sendAgain('dddddddddddddddd1', failed)).toBe('failed')
+    // Clicking Retry again changes nothing; Send as new sends under an ID of its own.
+    expect(await sendAgain('dddddddddddddddd1', failed)).toBe('failed')
+    expect(ids).toHaveLength(1)
+    const fresh = await sendAgain('dddddddddddddddd1', async (id) => (ids.push(id), 'queued' as const), {
+      asNew: true,
+    })
+    expect(fresh).toBe('sent')
+    expect(ids[1]).not.toBe(ids[0])
+    expect(ids[1]).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+    // Once sent, even as new, not again.
+    expect(await sendAgain('dddddddddddddddd1', failed, { asNew: true })).toBe('sent')
+    expect(ids).toHaveLength(2)
   })
 
   it('counts a replacement in the list as sent, from whichever tab sent it', () => {

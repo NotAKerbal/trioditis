@@ -385,9 +385,12 @@ export default defineSchema({
     forgottenAt: v.optional(v.number()),
   })
     .index('by_user', ['userId', 'state', 'sendAt'])
-    .index('by_chat', ['chatId', 'state'])
     .index('by_clientMessageId', ['userId', 'clientMessageId'])
-    .index('by_cancelled', ['state', 'cancelledAt']),
+    // Cancelled ones still holding their copies (`forgottenAt` unset), oldest first: forgotten
+    // ones are kept, for their client message IDs, but never in the way of these.
+    .index('by_user_kept', ['userId', 'state', 'forgottenAt', 'cancelledAt'])
+    .index('by_chat_kept', ['chatId', 'state', 'forgottenAt', 'cancelledAt'])
+    .index('by_kept', ['state', 'forgottenAt', 'cancelledAt']),
 
   /**
    * A scheduled message's sealed copies, kept apart so listing and counting scheduled

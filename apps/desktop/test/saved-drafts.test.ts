@@ -2,6 +2,7 @@ import { generateKeyPair, ready } from '@trioditis/crypto'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   adoptDraft,
+  appendToDraft,
   allSending,
   clearSentDraft,
   endSend,
@@ -85,7 +86,9 @@ describe('drafts saved across a reload', () => {
     )
     const loaded = loadAll<Reply>(storage, me)
     expect(loaded.drafts.get('c1')).toMatchObject(draft('see you at 7', 'id-1', { eventId: 'e1', body: 'when?' }))
-    expect(loaded.sending).toEqual([{ chatId: 'c1', sendId: 'd_s', copy: draft('on its way', 's1') }])
+    expect(loaded.sending).toEqual([
+      { chatId: 'c1', sendId: 'd_s', copy: { ...draft('on its way', 's1'), origins: [] } },
+    ])
   })
 
   it('are stored sealed: no text, reply or plaintext of any kind on disk', () => {
@@ -294,6 +297,46 @@ describe('a restored draft sent from two tabs', () => {
     setDraftText(b, 'see you at 7, or 8')
     expect(clearSentDraft(b, same)).toBe(false)
     expect(getDraft(b).text).toBe('see you at 7, or 8')
+  })
+})
+
+describe('a draft restored from a cancelled scheduled message', () => {
+  it('remembers where it came from, sealed, across a reload and a send that didn’t go', () => {
+    const a = chat()
+    appendToDraft(a, 'see you then', null, 'sched-1')
+    expect(getDraft(a).origins).toEqual(['sched-1'])
+    // Saved and loaded: the link comes back with it, inside the sealed copy.
+    const storage = memory()
+    const me = owner()
+    const d = getDraft<Reply>(a)
+    syncChat(
+      storage,
+      me,
+      a,
+      want({ draft: { text: d.text, reply: d.reply, id: d.id, origins: d.origins }, draftChanged: true }),
+      newKnown(),
+    )
+    expect([...storage.data.values()].join()).not.toContain('sched-1')
+    expect(loadAll<Reply>(storage, me).drafts.get(a)?.origins).toEqual(['sched-1'])
+    // Taken to send, it carries the link; back after a failure, it still has it.
+    const taken = takeForSend<Reply>(a, (t) => `d_${t.id}`)!
+    expect(taken.origins).toEqual(['sched-1'])
+    restoreDraft(a, taken.text, taken.reply, taken.id, taken.origins)
+    expect(getDraft(a).origins).toEqual(['sched-1'])
+    endSend(taken.clientMessageId, false)
+  })
+
+  it('drops the link once its text is erased: the server copy stays to restore again', () => {
+    const a = chat()
+    appendToDraft(a, 'see you then', null, 'sched-2')
+    setDraftText(a, '')
+    expect(getDraft(a).origins).toEqual([])
+    // Added below another draft, both links are kept, each once.
+    const b = chat()
+    appendToDraft(b, 'one', null, 'sched-3')
+    appendToDraft(b, 'two', null, 'sched-4')
+    appendToDraft(b, 'one', null, 'sched-3')
+    expect(getDraft(b).origins).toEqual(['sched-3', 'sched-4'])
   })
 })
 
