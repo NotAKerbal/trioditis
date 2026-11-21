@@ -32,7 +32,7 @@ async function detectHints() {
 }
 
 // The files for this system that will run on this computer, or null if that can't be known.
-// More than one means the browser can't tell which, and the visitor chooses. The system
+// More than one means the browser can't tell which, so the visitor chooses. The system
 // versions follow the requirements on the page: Electron 44 and later need macOS 13 and
 // Windows 10.
 function fittingFiles(os, files, hints, agent, touchPoints) {
@@ -77,14 +77,19 @@ async function showPick() {
   const files = fittingFiles(os, all, await detectHints(), navigator.userAgent, navigator.maxTouchPoints)
   if (!files) return
 
-  const pick = document.getElementById('pick')
-  for (const file of files) {
-    const button = document.createElement('a')
-    button.className = 'button primary'
-    button.href = file.href
-    button.textContent = file.dataset.button
-    pick.append(button)
+  // A file that's known to fit is offered directly. Where the browser can't tell which of
+  // several it is, the button goes to that system's downloads, each labelled and explained.
+  const button = document.createElement('a')
+  button.className = 'button primary'
+  if (files.length === 1) {
+    button.href = files[0].href
+    button.textContent = files[0].dataset.button
+  } else {
+    button.href = `#${platform.id}`
+    button.textContent = `Download for ${platform.dataset.name}`
   }
+  const pick = document.getElementById('pick')
+  pick.append(button)
   pick.hidden = false
 }
 

@@ -58,10 +58,10 @@
         <h2 id="all-downloads">All downloads</h2>
         <!--
           Each link is to the latest release's file of that name (apps/desktop/electron-builder.yml).
-          download.js offers the ones that fit the visitor's computer at the top, labelled by data-button.
+          download.js offers the one that fits the visitor's computer at the top, labelled by data-button.
         -->
         <div class="platforms">
-          <div class="platform" data-os="mac" data-name="macOS">
+          <div class="platform" id="mac" data-os="mac" data-name="macOS">
             <h3>macOS</h3>
             <p class="req">macOS 13 or later</p>
             <div class="files">
@@ -85,7 +85,7 @@
               &amp; Security.
             </p>
           </div>
-          <div class="platform" data-os="windows" data-name="Windows">
+          <div class="platform" id="windows" data-os="windows" data-name="Windows">
             <h3>Windows</h3>
             <p class="req">Windows 10 or later, x64</p>
             <div class="files">
@@ -100,19 +100,17 @@
               If SmartScreen stops it, choose <strong>More info</strong>, then <strong>Run anyway</strong>.
             </p>
           </div>
-          <div class="platform" data-os="linux" data-name="Linux">
+          <div class="platform" id="linux" data-os="linux" data-name="Linux">
             <h3>Linux</h3>
             <p class="req">x86_64</p>
             <div class="files">
               <a
                 class="file"
-                data-button="Download .deb"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-amd64.deb"
                 ><span>Debian, Ubuntu</span><span class="kind">.deb</span></a
               >
               <a
                 class="file"
-                data-button="Download AppImage"
                 href="https://github.com/NotAKerbal/trioditis/releases/latest/download/Trioditis-linux-x86_64.AppImage"
                 ><span>Other distributions</span><span class="kind">AppImage</span></a
               >

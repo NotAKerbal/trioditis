@@ -368,6 +368,11 @@ h3 {
   border-radius: var(--radius-xl);
 }
 
+/* Where the top button leads when the browser can't tell which of a system's files fits. */
+.platform:target {
+  border-color: var(--accent);
+}
+
 .platform h3 {
   margin: 0;
 }
