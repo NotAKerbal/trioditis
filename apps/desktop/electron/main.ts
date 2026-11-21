@@ -112,10 +112,9 @@ function partitionFor(origin: string): string {
     prepared.add(partition)
     // No HTTP cache: nothing a server sends is written to disk for reuse. The web app already
     // keeps decrypted files in memory only (src/data/media.ts) and fetches media uncached, but
-    // a server's other answers (sign-in, its pages) aren't the app's to judge. Older versions
-    // cached, so what they left is cleared.
+    // a server's other answers (sign-in, its pages) aren't the app's to judge. What older
+    // versions cached is deleted at startup (removeOldHttpCaches).
     const ses = session.fromPartition(partition, { cache: false })
-    void ses.clearCache()
     ses.setPermissionRequestHandler((_contents, permission, callback, details) =>
       callback(ALLOWED_PERMISSIONS.has(permission) && sameOrigin(details.requestingUrl, origin)),
     )
