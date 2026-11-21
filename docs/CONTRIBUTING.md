@@ -307,14 +307,17 @@ app, but Apple silicon calls an app with a broken signature damaged and won't op
 
 #### Desktop releases
 
-A release is a tag. Pushing `v<version>`, such as `v0.1.0`, runs
+A release is a tag on `main`, made after the release merge from `dev` (Branches, below). The
+desktop app and the web app it opens stay in step that way: desktop `v0.1.0` is built from the
+commit servers on the Stable channel run, and the workflow refuses a tag that isn't on `main`.
+Pushing `v<version>`, such as `v0.1.0`, runs
 `.github/workflows/desktop-release.yml`: it builds every installer on its own system (Linux and
 Windows x64, the Mac for Apple silicon and Intel), with the tag's version as the app's, and
 publishes them as the tag's GitHub release, with their SHA-256 sums and notes generated from
 the pull requests since the last release.
 
 ```sh
-git tag v0.1.0 origin/main   # the release merge (Branches, below)
+git fetch origin && git tag v0.1.0 origin/main
 git push origin v0.1.0
 ```
 

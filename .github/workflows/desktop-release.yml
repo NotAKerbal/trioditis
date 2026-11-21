@@ -1,5 +1,5 @@
-# Desktop app releases (docs/CONTRIBUTING.md, Desktop releases). Pushing a tag like v0.1.0
-# builds the installers on Linux, macOS and Windows and publishes them as that tag's GitHub
+# Desktop app releases (docs/CONTRIBUTING.md, Desktop releases). Pushing a tag like v0.1.0 on
+# main builds the installers on Linux, macOS and Windows and publishes them as that tag's GitHub
 # release, which trioditis.app links to. A pull request that changes the desktop app's
 # packaging builds them too, as the run's artifacts, so a broken build shows before a release.
 name: Desktop release
@@ -135,6 +135,19 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      # The desktop app is released from the commit Stable servers run (main, the Stable
+      # channel's branch), so a desktop version and the web app it opens are the same code.
+      - name: The tag is on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          status="$(gh api "repos/$REPO/compare/main...$SHA" --jq .status)"
+          if [ "$status" != identical ] && [ "$status" != behind ]; then
+            echo "::error::Tag a commit on main: this one is $status of main (docs/CONTRIBUTING.md, Desktop releases)"
+            exit 1
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: installers-*
