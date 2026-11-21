@@ -710,7 +710,27 @@ async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSession
   if (account && account._creationTime < session._creationTime) return
   // Kept so the account's own report, if it comes after this, is flagged too.
   await ctx.db.patch(session._id, { loginId })
-  if (account) await ctx.db.patch(account._id, { connectedAfterCancel: true })
+  // A later login of theirs already connected the account normally (a retry that finished
+  // before this late completion reached us): it's theirs, nothing to ask about.
+  if (account && !(await completedSince(ctx, session, loginId))) {
+    await ctx.db.patch(account._id, { connectedAfterCancel: true })
+  }
+}
+
+/** Whether a login of the same person, started after `session`, completed on `loginId`. */
+async function completedSince(ctx: MutationCtx, session: Doc<'loginSessions'>, loginId: string) {
+  const later = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', session.userId))
+    .order('desc')
+    .take(20)
+  return later.some(
+    (s) =>
+      s._creationTime > session._creationTime &&
+      s.state === 'complete' &&
+      s.network === session.network &&
+      s.loginId === loginId,
+  )
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {

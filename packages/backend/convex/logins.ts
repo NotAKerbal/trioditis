@@ -302,7 +302,8 @@ export const openBrowser = mutation({
  * Cancels a login, and says how it ended: `cancelled`, or `complete` or `error` when it had
  * already ended that way. Asking twice changes nothing. The login ends here, not only when
  * the bridge host confirms, so a step it sends meanwhile can't bring it back; one that
- * finished on the bridge host anyway is logged out when it reports in (lib/ingest.ts).
+ * finished on the bridge host anyway keeps its account, flagged for the person to keep or
+ * disconnect (lib/ingest.ts).
  */
 export const cancel = mutation({
   args: { loginSessionId: v.id('loginSessions') },

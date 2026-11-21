@@ -227,6 +227,19 @@ describe('cancelling a login', () => {
     expect(await logoutsQueued(t)).toEqual([])
   })
 
+  it('doesn’t flag the account when a retry connected it before the cancelled login’s late completion', async () => {
+    const { t, a, loginSessionId: first } = await started()
+    await a.mutation(api.logins.cancel, { loginSessionId: first })
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(1000)
+    const retry = await a.mutation(api.logins.start, { network: 'whatsapp' })
+    await claim(t)
+    await ingest(t, [complete(retry, 'l_same'), loginState('l_same')])
+    await ingest(t, [complete(first, 'l_same')])
+    expect(await a.query(api.logins.accounts, {})).toMatchObject([{ connectedAfterCancel: false }])
+    expect(await logoutsQueued(t)).toEqual([])
+  })
+
   it('leaves an account the person already had when a cancelled reconnect finishes anyway', async () => {
     seq = 0
     const t = setup()
