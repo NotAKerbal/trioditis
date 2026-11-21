@@ -179,19 +179,8 @@ export function cardReplacesText(cards: LinkCard[], text: string): boolean {
   const [part, ...rest] = linkParts(text.trim())
   if (rest.length || part?.kind !== 'link') return false
   const said = webURL(part.href)
-  return said !== null && sameAddress(said, new URL(card.href))
-}
-
-/**
- * The very same destination, scheme, host, port, query and fragment alike, ignoring only a
- * trailing slash on the path. Hiding the sent link behind a card that goes anywhere else (the
- * page's canonical address without the section it pointed to, say) would lose where it went.
- */
-function sameAddress(a: URL, b: URL): boolean {
-  const key = (u: URL) => {
-    const copy = new URL(u.href)
-    copy.pathname = copy.pathname.replace(/\/$/, '')
-    return copy.href
-  }
-  return key(a) === key(b)
+  // The very same destination, as the browser writes it: anything else (the page's canonical
+  // address without the section it pointed to, or with a slash the server may not serve) would
+  // hide where the sent link went.
+  return said !== null && said.href === new URL(card.href).href
 }

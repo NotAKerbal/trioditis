@@ -96,7 +96,7 @@ describe('a card standing in for the text', () => {
   const card = (href: string) => linkCards(message(href, [{ url: href, title: 'T' }]), href)
   it('replaces a message that is only the previewed link', () => {
     expect(cardReplacesText(card('https://example.com/a'), ' https://example.com/a ')).toBe(true)
-    expect(cardReplacesText(card('https://example.com/a/'), 'https://example.com/a')).toBe(true)
+    expect(cardReplacesText(card('https://example.com/a/'), 'https://example.com/a')).toBe(false)
   })
   it('keeps the text when it says more, or when the card is only from the address', () => {
     expect(cardReplacesText(card('https://example.com/a'), 'look https://example.com/a')).toBe(false)
