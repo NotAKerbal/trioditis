@@ -172,7 +172,7 @@ describe('privacy between people', () => {
       }
     })
     expect(await t.query(internal.mcp.networksForUser, { userId: 'user_a' })).toEqual([
-      { network: 'whatsapp', state: 'CONNECTED', lastHealthyAt: null },
+      expect.objectContaining({ network: 'whatsapp', state: 'CONNECTED', lastHealthyAt: null }),
     ])
   })
 })

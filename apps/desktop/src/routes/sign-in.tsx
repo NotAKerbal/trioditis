@@ -14,6 +14,7 @@ import { announceAccountChange } from '~/lib/account-tabs.ts'
 import { desktop, passkeysUnavailable, serverSwitcher } from '~/lib/desktop.ts'
 import { holdPassword } from '~/lib/pending-password.ts'
 import { holdPrf, signInWithPasskey } from '~/lib/passkeys.ts'
+import { peekConsentReturn } from '~/lib/agent-connect.ts'
 
 export const Route = createFileRoute('/sign-in')({ component: SignIn })
 
@@ -29,6 +30,11 @@ function SignIn() {
   const [busy, setBusy] = useState<'password' | 'passkey' | null>(null)
   // After a sign-out that couldn't confirm removing the key from this device (lib/sign-out.ts).
   const [keyUnconfirmed] = useState(() => new URLSearchParams(window.location.search).get('key') === 'unconfirmed')
+  // An agent's consent page sent the person here to sign in first: back there afterwards.
+  const [next] = useState(() => {
+    const request = peekConsentReturn()
+    return request ? ({ to: '/agents/connect', search: { request } } as const) : ({ to: '/' } as const)
+  })
 
   // Signed in already, in another tab (which reloaded this one, lib/account-tabs.ts): the app
   // is where this tab belongs now.
@@ -53,7 +59,7 @@ function SignIn() {
     announceAccountChange()
     // The same password unlocks the identity key on the next screen.
     holdPassword(password, data.user.id)
-    await navigate({ to: '/' })
+    await navigate(next)
   }
 
   async function withPasskey() {
@@ -70,10 +76,10 @@ function SignIn() {
     // The same touch gave the passkey's PRF output, if it has one: it unlocks the identity key
     // on the next screen.
     if (result.prf) holdPrf(result.prf, result.userId)
-    await navigate({ to: '/' })
+    await navigate(next)
   }
 
-  if (isAuthenticated && me.data) return <Navigate to="/" />
+  if (isAuthenticated && me.data) return <Navigate {...next} />
 
   return (
     <AuthCard

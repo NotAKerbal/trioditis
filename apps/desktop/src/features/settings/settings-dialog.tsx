@@ -27,6 +27,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import {
   Bell,
+  Bot,
   Check,
   Copy,
   Eye,
@@ -64,6 +65,7 @@ import {
 import { setPref, usePrefs } from '~/lib/prefs.ts'
 import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
+import { Agents } from './agents-section.tsx'
 import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 import { Networks } from './networks.tsx'
@@ -79,6 +81,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'notifications', name: 'Notifications', icon: <Bell /> },
   { id: 'accounts', name: 'Accounts', icon: <Plug /> },
   { id: 'keys', name: 'Keys and devices', icon: <KeyRound /> },
+  { id: 'agents', name: 'Agents', icon: <Bot /> },
   { id: 'networks', name: 'Networks', icon: <NetworkIcon />, admin: true },
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
@@ -150,6 +153,8 @@ export function SettingsDialog({
             <Notifications />
           ) : current.id === 'accounts' ? (
             <Accounts connect={connect} />
+          ) : current.id === 'agents' ? (
+            <Agents />
           ) : current.id === 'networks' ? (
             <Networks />
           ) : current.id === 'members' ? (
