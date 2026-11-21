@@ -7,6 +7,7 @@ import { requireAdmin } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
 import { queueLoginCancel, queueLogout } from './lib/outbox'
+import { issueReset } from './account'
 
 // Who is on this server. Accounts start from an invitation; the first account, the admin,
 // starts from the setup token the installer generates (TRIODITIS_SETUP_TOKEN).
@@ -227,6 +228,53 @@ export const list = query({
   },
 })
 
+/**
+ * Makes a password reset link's token for a member who forgot their password, returned once. It
+ * works for a day, once, and only together with the member's recovery key (account.resetPassword):
+ * the admin can let them set a new password, but can't open their messages or sign in as them.
+ * Not for the admin's own account, which changes its password in settings.
+ */
+export const issuePasswordReset = mutation({
+  args: { userId: v.string(), sessionId: v.optional(v.string()) },
+  returns: v.object({ token: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
+    const admin = await requireAdmin(ctx)
+    if (args.userId === admin.userId) {
+      throw new ConvexError('Change your own password in Settings → Keys and devices.')
+    }
+    const member = await ctx.db
+      .query('members')
+      .withIndex('by_userId', (q) => q.eq('userId', args.userId))
+      .unique()
+    if (!member) throw new ConvexError('That person isn’t a member of this server.')
+    return await issueReset(ctx, member.userId, admin.userId)
+  },
+})
+
+/**
+ * The same, from the deployment's command line, for an admin locked out of their own account
+ * (or a server's only admin): `npx convex run members:issuePasswordResetFor '{"email": "…"}'`.
+ */
+export const issuePasswordResetFor = internalMutation({
+  args: { email: v.string() },
+  returns: v.object({ token: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, { email }) => {
+    const user = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+      model: 'user',
+      where: [{ field: 'email', value: normalizeEmail(email) }],
+    })) as { _id: string } | null
+    const member =
+      user &&
+      (await ctx.db
+        .query('members')
+        .withIndex('by_userId', (q) => q.eq('userId', user._id))
+        .unique())
+    if (!member) throw new ConvexError('No member has that email.')
+    return await issueReset(ctx, member.userId, 'cli')
+  },
+})
+
 /** More than anyone has of each: removing a member clears them in one transaction. */
 const REMOVE_LIMIT = 200
 
@@ -267,7 +315,7 @@ export const removeMember = mutation({
     }
     const userId = member.userId
     await ctx.db.delete(member._id)
-    for (const table of ['keyBackups', 'keyChallenges'] as const) {
+    for (const table of ['keyBackups', 'keyChallenges', 'passwordResets'] as const) {
       const rows = await ctx.db
         .query(table)
         .withIndex('by_user', (q) => q.eq('userId', userId))

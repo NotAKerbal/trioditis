@@ -61,6 +61,20 @@ export default defineSchema({
     .index('by_tokenHash', ['tokenHash'])
     .index('by_email', ['email']),
 
+  /**
+   * Password resets an admin issued (members.issuePasswordReset), each for one member, used once
+   * with the member's recovery key (account.resetPassword).
+   */
+  passwordResets: defineTable({
+    userId: v.string(),
+    /** SHA-256 of the token in the reset link. The token itself is never stored. */
+    tokenHash: v.string(),
+    issuedBy: v.string(),
+    expiresAt: v.number(),
+  })
+    .index('by_tokenHash', ['tokenHash'])
+    .index('by_user', ['userId']),
+
   /** Server-wide state. `setup` holds the first-admin sign-up while it is in progress. */
   serverState: defineTable({
     key: v.literal('setup'),

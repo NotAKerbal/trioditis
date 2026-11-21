@@ -107,6 +107,7 @@ function SignIn() {
       }
       footer={
         <>
+          <p className="mb-2">Forgot your password? Ask your server’s admin for a reset link.</p>
           Setting up a new server?{' '}
           <Link to="/setup" className="font-semibold text-primary hover:underline">
             Create the admin account

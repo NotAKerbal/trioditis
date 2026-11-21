@@ -61,7 +61,7 @@ const wrapped = v.object({ nonce: v.string(), ct: v.string() })
 type Params = { salt: string; opslimit: number; memlimit: number }
 
 /** A wrapped 32-byte X25519 private key: a 24-byte nonce, and 32 bytes plus a 16-byte tag. */
-function checkWrapped({ nonce, ct }: { nonce: string; ct: string }) {
+export function checkWrapped({ nonce, ct }: { nonce: string; ct: string }) {
   if (decodedLength(nonce) !== 24 || decodedLength(ct) !== 48) throw new ConvexError('That isn’t a wrapped key.')
 }
 
@@ -98,7 +98,7 @@ export function keyState(member: Doc<'members'>, backups: Doc<'keyBackups'>[]) {
  * Uses up a challenge the device opened, sealed to `publicKey`. Each works once, within five
  * minutes, and only for the key it was sealed to.
  */
-async function consumeProof(ctx: MutationCtx, userId: string, proof: string, publicKey: string) {
+export async function consumeProof(ctx: MutationCtx, userId: string, proof: string, publicKey: string) {
   const hash = await sha256Hex(proof)
   const now = Date.now()
   const rows = await ctx.db
@@ -185,23 +185,28 @@ export const challenge = mutation({
       throw new ConvexError('This account already has an identity key. Unlock it with your password or recovery key.')
     }
     if (!isPublicKey(publicKey)) throw new ConvexError('That isn’t a valid public key.')
-    const secret = crypto.getRandomValues(new Uint8Array(32))
-    const expiresAt = Date.now() + CHALLENGE_TTL_MS
-    const old = await ctx.db
-      .query('keyChallenges')
-      .withIndex('by_user', (q) => q.eq('userId', member.userId))
-      .take(20)
-    // A handful outstanding at most; the oldest go.
-    for (const row of old.slice(0, Math.max(0, old.length - 4))) await ctx.db.delete(row._id)
-    await ctx.db.insert('keyChallenges', {
-      userId: member.userId,
-      hash: await sha256Hex(encode(secret)),
-      publicKey,
-      expiresAt,
-    })
-    return { sealed: encode(sealBox(secret, decode(publicKey))), expiresAt }
+    return await issueChallenge(ctx, member.userId, publicKey)
   },
 })
+
+/** A new challenge for `userId`, sealed to `publicKey`, for `consumeProof` to take back. */
+export async function issueChallenge(ctx: MutationCtx, userId: string, publicKey: string) {
+  const secret = crypto.getRandomValues(new Uint8Array(32))
+  const expiresAt = Date.now() + CHALLENGE_TTL_MS
+  const old = await ctx.db
+    .query('keyChallenges')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .take(20)
+  // A handful outstanding at most; the oldest go.
+  for (const row of old.slice(0, Math.max(0, old.length - 4))) await ctx.db.delete(row._id)
+  await ctx.db.insert('keyChallenges', {
+    userId,
+    hash: await sha256Hex(encode(secret)),
+    publicKey,
+    expiresAt,
+  })
+  return { sealed: encode(sealBox(secret, decode(publicKey))), expiresAt }
+}
 
 /**
  * Sets up the identity key with its password and recovery-key backups, with `proof` from
@@ -258,7 +263,7 @@ export const setup = mutation({
 })
 
 /** Checks a replacement for the backup of `kind` (and `credentialId`) against what's stored. */
-async function checkReplacement(
+export async function checkReplacement(
   ctx: MutationCtx,
   member: Doc<'members'>,
   args: { kind: Doc<'keyBackups'>['kind']; expectedRevision: number; params?: Params; credentialId?: string },
@@ -286,7 +291,7 @@ async function checkReplacement(
 }
 
 /** Replaces `current` with the new wrap, at the next revision, which it returns. */
-async function replaceBackup(
+export async function replaceBackup(
   ctx: MutationCtx,
   member: Doc<'members'>,
   { current, backups, kid }: { current: Doc<'keyBackups'>[]; backups: Doc<'keyBackups'>[]; kid: string },
@@ -544,7 +549,7 @@ export const commitPasswordChange = internalMutation({
   },
 })
 
-async function memberById(ctx: QueryCtx, userId: string) {
+export async function memberById(ctx: QueryCtx, userId: string) {
   const member = await ctx.db
     .query('members')
     .withIndex('by_userId', (q) => q.eq('userId', userId))

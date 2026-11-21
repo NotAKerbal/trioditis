@@ -868,7 +868,7 @@ function KeySetup({
         title={existing ? 'Finish setting up your key' : 'Set up your key'}
         description={
           has.password
-            ? 'Your key still needs a recovery key, the way back in if you forget your password.'
+            ? 'Your key still needs a recovery key. If you forget your password, it and a reset link from your server’s admin get you back into your messages.'
             : 'Trioditis seals every message to a key only your devices hold, so the server can’t read them. The password you just used protects a backup of it, so your other devices can open your messages too.'
         }
       >
@@ -887,7 +887,7 @@ function KeySetup({
   return (
     <AuthCard
       title="Save your recovery key"
-      description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now."
+      description="If you forget your password, you’ll need this and a reset link from your server’s admin to get back into your messages. Write it down or keep it in a password manager. It’s shown only now."
     >
       <FormError message={error} />
       <div

@@ -55,15 +55,17 @@ export function Members() {
   )
 }
 
-/** Everyone on the server, each removable by an admin but the admin themselves. */
-function People() {
-  const session = useSession()
-  const people = usePaginatedQuery(api.members.list, {}, { initialNumItems: PAGE_SIZE })
-  const remove = useMutation(api.members.removeMember)
-  // The person a Remove is waiting to be confirmed for, and the one being removed.
-  const [confirming, setConfirming] = useState<string | null>(null)
-  const [removing, setRemoving] = useState<string | null>(null)
+type Person = {
+  userId: string
+  role: 'admin' | 'member'
+  name: string | null
+  email: string | null
+  you: boolean
+}
 
+/** Everyone on the server. An admin can reset anyone else's password, or remove them. */
+function People() {
+  const people = usePaginatedQuery(api.members.list, {}, { initialNumItems: PAGE_SIZE })
   return (
     <Group title="People">
       {people.status === 'LoadingFirstPage' ? (
@@ -72,62 +74,139 @@ function People() {
         </div>
       ) : null}
       {people.results.map((person) => (
-        <div key={person.userId} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-semibold">
-              {person.name ?? person.email ?? 'Unknown account'}
-              {person.you ? <span className="font-normal text-muted-foreground"> (you)</span> : null}
-            </div>
-            <div className="truncate text-sm text-muted-foreground">
-              {person.role === 'admin' ? 'Admin' : 'Member'}
-              {person.name && person.email ? ` · ${person.email}` : null}
-            </div>
+        <PersonRow key={person.userId} person={person} />
+      ))}
+      {people.status === 'CanLoadMore' ? <More onClick={() => people.loadMore(PAGE_SIZE)} /> : null}
+    </Group>
+  )
+}
+
+function PersonRow({ person }: { person: Person }) {
+  const session = useSession()
+  const remove = useMutation(api.members.removeMember)
+  const issueReset = useMutation(api.members.issuePasswordReset)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState<'remove' | 'reset' | null>(null)
+  // A reset link the server gives only once, so it's shown here until the dialog closes.
+  const [resetLink, setResetLink] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const label = person.email ?? person.name ?? 'this person'
+
+  async function run(what: 'remove' | 'reset', call: () => Promise<void>, failure: string) {
+    setBusy(what)
+    try {
+      await call()
+    } catch (e) {
+      if (sessionChanged(e)) return window.location.reload()
+      toast(errorMessage(e, failure))
+    }
+    setBusy(null)
+  }
+
+  return (
+    <div className="px-4 py-3">
+      <div className="flex min-h-9 items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-semibold">
+            {person.name ?? person.email ?? 'Unknown account'}
+            {person.you ? <span className="font-normal text-muted-foreground"> (you)</span> : null}
           </div>
-          {person.you ? null : confirming === person.userId ? (
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="danger"
-                loading={removing === person.userId}
-                onClick={async () => {
-                  setRemoving(person.userId)
-                  try {
-                    await remove({ userId: person.userId, sessionId: session.sessionId })
-                    setConfirming(null)
-                  } catch (e) {
-                    if (sessionChanged(e)) return window.location.reload()
-                    toast(errorMessage(e, 'That person couldn’t be removed.'))
-                  }
-                  setRemoving(null)
-                }}
-              >
-                Remove
-              </Button>
-              <Button size="sm" variant="ghost" disabled={removing !== null} onClick={() => setConfirming(null)}>
-                Cancel
-              </Button>
-            </div>
-          ) : (
+          <div className="truncate text-sm text-muted-foreground">
+            {person.role === 'admin' ? 'Admin' : 'Member'}
+            {person.name && person.email ? ` · ${person.email}` : null}
+          </div>
+        </div>
+        {person.you ? null : confirming ? (
+          <div className="flex gap-2">
             <Button
               size="sm"
-              variant="ghost"
-              disabled={removing !== null}
-              aria-label={`Remove ${person.email ?? person.name ?? 'this person'}`}
-              onClick={() => setConfirming(person.userId)}
+              variant="danger"
+              loading={busy === 'remove'}
+              onClick={() =>
+                void run(
+                  'remove',
+                  async () => {
+                    await remove({ userId: person.userId, sessionId: session.sessionId })
+                  },
+                  'That person couldn’t be removed.',
+                )
+              }
             >
               Remove
             </Button>
-          )}
-        </div>
-      ))}
+            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        ) : (
+          <div className="flex gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={busy === 'reset'}
+              disabled={busy !== null}
+              aria-label={`Reset the password of ${label}`}
+              onClick={() =>
+                void run(
+                  'reset',
+                  async () => {
+                    const { token } = await issueReset({ userId: person.userId, sessionId: session.sessionId })
+                    // The token goes in the fragment, which never reaches a server or a proxy's logs.
+                    setResetLink(`${window.location.origin}/reset#token=${encodeURIComponent(token)}`)
+                    setCopied(false)
+                  },
+                  'A reset link couldn’t be made.',
+                )
+              }
+            >
+              Reset password
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy !== null}
+              aria-label={`Remove ${label}`}
+              onClick={() => setConfirming(true)}
+            >
+              Remove
+            </Button>
+          </div>
+        )}
+      </div>
       {confirming ? (
-        <p className="px-4 py-3 text-sm text-muted-foreground">
+        <p className="mt-2 text-sm text-muted-foreground">
           They’re signed out everywhere, their agents and network accounts are disconnected, and their messages stay
           sealed where nobody can read them. You can invite them again.
         </p>
       ) : null}
-      {people.status === 'CanLoadMore' ? <More onClick={() => people.loadMore(PAGE_SIZE)} /> : null}
-    </Group>
+      {resetLink ? (
+        <div className="mt-3">
+          <p className="mb-2 text-sm text-muted-foreground">
+            Send them this link. It works once, for a day, with their recovery key, and won’t be shown again.
+          </p>
+          <div className="flex gap-2">
+            <Input
+              readOnly
+              autoFocus
+              value={resetLink}
+              className="font-mono text-sm"
+              onFocus={(e) => e.target.select()}
+              aria-label={`Password reset link for ${label}`}
+            />
+            <Button
+              onClick={() =>
+                navigator.clipboard.writeText(resetLink).then(
+                  () => setCopied(true),
+                  () => toast('Copying didn’t work here. Select the link and copy it.'),
+                )
+              }
+            >
+              {copied ? <Check className="size-4" /> : <Copy className="size-4" />} {copied ? 'Copied' : 'Copy'}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
