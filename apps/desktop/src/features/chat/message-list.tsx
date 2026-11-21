@@ -315,7 +315,7 @@ export function MessageList(props: MessageListProps) {
                         <span
                           className={cn(
                             'absolute right-3 bottom-[5px] inline-flex',
-                            m.self && !big && !m.deleted ? 'text-primary-foreground/75' : 'text-subtle-foreground',
+                            m.self && !big && !m.deleted ? 'text-primary-foreground/90' : 'text-subtle-foreground',
                           )}
                         >
                           {meta}
