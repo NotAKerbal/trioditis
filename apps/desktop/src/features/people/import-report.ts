@@ -14,6 +14,8 @@ export interface ImportReport {
   droppedPhotos: number
   /** The names on cards whose note was cut to fit. */
   cutNotes: string[]
+  /** The names on entries left out because each matched more than one person here. */
+  ambiguous: string[]
 }
 
 export const emptyReport = (): ImportReport => ({
@@ -22,6 +24,7 @@ export const emptyReport = (): ImportReport => ({
   smallerPhotos: 0,
   droppedPhotos: 0,
   cutNotes: [],
+  ambiguous: [],
 })
 
 const people = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'person' : 'people'}`
@@ -46,6 +49,14 @@ export function importSummary(report: ImportReport): string {
       rest.length
         ? `Notes on ${first} and ${people(rest.length)} more were too long and were shortened.`
         : `The note on ${first} was too long and was shortened.`,
+    )
+  }
+  if (report.ambiguous.length) {
+    const [first, ...rest] = report.ambiguous
+    lines.push(
+      rest.length
+        ? `${first} and ${people(rest.length)} more weren’t imported: each matches more than one person here.`
+        : `${first} wasn’t imported: they match more than one person here.`,
     )
   }
   return lines.join(' ')

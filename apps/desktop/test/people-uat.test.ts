@@ -35,9 +35,20 @@ describe('large cards', () => {
     expect(fit.card.note).toBe(note)
   })
 
+  it('refuses an edit it can only save by leaving out the photo, rather than leaving it out', async () => {
+    const card = { name: 'Ann', photo, note: 'n'.repeat(LIMIT - 1000) }
+    const fit = await fitCard(card, shrink)
+    expect(fit.fits).toBe(false)
+    expect(fit.card).toBe(card)
+    // An import may leave it out, and says so.
+    const imported = await fitCard(card, shrink, { dropPhoto: true })
+    expect(imported).toMatchObject({ fits: true, photo: 'dropped' })
+    expect(imported.card.note).toBe(card.note)
+  })
+
   it('cuts an imported note only as a last resort, and says by how much', async () => {
     const note = 'n'.repeat(LIMIT + 10)
-    const fit = await fitCard({ name: 'Ann', photo, note }, shrink, { cutNote: true })
+    const fit = await fitCard({ name: 'Ann', photo, note }, shrink, { cutNote: true, dropPhoto: true })
     expect(fit.fits).toBe(true)
     expect(fit.photo).toBe('dropped')
     expect(fit.noteCut).toBeGreaterThan(0)
@@ -68,6 +79,19 @@ describe('big imports', () => {
     ).toBe(1)
     expect(tooMany(0, 10_001)).toBe(
       'That would add 10,001 people, and there’s room for 10,000 more (People holds 10,000).',
+    )
+  })
+
+  it('leaves out an entry that matches two people, and says so', () => {
+    const here = [
+      { personKey: 'person-a-00000000', card: { name: 'Ann', emails: [{ value: 'ann@x.co' }] } },
+      { personKey: 'person-b-00000000', card: { name: 'Ann', emails: [{ value: 'ann@x.co' }] } },
+    ]
+    const planner = importPlanner([{ name: 'Ann', emails: [{ value: 'ann@x.co' }], note: 'n' }, { name: 'Bob' }])
+    expect(planner.plan(here).map((p) => p.card.name)).toEqual(['Bob'])
+    expect(planner.ambiguous().map((c) => c.name)).toEqual(['Ann'])
+    expect(importSummary({ ...emptyReport(), written: 1, ambiguous: ['Ann'] })).toBe(
+      'Imported 1 person. Ann wasn’t imported: they match more than one person here.',
     )
   })
 
