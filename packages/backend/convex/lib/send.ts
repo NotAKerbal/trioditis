@@ -6,6 +6,7 @@ import { MAX_CLIENT_SEALED_BYTES, isEnvelope } from './envelope'
 import { sortKey } from './ingest'
 import { noteMessage } from './lastMessage'
 import { queueCommand } from './outbox'
+import { RETRY_PREFIX } from './retry'
 
 // Sending a message: the checks every send goes through, and turning it into the person's
 // pending copy plus an outbox command. A direct send and a scheduled one, when its time comes,
@@ -67,6 +68,15 @@ export async function clientMessageIdUsed(
   // `sent` has its outbox row, found above; one in between still counts as pending.
   const state = scheduled.state === 'cancelled' || scheduled.state === 'failed' ? scheduled.state : 'scheduled'
   return { already: 'scheduled', state }
+}
+
+/**
+ * Refuses a client message ID in the namespace of attempts made by `messages.sendAgain`
+ * (lib/retry.ts): only that makes them, so a chain's next ID can't be taken by an ordinary send
+ * or schedule first.
+ */
+export function refuseRetryId(clientMessageId: string) {
+  if (clientMessageId.startsWith(RETRY_PREFIX)) throw new ConvexError('That message ID isn’t valid.')
 }
 
 /** Refuses a send that can't go out as given. */

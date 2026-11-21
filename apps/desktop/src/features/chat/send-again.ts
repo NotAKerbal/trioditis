@@ -8,12 +8,13 @@ import { useSyncExternalStore } from 'react'
 
 /**
  * Where a chain stands, by its latest attempt: on its way from here (`sending`); taken and
- * being sent (`going`); sent (`sent`); may have been sent (`maybe`); or failed (`failed`).
+ * being sent (`going`); sent (`sent`); may have been sent (`maybe`); or failed (`failed`). Or
+ * the original itself turned out to have gone (`original`), which ends the chain.
  */
-export type SendAgainState = 'sending' | 'going' | 'sent' | 'maybe' | 'failed'
+export type SendAgainState = 'sending' | 'going' | 'sent' | 'maybe' | 'failed' | 'original'
 
 /** Where an attempt is, by its delivery state. */
-export function fromDelivery(delivery: string | null | undefined): Exclude<SendAgainState, 'sending'> {
+export function fromDelivery(delivery: string | null | undefined): Exclude<SendAgainState, 'sending' | 'original'> {
   switch (delivery) {
     case null:
     case undefined:
@@ -48,7 +49,8 @@ export function againView(
 ): { state: SendAgainState | undefined; canTry: boolean } {
   if (!state) return { state: undefined, canTry: false }
   if (sending.has(state.root)) return { state: 'sending', canTry: false }
-  return { state: state.latest ? fromDelivery(state.delivery) : undefined, canTry: state.allowed && !!state.nextId }
+  const shown = state.latest === state.root ? 'original' : state.latest ? fromDelivery(state.delivery) : undefined
+  return { state: shown, canTry: state.allowed && !!state.nextId }
 }
 
 let sending: ReadonlySet<string> = new Set()
@@ -65,7 +67,8 @@ function setSending(root: string, on: boolean) {
 /**
  * Makes the chain's next attempt with `send` (sealing for `state.nextId` and calling
  * messages.sendAgain), unless the server doesn't allow one or one is on its way from here.
- * Whether it was made is the server's answer; repeated clicks and other tabs make one.
+ * Whether it was made is the server's answer (false: it declined, the attempt made already or
+ * not allowed any more); an error, such as a reply to a message since deleted, is thrown on.
  */
 export async function sendAgain(
   state: RetryState | undefined,
@@ -75,8 +78,6 @@ export async function sendAgain(
   setSending(state.root, true)
   try {
     return (await send(state.nextId)).created
-  } catch {
-    return false
   } finally {
     setSending(state.root, false)
   }

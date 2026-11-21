@@ -3,7 +3,7 @@ import { internal } from './_generated/api'
 import type { Doc } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { ownChat, requireMember } from './lib/access'
-import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
 import { deliveryState, envelope } from './validators'
 
 // Scheduled sends: a message to go out at `sendAt`, in its chat (and so on its network). When
@@ -128,6 +128,7 @@ export const create = mutation({
   handler: async (ctx, { chatId, sendAt, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
+    refuseRetryId(input.clientMessageId)
     const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
     if (used) return used
     const now = Date.now()

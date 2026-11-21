@@ -797,9 +797,11 @@ await convex.mutation(api.messages.send, {
   `api.messages.retryStates({ clientMessageIds })`, at most 100 IDs of any sends in chains,
   returns `[{ clientMessageId, state }]` with `state` `{ root, latest, delivery, allowed,
 nextId }`: the original, the latest attempt and its delivery state, and whether another may be
-  made now, with its client message ID. Every send of a chain gets the same answer. Another is
-  allowed only when none has been made and the original failed or may not have gone, or the
-  latest attempt failed: never after one that may have gone. To make it, seal the text for
+  made now, with its client message ID. Every send of a chain gets the same answer. The first
+  attempt is allowed when the original failed or may not have gone; a later one only when the
+  latest attempt failed and every other send in the chain, the original included, failed too.
+  One that turns out to have gone ends the chain, and the answer then shows it as `latest`.
+  Attempt IDs start `rt_`: `messages.send` and `scheduled.create` refuse them. To make it, seal the text for
   `nextId` exactly as for `messages.send` and call `api.messages.sendAgain({ clientMessageId,
 nextId, forBridge, copy, replyTo? })` with any send of the chain. It returns
   `{ created, state }`: made only if it's still allowed and `nextId` is still the next one, so

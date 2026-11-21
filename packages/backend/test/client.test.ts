@@ -814,7 +814,7 @@ describe('scheduled sends', () => {
 
   describe('sending again, decided by the server', () => {
     // Sets a send's delivery state on its copy (if there still is one) and its outbox row.
-    const setDelivery = (t: T, clientMessageId: string, delivery: 'failed' | 'unknown' | 'queued') =>
+    const setDelivery = (t: T, clientMessageId: string, delivery: 'failed' | 'unknown' | 'queued' | 'sent') =>
       t.run(async (ctx) => {
         for (const table of ['messages', 'outbox'] as const) {
           const row = await ctx.db
@@ -892,6 +892,50 @@ describe('scheduled sends', () => {
       const state = (await states(a, [id(11)]))[id(11)]!
       expect(state).toMatchObject({ latest: r1, delivery: 'failed', allowed: true })
       expect((await again(a, id(11), state.nextId!)).created).toBe(true)
+    })
+
+    it('ends the chain when any send in it turns out to have gone, the original included', async () => {
+      const { t, a } = await failedSend()
+      await setDelivery(t, id(11), 'unknown')
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      // The original, which may not have gone, is confirmed sent after all.
+      await setDelivery(t, id(11), 'sent')
+      const state = (await states(a, [r1]))[r1]!
+      expect(state).toMatchObject({ root: id(11), latest: id(11), delivery: 'sent', allowed: false, nextId: null })
+      const stale = await again(a, r1, 'rt_made-up-by-a-stale-page-0000000000000000000')
+      expect(stale.created).toBe(false)
+    })
+
+    it('makes no further attempt while any send in the chain may still go', async () => {
+      const { t, a } = await failedSend()
+      await setDelivery(t, id(11), 'unknown')
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await again(a, id(11), r1)
+      await setDelivery(t, r1, 'failed')
+      // The original may still have gone: no second attempt.
+      expect((await states(a, [r1]))[r1]).toMatchObject({ allowed: false, nextId: null })
+    })
+
+    it('keeps attempt IDs for Send again alone: a send or schedule can’t take one', async () => {
+      const { t, a } = await failedSend()
+      const chatId = (await t.run(async (ctx) => await ctx.db.query('chats').first()))!._id
+      const r1 = (await states(a, [id(11)]))[id(11)]!.nextId!
+      await expect(
+        a.mutation(api.messages.send, { chatId, clientMessageId: r1, forBridge: sealed('b'), copy: sealed('c') }),
+      ).rejects.toThrow(/isn’t valid/)
+      await expect(
+        a.mutation(api.scheduled.create, {
+          chatId,
+          clientMessageId: r1,
+          forBridge: sealed('b'),
+          copy: sealed('c'),
+          sendAt: Date.now() + 60_000,
+        }),
+      ).rejects.toThrow(/isn’t valid/)
+      // Still free for the attempt itself.
+      expect((await again(a, id(11), r1)).created).toBe(true)
     })
 
     it('answers only for the person’s own sends, and makes none for anyone else', async () => {
