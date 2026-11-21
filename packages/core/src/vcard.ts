@@ -40,7 +40,11 @@ function components(p: Property): string[] {
   return parts
 }
 
-/** The most cards one file gives, as many as an address book can hold (people.ts, MAX_PEOPLE). */
+/**
+ * As many cards as an address book can hold (the backend's people.ts, MAX_PEOPLE). Files are
+ * read whole, however many cards they have; an import that would go past this is refused
+ * before anything is saved, and says by how many, rather than keeping the first ones quietly.
+ */
 export const MAX_IMPORT_CARDS = 10_000
 
 function unescapeText(text: string): string {
@@ -315,7 +319,6 @@ export function parseVCards(text: string): PersonPlaintext[] {
     if (/^END:VCARD$/i.test(line.trim())) {
       const card = current && cardFrom(current)
       if (card) cards.push(card)
-      if (cards.length >= MAX_IMPORT_CARDS) break
       current = null
       continue
     }
@@ -481,12 +484,24 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
     title: col('organization title', 'organization 1 - title', 'job title'),
     birthday: col('birthday'),
     note: col('notes', 'note'),
+    uid: col('uid'),
   }
   const cards: PersonPlaintext[] = []
-  for (const row of rows.slice(0, MAX_IMPORT_CARDS)) {
+  for (const row of rows) {
     const cell = (i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
     const card: PersonPlaintext = { name: cell(at.name) }
-    for (const key of ['given', 'middle', 'family', 'prefix', 'suffix', 'nickname', 'org', 'title', 'note'] as const) {
+    for (const key of [
+      'given',
+      'middle',
+      'family',
+      'prefix',
+      'suffix',
+      'nickname',
+      'org',
+      'title',
+      'note',
+      'uid',
+    ] as const) {
       const value = cell(at[key])
       if (value) card[key] = value
     }
@@ -586,7 +601,15 @@ export function parseContactsCsv(text: string): PersonPlaintext[] {
   return cards
 }
 
-/** The cards in an exported contacts file, by what it holds: vCard, or a CSV with a header. */
+/**
+ * The cards in an exported contacts file, by what it holds: vCard, or a CSV with a header. A
+ * vCard file starts with BEGIN:VCARD on its first line; a CSV can hold those words anywhere,
+ * in a note, so they're looked for there and nowhere else.
+ */
 export function parseContactsFile(text: string): PersonPlaintext[] {
-  return /BEGIN:VCARD/i.test(text.slice(0, 4096)) ? parseVCards(text) : parseContactsCsv(text)
+  const first = text
+    .replace(/^\uFEFF/, '')
+    .split(/\r\n|\r|\n/)
+    .find((line) => line.trim())
+  return first && /^BEGIN:VCARD$/i.test(first.trim()) ? parseVCards(text) : parseContactsCsv(text)
 }

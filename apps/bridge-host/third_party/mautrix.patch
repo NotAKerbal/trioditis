@@ -1,0 +1,54 @@
+diff --git a/bridgev2/portal.go b/bridgev2/portal.go
+index 1eef3b9b491326870c9cfd4961d42a608488fb3c..f7b6b354d9eaad9202b67259ea9610eb3aa00c97 100644
+--- a/bridgev2/portal.go
++++ b/bridgev2/portal.go
+@@ -114,6 +114,18 @@ type Portal struct {
+ }
+ 
+ var PanicOnStuckEvent = false
++
++// Trioditis: RemoteEventDone, if set, is called with each remote event's real outcome once its
++// handler returns, including a handler that ran past EventHandlingTimeoutTicks, for which the
++// caller was already given an assumed success. A network that acknowledges an event once its
++// handler returns (whatsmeow, signalmeow) can then wait for the real outcome. It runs on the
++// handler's goroutine, before the outcome is passed on.
++var RemoteEventDone func(evt RemoteEvent, res EventHandlingResult)
++
++// Trioditis: RemoteEventStart, if set, is called on a remote event's handler goroutine before
++// handling starts, and may block: the host holds a redelivered message back there until the
++// attempt before it has settled. Every call is followed by one to RemoteEventDone.
++var RemoteEventStart func(evt RemoteEvent)
+ var EventHandlingTimeoutTicks = 10
+ 
+ func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, queryErr error, key *networkid.PortalKey) (*Portal, error) {
+@@ -441,7 +453,17 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
+ 	var handleDuration time.Duration
+ 	// Note: this will assume success if the handler times out
+ 	outerRes = EventHandlingResult{Queued: true, Success: true, Error: ErrHandlerBackgrounded}
+-	go portal.handleSingleEvent(ctx, rawEvt, func(res EventHandlingResult) {
++	// Trioditis: the host may hold a remote event back (RemoteEventStart) until another attempt
++	// at the same message has settled. It waits on the handler's goroutine, so the limit below
++	// still applies to the wait.
++	handle := portal.handleSingleEvent
++	if remote, ok := rawEvt.(*portalRemoteEvent); ok && RemoteEventStart != nil {
++		handle = func(ctx context.Context, rawEvt any, done func(EventHandlingResult)) {
++			RemoteEventStart(remote.evt)
++			portal.handleSingleEvent(ctx, rawEvt, done)
++		}
++	}
++	go handle(ctx, rawEvt, func(res EventHandlingResult) {
+ 		// If the portal was deleted, ignore errors.
+ 		// The bridge background ctx check distinguishes bridge stops from portal deletions.
+ 		if res.Error != nil && portal.backgroundCtx.Err() != nil && portal.Bridge.BackgroundCtx.Err() == nil {
+@@ -454,6 +476,11 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
+ 			log.Debug().Err(res.Error).Msg("Not bubbling up Matrix error from event handler")
+ 			res = EventHandlingResultIgnored
+ 		}
++		// Trioditis: say how handling a remote event really ended, also when this function
++		// already stopped waiting for it and returned an assumed success.
++		if remote, ok := rawEvt.(*portalRemoteEvent); ok && RemoteEventDone != nil {
++			RemoteEventDone(remote.evt, res)
++		}
+ 		outerRes = res
+ 		handleDuration = time.Since(start)
+ 		close(doneCh)

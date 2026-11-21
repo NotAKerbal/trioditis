@@ -4,9 +4,16 @@ import { Component, Fragment, useEffect, type ReactNode } from 'react'
 import { errorMessage } from '~/lib/errors.ts'
 import { failuresInARow, retryDelay } from './retry-delay.ts'
 
+const OFFLINE = 'Can’t reach your server. Nothing shows until it’s back; still trying.'
+
 interface Props {
   /** Called when the list goes down, so nothing relies on what it last showed. */
   onError: () => void
+  /**
+   * The app opened from this device before the server confirmed the session (app-gate.tsx): an
+   * error then is the server not knowing who's asking yet, not a refusal to show.
+   */
+  offline?: boolean
   children: ReactNode
 }
 
@@ -46,6 +53,9 @@ export class SidebarBoundary extends Component<Props, State> {
     if (error === undefined) return <Fragment key={attempt}>{this.props.children}</Fragment>
     // A ConvexError is the server refusing (signed out, not a member, a label that's gone),
     // which asking again won't change; only Try again, which also clears the filters, does.
+    if (this.props.offline) {
+      return <ListError error={new Error(OFFLINE)} delay={retryDelay(failures)} onRetry={this.retry} />
+    }
     const delay = error instanceof ConvexError ? undefined : retryDelay(failures)
     return <ListError error={error} delay={delay} onRetry={this.retry} />
   }

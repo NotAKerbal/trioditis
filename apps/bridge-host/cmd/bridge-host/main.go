@@ -109,6 +109,7 @@ func main() {
 		Network:       *network,
 		HostID:        env("BRIDGE_HOST_ID", *network+"-1"),
 		DataDir:       *dataDir,
+		RestoreID:     os.Getenv("TRIODITIS_RESTORE_ID"),
 		DatabaseType:  os.Getenv("BRIDGE_DATABASE_TYPE"),
 		DatabaseURI:   os.Getenv("BRIDGE_DATABASE_URI"),
 		ListenAddr:    env("BRIDGE_HOST_ADDR", "127.0.0.1:8611"),

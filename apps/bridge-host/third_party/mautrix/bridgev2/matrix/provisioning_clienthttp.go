@@ -1,0 +1,325 @@
+// Copyright (c) 2026 Tulir Asokan
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+package matrix
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+
+	"github.com/rs/xid"
+	"github.com/rs/zerolog"
+	"go.mau.fi/util/exerrors"
+	"go.mau.fi/util/exhttp"
+
+	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/bridgev2"
+)
+
+var _ http.RoundTripper = (*ProvLogin)(nil)
+
+const maxClientHTTPResponseSize = 10 * 1024 * 1024
+
+func decodeGzippedClientHTTPResponse(body io.Reader, resp *bridgev2.LoginClientHTTPResponse) error {
+	decoder := json.NewDecoder(body)
+	err := decoder.Decode(resp)
+	if err != nil {
+		return err
+	}
+	gzipBody, err := gzip.NewReader(io.MultiReader(decoder.Buffered(), body))
+	if err != nil {
+		return err
+	}
+	resp.Body, err = io.ReadAll(io.LimitReader(gzipBody, maxClientHTTPResponseSize+1))
+	if err != nil {
+		return err
+	} else if len(resp.Body) > maxClientHTTPResponseSize {
+		return errors.New("decompressed body is too large")
+	}
+	return nil
+}
+
+func (prov *ProvisioningAPI) PostLoginClientHTTP(w http.ResponseWriter, r *http.Request) {
+	log := zerolog.Ctx(r.Context())
+	loginID := r.PathValue("loginProcessID")
+	txnID := r.PathValue("txnID")
+	reqID := r.PathValue("reqID")
+	prov.loginsLock.RLock()
+	login, ok := prov.logins[loginID]
+	prov.loginsLock.RUnlock()
+	if !ok || login.UserMXID != prov.GetUser(r).MXID {
+		log.Warn().Str("login_id", loginID).Msg("Login not found")
+		mautrix.MNotFound.WithMessage("Login not found").Write(w)
+		return
+	}
+	// Bypass the size limit set in auth middleware, because the client HTTP response may be large.
+	body := http.MaxBytesReader(w, exerrors.Must(r.GetBody()), maxClientHTTPResponseSize)
+	var resp bridgev2.LoginClientHTTPResponse
+	var err error
+	if r.Header.Get("Content-Type") == bridgev2.ClientHTTPResponseGzipContentType {
+		err = decodeGzippedClientHTTPResponse(body, &resp)
+	} else {
+		err = json.NewDecoder(body).Decode(&resp)
+	}
+	if err != nil {
+		log.Err(err).Msg("Failed to decode request body")
+		mautrix.MNotJSON.WithMessage("Failed to decode request body").Write(w)
+		return
+	} else if !resp.IsValid() {
+		mautrix.MBadJSON.WithMessage("Invalid client HTTP response payload in body").Write(w)
+		return
+	}
+	var currentStep *bridgev2.LoginStep
+	var stepWaitChan chan struct{}
+	err = login.step.WithLock(func(sm *stepManager) error {
+		if sm.err != nil {
+			return sm.err
+		}
+		currentStep = sm.next
+		if sm.prev != nil && sm.prev.TxnID == txnID && sm.prev.StepID == reqID && sm.prev.Type == bridgev2.LoginStepTypeClientHTTP {
+			return errReturnCurrentStep
+		} else if sm.next.Type != bridgev2.LoginStepTypeClientHTTP {
+			return mautrix.MBadState.WithMessage("Next step type is not client_http")
+		} else if sm.next.TxnID != txnID {
+			return mautrix.MBadState.WithMessage("Transaction ID does not match")
+		} else if sm.next.ClientHTTPParams.RequestID != reqID {
+			return mautrix.MBadState.WithMessage("Request ID does not match")
+		}
+		if sm.pendingHTTP != nil {
+			select {
+			case sm.pendingHTTP <- &resp:
+				log.Debug().
+					Str("req_id", reqID).
+					Int("status_code", resp.StatusCode).
+					Int("header_count", len(resp.Headers)).
+					Int("body_length", len(resp.Body)).
+					Str("error_msg", resp.Error).
+					Str("used_fingerprint", resp.Fingerprint).
+					Msg("Submitted client HTTP response")
+			default:
+				return fmt.Errorf("pendingHTTP channel unexpectedly didn't accept response")
+			}
+			sm.pendingHTTP = nil
+			sm.wait = make(chan struct{})
+		} else {
+			log.Debug().Str("req_id", reqID).
+				Msg("Client HTTP response was already submitted, ignoring new data")
+		}
+		stepWaitChan = sm.wait
+		return nil
+	})
+	if errors.Is(err, errReturnCurrentStep) {
+		exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: currentStep})
+		return
+	} else if err != nil {
+		log.Err(err).Msg("Client HTTP step rejected in pre-validation")
+		RespondWithError(w, err, "Internal error in login step validation")
+		return
+	}
+	select {
+	case <-stepWaitChan:
+	case <-r.Context().Done():
+		log.Warn().Str("req_id", reqID).Msg("Client HTTP step context canceled")
+		w.WriteHeader(499)
+		return
+	}
+	nextStep, err := login.step.GetNext()
+	// Check the actual error before checking if the context expired, because if there was an
+	// error, then we already deleted the login session, which canceled the context.
+	if err != nil {
+		log.Err(err).Str("req_id", reqID).Msg("Client HTTP step failed")
+		RespondWithError(w, err, "Internal error in login step")
+	} else if login.Ctx.Err() != nil && nextStep != nil && nextStep.Type != bridgev2.LoginStepTypeComplete {
+		if errors.Is(login.Ctx.Err(), context.DeadlineExceeded) {
+			ErrLoginTimedOut.Write(w)
+		} else {
+			ErrLoginCancelled.Write(w)
+		}
+	} else {
+		log.Debug().
+			Object("next_step", nextStep).
+			Msg("Returning next login step from client HTTP response")
+		exhttp.WriteJSONResponse(w, http.StatusOK, &RespSubmitLogin{LoginID: login.ID, LoginStep: nextStep})
+	}
+}
+
+func (p *ProvLogin) SetFingerprint(fingerprint string) {
+	p.HTTPLock.Lock()
+	defer p.HTTPLock.Unlock()
+	p.fingerprint = fingerprint
+}
+
+func (p *ProvLogin) RoundTrip(req *http.Request) (*http.Response, error) {
+	log := zerolog.Ctx(req.Context()).With().Str("login_id", p.ID).Logger()
+	upgrade := req.Header.Get("Upgrade") == "websocket" &&
+		req.Header.Get("Connection") == "Upgrade"
+	if upgrade && (!p.websocketEnabled || req.Method != http.MethodGet || req.URL.Scheme != "https") {
+		return nil, fmt.Errorf("client WebSocket upgrade is not supported")
+	}
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+	}
+	p.HTTPLock.Lock()
+	defer p.HTTPLock.Unlock()
+	var streamID string
+	var stream *loginClientStream
+	if upgrade {
+		var err error
+		streamID, stream, err = p.newClientStream()
+		if err != nil {
+			return nil, err
+		}
+	}
+	streamOpened := false
+	defer func() {
+		if stream != nil && !streamOpened {
+			_ = stream.Close()
+		}
+	}()
+	ch := make(chan *bridgev2.LoginClientHTTPResponse, 1)
+	err := p.step.WithLock(func(sm *stepManager) error {
+		if sm.err != nil {
+			return fmt.Errorf("login is errored: %w", sm.err)
+		}
+		if !sm.started {
+			return fmt.Errorf("illegal client HTTP request: no ongoing step")
+		}
+		sm.prev = sm.next
+		txnID := LoginStepTxnIDPrefix + xid.New().String()
+		if sm.prev != nil {
+			txnID = sm.prev.TxnID
+		}
+		sm.reqCounter++
+		reqID := "fi.mau.bridgev2.client_http." + strconv.Itoa(sm.reqCounter)
+		sm.next = &bridgev2.LoginStep{
+			Type:   bridgev2.LoginStepTypeClientHTTP,
+			StepID: reqID,
+			TxnID:  txnID,
+			ClientHTTPParams: &bridgev2.LoginClientHTTPParams{
+				RequestID:   reqID,
+				StreamID:    streamID,
+				Method:      req.Method,
+				URL:         req.URL.String(),
+				Headers:     req.Header,
+				Body:        body,
+				Fingerprint: p.fingerprint,
+
+				AcceptsGzipResponse: p.acceptsGzipResponse,
+			},
+		}
+		sm.pendingHTTP = ch
+		if sm.wait != nil {
+			close(sm.wait)
+			sm.wait = nil
+			log.Debug().
+				Str("req_id", reqID).
+				Str("method", req.Method).
+				Stringer("url", req.URL).
+				Msg("Waiting for client HTTP response")
+		} else {
+			// This should probably never happen
+			log.Warn().
+				Str("req_id", reqID).
+				Str("method", req.Method).
+				Stringer("url", req.URL).
+				Msg("Login step isn't waiting when client http request was made")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp *bridgev2.LoginClientHTTPResponse
+	var streamDone <-chan struct{}
+	if stream != nil {
+		streamDone = stream.done
+	}
+	select {
+	case resp = <-ch:
+		// yay
+	case <-streamDone:
+		return nil, fmt.Errorf("client WebSocket closed during upgrade")
+	case <-p.Ctx.Done():
+		log.Warn().Msg("Login context cancelled during client HTTP request")
+		return nil, fmt.Errorf("login context cancelled during client HTTP request: %w", p.Ctx.Err())
+	case <-req.Context().Done():
+		log.Warn().Err(req.Context().Err()).Msg("Client HTTP request canceled")
+		p.CancelCtx()
+		return nil, req.Context().Err()
+	}
+	if resp.Error != "" {
+		return nil, errors.New(ErrorFromClientPrefix + resp.Error)
+	}
+	responseBody := io.NopCloser(bytes.NewReader(resp.Body))
+	contentLength := int64(len(resp.Body))
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		if stream == nil || resp.StreamID != streamID || len(resp.Body) != 0 {
+			return nil, fmt.Errorf("invalid client WebSocket upgrade response")
+		}
+		if _, err = stream.waitConn(req.Context()); err != nil {
+			if req.Context().Err() != nil {
+				p.CancelCtx()
+			}
+			return nil, err
+		}
+		stream.opening.Stop()
+		responseBody = stream
+		contentLength = -1
+		streamOpened = true
+	} else if resp.StreamID != "" {
+		return nil, fmt.Errorf("unexpected stream ID in client HTTP response")
+	}
+	if resp.Headers == nil {
+		resp.Headers = make(http.Header)
+	}
+	for _, headers := range []http.Header{resp.Headers, resp.Trailers} {
+		for key, values := range headers {
+			canon := http.CanonicalHeaderKey(key)
+			if canon != key {
+				headers[canon] = append(headers[canon], values...)
+				delete(headers, key)
+			}
+		}
+	}
+	finalURL, _ := url.Parse(resp.FinalURL)
+	if finalURL == nil || resp.FinalURL == "" {
+		finalURL = req.URL
+	}
+	return &http.Response{
+		Status:        fmt.Sprintf("%d Meow", resp.StatusCode),
+		StatusCode:    resp.StatusCode,
+		Proto:         ClientHTTPProto,
+		ProtoMajor:    1,
+		Header:        resp.Headers,
+		Trailer:       resp.Trailers,
+		Body:          responseBody,
+		ContentLength: contentLength,
+		Request: &http.Request{
+			Method: req.Method,
+			URL:    finalURL,
+		},
+	}, nil
+}
+
+// Note: bridges may check these without referencing the constants, so they shouldn't be changed
+const (
+	ErrorFromClientPrefix = "error from client: "
+	ClientHTTPProto       = "MauClientHTTP/1.0"
+)

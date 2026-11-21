@@ -41,6 +41,15 @@ export function isExternalAllowed(target: string): boolean {
   }
 }
 
+/**
+ * Whether closing the last window quits the app. A Mac keeps running for notifications, as Mac
+ * apps do; elsewhere it quits, except mid-change of server, when the old server's window has
+ * closed and the new one's is about to open.
+ */
+export function quitsWhenAllClosed(platform: string, changingServer: boolean): boolean {
+  return platform !== 'darwin' && !changingServer
+}
+
 export function sameOrigin(target: string, origin: string): boolean {
   try {
     return new URL(target).origin === origin
@@ -71,4 +80,17 @@ export function serverKind(answer: { config?: unknown; html?: string }): 'ready'
   const config = answer.config as { convexUrl?: unknown } | null | undefined
   if (config && typeof config === 'object' && typeof config.convexUrl === 'string' && config.convexUrl) return 'old'
   return 'other'
+}
+
+/**
+ * Whether a page's HTTP status means a proxy in front of the server couldn't reach it (502 Bad
+ * Gateway, 503 Unavailable, 504 Timeout): the server is down or restarting, not a page to show.
+ */
+export function proxyCouldNotReach(status: number): boolean {
+  return status >= 502 && status <= 504
+}
+
+/** What the picker says when the server couldn't be reached, so connecting again is a retry. */
+export function unreachableMessage(origin: string, why: string): string {
+  return `Couldn’t reach your server at ${origin} (${why}). Check your connection, then retry.`
 }

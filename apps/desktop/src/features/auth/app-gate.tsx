@@ -52,6 +52,10 @@ import { proveKey } from '~/lib/proof.ts'
 import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
+import { keyGateLoad, SLOW_SERVER_MS, type SessionStore } from './gate-load.ts'
+import { authRestarts, restartAuth } from '~/lib/auth-epoch.ts'
+import { useConfirmedSignedOut } from './confirm-signed-out.ts'
+import { COLD_START_MS, coldSession, forgetVerified, readVerified, rememberVerified } from '~/lib/verified-session.ts'
 
 /**
  * Everything signed in passes through here: the account must be a member of this server, and
@@ -59,8 +63,17 @@ import { AuthCard, Field, FormError } from './auth-card.tsx'
  */
 export function AppGate({ children }: { children: ReactNode }) {
   const { isLoading, isAuthenticated } = useConvexAuth()
-  const signedOut = useConfirmedSignedOut(!isLoading && !isAuthenticated)
+  const signedOut = useConfirmedSignedOut({
+    isLoading,
+    isAuthenticated,
+    store: sessionStore,
+    wakes: serverMayAnswer,
+    restartAuth,
+    restarts: authRestarts,
+  })
+  const cold = useColdSession(!isAuthenticated && !signedOut)
   if (isAuthenticated) return <MemberGate>{children}</MemberGate>
+  if (signedOut) forgetVerified()
   // A page that was signed in leaves as its session's end says (a sign-out of its own may be
   // finishing, or never heard back): see leaveForSignIn. One that never was just goes to sign in.
   if (signedOut && openedSession()) {
@@ -68,30 +81,54 @@ export function AppGate({ children }: { children: ReactNode }) {
     return <Splash />
   }
   if (signedOut) return <Navigate to="/sign-in" />
-  return <Splash />
+  // No answer from the server yet: open with this device's key for the last confirmed session,
+  // until the server answers and the gate above takes over (lib/verified-session.ts).
+  if (cold) return <SessionContext value={cold}>{children}</SessionContext>
+  return <Splash slow />
 }
 
 /**
- * Right after signing in or up, Convex can report "not signed in" for a moment, and the
- * session the page cached before can still say so too. So before sending the person to sign
- * in, ask Better Auth afresh; only a fresh "no session" counts.
+ * The last confirmed session, with this device's key for it, once the server has kept the page
+ * waiting: at once when the browser says it's offline, otherwise after COLD_START_MS. Null while
+ * the server may still answer soon, or when there's nothing here to open with.
  */
-function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
-  const [signedOut, setSignedOut] = useState(false)
+function useColdSession(waiting: boolean): Session | null {
+  const [cold, setCold] = useState<Session | null>(null)
   useEffect(() => {
-    if (!convexSaysSignedOut) {
-      setSignedOut(false)
+    if (!waiting) {
+      setCold(null)
       return
     }
+    const verified = readVerified()
+    if (!verified) return
     let cancelled = false
-    void authClient.getSession().then(({ data }) => {
-      if (!cancelled && !data) setSignedOut(true)
-    })
+    const open = () =>
+      void loadIdentity(verified.userId).then(
+        (kept) => !cancelled && setCold(coldSession(verified, kept)),
+        () => undefined,
+      )
+    const timer = setTimeout(open, navigator.onLine ? COLD_START_MS : 0)
+    window.addEventListener('offline', open)
     return () => {
       cancelled = true
+      clearTimeout(timer)
+      window.removeEventListener('offline', open)
     }
-  }, [convexSaysSignedOut])
-  return signedOut
+  }, [waiting])
+  return waiting ? cold : null
+}
+
+/** Better Auth's session store, as the Convex provider reads it. */
+const sessionStore = authClient.$store.atoms.session as unknown as SessionStore
+
+/** When the server may answer again: the browser coming online, or Convex reconnecting. */
+function serverMayAnswer(wake: () => void) {
+  window.addEventListener('online', wake)
+  const stop = convex.subscribeToConnectionState((state) => state.isWebSocketConnected && wake())
+  return () => {
+    window.removeEventListener('online', wake)
+    stop()
+  }
 }
 
 function MemberGate({ children }: { children: ReactNode }) {
@@ -120,15 +157,33 @@ function MemberGate({ children }: { children: ReactNode }) {
     }
   }, [sessionId])
   if (opened.current && sessionId && opened.current !== sessionId) return <Splash />
-  if (me.isPending) return <Splash />
+  if (me.isPending) return <Splash slow />
+  // A failed answer with nothing to go on: say so, rather than a splash that never ends.
+  if (me.isError && me.data === undefined) {
+    return (
+      <LoadFailed
+        what="your account"
+        error={me.error}
+        onRetry={() => void me.refetch()}
+        signOut={
+          <Button block onClick={() => window.location.reload()}>
+            Reload
+          </Button>
+        }
+      />
+    )
+  }
   // The session Convex was given has ended. Loaded afresh, the page asks for a token again and
   // finds none, rather than going on with the one it holds until it expires.
   // A sign-out under way here goes on to the sign-in page itself, with what it must say.
   if (!me.data) {
+    forgetVerified()
     void leaveForSignIn(opened.current)
     return <Splash />
   }
   if (!me.data.member) {
+    // Removed (or never a member): a cold start here must not open the app again.
+    forgetVerified()
     return (
       <AuthCard
         title="This account isn’t on this server"
@@ -308,9 +363,29 @@ function KeyGate({
   if (held) return setupScreen(held)
   if (local.data && setUpKid && local.data.kid === setUpKid) {
     const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
-    return <SessionContext value={session}>{children}</SessionContext>
+    return <OpenApp session={session}>{children}</OpenApp>
   }
-  if (token === null || remote.isPending || local.isPending || !remote.data) return <Splash />
+  const load = keyGateLoad({
+    token,
+    remote: { failed: remote.isError, hasData: !!remote.data },
+    local: { pending: local.isPending, hasKey: !!local.data },
+    recoveryCheckPending: !!pendingRecoveryCheck(userId),
+  })
+  if (load === 'openLocal' && local.data) {
+    const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
+    return <OpenApp session={session}>{children}</OpenApp>
+  }
+  if (load === 'failed') {
+    return (
+      <LoadFailed
+        what="your key"
+        error={remote.error}
+        onRetry={() => void remote.refetch()}
+        signOut={<Button onClick={() => void signOutHere(null)}>Sign out</Button>}
+      />
+    )
+  }
+  if (load === 'wait' || !remote.data) return <Splash slow />
   const { state, publicKey, kid, backups } = remote.data
   const here = local.data && local.data.kid === kid ? local.data : null
   const setupFor: SetupFor | null =
@@ -363,7 +438,7 @@ function KeyGate({
   }
   if (here) {
     const session: Session = { userId, sessionId, role, kid: here.kid, keyPair: here.keyPair }
-    return <SessionContext value={session}>{children}</SessionContext>
+    return <OpenApp session={session}>{children}</OpenApp>
   }
   // A key already here was opened with WebCrypto, so only unlocking needs the check.
   if (!canKeepKeys()) return <InsecurePage userId={userId} sessionId={sessionId} />
@@ -635,30 +710,40 @@ function KeySetup({
       return
     }
     let kid: string
+    let stored: readonly string[]
     onSaving()
     try {
       const call = setup({ ...job.setup.args, proof, sessionId })
       onBackup(call)
-      kid = (await call).kid
+      const result = await call
+      kid = result.kid
+      stored = result.stored
     } catch (e) {
       if (sessionChanged(e)) return window.location.reload()
       if (await takenElsewhere(job)) return
       // Still held: trying again ends in the same check below.
       return fail(errorMessage(e, 'The server couldn’t save your key’s backups. Try again.'))
     }
-    await check(kid, job)
+    await check(kid, job, false, stored)
   }
 
   /**
    * keys.setup stores only what's missing, so if another device holding this key installed a
-   * recovery key a moment before, the one shown here isn't it. Which one the server kept is
-   * checked, and only a match, or a clear mismatch, goes on; a failed check can be tried again.
+   * recovery key a moment before, the one shown here isn't it. When the call says it stored this
+   * recovery key (`stored`, decided in the transaction that wrote it), that settles it. Otherwise
+   * (another device's won, or an earlier try of this one stored it and its answer was lost) which
+   * one the server kept is checked, and only a match, or a clear mismatch, goes on; a failed check
+   * can be tried again.
    */
-  async function check(kid: string, job: NonNullable<typeof prepared>, fresh = false) {
+  async function check(kid: string, job: NonNullable<typeof prepared>, fresh = false, stored?: readonly string[]) {
     setBusy(true)
     setError(null)
     let lost = false
-    if (job.showRecovery) {
+    if (job.showRecovery && stored?.includes('recovery')) {
+      setRecoveryLost(false)
+      onRecoveryLost(false)
+      clearPendingRecoveryCheck()
+    } else if (job.showRecovery) {
       const identity = await readIdentity(fresh)
       const installed = identity?.backups.find((b) => b.kind === 'recovery')
       if (!installed) {
@@ -822,7 +907,7 @@ function KeySetup({
         title={existing ? 'Finish setting up your key' : 'Set up your key'}
         description={
           has.password
-            ? 'Your key still needs a recovery key, the way back in if you forget your password.'
+            ? 'Your key still needs a recovery key. If you forget your password, it and a reset link from your server’s admin get you back into your messages.'
             : 'Trioditis seals every message to a key only your devices hold, so the server can’t read them. The password you just used protects a backup of it, so your other devices can open your messages too.'
         }
       >
@@ -841,7 +926,7 @@ function KeySetup({
   return (
     <AuthCard
       title="Save your recovery key"
-      description="If you forget your password, this is the only way back into your messages. Write it down or keep it in a password manager. It’s shown only now."
+      description="If you forget your password, you’ll need this and a reset link from your server’s admin to get back into your messages. Write it down or keep it in a password manager. It’s shown only now."
     >
       <FormError message={error} />
       <div
@@ -1072,7 +1157,7 @@ function Unlock({
             block
             className="mt-2"
             loading={busy === 'passkey'}
-            disabled={busy !== null}
+            disabled={busy !== null || !!passkeysUnavailable}
             onClick={() => void unlockWithPasskey()}
           >
             <KeyRound className="size-4" /> Unlock with a passkey
@@ -1287,10 +1372,58 @@ export function SignOutButton({
   )
 }
 
-export function Splash() {
+/**
+ * The app, for a session the server has just confirmed with this device's key: it's noted as the
+ * last confirmed session, for a cold start offline (lib/verified-session.ts).
+ */
+function OpenApp({ session, children }: { session: Session; children: ReactNode }) {
+  const { userId, sessionId, role, kid } = session
+  useEffect(() => rememberVerified({ userId, sessionId, role, kid }), [userId, sessionId, role, kid])
+  return <SessionContext value={session}>{children}</SessionContext>
+}
+
+/** The splash. With `slow`, it also says the server is taking a while, once it has. */
+export function Splash({ slow = false }: { slow?: boolean }) {
+  const [late, setLate] = useState(false)
+  useEffect(() => {
+    if (!slow) return
+    const timer = setTimeout(() => setLate(true), SLOW_SERVER_MS)
+    return () => clearTimeout(timer)
+  }, [slow])
   return (
-    <div className="flex h-full items-center justify-center bg-rail" aria-busy="true" aria-label="Loading">
+    <div
+      className="flex h-full flex-col items-center justify-center gap-4 bg-rail"
+      aria-busy="true"
+      aria-label="Loading"
+    >
       <img src="/icon.svg" alt="" className="size-10 opacity-80 motion-safe:animate-pulse" />
+      {late ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          Still trying to reach your server…
+        </p>
+      ) : null}
     </div>
+  )
+}
+
+/** A load the gate needs failed: what went wrong, a retry, and a way out. */
+function LoadFailed({
+  what,
+  error,
+  onRetry,
+  signOut,
+}: {
+  what: string
+  error: unknown
+  onRetry: () => void
+  signOut: ReactNode
+}) {
+  return (
+    <AuthCard title={`Couldn’t load ${what}`} description={errorMessage(error, 'The server didn’t answer.')}>
+      <Button variant="primary" size="lg" block className="mb-2" onClick={onRetry}>
+        Try again
+      </Button>
+      {signOut}
+    </AuthCard>
   )
 }

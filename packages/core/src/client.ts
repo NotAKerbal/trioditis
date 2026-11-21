@@ -234,6 +234,11 @@ export interface ChatRow {
   sealedMeta: Envelope | null
   portalId: string
   unreadCount: number
+  /**
+   * Goes up by one with every message counted unread, so two answers with the same count can
+   * still be told apart: one at 1, marked read, then another at 1.
+   */
+  unreadRev: number
   /** Unread messages that mention the person, as the bridge host flags them. */
   mentionCount: number
   /** Set by the person, whatever the unread count. */
@@ -284,12 +289,30 @@ export interface Preferences {
 
 export const DEFAULT_PREFERENCES: Preferences = { sidebarLayout: 'simple' }
 
+/**
+ * A bridge host heard from within this long is online; it heartbeats every 30 seconds, so one
+ * missing for two minutes has stopped, whether or not it said so on the way out.
+ */
+export const BRIDGE_HOST_STALE_MS = 2 * 60_000
+
+export type NetworkStatus = 'online' | 'degraded' | 'offline' | 'none'
+
 /** One network's health for the person, for the status bar. */
 export interface NetworkHealth {
   network: Network
-  /** A bridge host for this network has been heard from in the last two minutes. */
+  /** A bridge host for this network had been heard from in the last two minutes when the query ran. */
   bridgeOnline: boolean
+  /** When it was last heard from, to judge `bridgeOnline` again as time passes; null if never. */
+  bridgeLastSeenAt?: number | null
   accounts: { networkAccountId: string; state: LoginState; error: ErrorCode | null; lastHealthyAt: number | null }[]
   /** `online`: everything connected. `degraded`: some accounts aren't. `offline`: no bridge host, or no account connected. */
-  status: 'online' | 'degraded' | 'offline' | 'none'
+  status: NetworkStatus
+}
+
+/** Sums up a network's accounts (those not logged out) and its bridge for the status bar. */
+export function networkStatus(accounts: readonly { state: LoginState }[], bridgeOnline: boolean): NetworkStatus {
+  const connected = accounts.filter((account) => account.state === 'CONNECTED').length
+  if (accounts.length === 0) return 'none'
+  if (!bridgeOnline || connected === 0) return 'offline'
+  return connected < accounts.length ? 'degraded' : 'online'
 }

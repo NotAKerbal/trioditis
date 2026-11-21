@@ -3,12 +3,13 @@ import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
 import { constantTimeEqual, sha256Hex } from './lib/hash'
-import { onCommandExpired, onCommandOverdue, onCommandRejected } from './lib/commandOutcome'
+import { onCommandExpired, onCommandOverdue, onCommandRejected, requeueRemovedLogout } from './lib/commandOutcome'
 import { byteSize } from './lib/bounded'
 import { Unmappable, applyEvent, startMeter } from './lib/ingest'
 import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
 import { browserStepOpen } from './logins'
+import { sendScheduled } from './scheduled'
 import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
@@ -40,6 +41,8 @@ const MAX_CLAIMS = 20
  * the next sweep.
  */
 const MAX_EXPIRIES = 20
+/** What still goes out for someone no longer a member: what tears their network accounts down. */
+const TEARDOWN = new Set(['logout', 'loginCancel'])
 /**
  * The index lookups one claim may make beyond its two scans, kept well under Convex's
  * 4,096 ranges per transaction. A claim that runs out stops early; the next sweep goes on.
@@ -99,6 +102,8 @@ export const ingest = mutation({
     hostId: v.string(),
     network,
     events: v.array(bridgeEvent),
+    /** The host's last heartbeat before it shuts down: it is offline from now. */
+    stopping: v.optional(v.boolean()),
   },
   returns: v.union(v.object({ ackedThrough: v.number() }), v.object({ expectedSeq: v.number() })),
   handler: async (ctx, args) => {
@@ -143,7 +148,10 @@ export const ingest = mutation({
       applied++
       meter.bytes += 2 * byteSize(event)
     }
-    await ctx.db.patch(host._id, { lastSeq, lastSeenAt: now })
+    // A host that says it is stopping is offline at once (never heard from, as far as being
+    // live goes), rather than once its heartbeats have gone stale.
+    const stopping = args.stopping === true && args.events.length === 0
+    await ctx.db.patch(host._id, { lastSeq, lastSeenAt: stopping ? 0 : now })
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
   },
 })
@@ -276,8 +284,12 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
  * handed out whose acceptance was never confirmed may have reached the bridge host:
  * `unknown`, and the person decides. (The bridge host itself won't send after `notAfter`.)
  */
-async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
-  const delivery = command.state === 'queued' ? 'failed' : 'unknown'
+async function expire(
+  ctx: MutationCtx,
+  command: Doc<'outbox'>,
+  delivery: 'failed' | 'unknown' = command.state === 'queued' ? 'failed' : 'unknown',
+  requeue = true,
+) {
   await ctx.db.patch(command._id, {
     state: 'expired',
     leaseUntil: undefined,
@@ -287,7 +299,7 @@ async function expire(ctx: MutationCtx, command: Doc<'outbox'>) {
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
   await expireLogin(ctx, command)
-  await onCommandExpired(ctx, command)
+  await onCommandExpired(ctx, command, requeue)
 }
 
 /** How long after its deadline a command the bridge host accepted may go without an outcome. */
@@ -316,12 +328,12 @@ async function settleOverdue(ctx: MutationCtx, now: number) {
 }
 
 /** Settles one overdue command; it then has no `expiresAt`, so nothing settles it twice. */
-async function settle(ctx: MutationCtx, command: Doc<'outbox'>) {
+async function settle(ctx: MutationCtx, command: Doc<'outbox'>, requeue = true) {
   const unsettled = command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
   await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
   if (unsettled) await markCopy(ctx, command, 'unknown')
   await expireLogin(ctx, command)
-  await onCommandOverdue(ctx, command)
+  await onCommandOverdue(ctx, command, requeue)
 }
 
 /**
@@ -422,6 +434,18 @@ export const claimCommands = mutation({
       const current = liveByNetwork.get(host.network)
       if (!current || host.lastSeenAt > current.lastSeenAt) liveByNetwork.set(host.network, host)
     }
+    const members = new Map<string, boolean>()
+    async function stillMember(userId: string) {
+      if (!members.has(userId)) {
+        lookups += 1
+        const member = await ctx.db
+          .query('members')
+          .withIndex('by_userId', (q) => q.eq('userId', userId))
+          .unique()
+        members.set(userId, member !== null)
+      }
+      return members.get(userId)!
+    }
     const loginHosts = new Map<string, string | undefined>()
     async function hostFor(command: Doc<'outbox'>) {
       if (command.hostId) return liveHosts.get(command.hostId)
@@ -521,6 +545,18 @@ export const claimCommands = mutation({
     for (const command of candidates) {
       if (claimed.length >= take || lookups >= MAX_LOOKUPS) break
       if (command.expiresAt !== undefined && command.expiresAt <= now) {
+        if (expired < MAX_EXPIRIES) {
+          lookups += 3
+          await expire(ctx, command)
+          expired++
+        }
+        continue
+      }
+      // A removed member's commands never reach a bridge host, but for the logouts and login
+      // cancels that tear their accounts down. Each is settled as if it ran out of time: a send
+      // never handed over fails, and one that may have gone out (claimed before, lease lapsed)
+      // becomes `unknown`. Neither is sent again.
+      if (!TEARDOWN.has(command.payload.type) && !(await stillMember(command.userId))) {
         if (expired < MAX_EXPIRIES) {
           lookups += 3
           await expire(ctx, command)
@@ -637,5 +673,85 @@ export const redeemSigninTicket = mutation({
       return null
     }
     return { loginSessionId: row.loginSessionId, userId: row.userId, hostId: row.hostId, stepId: row.stepId }
+  },
+})
+
+const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired', 'logouts', 'cancelled'] as const
+const restorePhase = v.union(...RESTORE_PHASES.map((phase) => v.literal(phase)))
+/** Rows one call of `settleAfterRestore` handles; each is bounded like an expiry. */
+const RESTORE_BATCH = 20
+
+/**
+ * Run once after `deploy/trioditis restore`, before the gateway starts (docs/deploy.md,
+ * Restore). A backup is a moment in the past, and the server ran on after it, so a send the
+ * backup holds as still on its way may have gone out since. None is sent again: each becomes
+ * `unknown`, and the person decides. In order, one batch a call, until `phase` is null:
+ * every scheduled message becomes a send (and so `unknown`), even one whose time is still to
+ * come, since one sent early with Send now after the backup can't be told apart; queued and
+ * claimed commands expire as `unknown`; accepted ones are settled as `unknown`, as if overdue;
+ * and a send the backend expired as `failed` when it started (its deadline came after
+ * `backupAt`, so it may have gone in the meantime) is `unknown` too. Logins, logouts and new
+ * chats waiting on a command end as if it expired, without a removed member's logout being queued
+ * again while it runs (that would refill the queue it empties); the last phase queues those again,
+ * once. Safe to run again.
+ */
+export const settleAfterRestore = internalMutation({
+  args: {
+    backupAt: v.number(),
+    phase: v.optional(restorePhase),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  returns: v.object({ phase: v.union(restorePhase, v.null()), cursor: v.union(v.string(), v.null()) }),
+  handler: async (ctx, { backupAt, phase = 'scheduled', cursor = null }) => {
+    const next = (more: boolean, nextCursor: string | null) =>
+      more
+        ? { phase, cursor: nextCursor }
+        : { phase: RESTORE_PHASES[RESTORE_PHASES.indexOf(phase) + 1] ?? null, cursor: null }
+    if (phase === 'scheduled') {
+      const page = await ctx.db.query('scheduledSends').paginate({ cursor, numItems: RESTORE_BATCH })
+      for (const row of page.page) if (row.state === 'scheduled') await sendScheduled(ctx, row)
+      return next(!page.isDone, page.continueCursor)
+    }
+    if (phase === 'queued' || phase === 'claimed') {
+      // Each leaves the index as it expires, so the next call starts from the front again.
+      const rows = await ctx.db
+        .query('outbox')
+        .withIndex('by_state', (q) => q.eq('state', phase))
+        .take(RESTORE_BATCH)
+      // No requeue: a removed member's logout queued again here would refill the queue this
+      // empties, for ever. The last phase queues those again, once.
+      for (const command of rows) await expire(ctx, command, 'unknown', false)
+      return next(rows.length === RESTORE_BATCH, null)
+    }
+    if (phase === 'dispatched') {
+      // A settled command has no `expiresAt`, so it leaves this range too.
+      const rows = await ctx.db
+        .query('outbox')
+        .withIndex('by_expiry', (q) => q.eq('state', 'dispatched').gte('expiresAt', 0))
+        .take(RESTORE_BATCH)
+      for (const command of rows) await settle(ctx, command, false)
+      return next(rows.length === RESTORE_BATCH, null)
+    }
+    if (phase === 'cancelled') {
+      // Kept so a restore already past it carries on: a cancelled login's account is no longer
+      // logged out on its own (it is flagged, connectedAfterCancel), so nothing is left to do.
+      return next(false, null)
+    }
+    if (phase === 'logouts') {
+      // Removed members' logouts that settling ended, queued again once, as failLogout would.
+      const page = await ctx.db.query('networkAccounts').paginate({ cursor, numItems: RESTORE_BATCH })
+      for (const account of page.page) await requeueRemovedLogout(ctx, account)
+      return next(!page.isDone, page.continueCursor)
+    }
+    const page = await ctx.db
+      .query('outbox')
+      .withIndex('by_expiry', (q) => q.eq('state', 'expired').gte('expiresAt', backupAt))
+      .paginate({ cursor, numItems: RESTORE_BATCH })
+    for (const command of page.page) {
+      if (command.delivery !== 'failed' || command.lastError !== 'expired') continue
+      await ctx.db.patch(command._id, { delivery: 'unknown' })
+      await markCopy(ctx, command, 'unknown')
+    }
+    return next(!page.isDone, page.continueCursor)
   },
 })

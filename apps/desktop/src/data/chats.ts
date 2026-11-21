@@ -1,6 +1,6 @@
 import { api } from '@trioditis/backend/api'
 import type { Id } from '@trioditis/backend/dataModel'
-import type { Attachment, ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
+import type { AccountPlaintext, Attachment, ChatRow, ChatView, Network, SidebarLayout } from '@trioditis/core'
 import { DEFAULT_PREFERENCES, NETWORK_INFO } from '@trioditis/core'
 import { toast } from '@trioditis/ui/toast'
 import { convexQuery } from '@convex-dev/react-query'
@@ -8,6 +8,7 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import { useMutation, usePaginatedQuery } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
 import { useMemo } from 'react'
+import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -264,16 +265,43 @@ export function useNetworks() {
   return useQuery(convexQuery(api.networks.list, {})).data
 }
 
+/** Each network's health, with its bridge judged again as time passes (data/bridge-liveness.ts). */
 export function useNetworkHealth() {
-  return useQuery(convexQuery(api.networks.health, {})).data
+  const rows = useQuery(convexQuery(api.networks.health, {})).data
+  const clock = useHeardClock()
+  const now = useNow()
+  return useMemo(() => (rows ? liveHealth(rows, clock, now) : rows), [rows, clock, now])
+}
+
+type AccountRow = FunctionReturnType<typeof api.logins.accounts>[number]
+// Opened account hints (openCached), so re-renders don't decrypt every row again.
+const accountCache = new Map<string, AccountPlaintext | null>()
+
+/**
+ * An account's hint as its bridge host put it (its number or username, sealed to the person),
+ * or the backend's own (the end of its ID) where this device can't open one.
+ */
+export function openAccountHint(row: AccountRow, session: Session): string {
+  const meta = row.sealedMeta
+  const opened = meta
+    ? openCached(accountCache, meta.sealed, session.keyPair, session.kid, 'account', session.userId, meta.objectId)
+    : null
+  return typeof opened?.hint === 'string' && opened.hint ? opened.hint : row.hint
 }
 
 export function useAccounts() {
-  return useQuery(convexQuery(api.logins.accounts, {})).data
+  const session = useSession()
+  const rows = useQuery(convexQuery(api.logins.accounts, {})).data
+  return useMemo(() => rows?.map((row) => ({ ...row, hint: openAccountHint(row, session) })), [rows, session])
 }
 
 export function useScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.list, chatId ? { chatId } : {})).data
+}
+
+/** Cancelled scheduled messages kept on the server until restored or discarded (scheduled.cancelled). */
+export function useCancelledScheduled(chatId?: ChatId) {
+  return useQuery(convexQuery(api.scheduled.cancelled, chatId ? { chatId } : {})).data
 }
 
 type ScheduledCopy = FunctionReturnType<typeof api.scheduled.copies>[number]
@@ -293,7 +321,9 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
     queries: batches.map((scheduledIds) => convexQuery(api.scheduled.copies, { scheduledIds })),
     combine: copiesOf,
   })
-  const clientIds = useScheduled()
+  const scheduledIds = useScheduled()
+  const cancelledIds = useCancelledScheduled()
+  const clientIds = useMemo(() => [...(scheduledIds ?? []), ...(cancelledIds ?? [])], [scheduledIds, cancelledIds])
   return useMemo(() => {
     // Text once opened; null for a copy that doesn't open here or couldn't be fetched (it can
     // still be cancelled, with nothing to put back); missing while it loads.
@@ -302,7 +332,7 @@ export function useScheduledTexts(ids: Id<'scheduledSends'>[]): Map<string, stri
       if (answer.failed) for (const id of batches[i] ?? []) out.set(id, null)
     })
     for (const row of answers.flatMap((answer) => answer.rows ?? [])) {
-      const clientMessageId = clientIds?.find((s) => s._id === row._id)?.clientMessageId
+      const clientMessageId = clientIds.find((s) => s._id === row._id)?.clientMessageId
       if (!clientMessageId) continue
       const body = tryOpen<MessagePlaintext>(
         row.copy,

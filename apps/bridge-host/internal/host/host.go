@@ -38,6 +38,10 @@ type Config struct {
 	Network string
 	HostID  string
 	DataDir string
+	// RestoreID names the last restore of this server (deploy/trioditis restore, RESTORE_ID in
+	// deploy/.env), if there was one: a database that hasn't settled that one yet holds the
+	// backup's queue, which is settled at start rather than run.
+	RestoreID string
 	// DatabaseType is "sqlite3-fk-wal" (default) or "postgres"; DatabaseURI defaults to a
 	// SQLite file in DataDir.
 	DatabaseType string
@@ -78,6 +82,9 @@ type Host struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	workerDone chan struct{}
+	// postStart closes once bridgev2's post-start work is done; stopPostStart cuts it short.
+	postStart     chan struct{}
+	stopPostStart context.CancelFunc
 }
 
 // BridgeConfig is bridgev2's configuration for Trioditis. See docs/PLAN.md, Bridge host.
@@ -206,8 +213,39 @@ func (h *Host) Start(ctx context.Context) error {
 	} else if err = h.Store.ScrubLoginDisplays(ctx, acked); err != nil {
 		return fmt.Errorf("host: failed to scrub login codes: %w", err)
 	}
-	if err = h.Bridge.Start(ctx); err != nil {
+	// bridgev2.Start, with its post-start work tracked so Stop can wait for it.
+	bridgeCtx := h.Bridge.Log.WithContext(ctx)
+	if err = h.Bridge.StartConnectors(bridgeCtx); err == nil {
+		err = h.Bridge.StartLogins(bridgeCtx)
+	}
+	if err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
+	}
+	postCtx, stopPostStart := context.WithCancel(bridgeCtx)
+	h.postStart, h.stopPostStart = make(chan struct{}), stopPostStart
+	go func() {
+		defer close(h.postStart)
+		h.Bridge.PostStart(postCtx)
+	}()
+	// Restored from a backup since this database last started: the queue in it is the backup's,
+	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from
+	// deploy/.env), and the database keeps the last one it settled, so the decision follows
+	// the queue itself, whichever volumes the backup had. The ID is recorded only once every
+	// such command is settled and its status is in the journal, which the pusher delivers; a
+	// start that stops before then settles again on the next one.
+	if h.Config.RestoreID != "" {
+		settled, err := h.Store.SettledRestore(ctx)
+		if err != nil {
+			return fmt.Errorf("host: failed to read the last restore settled: %w", err)
+		}
+		if settled != h.Config.RestoreID {
+			if err = h.Connector.SettleRestored(ctx); err != nil {
+				return fmt.Errorf("host: failed to settle the restored commands: %w", err)
+			}
+			if err = h.Store.SetSettledRestore(ctx, h.Config.RestoreID); err != nil {
+				return fmt.Errorf("host: failed to record the restore as settled: %w", err)
+			}
+		}
 	}
 	if err = h.Connector.RecoverCommands(ctx); err != nil {
 		return fmt.Errorf("host: failed to recover interrupted commands: %w", err)
@@ -262,6 +300,12 @@ func (h *Host) Stop() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = h.httpServer.Shutdown(ctx)
 		cancel()
+	}
+	// bridgev2's post-start work (resending bridge info) uses the database, which bridgev2's stop
+	// closes: it is told to stop, and waited for, first.
+	if h.postStart != nil {
+		h.stopPostStart()
+		<-h.postStart
 	}
 	h.Bridge.StopWithTimeout(10 * time.Second)
 	if h.cancel != nil {

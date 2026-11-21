@@ -1,3 +1,6 @@
 * text=auto eol=lf
 pnpm-lock.yaml linguist-generated=true -diff
 **/_generated/** linguist-generated=true
+# Patches of upstream modules carry upstream's own context lines, blank ones included (a single
+# space); whitespace checks would flag them, and rewriting them would break the patch.
+apps/bridge-host/third_party/*.patch -whitespace

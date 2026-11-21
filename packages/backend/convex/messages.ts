@@ -2,14 +2,16 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v, type Infer } from 'convex/values'
 import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
 import type { Id } from './_generated/dataModel'
-import { mutation, query } from './_generated/server'
+import { internalMutation, mutation, query } from './_generated/server'
 import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
+import { markOwnReadRange as markRange } from './lib/ingest'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
-import { checkSend, clientMessageIdUsed, queueSend } from './lib/send'
+import { retryPlan, retryState } from './lib/retry'
+import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
 import { envelope } from './validators'
 
 /** The most messages one page holds. */
@@ -114,6 +116,9 @@ const _feedMatchesCore: SameShape<keyof Infer<typeof arrivalFeed>, keyof Arrival
  *
  * `clientMessageId` makes the send idempotent end to end: sending the same ID again does
  * nothing. Retrying a failed or unknown send uses a new ID, which the person chooses to do.
+ * Returns `queued` for a new send, or what the ID was used for already and where that stands
+ * (`alreadyUsed`), so a client can say what happened rather than report a send that wasn't
+ * this one.
  */
 export const send = mutation({
   args: {
@@ -123,15 +128,75 @@ export const send = mutation({
     copy: envelope,
     replyTo: v.optional(v.string()),
   },
-  returns: v.null(),
+  returns: v.union(v.literal('queued'), alreadyUsed),
   handler: async (ctx, { chatId, ...input }) => {
     const member = await requireMember(ctx)
     const chat = await ownChat(ctx, member.userId, chatId)
+    refuseRetryId(input.clientMessageId)
     // Sending the same message again does nothing, whatever has changed since.
-    if (await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)) return null
+    const used = await clientMessageIdUsed(ctx, member.userId, input.clientMessageId)
+    if (used) return used
     await checkSend(ctx, chat, input)
     await queueSend(ctx, chat, input)
-    return null
+    return 'queued' as const
+  },
+})
+
+const MAX_RETRY_STATES = 100
+
+/**
+ * Where sending each of these messages again stands, for any send in a chain (the original or
+ * an attempt): the chain's original, its latest attempt and that one's delivery state, and
+ * whether another may be made, with its client message ID (lib/retry.ts). IDs that aren't the
+ * person's sends are left out.
+ */
+export const retryStates = query({
+  args: { clientMessageIds: v.array(v.string()) },
+  returns: v.array(v.object({ clientMessageId: v.string(), state: retryState })),
+  handler: async (ctx, { clientMessageIds }) => {
+    const member = await requireMember(ctx)
+    if (clientMessageIds.length > MAX_RETRY_STATES)
+      throw new ConvexError(`Ask for at most ${MAX_RETRY_STATES} at once.`)
+    const out = []
+    for (const clientMessageId of new Set(clientMessageIds)) {
+      const plan = await retryPlan(ctx, member.userId, clientMessageId)
+      if (!plan) continue
+      const { next: _next, ...state } = plan
+      out.push({ clientMessageId, state })
+    }
+    return out
+  },
+})
+
+/**
+ * Sends a message again: the next attempt of the chain `clientMessageId` belongs to (any send
+ * in it), sealed by the client for `nextId` as `messages.send` takes it. Made only if the
+ * server allows one now and `nextId` is the one it says (`retryStates`); otherwise nothing is
+ * made, and `created` is false. So repeated clicks, other tabs and stale pages make one attempt
+ * per link, and one that may have gone is never followed by another.
+ */
+export const sendAgain = mutation({
+  args: {
+    clientMessageId: v.string(),
+    nextId: v.string(),
+    forBridge: envelope,
+    copy: envelope,
+    replyTo: v.optional(v.string()),
+  },
+  returns: v.object({ created: v.boolean(), state: retryState }),
+  handler: async (ctx, { clientMessageId, nextId, ...input }) => {
+    const member = await requireMember(ctx)
+    const plan = await retryPlan(ctx, member.userId, clientMessageId)
+    if (!plan) throw new ConvexError('That message doesn’t exist.')
+    const { next, ...state } = plan
+    if (!plan.allowed || plan.nextId !== nextId) return { created: false, state }
+    const chat = await ownChat(ctx, member.userId, next.chatId!)
+    const send = { clientMessageId: nextId, ...input }
+    await checkSend(ctx, chat, send)
+    await queueSend(ctx, chat, send, { root: plan.root, of: next.of, index: next.index })
+    const after = await retryPlan(ctx, member.userId, plan.root)
+    const { next: _next, ...now } = after!
+    return { created: true, state: now }
   },
 })
 
@@ -285,6 +350,19 @@ export const reactions = query({
         .map(({ key, senderKey }) => ({ key, senderKey }))
     }
     return out
+  },
+})
+
+/**
+ * The rest of a read receipt's marking of the person's own messages, when one transaction
+ * couldn't look through them all (lib/ingest.ts, markOwnReadRange).
+ */
+export const markOwnReadRange = internalMutation({
+  args: { chatId: v.id('chats'), after: v.union(v.null(), v.string()), upTo: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, after, upTo }) => {
+    await markRange(ctx, chatId, after, upTo)
+    return null
   },
 })
 

@@ -10,8 +10,12 @@
 # - CONVEX_ADMIN_KEY may hold | (the backend's admin keys are <instance>|<hex>);
 # - CADDY_GLOBAL_OPTIONS, CADDY_TRUSTED_PROXIES and INSTALL_TRUSTED_PROXIES may be several
 #   such words, each separated by one space (Caddy reads them as separate tokens);
-# - BRIDGE_PRIVATE_KEY and AGENT_ACCESS_PRIVATE_KEY must each be exactly a key: canonical
-#   unpadded base64url of 32 bytes, 43 characters.
+# - BRIDGE_PRIVATE_KEY, AGENT_ACCESS_PRIVATE_KEY and BACKUP_KEY must each be exactly a key:
+#   canonical unpadded base64url of 32 bytes, 43 characters.
+# And a few settings an operator writes by hand are narrower, so a typo stops the installer
+# rather than the service that reads it: LOGIN_BROWSER_MAX is a whole number from 1 to 64,
+# DEBIAN_SNAPSHOT a snapshot.debian.org timestamp (20261101T000000Z), and UPDATE_BACKUP_DIR an
+# absolute path.
 
 # env_raw_clean FILE: whether FILE's raw bytes hold no NUL and no carriage return, checked
 # before the shell reads it (command substitution drops a NUL with at most a warning).
@@ -33,7 +37,12 @@ env_check() {
       name = $0; sub(/=.*/, "", name)
       value = $0; sub(/^[^=]*=/, "", value)
       if (seen[name]++) { print "line " NR " sets " name " again"; bad = 1 }
-      if (name == "BRIDGE_PRIVATE_KEY" || name == "AGENT_ACCESS_PRIVATE_KEY") ok = key(value)
+      if (name == "BRIDGE_PRIVATE_KEY" || name == "AGENT_ACCESS_PRIVATE_KEY" || name == "BACKUP_KEY") ok = key(value)
+      else if (name == "RESTORE_PENDING") ok = value ~ /^[0-9]*$/
+      else if (name == "RESTORE_ID") ok = value ~ /^([0-9]+-[0-9a-f]+)?$/
+      else if (name == "LOGIN_BROWSER_MAX") ok = value ~ /^[1-9][0-9]?$/ && value + 0 <= 64
+      else if (name == "DEBIAN_SNAPSHOT") ok = value ~ /^(2[0-9][0-9][0-9][01][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-5][0-9]Z)?$/
+      else if (name == "UPDATE_BACKUP_DIR") ok = value ~ /^(\/[A-Za-z0-9._~@+=,%-]+)*\/?$/ && value !~ /(^|\/)\.\.?(\/|$)/
       else if (name == "CONVEX_ADMIN_KEY") ok = value ~ /^[A-Za-z0-9._~:\/@+=,%|-]*$/
       else if (name == "CADDY_GLOBAL_OPTIONS" || name == "CADDY_TRUSTED_PROXIES" || name == "INSTALL_TRUSTED_PROXIES") ok = words(value)
       else ok = literal(value)
@@ -54,7 +63,7 @@ env_names() {
 
 # env_kept NAMES SETTINGS KEPT: checks that KEPT (a backup's secrets.env) holds exactly the
 # settings in SETTINGS (a checked deploy/.env) whose names NAMES (env-names) lists, other
-# than the private keys: each once, with its value, and nothing else. Prints how many, and
+# than the private keys and BACKUP_KEY: each once, with its value, and nothing else. Prints how many, and
 # fails if it doesn't. It reads them apart from the shell's copy, so the two agree or the
 # backup isn't published.
 env_kept() {
@@ -64,7 +73,7 @@ env_kept() {
     FILENAME == ARGV[2] {
       if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/) next
       parse()
-      if ((name in listed) && name != "BRIDGE_PRIVATE_KEY" && name != "AGENT_ACCESS_PRIVATE_KEY") { want[name] = value; wanted++ }
+      if ((name in listed) && name != "BRIDGE_PRIVATE_KEY" && name != "AGENT_ACCESS_PRIVATE_KEY" && name != "BACKUP_KEY") { want[name] = value; wanted++ }
       next
     }
     {
@@ -77,9 +86,9 @@ env_kept() {
 }
 
 # env_classified NAME: whether NAME is one a deploy/.env may hold: listed in env-names (what
-# a backup keeps), or one of the two private keys (what it never does).
+# a backup keeps), or one of the server's three keys (what it never does).
 env_classified() {
-  case "$1" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY) return 0 ;; esac
+  case "$1" in BRIDGE_PRIVATE_KEY | AGENT_ACCESS_PRIVATE_KEY | BACKUP_KEY) return 0 ;; esac
   # shellcheck disable=SC2154 # env_names_file is set by the caller
   grep -qxF "$1" "$env_names_file"
 }

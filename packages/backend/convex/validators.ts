@@ -78,8 +78,12 @@ export const loginStep = v.object({
     v.object({
       type: v.union(v.literal('qr'), v.literal('code'), v.literal('emoji'), v.literal('nothing')),
       data: v.optional(v.string()),
+      /** When to stop showing the code (ms); the bridge host moves it on while it's good. */
+      expiresAt: v.optional(v.number()),
     }),
   ),
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt: v.optional(v.number()),
   fields: v.optional(
     v.array(
       v.object({
@@ -101,6 +105,8 @@ export const loginStep = v.object({
     }),
   ),
   loginId: v.optional(v.string()),
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel: v.optional(v.boolean()),
   error: v.optional(errorCode),
 })
 
@@ -201,6 +207,8 @@ export const bridgeEvent = v.union(
     type: v.literal('loginState'),
     state: loginState,
     error: v.optional(errorCode),
+    /** The account's own metadata, sealed to its owner (kind `account`, object ID `loginId`): what tells it apart. */
+    sealed: v.optional(envelope),
   }),
   v.object({ ...base, type: v.literal('loginStep'), loginSessionId: v.string(), step: loginStep }),
   v.object({

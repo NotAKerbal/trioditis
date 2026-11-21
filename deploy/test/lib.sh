@@ -41,8 +41,9 @@ make_install() {
     TRIODITIS_INTERNAL_TOKEN LOGIN_BROWSER_TOKEN BRIDGE_PUBLIC_KEY AGENT_ACCESS_PUBLIC_KEY CONVEX_ADMIN_KEY; do
     echo "$name=test-$name"
   done >"$root/deploy/.env"
-  # The private keys in the form deploy/.env requires (32 random bytes, base64url).
-  for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY; do
+  # The private keys and the backup key in the form deploy/.env requires (32 random bytes,
+  # base64url).
+  for name in BRIDGE_PRIVATE_KEY AGENT_ACCESS_PRIVATE_KEY BACKUP_KEY; do
     echo "$name=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
   done >>"$root/deploy/.env"
   cat >>"$root/deploy/.env" <<EOF
@@ -84,4 +85,15 @@ make_volume() {
 # fill <key> <shell command>: runs the command with the volume at /v.
 fill() {
   docker run --rm --log-driver none -v "${project}_$1:/v" --entrypoint sh "$tool" -c "$2"
+}
+
+# decrypt <file>: a backup file (archive.enc or secrets.env.enc), decrypted with this install's
+# BACKUP_KEY as the file of its backup it is, on stdout.
+node_image=node:24.21-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+decrypt() {
+  case "$(basename "$1")" in archive.enc) role=archive ;; *) role=settings ;; esac
+  backup_id=$(sed -n 's/^id=//p' "$(dirname "$1")/backup.info" 2>/dev/null)
+  BACKUP_KEY=$(private_value BACKUP_KEY) BACKUP_CONTEXT=${backup_id:+$backup_id/$role} \
+    docker run --rm -i --network none --log-driver none -e BACKUP_KEY -e BACKUP_CONTEXT \
+    "$node_image" node --input-type=module -e "$(cat "$scripts/backup-crypt.mjs")" decrypt <"$1"
 }

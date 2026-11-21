@@ -7,3 +7,4 @@ apps/bridge-host/
 **/testdata/**
 deploy/runtime/
 apps/desktop/dist-electron/
+apps/desktop/release/

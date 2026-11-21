@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -688,8 +689,75 @@ var startTargets = map[string]struct{ contact, phone, username bool }{
 	"testnet":   {contact: true, phone: true, username: true},
 }
 
-// phonePattern is what a phone number looks like as people write one.
-var phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 ().-]{5,}[0-9]$`)
+// A phone number is 7 to 15 digits once its formatting is taken off (E.164 allows at most 15).
+const (
+	minPhoneDigits = 7
+	maxPhoneDigits = 15
+)
+
+// Phone numbers are read exactly as the client reads them before sending one
+// (packages/core/src/people.ts, normalPhone and startIdentifier), so a number the app offers is
+// one the host takes. Both are checked against the same table of cases,
+// packages/core/test/fixtures/phone-identifiers.json.
+var (
+	phoneScheme = regexp.MustCompile(`(?i)^(?:tel|sms):`)
+	// From an extension on ("x12", "ext. 12", "#12", ";ext=12") is dropped.
+	phoneExtension = regexp.MustCompile(`(?i)[;,#]|\s*(?:x|ext\.?|extension)\s*\d`)
+	// "+44 (0)20 …", "0044 (0)20 …": the bracketed trunk 0 isn't dialled with the country code.
+	phoneTrunkZero = regexp.MustCompile(`^((?:\+|00)\s*\d{1,3})[\s\x{00a0}]*\(0\)`)
+	// Letters, an @ or an underscore make it a username; otherwise it was meant as a number.
+	usernameish       = regexp.MustCompile(`(?i)[a-z@_]`)
+	trailingExtension = regexp.MustCompile(`(?i)\s*(?:x|ext\.?|extension)\s*\d+$`)
+	onlyDigits        = regexp.MustCompile(`^[0-9]+$`)
+)
+
+// phonePunctuation is what people write between a number's digits: spaces of every width,
+// dots, slashes, brackets and dashes of every length.
+func phonePunctuation(r rune) bool {
+	switch {
+	case unicode.IsSpace(r), r >= '\u2000' && r <= '\u200b', r == '\u202f', r == '\ufeff',
+		r == '.', r == '/', r == '(', r == ')', r == '-', r >= '\u2010' && r <= '\u2015', r == '\u2212':
+		return true
+	}
+	return false
+}
+
+// normalPhone is a typed number as + and its digits, or its national digits as written; ""
+// if it isn't a number. A scheme (tel:, sms:) and an extension are dropped, then the
+// punctuation; a leading 00 is the international prefix, taken as +. A national number keeps
+// its trunk 0: which country it belongs to can't be told from it.
+func normalPhone(raw string) string {
+	text := phoneScheme.ReplaceAllString(strings.TrimSpace(raw), "")
+	if loc := phoneExtension.FindStringIndex(text); loc != nil {
+		text = text[:loc[0]]
+	}
+	text = phoneTrunkZero.ReplaceAllString(strings.TrimSpace(text), "$1")
+	plus := strings.HasPrefix(text, "+")
+	digits := strings.Map(func(r rune) rune {
+		if phonePunctuation(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimPrefix(text, "+"))
+	if !onlyDigits.MatchString(digits) {
+		return ""
+	}
+	international := plus
+	if !plus && strings.HasPrefix(digits, "00") {
+		digits, international = digits[2:], true
+	}
+	if len(digits) < minPhoneDigits || len(digits) > maxPhoneDigits {
+		return ""
+	}
+	if international {
+		// No country code starts with 0.
+		if strings.HasPrefix(digits, "0") {
+			return ""
+		}
+		return "+" + digits
+	}
+	return digits
+}
 
 // usernamePatterns are each network's own username grammar, after a leading @ is taken off:
 // anything else could be an internal ID the connector resolves another way (a Signal ACI, say).
@@ -702,30 +770,39 @@ var usernamePatterns = map[string]*regexp.Regexp{
 // internationalOnly are the networks that take a phone number only with its country code.
 var internationalOnly = map[string]bool{"signal": true}
 
+// countryCodeFirst are the networks that read a number without + as international anyway
+// (mautrix-whatsapp prefixes the digits with +). A number starting with 0 there is written the
+// national way, since no country code starts with 0: looking it up would ask about a different
+// number, so it is refused as written wrong.
+var countryCodeFirst = map[string]bool{"whatsapp": true}
+
 // canonicalIdentifier is the identifier as the network's connector gets it: a phone number as
 // digits with its leading + (never dots or spaces, which a connector could take for one of its
 // own IDs, as mautrix-gmessages does), or a username without its @. Empty if it's neither kind
-// the network takes.
+// the network takes; the person is told it isn't written in a way the network takes
+// (invalid_identifier), as against nobody on the network having it (not_found), which only
+// the network can say.
 func (c *Connector) canonicalIdentifier(identifier string) string {
 	targets := startTargets[c.Network]
-	if targets.phone && phonePattern.MatchString(identifier) {
-		plus := strings.HasPrefix(identifier, "+")
-		if !plus && internationalOnly[c.Network] {
+	text := strings.TrimSpace(identifier)
+	// A valid number is one, extension and all (";ext=89" has letters); otherwise letters, an @ or
+	// an underscore make it a username. The client decides the same way (startIdentifier).
+	meantAsNumber := normalPhone(text) != "" || !usernameish.MatchString(trailingExtension.ReplaceAllString(phoneScheme.ReplaceAllString(text, ""), ""))
+	switch {
+	case meantAsNumber && !targets.phone && targets.username && onlyDigits.MatchString(text):
+		// Digits alone can be a username where only usernames work (X allows it).
+	case meantAsNumber && !targets.phone:
+		return ""
+	case meantAsNumber:
+		phone := normalPhone(text)
+		national := !strings.HasPrefix(phone, "+")
+		if phone == "" || national && internationalOnly[c.Network] || national && countryCodeFirst[c.Network] && strings.HasPrefix(phone, "0") {
 			return ""
 		}
-		digits := strings.Map(func(r rune) rune {
-			if r >= '0' && r <= '9' {
-				return r
-			}
-			return -1
-		}, identifier)
-		if plus {
-			return "+" + digits
-		}
-		return digits
+		return phone
 	}
 	if pattern := usernamePatterns[c.Network]; targets.username && pattern != nil {
-		if name := strings.TrimPrefix(identifier, "@"); pattern.MatchString(name) {
+		if name := strings.TrimPrefix(text, "@"); pattern.MatchString(name) {
 			return name
 		}
 	}
@@ -781,7 +858,7 @@ func (c *Connector) handleStartChat(ctx context.Context, cmd *protocol.Command, 
 		}
 		// Only the kinds the network's connector resolves safely; anything else is nobody here.
 		if identifier = c.canonicalIdentifier(identifier); identifier == "" {
-			return conflict(protocol.ErrNotFound, "the network doesn't start chats from that kind of identifier")
+			return conflict(protocol.ErrInvalidIdentifier, "that isn't a phone number or username the network takes")
 		}
 	}
 	if check {

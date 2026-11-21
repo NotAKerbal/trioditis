@@ -12,7 +12,7 @@ export async function ready(): Promise<void> {
 
 export const ENVELOPE_VERSION = 1
 
-export type SealKind = 'message' | 'chat' | 'contact' | 'draft' | 'outbound' | 'media' | 'label' | 'person'
+export type SealKind = 'message' | 'chat' | 'contact' | 'draft' | 'outbound' | 'media' | 'label' | 'person' | 'account'
 
 /** The row a sealed object belongs to. Bound into the ciphertext as associated data. */
 export interface SealContext {
@@ -67,6 +67,11 @@ export function fromBase64Url(text: string): Uint8Array {
 export function generateKeyPair(): KeyPair {
   const { publicKey, privateKey } = sodium.crypto_box_keypair()
   return { publicKey, privateKey }
+}
+
+/** BLAKE2b-256 of `text` (UTF-8), base64url: 43 characters, for IDs derived from others. */
+export function digest(text: string): string {
+  return toBase64Url(sodium.crypto_generichash(32, sodium.from_string(text), null))
 }
 
 /** The first 16 bytes of BLAKE2b-256 of the public key, base64url. */

@@ -121,6 +121,91 @@ export function samePhone(a: string, b: string): boolean {
   return x.digits.slice(-n) === y.digits.slice(-n)
 }
 
+// Starting a chat from a typed number. The bridge host (apps/bridge-host/internal/connector,
+// normalPhone and canonicalIdentifier) reads a number exactly as this does, and both are
+// checked against the same cases (test/fixtures/phone-identifiers.json), so the client sends
+// every number in one shape that both sides agree on:
+//
+//   normalPhone: an optional `tel:`/`sms:` scheme is dropped, and anything from an extension
+//   (`x`, `ext`, `#`, `;`, `,`) on. What's left may hold only digits, spaces of any width,
+//   `.`, `/`, `(`, `)`, any dash, and one leading `+`. `(0)` after a country code is dropped,
+//   and a leading `00` is the international prefix, so it becomes `+`. The result is `+` and
+//   7 to 15 digits (E.164's most) not starting with 0, or 7 to 15 national digits as written
+//   (a trunk 0 kept: it's the network's to read). Anything else isn't a number.
+//
+// The bridge host must accept exactly these two shapes (`+` then digits, or digits alone).
+
+/** Characters people write between a number's digits. */
+const PHONE_PUNCTUATION = /[\s\u00a0\u2000-\u200b\u202f./()\-\u2010-\u2015\u2212]/g
+
+/** A typed phone number as `+` and its digits, or its national digits; null if it isn't one. */
+export function normalPhone(raw: string): string | null {
+  let text = raw
+    .trim()
+    .replace(/^(?:tel|sms):/i, '')
+    .split(/[;,#]|\s*(?:x|ext\.?|extension)\s*\d/i)[0]!
+    .trim()
+  // `+44 (0)20 …` and `0044 (0)20 …`: the bracketed trunk 0 isn't dialled with the country code.
+  text = text.replace(/^((?:\+|00)\s*\d{1,3})[\s\u00a0]*\(0\)/, '$1')
+  const plus = text.startsWith('+')
+  const rest = (plus ? text.slice(1) : text).replace(PHONE_PUNCTUATION, '')
+  if (!/^\d+$/.test(rest)) return null
+  let digits = rest
+  let international = plus
+  if (!plus && digits.startsWith('00')) {
+    digits = digits.slice(2)
+    international = true
+  }
+  if (digits.length < MIN_PHONE_DIGITS || digits.length > 15) return null
+  // No country code starts with 0.
+  if (international && digits.startsWith('0')) return null
+  return international ? `+${digits}` : digits
+}
+
+/** Networks whose connectors find someone by number only with its country code. Mirrors the bridge host's internationalOnly. */
+export const PHONE_NEEDS_COUNTRY_CODE: readonly Network[] = ['signal']
+
+/** Networks that read a number without `+` as international. Mirrors the bridge host's countryCodeFirst. */
+export const PHONE_COUNTRY_CODE_FIRST: readonly Network[] = ['whatsapp']
+
+/** Why a typed identifier can't start a chat on a network, before it's sent. */
+export type StartIdentifierProblem = 'needs_country_code' | 'phone_only' | 'username_only' | 'not_a_number'
+
+/**
+ * What to send to start a chat from what someone typed: a number in `normalPhone`'s shape, or a
+ * username without its `@`. A problem instead when the network can't start from it, so the
+ * person hears why rather than "no one has that number".
+ */
+export function startIdentifier(
+  raw: string,
+  network: Network,
+  targets: { phone: boolean; username: boolean },
+): { identifier: string } | { problem: StartIdentifierProblem } {
+  const text = raw.trim()
+  // A valid number is one, extension and all (`;ext=89` has letters); otherwise letters or an
+  // `@` make it a username. The bridge host decides the same way (canonicalIdentifier).
+  const meantAsNumber =
+    normalPhone(text) !== null ||
+    !/[a-z@_]/i.test(text.replace(/^(?:tel|sms):/i, '').replace(/\s*(?:x|ext\.?|extension)\s*\d+$/i, ''))
+  // Where only usernames work, digits alone can be one (X allows it); a `+` or a number's
+  // punctuation can't.
+  if (meantAsNumber && !targets.phone && targets.username && /^\d+$/.test(text)) return { identifier: text }
+  if (meantAsNumber) {
+    if (!targets.phone) return { problem: 'username_only' }
+    const phone = normalPhone(text)
+    if (!phone) return { problem: 'not_a_number' }
+    if (!phone.startsWith('+') && PHONE_NEEDS_COUNTRY_CODE.includes(network)) return { problem: 'needs_country_code' }
+    // WhatsApp reads digits without a + as international; a leading 0 is a national number
+    // (bridge host's countryCodeFirst), which would look up someone else.
+    if (!phone.startsWith('+') && phone.startsWith('0') && PHONE_COUNTRY_CODE_FIRST.includes(network)) {
+      return { problem: 'needs_country_code' }
+    }
+    return { identifier: phone }
+  }
+  if (!targets.username) return { problem: 'phone_only' }
+  return { identifier: text.replace(/^@/, '') }
+}
+
 const normalEmail = (raw: string) =>
   raw
     .trim()
@@ -389,13 +474,87 @@ export function moveLinks(people: readonly Person[], personKey: string, contacts
   return out
 }
 
+/** An identifier as a string equal only for the very same number, address or username. */
+function exactKey(id: Identifier): string {
+  if (id.kind !== 'phone') return bucket(id)
+  const { digits, international } = phoneDigits(id.value)!
+  return `tel:${international ? '+' : ''}${digits}`
+}
+
+/** Two lists of fields as one: the card's own first, then the file's it doesn't have yet. */
+function unionFields(
+  mine: readonly PersonField[] | undefined,
+  theirs: readonly PersonField[] | undefined,
+  key: (value: string) => string,
+): PersonField[] | undefined {
+  const out = [...(mine ?? [])]
+  const seen = new Set(out.map((f) => key(f.value)))
+  for (const f of theirs ?? []) {
+    if (seen.has(key(f.value))) continue
+    seen.add(key(f.value))
+    out.push(f)
+  }
+  return out.length ? out : undefined
+}
+
+const phoneKey = (value: string) => {
+  const d = phoneDigits(value)
+  return d ? `tel:${d.international ? '+' : ''}${d.digits}` : value.trim()
+}
+const handleKey = (value: string) => {
+  const id = parseIdentifier(value)
+  return id ? bucket(id) : value.trim().toLowerCase()
+}
+
 /**
- * The cards an import makes or changes, worked out from the cards there are now. A card whose
- * UID is already here gets the file's fields, keeping its links (and its photo, if the file
- * has none); a UID the file repeats is one card. Every other entry gets the key `keyFor` gives
- * its place in the file, so working the import out again later (after another device changed
- * the address book) gives the same cards, and keeps the links they have by then. Cards that
- * wouldn't change are left out.
+ * A card already here with what a file says about the same person added to it. Reimporting an
+ * older export mustn't take away what was added here since: numbers, emails, usernames, links
+ * and addresses are put together, a note written here stays, and a field the file leaves out
+ * stays as it is. A field the file has replaces the card's (a new job title, say).
+ */
+function merged(now: PersonPlaintext, file: PersonPlaintext): PersonPlaintext {
+  const next: PersonPlaintext = { ...now }
+  for (const [key, value] of Object.entries(file)) {
+    if (value === undefined || value === '' || (Array.isArray(value) && !value.length)) continue
+    next[key] = value
+  }
+  const set = (key: 'phones' | 'emails' | 'handles' | 'urls', list: PersonField[] | undefined) => {
+    if (list) next[key] = list
+    else delete next[key]
+  }
+  set('phones', unionFields(now.phones, file.phones, phoneKey))
+  set(
+    'emails',
+    unionFields(now.emails, file.emails, (v) => normalEmail(v)),
+  )
+  set('handles', unionFields(now.handles, file.handles, handleKey))
+  set(
+    'urls',
+    unionFields(now.urls, file.urls, (v) => v.trim()),
+  )
+  const addresses = [...(now.addresses ?? [])]
+  for (const a of file.addresses ?? []) {
+    if (!addresses.some((b) => JSON.stringify(b) === JSON.stringify(a))) addresses.push(a)
+  }
+  if (addresses.length) next.addresses = addresses
+  if (now.note?.trim()) next.note = now.note
+  if (now.links?.length) next.links = now.links
+  if (now.uid) next.uid = now.uid
+  return next
+}
+
+/**
+ * The cards an import makes or changes, worked out from the cards there are now. An entry goes
+ * to a card already here that is the same person: one with its UID, or, for an entry without
+ * a UID match (a CSV row has none, and Google's and Outlook's exports have none), the one card
+ * with the same name and the same number, email or username exactly. A name alone never
+ * matches: two people can share one. An entry that matches several cards isn't guessed at; it's
+ * left out and reported through `ambiguous`. A matched card keeps what it has and gains what
+ * the file adds (merged), so importing a file again, even an older one, takes nothing away; a
+ * UID the file repeats is one card, and each card here is matched by one entry at most. Every
+ * other entry gets the key `keyFor` gives its place in the file, so working the import out
+ * again later (after another device changed the address book) gives the same cards, and keeps
+ * the links they have by then. Cards that wouldn't change are left out.
  */
 export function planImport(
   existing: readonly Person[],
@@ -403,21 +562,52 @@ export function planImport(
   keyFor: (index: number) => string,
   /** Told which card each entry went to, for a caller that tracks entries across plans. */
   placed?: (index: number, personKey: string) => void,
+  /**
+   * Whether a card here may be matched by identity: not one this same import made, which a
+   * later plan sees as existing.
+   */
+  matchable: (personKey: string) => boolean = () => true,
+  /** Told of each entry left out because it matches more than one card. */
+  ambiguous?: (index: number) => void,
 ): Person[] {
   const byUid = new Map(existing.filter((p) => p.card.uid).map((p) => [p.card.uid!, p]))
   const byKey = new Map(existing.map((p) => [p.personKey, p]))
+  const byName = new Map<string, { person: Person; ids: Set<string> }[]>()
+  for (const person of [...existing].sort((a, b) => (a.personKey < b.personKey ? -1 : 1))) {
+    if (!matchable(person.personKey)) continue
+    const name = normalName(person.card.name)
+    const list = byName.get(name) ?? []
+    list.push({ person, ids: new Set(cardIdentifiers(person.card).map(exactKey)) })
+    byName.set(name, list)
+  }
+  const claimed = new Set<string>()
   const keyForUid = new Map<string, string>()
   const out = new Map<string, Person>()
+  /** The one card this entry is, null when several could be, undefined when none is. */
+  const sameAs = (card: PersonPlaintext): string | null | undefined => {
+    const ids = cardIdentifiers(card).map(exactKey)
+    if (!ids.length) return undefined
+    const matches = (byName.get(normalName(card.name)) ?? []).filter(
+      ({ person, ids: theirs }) =>
+        // Cards from two sources with their own UIDs are two cards.
+        (!card.uid || !person.card.uid) && ids.some((id) => theirs.has(id)),
+    )
+    if (matches.length > 1) return null
+    const only = matches[0]?.person.personKey
+    return only && !claimed.has(only) ? only : undefined
+  }
   imported.forEach((card, index) => {
-    const personKey =
-      byUid.get(card.uid ?? '')?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined) ?? keyFor(index)
+    let personKey = byUid.get(card.uid ?? '')?.personKey ?? (card.uid ? keyForUid.get(card.uid) : undefined)
+    if (!personKey) {
+      const same = sameAs(card)
+      if (same === null) return ambiguous?.(index)
+      personKey = same ?? keyFor(index)
+    }
     if (card.uid) keyForUid.set(card.uid, personKey)
+    claimed.add(personKey)
     placed?.(index, personKey)
-    const now = byKey.get(personKey)?.card
-    const next: PersonPlaintext = { ...card }
-    if (now?.links?.length) next.links = now.links
-    if (!next.photo && now?.photo) next.photo = now.photo
-    out.set(personKey, { personKey, card: next })
+    const now = out.get(personKey)?.card ?? byKey.get(personKey)?.card
+    out.set(personKey, { personKey, card: now ? merged(now, card) : { ...card } })
   })
   return [...out.values()].filter((p) => JSON.stringify(byKey.get(p.personKey)?.card) !== JSON.stringify(p.card))
 }

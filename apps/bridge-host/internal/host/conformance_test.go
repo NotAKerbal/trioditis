@@ -152,18 +152,18 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 // for each event type, its required and optional fields beyond the ones every event has.
 // The backend refuses an event with a missing or unknown field.
 var eventFields = map[string][2][]string{
-	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId"}},
+	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId", "mentionsMe"}},
 	protocol.EventEdit:               {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
 	protocol.EventReaction:           {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
 	protocol.EventReactionRemove:     {{"portalId", "targetEventId", "sender", "key"}, nil},
 	protocol.EventRedaction:          {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
 	protocol.EventReceipt:            {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
 	protocol.EventTyping:             {{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted"}},
+	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted", "isRequest"}},
 	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
 	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
 	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
-	protocol.EventLoginState:         {{"state"}, {"error"}},
+	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
 	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
 	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
 	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
@@ -375,6 +375,8 @@ func (h *harness) open(userID string, evt *protocol.Event, out any) {
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID
 	case protocol.EventContactIdentifiers:
 		ctx.Kind, ctx.ObjectID = seal.KindContact, evt.GhostID+"/identifiers/"+evt.LoginID
+	case protocol.EventLoginState:
+		ctx.Kind, ctx.ObjectID = seal.KindAccount, evt.LoginID
 	default:
 		h.t.Fatalf("%s isn't sealed", evt.Type)
 	}
@@ -406,6 +408,20 @@ func TestConformance(t *testing.T) {
 		defer gw.lock.Unlock()
 		if len(gw.batches) == 0 || len(gw.batches[0].Events) != 0 || gw.batches[0].HostID != "testnet-1" {
 			t.Fatalf("the first batch must be an empty heartbeat from testnet-1, got %+v", gw.batches[0])
+		}
+	})
+
+	t.Run("an account's hint is sealed to its owner, and its login ID is opaque", func(t *testing.T) {
+		state := gw.waitFor(t, "a login state with a hint", func(e *protocol.Event) bool {
+			return e.Type == protocol.EventLoginState && e.LoginID == aliceLogin && e.Sealed != nil
+		})
+		var account protocol.AccountPlaintext
+		h.open("alice", state, &account)
+		if account.Hint != "alice-testnet" {
+			t.Fatalf("hint %q", account.Hint)
+		}
+		if err := seal.OpenJSON(state.Sealed, gw.keys["bob"], seal.Context{Kind: seal.KindAccount, OwnerUserID: "alice", ObjectID: aliceLogin}, &account); err == nil {
+			t.Fatal("bob opened alice's account hint")
 		}
 	})
 
@@ -538,7 +554,7 @@ func TestConformance(t *testing.T) {
 			CommandID: nextCommandID(), Type: protocol.CommandStartChat, UserID: "alice", LoginID: aliceLogin,
 			RequestID: odd, Sealed: h.sealForBridge("alice", odd, map[string]string{"identifier": "lid:12345 x"}),
 		})
-		if status != http.StatusConflict || strings.TrimSpace(body) != `{"error":"not_found"}` {
+		if status != http.StatusConflict || strings.TrimSpace(body) != `{"error":"invalid_identifier"}` {
 			t.Fatalf("an identifier of no kind the network takes got %d %s", status, body)
 		}
 
@@ -664,6 +680,28 @@ func TestConformance(t *testing.T) {
 		gw.waitFor(t, "reaction removal", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventReactionRemove && e.TargetEventID == first.EventID && e.Key == "👍"
 		})
+		// Given again after it was taken away: a new reaction event, not a replay of the first
+		// one, which the backend would drop.
+		time.Sleep(2 * time.Millisecond)
+		if err := h.net.React(aliceNet, "family", "peer-family", "m1", "👍", false); err != nil {
+			t.Fatal(err)
+		}
+		reactions := func(e *protocol.Event) bool {
+			return e.Type == protocol.EventReaction && e.TargetEventID == first.EventID && e.Key == "👍"
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for gw.count(reactions) < 2 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		var reactionIDs []string
+		for _, evt := range gw.snapshot() {
+			if reactions(evt) {
+				reactionIDs = append(reactionIDs, evt.EventID)
+			}
+		}
+		if len(reactionIDs) != 2 || reactionIDs[0] == reactionIDs[1] {
+			t.Fatalf("a reaction given again must have its own event ID: %v", reactionIDs)
+		}
 		if err := h.net.Receipt(aliceNet, "family", "peer-family", "m1"); err != nil {
 			t.Fatal(err)
 		}
@@ -677,6 +715,38 @@ func TestConformance(t *testing.T) {
 		}
 		gw.waitFor(t, "redaction", func(e *protocol.Event) bool {
 			return e.Type == protocol.EventRedaction && e.TargetEventID == first.EventID
+		})
+	})
+
+	t.Run("mentions of the person and message requests are flagged", func(t *testing.T) {
+		if err := h.net.IncomingMention(aliceNet, "family", "peer-family", "m-mention", "hey you"); err != nil {
+			t.Fatal(err)
+		}
+		mention := gw.waitFor(t, "a mention", isMessage("hey you", h, "alice"))
+		if !mention.MentionsMe {
+			t.Fatal("a message mentioning the person isn't flagged")
+		}
+		if first.MentionsMe {
+			t.Fatal("a message mentioning nobody is flagged")
+		}
+
+		if err := h.net.Incoming(aliceNet, "request-stranger", "peer-request-stranger", "m-req", "hi, it's me", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		req := gw.waitFor(t, "a message request", isMessage("hi, it's me", h, "alice"))
+		chats := func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == req.PortalID }
+		created := gw.waitFor(t, "the request's chat", chats)
+		if created.IsRequest == nil || !*created.IsRequest {
+			t.Fatalf("a message request's chat isn't flagged: %+v", created.IsRequest)
+		}
+		if family := gw.waitFor(t, "the family chat", func(e *protocol.Event) bool { return e.Type == protocol.EventChat && e.PortalID == portalID }); family.IsRequest != nil {
+			t.Fatal("a chat that was never a request mustn't say anything about requests")
+		}
+		if err := h.net.AcceptRequest(aliceNet, "request-stranger"); err != nil {
+			t.Fatal(err)
+		}
+		gw.waitFor(t, "the accepted request", func(e *protocol.Event) bool {
+			return chats(e) && e.IsRequest != nil && !*e.IsRequest
 		})
 	})
 
@@ -994,7 +1064,7 @@ func TestConformance(t *testing.T) {
 			protocol.ErrNetworkRejected: true, protocol.ErrNotConnected: true, protocol.ErrTimeout: true,
 			protocol.ErrInvalidCommand: true, protocol.ErrExpired: true, protocol.ErrUnsupported: true,
 			protocol.ErrRateLimited: true, protocol.ErrBadCredentials: true, protocol.ErrLoginFailed: true, protocol.ErrInternal: true,
-			protocol.ErrNotFound: true,
+			protocol.ErrNotFound: true, protocol.ErrInvalidIdentifier: true,
 		}
 		for _, evt := range gw.snapshot() {
 			raw, _ := json.Marshal(evt)

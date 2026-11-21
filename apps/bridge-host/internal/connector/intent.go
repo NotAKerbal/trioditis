@@ -27,6 +27,7 @@ import (
 	"go.mau.fi/util/variationselector"
 	"golang.org/x/crypto/chacha20poly1305"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
@@ -116,7 +117,53 @@ func (c *Connector) protocolSender(ctx context.Context, o *owner, s sender) (*pr
 	return &protocol.Sender{GhostID: ghostID}, nil
 }
 
+// SendMessage turns a message, edit, reaction or redaction into its protocol event. A part of
+// a message whose network will send it again if it isn't acknowledged (package handled) is
+// recorded as in flight first, until bridgev2 says how handling it ended (remoteEventDone):
+// bridgev2 saves each part as it goes, and a part left saved by a handling that failed, or
+// that a stop cut off, would make it drop the redelivery as a duplicate.
 func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
+	remote := bridgev2.GetRemoteEventFromContext(ctx)
+	if messagePart(remote, eventType, content, extra) {
+		m := handled.Message{Receiver: string(extra.MessageMeta.Room.Receiver), ID: string(extra.MessageMeta.ID)}
+		if handled.NoteMessage(remote, m) {
+			if err := in.c.Store.PutInflight(ctx, store.InflightMessage{Receiver: m.Receiver, MessageID: m.ID}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return in.sendMessage(ctx, roomID, eventType, content, extra)
+}
+
+// messagePart says whether a write is a part of the message a remote event brings, as against
+// an edit, a reaction, or something bridgev2 writes on the side (an error notice when the
+// message couldn't be converted).
+func messagePart(remote bridgev2.RemoteEvent, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) bool {
+	if remote == nil || extra == nil || extra.MessageMeta == nil || isEdit(content) {
+		return false
+	}
+	if eventType != event.EventMessage && eventType != event.EventSticker {
+		return false
+	}
+	switch remote.GetType() {
+	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventMessageUpsert:
+		msg, ok := remote.(bridgev2.RemoteMessage)
+		return ok && extra.MessageMeta.ID == msg.GetID()
+	}
+	return false
+}
+
+// remoteSourceID is the network's own ID for the remote event being handled, where its
+// connector gives one (a WhatsApp reaction is a message with its own ID; Signal's is its
+// sender and millisecond timestamp), or "".
+func remoteSourceID(ctx context.Context) string {
+	if remote, ok := bridgev2.GetRemoteEventFromContext(ctx).(interface{ GetID() networkid.MessageID }); ok {
+		return string(remote.GetID())
+	}
+	return ""
+}
+
+func (in *Intent) sendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
 	if extra == nil {
 		extra = &bridgev2.MatrixSendExtra{}
 	}
@@ -130,7 +177,7 @@ func (in *Intent) SendMessage(ctx context.Context, roomID id.RoomID, eventType e
 		eventID = ids.MessageEventID(extra.MessageMeta.Room, extra.MessageMeta.ID, extra.MessageMeta.PartID)
 	case extra.ReactionMeta != nil:
 		r := extra.ReactionMeta
-		eventID = ids.ReactionEventID(r.Room, r.MessageID, r.MessagePartID, r.SenderID, r.EmojiID)
+		eventID = ids.RemoteReactionEventID(r.Room, r.MessageID, r.MessagePartID, r.SenderID, r.EmojiID, r.Emoji, remoteSourceID(ctx), r.Timestamp)
 	default:
 		eventID = ids.LocalEventID(string(roomID), string(in.mxid), eventType.Type, strconv.FormatInt(ts.UnixNano(), 10), digest(content))
 	}
@@ -264,6 +311,7 @@ func (c *Connector) emitContent(ctx context.Context, o *owner, s sender, eventTy
 		if threadRoot := msg.RelatesTo.GetThreadParent(); threadRoot != "" {
 			base.ThreadRoot = string(threadRoot)
 		}
+		base.MentionsMe = !s.self && mentions(msg.Mentions, o.userID)
 		return c.emit(ctx, &base)
 	case event.EventReaction:
 		reaction, ok := content.Parsed.(*event.ReactionEventContent)
@@ -322,23 +370,32 @@ func (c *Connector) messagePlaintext(ctx context.Context, o *owner, eventType ev
 		plain.HTML = msg.FormattedBody
 	}
 	if msg.URL != "" {
-		att, err := c.Media.AttachmentFor(msg.URL, o.userID)
+		att, err := c.attachmentFor(ctx, msg.URL, o.userID)
 		if err != nil {
-			c.Log.Warn().Err(err).Msg("Attachment isn't available to seal; sending the message without it")
-		} else {
-			if msg.FileName != "" {
-				att.Name = msg.FileName
-			} else if att.Name == "" {
-				att.Name = msg.Body
-			}
+			// The message still goes, with a record of the file that couldn't be kept (no key
+			// or ID, so nothing to fetch): the person sees a file was sent rather than nothing.
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Bool("expired", errors.Is(err, media.ErrUnavailable)).
+				Msg("An attachment couldn't be stored; sending the message with it marked failed")
+			att = &protocol.Attachment{Failed: true}
 			if info := msg.Info; info != nil {
-				if info.MimeType != "" {
-					att.Mime = info.MimeType
-				}
-				att.Width, att.Height, att.DurationMS = info.Width, info.Height, info.Duration
+				att.Size = info.Size
 			}
-			plain.Attachments = []protocol.Attachment{*att}
 		}
+		if msg.FileName != "" {
+			att.Name = msg.FileName
+		} else if att.Name == "" {
+			att.Name = msg.Body
+		}
+		if info := msg.Info; info != nil {
+			if info.MimeType != "" {
+				att.Mime = info.MimeType
+			}
+			att.Width, att.Height, att.DurationMS = info.Width, info.Height, info.Duration
+		}
+		if att.Mime == "" {
+			att.Mime = "application/octet-stream"
+		}
+		plain.Attachments = []protocol.Attachment{*att}
 	}
 	if msg.Mentions != nil {
 		for _, mxid := range msg.Mentions.UserIDs {
@@ -350,6 +407,46 @@ func (c *Connector) messagePlaintext(ctx context.Context, o *owner, eventType ev
 		}
 	}
 	return plain
+}
+
+// attachmentRetries are the waits before trying again to store an attachment whose sealed
+// copy couldn't be written (a full or failing disk, say). An upload that is gone (expired)
+// isn't retried: nothing can bring it back.
+var attachmentRetries = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second}
+
+// attachmentFor writes the owner's sealed copy of an upload, trying again while the write
+// fails and ctx allows.
+func (c *Connector) attachmentFor(ctx context.Context, uri id.ContentURIString, ownerUserID string) (*protocol.Attachment, error) {
+	att, err := c.Media.AttachmentFor(uri, ownerUserID)
+	for _, wait := range attachmentRetries {
+		if err == nil || errors.Is(err, media.ErrUnavailable) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(wait):
+		}
+		att, err = c.Media.AttachmentFor(uri, ownerUserID)
+	}
+	return att, err
+}
+
+// mentions reports whether a message mentions the person: by their own account (connectors
+// write a mention of the login as the person's Matrix ID) or the whole chat.
+func mentions(m *event.Mentions, userID string) bool {
+	if m == nil {
+		return false
+	}
+	if m.Room {
+		return true
+	}
+	for _, mxid := range m.UserIDs {
+		if mentioned, ok := ids.ParseUserMXID(mxid); ok && mentioned == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func (in *Intent) SendState(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string, content *event.Content, ts time.Time) (*mautrix.RespSendEvent, error) {
@@ -367,9 +464,65 @@ func (in *Intent) SendState(ctx context.Context, roomID id.RoomID, eventType eve
 		return resp, in.c.setMembership(ctx, roomID, id.UserID(stateKey), member.Membership)
 	case event.StateRoomName, event.StateTopic, event.StateRoomAvatar:
 		return resp, in.c.emitChat(ctx, roomID, chatOverride{eventType: eventType, content: content})
+	case event.StateBridge, event.StateHalfShotBridge:
+		// bridgev2 says a chat became, or stopped being, a message request only in its bridge
+		// info. Sent as often as anything about the chat changes, so only a change in the
+		// request is passed on.
+		info, ok := content.Parsed.(*event.BridgeEventContent)
+		if !ok {
+			return resp, nil
+		}
+		changed, err := in.c.requestChanged(ctx, roomID, info.Channel.MessageRequest)
+		if err != nil || !changed {
+			return resp, err
+		}
+		request := info.Channel.MessageRequest
+		if err = in.c.emitChat(ctx, roomID, chatOverride{request: &request}); errors.Is(err, errNotPortal) {
+			err = nil
+		}
+		return resp, err
 	default:
 		return resp, nil
 	}
+}
+
+// requestsRoom records which of a person's chats were last sent as message requests.
+func requestsRoom(userID string) string { return "requests:" + userID }
+
+// requestChanged reports whether a chat's message request state differs from what was last
+// sent for it.
+func (c *Connector) requestChanged(ctx context.Context, roomID id.RoomID, request bool) (bool, error) {
+	o, err := c.owner(ctx, roomID)
+	if errors.Is(err, errNotPortal) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	sent, err := c.Store.IsMember(ctx, requestsRoom(o.userID), o.portalID)
+	return err == nil && sent != request, err
+}
+
+// requestState is what a chat event says of the message request: true while it is one, false
+// once, the first time after it stopped being one, and nothing otherwise, so a network
+// without requests never touches the person's own choice. The marker is set before a true is
+// sent (sending it again is harmless) and cleared only once a false is.
+func (c *Connector) requestState(ctx context.Context, o *owner, request bool) (state *bool, sent func(), err error) {
+	room := requestsRoom(o.userID)
+	if request {
+		if _, err = c.Store.AddMember(ctx, room, o.portalID); err != nil {
+			return nil, nil, err
+		}
+		return &request, func() {}, nil
+	}
+	marked, err := c.Store.IsMember(ctx, room, o.portalID)
+	if err != nil || !marked {
+		return nil, func() {}, err
+	}
+	return &request, func() {
+		if err := c.Store.RemoveMember(ctx, room, o.portalID); err != nil {
+			c.Log.Err(err).Msg("Forgetting an accepted message request failed; it is sent again with the chat's next change")
+		}
+	}, nil
 }
 
 func (c *Connector) setMembership(ctx context.Context, roomID id.RoomID, mxid id.UserID, membership event.Membership) error {
@@ -629,6 +782,9 @@ type chatOverride struct {
 	eventType    event.Type
 	content      *event.Content
 	initialState []*event.Event
+	// request, if set, is whether the chat is a message request, from bridge info bridgev2
+	// is sending now.
+	request *bool
 }
 
 func roomKind(roomType database.RoomType) string {
@@ -658,8 +814,10 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	kind := override.kind
 	var parentKey networkid.PortalKey
 	var parentRoom id.RoomID
+	var request bool
 	if portal != nil {
 		plain.Name, plain.Topic, avatarURL = portal.Name, portal.Topic, portal.AvatarMXC
+		request = portal.MessageRequest
 		if kind == "" {
 			kind = roomKind(portal.RoomType)
 		}
@@ -678,6 +836,8 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			plain.Topic = parsed.Topic
 		case *event.RoomAvatarEventContent:
 			avatarURL = parsed.URL
+		case *event.BridgeEventContent:
+			request = parsed.Channel.MessageRequest
 		case *event.SpaceParentEventContent:
 		}
 	}
@@ -692,15 +852,19 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	if override.content != nil {
 		apply(override.eventType, override.content)
 	}
+	if override.request != nil {
+		request = *override.request
+	}
 	if kind == "" {
 		kind = "group"
 	}
 	if avatarURL != "" {
-		if att, err := c.Media.AttachmentFor(avatarURL, o.userID); err == nil {
+		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
 			plain.Avatar = att
 		} else {
-			// The avatar exists but its upload is gone (it expired, or the host restarted).
-			// Saying so keeps clients from taking a name change as the avatar's removal.
+			// The avatar exists but neither its upload nor a kept reference is left (an avatar
+			// from before references were kept). Saying so keeps clients from taking a name
+			// change as the avatar's removal.
 			plain.AvatarUnchanged = true
 		}
 	}
@@ -721,7 +885,16 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 			return err
 		}
 	}
-	return c.emit(ctx, evt)
+	state, sent, err := c.requestState(ctx, o, request)
+	if err != nil {
+		return err
+	}
+	evt.IsRequest = state
+	if err = c.emit(ctx, evt); err != nil {
+		return err
+	}
+	sent()
+	return nil
 }
 
 // ensureContact sends a ghost's profile to a person the first time the ghost appears in
@@ -804,13 +977,52 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 		avatarURL = *avatar
 	}
 	if avatarURL != "" {
-		if att, err := c.Media.AttachmentFor(avatarURL, o.userID); err == nil {
+		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
 			plain.Avatar = att
 		} else {
 			plain.AvatarUnchanged = true
 		}
 	}
 	return c.emitContactProfile(ctx, o, ghost, plain)
+}
+
+// avatarKind is what a kept avatar reference is sealed as. It is sealed to the bridge key
+// only: the bridge host reads it back, nobody else does.
+const avatarKind seal.Kind = "avatarRef"
+
+// avatarFor is the owner's sealed copy of an avatar, to put in a chat or contact's metadata.
+// An avatar's upload lives only minutes, but its sealed copy stays in the media store, so the
+// first copy is kept (sealed to the bridge key) and attached again once the upload is gone:
+// otherwise a later change to the name alone would carry no avatar, and a device that never
+// saw it would show none. Nil when there is neither.
+func (c *Connector) avatarFor(ctx context.Context, uri id.ContentURIString, ownerUserID string) *protocol.Attachment {
+	sealCtx := seal.Context{Kind: avatarKind, OwnerUserID: ownerUserID, ObjectID: string(uri)}
+	att, err := c.Media.AttachmentFor(uri, ownerUserID)
+	if err == nil {
+		kept, err := seal.SealJSON(att, []seal.PublicKey{c.BridgeKey.Public}, sealCtx)
+		if err == nil {
+			err = c.Store.PutAvatarRef(ctx, ownerUserID, string(uri), kept)
+		}
+		if err != nil {
+			// The avatar still goes now; only a later resend of it is lost.
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping an avatar's reference failed")
+		}
+		return att
+	}
+	kept, err := c.Store.AvatarRef(ctx, ownerUserID, string(uri))
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's reference failed")
+		}
+		return nil
+	}
+	var ref protocol.Attachment
+	if err = seal.OpenJSON(kept, c.BridgeKey, sealCtx, &ref); err != nil {
+		// Sealed to an earlier bridge key, say: the avatar is left as the client has it.
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's reference couldn't be opened")
+		return nil
+	}
+	return &ref
 }
 
 // emitContactProfile seals a contact's profile and sends it to the person.

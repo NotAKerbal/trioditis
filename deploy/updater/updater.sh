@@ -6,15 +6,17 @@
 # It learns the admins' choices (the release channel, whether updates install on their own)
 # and requests from the backend, through deploy/scripts/updater-agent.mjs in a one-off
 # container on the server's network, and reports back the same way. It fetches the channel's
-# branch from this checkout's git remote, and to update, moves the checkout to that branch's
-# newest commit and runs the installer, which restarts only what changed. It only ever moves
-# forward: a commit the branch doesn't have, or local changes, and it stays where it is. If
-# the installer fails, it goes back to the commit it was on and runs the installer again. It
-# holds the install's lock from before it moves the checkout until the installer is done, and
-# keeps what must outlast a restart in deploy/.updater-state: an update in progress (finished
-# on the next start, if it was cut off, by going back), how the last one ended until the
-# backend has the report, the day of the last automatic update, and the commit whose update
-# last failed.
+# branch from this checkout's git remote, and to update, backs the server up (an update that
+# can't is called off), moves the checkout's local branch of that name to the branch's newest
+# commit and runs the installer, which restarts only what changed. It only ever moves forward:
+# a commit the branch doesn't have, or local changes, and it stays where it is. If the
+# installer fails, it goes back to the commit it was on and restores that backup, data and
+# settings, since the failed version's migrations and database images may have changed the
+# data in ways the older code can't read. It holds the install's lock from before the backup
+# until the installer is done, and keeps what must outlast a restart in deploy/.updater-state:
+# an update in progress and its backup (finished on the next start, if it was cut off, by going
+# back), how the last one ended until the backend has the report, the day of the last automatic
+# update, and the commit whose update last failed.
 #
 # Everything is in functions and the last line calls main, so bash has read the whole file
 # before an update replaces it. After an update it exits, and systemd starts the new one.
@@ -35,6 +37,9 @@ WATCH_SECONDS=600
 FETCH_SECONDS=3600
 # How long it waits after the backend didn't answer, or didn't take a report.
 BACKOFF_SECONDS=60
+# How many of its own backups it keeps (each update makes one, and so does going back after
+# one fails): the oldest beyond these are removed after each new one.
+KEEP_BACKUPS=3
 
 log() { printf 'updater: %s\n' "$*" >&2; }
 
@@ -47,6 +52,13 @@ load_settings() {
   project=${project:-trioditis}
   secret=$(printf '%s\n' "$text" | env_value UPDATER_SECRET)
   [ -n "$secret" ] || { log "deploy/.env has no UPDATER_SECRET. Run deploy/install/install.sh --updater."; return 1; }
+  # Where its backups go: UPDATE_BACKUP_DIR if the operator set one (an absolute path, checked
+  # by the installer), else the operator's own state directory, outside the checkout.
+  backup_dir=$(printf '%s\n' "$text" | env_value UPDATE_BACKUP_DIR)
+  backup_dir=${backup_dir:-${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}/.local/state/trioditis/$project}
+  # Its own subdirectory, the only place it removes old backups from, so backups an operator keeps
+  # in UPDATE_BACKUP_DIR are never touched.
+  backup_dir=$backup_dir/updater-backups
 }
 
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
@@ -81,7 +93,7 @@ report() {
 # phase: `install` (the target) or `rollback` (back to the previous commit, the target having
 # failed). done_*: how the last update ended, until the backend has the report, so a report
 # that didn't get through is sent again rather than the request run again.
-STATE_NAMES='pending_target pending_previous pending_request pending_phase
+STATE_NAMES='pending_target pending_previous pending_request pending_phase pending_branch pending_backup
   done_request done_result done_target done_previous auto_day failed_target'
 load_state() {
   local name value
@@ -92,8 +104,10 @@ load_state() {
       pending_target | pending_previous | done_target | done_previous | failed_target)
         [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
       pending_request | done_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
-      pending_phase) [[ "$value" =~ ^(install|rollback)$ ]] || continue ;;
-      done_result) [[ "$value" =~ ^(updated|back|stuck)$ ]] || continue ;;
+      pending_phase) [[ "$value" =~ ^(backup|install|rollback)$ ]] || continue ;;
+      pending_branch) [[ "$value" =~ ^(main|dev)$ ]] || continue ;;
+      pending_backup) [[ "$value" =~ ^/[A-Za-z0-9._/@+=,%~-]+$ ]] && [[ ! "$value" =~ (^|/)\.\.(/|$) ]] || continue ;;
+      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed)$ ]] || continue ;;
       auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
       *) continue ;;
     esac
@@ -120,6 +134,7 @@ release_lock() { exec 9>&-; }
 outcome() {
   outcome_state=$1
   outcome_message=$2
+  outcome_note=0
 }
 
 describe_current() {
@@ -203,15 +218,29 @@ check_latest() {
   checked_at=$(date +%s)
 }
 
-# run_install COMMIT: checks the commit out and runs its installer, which keeps every setting.
-# On failure, `install_error` is the installer's last error line.
+# checkout COMMIT [BRANCH]: puts the checkout at COMMIT: on local branch BRANCH, made or moved
+# there and following the remote's branch of that name, so the checkout stays one an operator
+# can `git pull` (docs/deploy.md, Upgrade); detached without one. On failure, `install_error`
+# says so.
+checkout() {
+  install_error=''
+  if [ -n "${2:-}" ]; then
+    if git -C "$root" checkout --quiet -B "$2" "$1"; then
+      git -C "$root" branch --quiet --set-upstream-to="$remote/$2" "$2" 2>/dev/null || true
+      return 0
+    fi
+  elif git -C "$root" checkout --quiet --detach "$1"; then
+    return 0
+  fi
+  install_error="Couldn't check out ${1:0:7}."
+  return 1
+}
+
+# run_install COMMIT [BRANCH]: checks the commit out (as checkout does) and runs its installer,
+# which keeps every setting. On failure, `install_error` is the installer's last error line.
 run_install() {
   local output status
-  install_error=''
-  if ! git -C "$root" checkout --quiet --detach "$1"; then
-    install_error="Couldn't check out ${1:0:7}."
-    return 1
-  fi
+  checkout "$1" "${2:-}" || return 1
   output=$(mktemp)
   # Its output goes to the journal, which is no place for the admin setup link.
   "$root/deploy/install/install.sh" --no-setup-link 2>&1 | tee "$output" >&2
@@ -222,6 +251,83 @@ run_install() {
   fi
   rm -f "$output"
   [ "$status" = 0 ]
+}
+
+# last_error FILE: the last `error:` line (or failing that the last line) of a command's output,
+# without colour, at most 300 characters.
+last_error() {
+  local line
+  line=$(sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -a '^error: ' | tail -1 | cut -c8-308)
+  [ -n "$line" ] || line=$(sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -a . | tail -1 | cut -c1-300)
+  printf '%s' "$line"
+}
+
+# take_backup: backs the server up with deploy/trioditis backup into $backup_dir, holding the
+# lock (which it's handed), and leaves it stopped (--keep-stopped), so nothing it does before the
+# new version is up and checked can be lost by going back to the backup; then keeps the newest
+# KEEP_BACKUPS of the backups there. Sets `update_backup` to the new one, or `backup_error` to
+# why there's none (and then the backup has started the server again).
+take_backup() {
+  local output status old
+  update_backup='' backup_error=''
+  output=$(mktemp)
+  log "Backing up the server to $backup_dir."
+  (umask 077 && mkdir -p "$backup_dir") && "$root/deploy/trioditis" backup --keep-stopped "$backup_dir" >"$output" 2>&1
+  status=$?
+  cat "$output" >&2
+  if [ "$status" = 0 ]; then
+    update_backup=$(sed -n 's/^Backed up project [^ ]* to \(.*\) (archive\.enc.*/\1/p' "$output" | tail -1)
+  fi
+  if [ -z "$update_backup" ] || [ ! -f "$update_backup/backup.info" ]; then
+    # Its last line says only that it failed; the one before says why.
+    backup_error=$(grep -av '^The backup failed\.$' "$output" | grep -a . | tail -1 | cut -c1-300)
+    backup_error=${backup_error:-The backup stopped (exit $status).}
+    update_backup=''
+  fi
+  rm -f "$output"
+  [ -n "$update_backup" ] || return 1
+  # Only backups (directories with a backup.info) of this project, by name, which sorts by time.
+  while IFS= read -r old; do
+    [ -n "$old" ] && [ -f "$old/backup.info" ] && [ "$old" != "$update_backup" ] || continue
+    rm -rf -- "$old"
+  done < <(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name "$project-2*" | LC_ALL=C sort -r | tail -n +"$((KEEP_BACKUPS + 1))")
+}
+
+# position_note CHANNEL: why a server ahead of CHANNEL's branch, or off it, isn't updated, and
+# which channel it's on if it's on the other one's branch (as after installing from dev while
+# admins have Stable), so admins can choose that.
+position_note() {
+  local name other other_name other_label ref
+  name=$(channel_branch "$1")
+  case "$1" in stable) other=nightly ;; *) other=stable ;; esac
+  other_name=$(channel_branch "$other")
+  ref="refs/remotes/$remote/$other_name"
+  if timeout 300 git -C "$root" fetch --quiet --no-tags "$remote" "+refs/heads/$other_name:$ref" 2>/dev/null &&
+    git -C "$root" merge-base --is-ancestor "$current" "$ref" 2>/dev/null; then
+    other_label=${other^}
+    if [ "$behind" = 0 ]; then
+      echo "This server runs a newer version than ${1^} ($name), from ${other_label} ($other_name). Choose ${other_label} to keep it updated, or it stays where it is until ${1^} catches up."
+    else
+      echo "This server runs commits ${1^} ($name) doesn't have, from ${other_label} ($other_name). Choose ${other_label} to keep it updated."
+    fi
+  elif [ "$behind" = 0 ]; then
+    echo "This server is newer than $name, so there's nothing to install."
+  else
+    echo "This server runs commits $name doesn't have, so it stays where it is."
+  fi
+}
+
+# refresh CHANNEL: check_latest, then, whenever it got through, what the page should say about
+# where the server stands: why nothing installs when it's ahead of or off the channel (and which
+# channel it's on), and nothing more once it isn't, until something else happens.
+refresh() {
+  check_latest "$1" || return 1
+  if [ "$ahead" != 0 ]; then
+    outcome idle "$(position_note "$1")"
+    outcome_note=1
+  elif [ "${outcome_note:-0}" = 1 ]; then
+    outcome idle ''
+  fi
 }
 
 # update CHANNEL [AUTO]: installs the channel's newest commit, if that moves the server forward;
@@ -238,12 +344,8 @@ update() {
     outcome idle "Already up to date."
     return
   fi
-  if [ "$behind" = 0 ]; then
-    outcome idle "This server is newer than $name, so there's nothing to install."
-    return
-  fi
   if [ "$ahead" != 0 ]; then
-    outcome idle "This server runs commits $name doesn't have, so it stays where it is."
+    outcome idle "$(position_note "$channel")"
     return
   fi
   if [ -n "$(git -C "$root" status --porcelain --untracked-files=no)" ]; then
@@ -251,7 +353,8 @@ update() {
     return
   fi
   # Held from here until the installer is done, so a backup or an install the operator starts
-  # can't run between moving the checkout and installing it, nor be mistaken for a failure.
+  # can't run between the backup, moving the checkout and installing it, nor be mistaken for a
+  # failure.
   if ! take_lock; then
     release_lock
     outcome failed "A backup or an install is running on the server. Try again once it's done."
@@ -268,19 +371,49 @@ update() {
     outcome idle "The update didn't start: it was cancelled, the channel or automatic updates changed, or the server couldn't be reached."
     return
   fi
-  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install
+  # A backup first: if the update fails, going back restores it, data and settings, rather
+  # than running older code on data the new version's migrations or database images may have
+  # changed. No backup, no update. The backup phase is saved first: the backup stops the server,
+  # and if the updater is cut off before the install starts, its next start finds the server
+  # stopped with nothing installed, and starts it again (recover).
+  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=backup
+  pending_branch='' pending_backup=''
   save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
+  if ! take_backup; then
+    pending_target='' pending_previous='' pending_request='' pending_phase=''
+    save_state
+    release_lock
+    outcome failed "Couldn't back up the server before updating, so nothing was installed: $backup_error"
+    return
+  fi
+  # On the channel's own local branch, unless one by that name has commits it doesn't, which
+  # stay where they are (the checkout is detached instead).
+  local branch=$name
+  if git -C "$root" rev-parse --verify --quiet "refs/heads/$name" >/dev/null &&
+    ! git -C "$root" merge-base --is-ancestor "refs/heads/$name" "$target"; then
+    branch=''
+  fi
+  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install
+  pending_branch=$branch pending_backup=$update_backup
+  if ! save_state; then
+    # The backup left the server stopped; with nothing installed, it starts again as it was.
+    "$root/deploy/trioditis" start >&2 || log "Couldn't start the server again."
+    release_lock
+    outcome failed "Couldn't save the updater's state on the server."
+    return
+  fi
   log "Updating from $previous to $target ($name)."
   finish_update
 }
 
 # finish_update: installs $pending_target, or, in the rollback phase or once that fails, goes
-# back to $pending_previous, holding the lock. Exits after a successful update.
+# back to $pending_previous and restores the backup taken before, holding the lock. Exits after
+# a successful update.
 finish_update() {
   local target=$pending_target previous=$pending_previous
   if [ "$pending_phase" != rollback ]; then
     failure_detail='' rollback_detail=''
-    if run_install "$target"; then
+    if run_install "$target" "$pending_branch"; then
       conclude updated
       describe_current
       behind=0 ahead=0 latest_notes=''
@@ -293,7 +426,17 @@ finish_update() {
     failed_target=$target pending_phase=rollback
     save_state
   fi
-  if run_install "$previous"; then conclude back; else
+  if go_back "$previous"; then conclude back; elif [ "$stop_unconfirmed" = 1 ]; then
+    # The server may still be running on data the failed version changed, and that can't be
+    # left as if it were over: the update stays in progress, as going back, and the updater
+    # exits so its next start (systemd starts it again) tries to stop it again.
+    log "Couldn't confirm the server stopped after going back failed; trying again on the next start."
+    # Reported as still updating, not as over: the rollback isn't done, and admins mustn't be
+    # able to cancel it or start another update meanwhile.
+    done_id='' report updating "Going back to ${previous:0:7} after the update to ${target:0:7} failed: ${install_error:0:200}. The server couldn't be confirmed stopped; the updater keeps trying." || true
+    release_lock
+    exit 1
+  else
     rollback_detail=$install_error
     conclude stuck
   fi
@@ -302,11 +445,58 @@ finish_update() {
   release_lock
 }
 
+# go_back COMMIT: back to the commit the update started from. With the backup taken before it,
+# the checkout goes there and the backup is restored (deploy/trioditis restore, which keeps a
+# copy of the failed state, checks the backup is from that commit, and runs the installer). The
+# failed version's migrations or database images may have changed the data, so the older code
+# never runs on it without that backup: if the backup is gone or can't be restored, the server
+# is stopped and left for the operator, and `install_error` says so. (An update from an updater
+# that took no backup goes back the old way, installing the commit.)
+go_back() {
+  local output status
+  backup_note='' stop_unconfirmed=0
+  if [ -z "$pending_backup" ]; then
+    run_install "$1" "$pending_branch"
+    return
+  fi
+  if [ ! -f "$pending_backup/backup.info" ]; then
+    stop_server
+    install_error="its backup, $pending_backup, is gone, so the server is stopped rather than run on data the failed version may have changed"
+    return 1
+  fi
+  checkout "$1" "$pending_branch" || { stop_server; return 1; }
+  output=$(mktemp)
+  log "Restoring the backup from before the update, $pending_backup."
+  "$root/deploy/trioditis" restore --yes --recovery-dir "$backup_dir" "$pending_backup" >"$output" 2>&1
+  status=$?
+  cat "$output" >&2
+  if [ "$status" = 0 ]; then
+    rm -f "$output"
+    return 0
+  fi
+  install_error="restoring its backup failed ($(last_error "$output")), so the server is stopped rather than run on data the failed version may have changed; restore $pending_backup by hand"
+  rm -f "$output"
+  stop_server
+  return 1
+}
+
+# stop_server: stops everything (the lock is handed on), so a server whose data can't be
+# vouched for takes no writes and sends nothing.
+stop_server() {
+  log "Stopping the server."
+  "$root/deploy/trioditis" stop >&2 || log "Couldn't stop the server."
+  # Only what Docker says counts: none of the project's containers still running.
+  local running
+  running=$(docker ps -q --filter "label=com.docker.compose.project=$project") && [ -z "$running" ] && return 0
+  stop_unconfirmed=1
+  return 1
+}
+
 # conclude RESULT: the update in progress is over (updated, back on the previous commit, or
 # stuck: going back failed too); kept as done_* until the backend has the report.
 conclude() {
   done_request=$pending_request done_result=$1 done_target=$pending_target done_previous=$pending_previous
-  pending_target='' pending_previous='' pending_request='' pending_phase=''
+  pending_target='' pending_previous='' pending_request='' pending_phase='' pending_branch='' pending_backup=''
   save_state
 }
 
@@ -327,6 +517,7 @@ report_done() {
       installed_notes=$(release_notes "$done_previous" "$done_target")
       ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
+    resumed) outcome failed "The update to $target was cut off while the server was being backed up, before anything was installed. The server is still on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
   if UPDATER_INSTALLED_FROM=$installed_from UPDATER_INSTALLED_TO=$installed_to \
@@ -343,6 +534,26 @@ report_done() {
 # on its own.
 recover() {
   [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
+  # Cut off while backing up, before the checkout moved: nothing was installed, and the backup
+  # may have left the server stopped. It starts again as it was, and the request is reported
+  # done; the target isn't counted as failed.
+  if [ "$pending_phase" = backup ]; then
+    log "The update to $pending_target was cut off while backing up; starting the server again as it was."
+    take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
+    # Until the server is started again, the update stays in its backup phase, still updating:
+    # the updater exits and its next start (systemd starts it again) tries again.
+    if ! "$root/deploy/trioditis" start >&2; then
+      log "Couldn't start the server again after the cut-off backup; trying again on the next start."
+      done_id='' report updating "Starting the server again: the update to ${pending_target:0:7} was cut off while backing up, and the server hasn't started yet; the updater keeps trying." || true
+      release_lock
+      return 1
+    fi
+    conclude resumed
+    describe_current
+    report_done
+    release_lock
+    return 0
+  fi
   log "The update to $pending_target was cut off; going back to $pending_previous."
   take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
   done_id='' report updating "Going back to ${pending_previous:0:7}: the update to ${pending_target:0:7} was cut off."
@@ -376,7 +587,7 @@ init() {
   { top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) && [ "$top" -ef "$root" ] && describe_current; } ||
     { log "$root isn't a git checkout of its own."; return 1; }
   latest='' latest_channel='' latest_at='' latest_subject='' latest_notes='' behind='' ahead='' checked_at=''
-  last_fetch=0 done_id='' failure_detail='' rollback_detail=''
+  last_fetch=0 done_id='' failure_detail='' rollback_detail='' backup_note=''
   load_state
   outcome idle ''
 }
@@ -439,14 +650,16 @@ handle() {
     update "$channel"
   elif [ "$kind" = check ]; then
     report checking
-    if check_latest "$channel"; then outcome idle ''; else outcome failed "Couldn't reach the repository to look for updates."; fi
+    outcome idle ''
+    refresh "$channel" || outcome failed "Couldn't reach the repository to look for updates."
+
   elif [ "$channel" != "$latest_channel" ] || [ $(($(date +%s) - last_fetch)) -ge "$FETCH_SECONDS" ]; then
-    check_latest "$channel" || true
+    refresh "$channel" || true
   fi
   if [ "$kind" != update ] && auto_due; then
     auto_day=$(date +%F)
     save_state
-    if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
+    if refresh "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
       update "$channel" 1
     fi
   fi

@@ -29,6 +29,8 @@ interface Batch {
   hostId: string
   network: Network
   events: BridgeEvent[]
+  /** The host's last heartbeat before it shuts down. */
+  stopping?: true
 }
 
 const isText = (value: unknown) => typeof value === 'string' && value.length > 0
@@ -47,7 +49,15 @@ export function parseBatch(value: unknown): Batch | null {
     const { seq } = event as Record<string, unknown>
     if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 1) return null
   }
-  return { hostId: batch.hostId as string, network: batch.network as Network, events: batch.events as BridgeEvent[] }
+  const events = batch.events as BridgeEvent[]
+  // Only a heartbeat can say the host is stopping: a batch with events isn't its last word.
+  const stopping = batch.stopping === true && events.length === 0
+  return {
+    hostId: batch.hostId as string,
+    network: batch.network as Network,
+    events,
+    ...(stopping ? { stopping } : {}),
+  }
 }
 
 /** Whether the backend's validators refused the event itself (rather than being down). */
@@ -103,7 +113,7 @@ type Outcome = { ackedThrough: number } | { expectedSeq: number }
  * instead and quarantines the ones refused, so one malformed event doesn't stop the feed.
  */
 async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[]): Promise<Outcome> {
-  const target = { hostId: batch.hostId, network: batch.network }
+  const target = { hostId: batch.hostId, network: batch.network, ...(batch.stopping ? { stopping: true } : {}) }
   // A chunk holding an event that can't be sent goes one event at a time from the start.
   if (events.every(sendable)) {
     try {
@@ -136,7 +146,7 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
  */
 async function ingestAll(
   backend: Backend,
-  target: { hostId: string; network: Network },
+  target: { hostId: string; network: Network; stopping?: boolean },
   events: BridgeEvent[],
 ): Promise<Outcome> {
   const last = events.at(-1)?.seq ?? 0

@@ -9,6 +9,11 @@ export interface Session {
   role: 'admin' | 'member'
   kid: string
   keyPair: KeyPair
+  /**
+   * Opened from this device before the server confirmed the session, because it couldn't be
+   * reached (lib/verified-session.ts): nothing loads until it can, and views say so.
+   */
+  offline?: true
 }
 
 export const SessionContext = createContext<Session | null>(null)

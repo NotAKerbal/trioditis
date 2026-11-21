@@ -91,17 +91,20 @@ follow-up: there is no email change yet).
 A server has no open sign-up. Every account starts from an invitation, and the first one,
 the admin, from the setup token the installer prints (`TRIODITIS_SETUP_TOKEN`).
 
-| What                | How                                                                                                                                                                           |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members |
-| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                |
-| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                     |
-| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                           |
-| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404            |
-| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                       |
-| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member   |
-| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                       |
-| Invitations (admin) | `api.members.invitations` lists the server's invitations, without tokens. `api.members.revokeInvitation({ invitationId })`                                                    |
+| What                | How                                                                                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First admin         | `authClient.signUp.email({ email, password: authPassword(pw, email), name }, { headers: { 'x-trioditis-invite': setupToken } })`. Works once, while the server has no members          |
+| Invited sign-up     | The same, with the invitation's token from its link in `x-trioditis-invite`. The email must be the invited one                                                                         |
+| Sign in             | `authClient.signIn.email({ email, password: authPassword(pw, email) })`, or `authClient.signIn.passkey()`                                                                              |
+| Add a passkey       | `authClient.passkey.addPasskey()` while signed in, with the page's session in `x-trioditis-session-id` (Key writes are bound to the page's session)                                    |
+| Change the password | `api.account.changePassword` (see Keys, Changing the password). Better Auth's own `changePassword`, password reset and `changeEmail` are turned off and answer 404                     |
+| Forgotten password  | An admin's reset link and the recovery key: see Resetting a forgotten password below                                                                                                   |
+| Sign out            | `authClient.signOut()`. To end one particular session, see Ending a known session below                                                                                                |
+| Who am I            | `api.members.me` returns `{ userId, sessionId, member }`, or `null` when signed out. `member` is `{ userId, role, identityKid }`, or `null` when the account isn’t a member            |
+| Invite (admin)      | `api.members.invite({ email, role, sessionId? })` returns `{ invitationId, token }`. The token is returned once: build the link from it                                                |
+| Invitations (admin) | `api.members.invitations({ paginationOpts })` pages through the invitations nobody has joined with yet, newest first, without tokens. `api.members.revokeInvitation({ invitationId })` |
+| Members (admin)     | `api.members.list({ paginationOpts })` pages through the members, oldest first: `{ userId, role, createdAt, name, email, you }`                                                        |
+| Remove (admin)      | `api.members.removeMember({ userId, sessionId? })`. See Removing a member below                                                                                                        |
 
 Sign-up without a valid token fails with Better Auth's `FORBIDDEN` and code
 `INVITE_REQUIRED`.
@@ -190,10 +193,81 @@ then lose the race for it; without the per-address limit, one address can. A pas
 isn't counted by it. The table holds SHA-256 hashes of its keys, never an email or address,
 and buckets that have refilled are deleted every ten minutes.
 
-Errors: `Only an admin can do that.` (`invite`, `invitations`, `revokeInvitation`) ·
+### Members and invitations (admins)
+
+`members.list` and `members.invitations` are paginated queries (`usePaginatedQuery`): a server with many members or
+invitations shows them all, a page at a time, rather than only the newest hundred.
+
+Errors: `Only an admin can do that.` (`invite`, `invitations`, `list`, `revokeInvitation`,
+`removeMember`, `issuePasswordReset`) ·
 `Invitations are turned off on demo servers.` · `That isn’t an email address.` · `That
 invitation can’t be revoked.` · `Someone is signing up with that invitation right now. Try
 again in a few minutes.`
+
+### Removing a member
+
+`members.removeMember` takes a member off the server in one transaction: their membership
+goes (so every member function refuses them at once), with their Better Auth sessions,
+password credential, passkeys and user (so the email can be invited again, as a new account),
+their key backups, key challenges and reset links, and every agent connection they approved.
+Their network accounts are logged out and their logins in progress ended, through the bridge
+host, as removing a network does. Their stored chats and messages stay, sealed to a key nobody
+else holds. An admin can't remove themselves, and the last admin can't be removed.
+
+What finishes later is fenced on membership meanwhile:
+
+- **Agents.** An agent request approved just before the removal can still be traded for a
+  token, but every MCP call checks the token's person is still a member: one who isn't gets a
+  401, and the connection is revoked.
+- **Sends.** `gateway.claimCommands` hands a bridge host nothing of someone who isn't a member
+  but their logouts and login cancels. Their other commands are settled as if they ran out of
+  time: a send never handed over becomes `failed`, one that may have gone out becomes
+  `unknown`. Neither is sent again.
+- **Logouts.** `api.members.removedCleanup({ paginationOpts })` pages through removed people
+  whose network accounts aren't confirmed logged out yet, newest first: `{ userId, email,
+removedAt, accounts, pending, failed }`. Only cleanups still active are read, however many
+  have finished. An account of theirs that reports in after the removal (a login that finished,
+  or a logged-out account reconnecting) is logged out at once and makes their cleanup active
+  again. A logout that ran out of time is queued again by itself; one a bridge host refused can
+  be tried again with `api.members.retryCleanup({ userId, sessionId? })`, which answers
+  `{ queued, left }`.
+
+Errors: `You can’t remove yourself. Ask another admin.` · `That person isn’t a member of this
+server.` · `The server’s last admin can’t be removed.`
+
+### Resetting a forgotten password
+
+Sign-in takes a password derived from the person's own, and their identity key is wrapped by
+it, so neither the server nor an admin can sign anyone in or open their messages. A reset
+needs two things: a link an admin makes, and the person's recovery key.
+
+1. An admin calls `api.members.issuePasswordReset({ userId, sessionId? })` (Settings →
+   Members → Reset password), which returns `{ token, expiresAt }` once, and shares
+   `/reset#token=…`. It works for a day, once; a newer one replaces it. It isn't for the
+   admin's own account. A locked-out admin, or a server's only admin, gets one from the
+   deployment's command line: `npx convex run members:issuePasswordResetFor '{"email": "…"}'`.
+2. Signed out, the reset page calls `api.account.resetInfo({ token })`: `{ userId, email,
+key }`, or `null` for a link that no longer works. `key` is `{ kid, publicKey, recovery,
+passwordParams }`, or `null` for an account that never set its key up.
+3. It opens the key with the recovery key (`unwrapIdentityKey` of `key.recovery`), wraps it
+   with the new password (fresh `newPasswordParams()`, never weaker than `passwordParams`),
+   proves it holds the key with `api.account.resetChallenge({ token })` (a sealed box, as
+   `keys.challenge` gives), and derives the new sign-in password with `authPassword` and
+   `email`.
+4. `api.account.resetPassword({ token, newAuthPassword, newWrap, proof })` changes the
+   sign-in credential and the password backup in one transaction, uses the link up and ends
+   every session the account has. An account with no key sends neither `newWrap` nor `proof`.
+   Then sign in with the new password.
+
+A reset, like `account.changePassword`, moves the account's credential version. A password
+sign-in notes the version before its password is checked, and the session it makes is ended at
+once if the version moved meanwhile: the sign-in fails with `401` and code `PASSWORD_CHANGED`.
+So a sign-in with the old password that races a reset never keeps a session.
+
+Errors: `This reset link has expired or was already used. Ask your admin for a new one.` ·
+`Open your key with your recovery key first.` · `Your password changed meanwhile. Open the
+reset link again.` · `That new password isn’t allowed.` · `Change your own password in
+Settings → Keys and devices.`
 
 ## Keys
 
@@ -238,6 +312,12 @@ await convex.mutation(api.keys.setup, { ...args, proof, sessionId })
   bytes, or a low-order X25519 point), in `keys.challenge` and in `keys.setup`.
 - `keys.setup` is complete only when both backups exist. Repeating it with the same key then
   does nothing; a different key for an account that has one is refused.
+- It returns `{ kid, stored }`: `stored` is the backups this call stored (`password`,
+  `recovery`), decided in the transaction that writes them. Two devices finishing setup at
+  once both succeed, but only one stores its recovery key; the other's `stored` leaves
+  `recovery` out. An empty `stored` can also mean an earlier try of the same call stored
+  them and its answer was lost, so compare the recovery backup's `ct` before telling the
+  person their recovery key didn't take.
 - For a key that exists without its backups (`needsBackup`), get the proof from
   `keys.challenge({})` (below).
 
@@ -529,6 +609,7 @@ A `ChatRow` (type in `@trioditis/core`):
 | `kind`                                       | `dm`, `group`, `channel`, `space`                                                                                                                   |
 | `sealedMeta`                                 | Name, topic and avatar: open with kind `chat`, object ID `portalId`. `null` until described. Plaintext is `ChatPlaintext`; honour `avatarUnchanged` |
 | `unreadCount`, `mentionCount`                | Unread messages, and how many of those mention the person (flagged by the bridge host)                                                              |
+| `unreadRev`                                  | One more with every message counted unread, so two answers with the same count can be told apart                                                    |
 | `markedUnread`                               | The person marked it unread                                                                                                                         |
 | `pinned`, `archived`, `blocked`, `isRequest` | As named                                                                                                                                            |
 | `mutedUntil`                                 | `null`, a time, or `Number.MAX_SAFE_INTEGER` for "until I unmute"                                                                                   |
@@ -705,7 +786,27 @@ await convex.mutation(api.messages.send, {
 
 - Each sealed object is at most 64 KiB.
 - The same `clientMessageId` again does nothing, so retrying a call that may have failed is
-  safe.
+  safe. `messages.send` returns `'queued'` for a new send; for an ID already used it returns
+  what it was used for and where that stands, and sends nothing:
+  `{ already: 'send', delivery }` (the copy's delivery state, `null` once it was discarded) or
+  `{ already: 'scheduled', state }` (`scheduled`, `cancelled` or `failed`; one that has gone
+  out is a send). A client should keep the text of one that was cancelled or failed, since it
+  never went, and send it again only with a new ID.
+- **Sending again** is decided by the server. Every attempt is a link in a chain from the
+  original send; its outbox row records the original and the attempt before it.
+  `api.messages.retryStates({ clientMessageIds })`, at most 100 IDs of any sends in chains,
+  returns `[{ clientMessageId, state }]` with `state` `{ root, latest, delivery, allowed,
+nextId }`: the original, the latest attempt and its delivery state, and whether another may be
+  made now, with its client message ID. Every send of a chain gets the same answer. The first
+  attempt is allowed when the original failed or may not have gone; a later one only when the
+  latest attempt failed and every other send in the chain, the original included, failed too.
+  One that turns out to have gone ends the chain, and the answer then shows it as `latest`.
+  Attempt IDs start `rt_`: `messages.send` and `scheduled.create` refuse them. To make it, seal the text for
+  `nextId` exactly as for `messages.send` and call `api.messages.sendAgain({ clientMessageId,
+nextId, forBridge, copy, replyTo? })` with any send of the chain. It returns
+  `{ created, state }`: made only if it's still allowed and `nextId` is still the next one, so
+  repeated clicks, other tabs and stale pages make one attempt per link. Nothing is ever sent
+  again on its own.
 - The send appears in `messages.list` at once as the pending copy, and the network's echo
   replaces it in place.
 
@@ -717,7 +818,7 @@ await convex.mutation(api.messages.send, {
 | `submitted`         | Sending, handed to the network                                                                                                                                                                                                                                            |
 | `sent`              | Sent (one tick)                                                                                                                                                                                                                                                           |
 | `delivered`         | Delivered (two ticks)                                                                                                                                                                                                                                                     |
-| `read`              | Read                                                                                                                                                                                                                                                                      |
+| `read`              | Read. Set by someone else's read receipt (`receipt` event) covering the message, as well as by `sendStatus`; never lowered after                                                                                                                                          |
 | `failed`            | Not sent. Offer **Retry** (a new send with a new `clientMessageId`) or **Delete** (`messages.discardSend`)                                                                                                                                                                |
 | `unknown`           | **May not have sent.** Trioditis never resends on its own, because the network may have it. Offer "Send again" (a new `clientMessageId`, which may duplicate) or "Discard" (`messages.discardSend({ clientMessageId })`). A late confirmation can still move it to `sent` |
 
@@ -759,13 +860,15 @@ can’t be sent.` · `That message can’t be reacted to.`
 
 ### Scheduled sends
 
-| Function            | Arguments                                                              | Returns                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `scheduled.create`  | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or `null` if that `clientMessageId` was already used                                            |
-| `scheduled.list`    | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                           |
-| `scheduled.copies`  | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled, to show what each says; open like a pending copy |
-| `scheduled.cancel`  | `scheduledId`                                                          | `null`. Cancels one still scheduled, or dismisses one that failed                                                 |
-| `scheduled.sendNow` | `scheduledId`                                                          | `null`                                                                                                            |
+| Function              | Arguments                                                              | Returns                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduled.create`    | `chatId`, `clientMessageId`, `forBridge`, `copy`, `sendAt`, `replyTo?` | The scheduled ID, or what that `clientMessageId` was already used for, as `messages.send` says it                                                                                             |
+| `scheduled.list`      | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, sendAt, replyTo, state }]`, soonest first. No content                                                                                                       |
+| `scheduled.copies`    | `scheduledIds` (at most 20)                                            | `[{ _id, copy }]`: the person's copies of those still scheduled or cancelled and not forgotten; open like a pending copy                                                                      |
+| `scheduled.cancel`    | `scheduledId`                                                          | What happened: `{ outcome: 'cancelled', first, clientMessageId, copy, replyTo }`, `{ outcome: 'sent', delivery }` (how that send stands now) or, for a failed one, `{ outcome: 'dismissed' }` |
+| `scheduled.cancelled` | `chatId?`                                                              | `[{ _id, chatId, clientMessageId, replyTo, cancelledAt }]`: cancelled ones not forgotten yet. No content                                                                                      |
+| `scheduled.forget`    | `scheduledId`                                                          | `null`. Deletes a cancelled one's copies, when the person discards it                                                                                                                         |
+| `scheduled.sendNow`   | `scheduledId`                                                          | `null`                                                                                                                                                                                        |
 
 Seal it exactly as for `messages.send`. At `sendAt` (within a year: 365 days) it becomes an
 ordinary send in its chat, on its network, with its 24-hour deadline starting then. A person
@@ -777,11 +880,22 @@ sent, and its sealed copies are deleted. A failed one stays listed until `schedu
 dismisses it. `scheduled.list` returns at most 500 of each state, so at most 500 failed
 ones are shown at once; dismissing some brings the rest into view.
 
+Cancelling is decided on the server. `scheduled.cancel` answers `cancelled`, or `sent` with the
+send's delivery state when its time or Send now came first; never infer it from the row leaving
+`scheduled.list`. A cancelled one keeps its sealed copy, returned with the answer (and again if
+`cancel` is asked again, with `first` false: only the call that cancelled it has `first` true,
+so only that one should put its text in a composer), and is listed in `scheduled.cancelled` until `scheduled.forget`, which
+the client calls only when the person discards it. Restoring its text to the composer copies
+it into an ordinary new draft and leaves the row as it is, so it can be restored again; nothing
+is forgotten by itself, except one not discarded within 30 days. Forgotten ones are kept,
+without copies, so their client message IDs stay used. A cancelled one is never sent, including by restore settlement.
+
 Errors: `That chat doesn’t exist.` · `Pick a time in the future.` · `Pick a time within a
 year.` · `You can schedule at most 500 messages.` · the sealing and reply errors of
 `messages.send` (`create`) · `Ask for at most 20 at once.` (`copies`) · `That scheduled
 message doesn’t exist.` · `That message has already gone out.` · `That message couldn’t be
-sent: its chat is gone.` (`sendNow` on a failed one)
+sent: its chat is gone.` (`sendNow` on a failed one) · `Only a cancelled message can be
+discarded.` (`forget`)
 
 ## Labels
 
@@ -822,8 +936,14 @@ whether the network has them (Reacting).
    It needs `keys.identity` in state `ready`. `flowId` is one of the network's `flows` ids
    from `networks.list`; without it, the bridge host uses the network's default login.
 2. Watch `api.logins.session({ loginSessionId })`. It returns
-   `{ _id, network, state, step, updatedAt }`, or `null` for a login that doesn't exist or
-   isn't the person's. `state` is one of `pending`, `active`, `complete`, `cancelled` or
+   `{ _id, network, state, step, updatedAt, hostLastSeenAt, hostOnline }`, or `null` for a
+   login that doesn't exist or isn't the person's. `hostLastSeenAt` is when the bridge host
+   running it (before one has it, the network's most recently seen host) was last heard from,
+   or `null`; `hostOnline` is whether that was within two minutes (`BRIDGE_HOST_STALE_MS`) when
+   the query ran. A host that has gone can't finish the login, so hide a QR or pairing code it
+   showed once `hostOnline` is false or two minutes pass with no new `hostLastSeenAt`. Likewise a
+   `step.expiresAt` or `display.expiresAt` (bridge host time, ms) that has passed, where the
+   bridge host sends one. `state` is one of `pending`, `active`, `complete`, `cancelled` or
    `error`. `step` is `null` until the bridge host sends the first step (while `pending`);
    then render it (the `LoginStep` type in `@trioditis/core/bridge-protocol`):
    - `displayAndWait`: with `display.type` `qr`, draw `display.data` as a QR code; with
@@ -854,14 +974,26 @@ whether the network has them (Reacting).
    })
    ```
 
-4. Cancel with `api.logins.cancel({ loginSessionId })`. It's best effort: a login that
-   completes while the cancel is on its way still connects.
+4. Cancel with `api.logins.cancel({ loginSessionId })`. The login is `cancelled` at once,
+   and later steps for it are ignored; it returns `cancelled`, or `complete` or `error` if the
+   login had already ended that way (then it changes nothing). Cancelling again is the same.
+   A login the bridge host finishes anyway (before the cancel reached it) isn't logged out:
+   its account is kept with `connectedAfterCancel: true` (below), unless it reconnected an
+   account the person already had.
 
 Accounts: `api.logins.accounts` returns
-`[{ _id, network, state, error, lastHealthyAt, updatedAt, logoutPending, logoutError }]`.
+`[{ _id, network, state, error, lastHealthyAt, updatedAt, hint, sealedMeta, logoutPending, logoutError, connectedAfterCancel }]`.
+`connectedAfterCancel` is true for an account a login the person cancelled connected anyway:
+they decide, with `api.logins.keep({ networkAccountId })` (clears it) or a disconnect (which
+clears it too). A later normal login of the account clears it as well.
+`hint` tells the person's accounts on one network apart, as far as the backend can: `ID …` and the
+login ID's last four characters. `sealedMeta` (`{ sealed, objectId }`, kind `account`, sealed to
+the owner) carries the bridge host's own hint (the number or username), which the app shows in its
+place. The login ID itself isn't returned.
 `state` is `CONNECTED`, `CONNECTING`, `TRANSIENT_DISCONNECT`, `BAD_CREDENTIALS` (reconnect
 it), `UNKNOWN_ERROR` or `LOGGED_OUT`. `api.logins.logout({ networkAccountId })` disconnects
-one: `logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
+one, returning `queued`, `pending` (one is already on its way) or `loggedOut` (nothing to do):
+`logoutPending` is true until the bridge host confirms; if it couldn't (rejected, or no
 bridge host took it within 10 minutes: `expired`; or one took it but never confirmed, an
 hour after that: `timeout`), `logoutPending` goes false and `logoutError` says why. Both
 happen on time whether or not a gateway is running, with the same two exceptions as sends: a
@@ -881,7 +1013,7 @@ a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login do
 ### Health
 
 `api.networks.health` returns, for each network in `networks.list`,
-`{ network, bridgeOnline, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
+`{ network, bridgeOnline, bridgeLastSeenAt, accounts: [{ networkAccountId, state, error, lastHealthyAt }], status }`:
 
 | `status`   | Means                                                                      |
 | ---------- | -------------------------------------------------------------------------- |
@@ -891,7 +1023,13 @@ a browser. Start again if it didn’t finish.` (`openBrowser`) · `That login do
 | `none`     | The person hasn't connected this network                                   |
 
 `bridgeOnline` goes false two minutes after the bridge host's last heartbeat. Queries rerun
-when data changes, not when time passes, so recheck on focus.
+when data changes, not when time passes, so a host that stops heartbeating stays
+`bridgeOnline` in an answer already given. A live host's heartbeat changes
+`bridgeLastSeenAt` (null if never heard from) every 30 seconds, so treat the bridge as down
+once two minutes (`BRIDGE_HOST_STALE_MS`) pass by the client's clock without a new one, and
+recompute `status` with `networkStatus` from `@trioditis/core`. Timing it from when the
+client got the value, not from the value itself, keeps a fast or slow client clock from
+misjudging it.
 
 ### Installing networks (admins)
 
@@ -900,7 +1038,7 @@ one for every network unless the operator narrows it; docs/deploy.md). Admins ch
 those people can connect:
 
 - `api.networks.catalog` lists every network Trioditis knows, for the admin panel:
-  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, accounts }[]`.
+  `{ network, name, maturity, termsRisk, installed, bridged, bridgeOnline, bridgeLastSeenAt, accounts }[]`.
   `bridged` says the server runs its bridge host; one it doesn't can't be installed, and the
   operator adds it with the installer (Telegram also needs its API ID and hash). `accounts`
   counts the accounts connected to it, everyone's together; never whose.
@@ -1044,7 +1182,8 @@ never sees it.
 
 The client watches `newChats.status` until it's `started` (open `chatId`; a chat the person
 already has with them is given as it is) or `failed`, with an error code: `not_found` (nobody
-on the network has that identifier), `unsupported`, `not_connected`, `rate_limited`,
+on the network has that identifier), `invalid_identifier` (it isn't written as a number or
+username the network takes), `unsupported`, `not_connected`, `rate_limited`,
 `network_rejected`, `timeout` (the network took over two minutes, or no host reported back), or
 `expired` (no bridge host took it in ten minutes; one that does later doesn't start it). Only
 the host the command went to can answer it.
@@ -1054,7 +1193,8 @@ packages/core, mirroring the bridge host's `startTargets`): WhatsApp and Google 
 contact or a phone number; Signal a contact, a phone number or a username; Telegram, Messenger,
 Instagram, Slack and LinkedIn a contact; X a username. The bridge host passes a number on as digits with
 its `+` (Signal needs the country code) and a username without its `@`, checked against the
-network's own username grammar; anything else is `not_found` (it could be one of the
+network's own username grammar. A number's formatting (spaces, dashes, dots, brackets, `tel:`,
+`00` for `+`) is taken off first; anything else is `invalid_identifier` (it could be one of the
 connector's own IDs: WhatsApp would resolve a LID, filling in its number from a map the whole
 host shares, and Google Messages looks dotted IDs up among every login's contacts). Telegram's identifier lookup reads a phone table the whole host shares, Google Voice's
 chats are keyed by phone number (which bridgev2 logs), Meta's connector resolves only numeric
@@ -1073,6 +1213,39 @@ Errors: `That request ID isn’t valid.` · `Start a chat with a contact or a se
 `That account doesn’t exist.` · `That account isn’t connected.` · `That identifier isn’t
 sealed, or is too long.` · `That contact doesn’t exist.` · `Too many new chats. Wait a minute,
 then try again.`
+
+## Agents
+
+People's own agents connect over MCP at `<site>/mcp` (`convex/mcp.ts`; docs/PLAN.md, Agents).
+`@convex-dev/mcp` is the OAuth 2.1 server: an agent registers itself and sends the person to
+`<site>/agents/connect?request=<id>`, the app's consent page.
+
+- **Scopes.** Only scopes a tool uses are offered: today `read`, for `list_networks`. An agent
+  asking for any other is refused at `/mcp/oauth/authorize` (`invalid_scope`); one asking for
+  none gets `read`. Drafting, sending and channels come with their tools. A request still
+  waiting with a scope the server no longer offers can't be approved: `mcp.authorize` throws
+  `This agent asked for access Trioditis doesn’t offer yet…`; denying it still works.
+- **The consent page** runs behind the app gate, so the person is a signed-in member with their
+  key unlocked. A person who must sign in first comes back to it: the page keeps the request ID
+  in this tab's `sessionStorage` for ten minutes, and sign-in opens only `/agents/connect` with
+  it. It refuses to show the choice inside a frame. It shows `api.mcp.getAuthRequest({ requestId })`:
+  `clientName` (the agent's own, unchecked; labelled so), where approval returns
+  (`redirectUri`'s host), the scopes with their descriptions, and the account's email. Allow or
+  Deny calls `api.mcp.authorize({ requestId, approve, sessionId })` (bound to the page's session,
+  Key writes are bound to the page's session) and sends the browser to the `redirectUrl` it
+  returns, which carries the agent's `state`. A request already answered or expired is
+  refused (`…has expired`). The device flow is off.
+- **Connections.** The agent's connection exists once it trades the code for its token; it is
+  owned by the approving account and acts only as it. Settings → Agents lists
+  `api.mcp.listConnections({})`: `{ id, kind, name, clientId, scopes, createdAt, lastUsedAt? }`,
+  newest first, only the caller's. `api.mcp.revokeConnection({ id })` disconnects one at once,
+  ending its tokens; it returns false for an ID that isn't the caller's.
+- **`list_networks`** returns `{ networks: [{ accountId, network, name, state, bridgeOnline,
+connected, disconnecting, connectedAt, lastHealthyAt }] }`. `accountId` is the account's
+  opaque ID, which tells apart two accounts on one network; never the network's login ID.
+  `connected` is true only when `state` is `CONNECTED` and the network's bridge host was heard
+  from in the last two minutes, the same age the app's status uses (`networks.ts`); otherwise
+  `state` may be out of date.
 
 ## Server updates
 
@@ -1102,7 +1275,14 @@ The updater calls `api.updates.poll` and `api.updates.report` with `UPDATER_SECR
 
 1. **Done:** mentions and message requests come from the bridge host and are applied at
    ingest, and a new message wakes a snoozed chat. A read receipt from the person's phone
-   recounts unread and mentions after it.
+   recounts unread and mentions after it. The chat keeps how far the person has read
+   (`readSortKey`, from `chats.markRead` or their own receipt, only ever forward), so a
+   message that arrives late but sorts before it isn't counted unread, and an older receipt
+   doesn't bring counts back. Someone else's receipt marks the person's own messages up to it
+   `read`: every one since the last such receipt (`theirReadSortKey`), 100 per transaction
+   with the rest scheduled, and one that arrives late behind it is `read` on arrival. Quarantined events are listed to admins
+   (`quarantine.list`: host, sequence, type, reason and time only) and dismissed with
+   `quarantine.dismiss({ ids })`.
 2. **Network-side block and accept request.** There's no bridge command for either yet, so
    both are Trioditis-side. A `block` command needs a protocol change.
 3. **Done:** contacts queries (Contacts): for a page's senders, and every contact for the

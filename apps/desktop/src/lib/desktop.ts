@@ -32,12 +32,41 @@ export function serverSwitcher(
 }
 
 /**
- * Said wherever a passkey is used, in the desktop app on a Mac or Linux, where passkeys don't
- * work. An unsigned Electron app can't reach the Mac's own passkeys (iCloud Keychain), and
+ * Why passkeys can't be used in the desktop app here, or null where they can (and always in a
+ * browser). An unsigned Electron app can't reach the Mac's own passkeys (iCloud Keychain), and
  * Electron can't ask a security key for its PIN, which every passkey use here requires. On
- * Windows the system asks, so they work.
+ * Windows the system asks, so they work, as long as the page has WebAuthn at all.
  */
-export const passkeysUnavailable =
-  desktop && desktop.platform !== 'win32'
-    ? `Passkeys don’t work in the desktop app on ${{ darwin: 'a Mac', linux: 'Linux' }[desktop.platform] ?? 'this system'} yet.`
-    : null
+export function passkeysUnavailableIn(bridge: DesktopBridge | undefined, webAuthn: boolean): string | null {
+  if (!bridge) return null
+  if (bridge.platform !== 'win32')
+    return `Passkeys don’t work in the desktop app on ${{ darwin: 'a Mac', linux: 'Linux' }[bridge.platform] ?? 'this system'} yet.`
+  return webAuthn ? null : 'Passkeys don’t work in the desktop app on this system.'
+}
+
+/**
+ * Said wherever a passkey is used, and its buttons are disabled with it: a passkey prompt that
+ * can never finish would leave the person waiting on nothing.
+ */
+export const passkeysUnavailable = passkeysUnavailableIn(
+  desktop,
+  typeof (window as { PublicKeyCredential?: unknown }).PublicKeyCredential === 'function',
+)
+
+/**
+ * The same invitation as a `trioditis://` link, which an installed desktop app opens
+ * (apps/desktop/electron/links.ts), or null where the app couldn't reach this server from it:
+ * the app takes a server on this machine as plain http and any other as https. Never in the
+ * desktop app itself, which is already here.
+ */
+export function desktopInvitation(
+  bridge: DesktopBridge | undefined,
+  location: { protocol: string; hostname: string; host: string },
+  email: string,
+  token: string,
+): string | null {
+  if (bridge) return null
+  const loopback = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(location.hostname)
+  if (location.protocol !== (loopback ? 'http:' : 'https:')) return null
+  return `trioditis://${location.host}/invite?${new URLSearchParams({ email })}#token=${encodeURIComponent(token)}`
+}

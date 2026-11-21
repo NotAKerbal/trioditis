@@ -215,12 +215,26 @@ export function useBridge(): { key: string | undefined; status: BridgeStatus } {
   return data?.publicKey ? { key: data.publicKey, status: 'ready' } : { key: undefined, status: 'missing' }
 }
 
+/**
+ * Where sending each of these sends again stands, by client message ID, as the server decides
+ * it (messages.retryStates): the same for every send of a chain.
+ */
+export function useRetryStates(clientMessageIds: string[]) {
+  const { data } = useQuery({
+    ...convexQuery(api.messages.retryStates, { clientMessageIds }),
+    enabled: clientMessageIds.length > 0,
+  })
+  return data
+}
+
 export function useSendMutations() {
   return {
     send: useMutation(api.messages.send),
+    sendAgain: useMutation(api.messages.sendAgain),
     discard: useMutation(api.messages.discardSend),
     schedule: useMutation(api.scheduled.create),
     cancelScheduled: useMutation(api.scheduled.cancel),
+    forgetScheduled: useMutation(api.scheduled.forget),
     sendScheduledNow: useMutation(api.scheduled.sendNow),
   }
 }

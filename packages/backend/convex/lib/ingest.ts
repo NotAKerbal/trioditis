@@ -7,6 +7,7 @@ import { deletePayload, queueLogout } from './outbox'
 import { removedNetwork } from './networks'
 import { patchChat } from './chatView'
 import { onLoggedOut } from './commandOutcome'
+import { isMember, noteCleanup } from './formerMembers'
 import { internal } from '../_generated/api'
 import { MAX_MESSAGE_ROW_BYTES, byteSize } from './bounded'
 import { noteMessage } from './lastMessage'
@@ -234,23 +235,36 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
   const pending = clientMessageId ? await findPersonsCopy(ctx, event.userId, clientMessageId) : null
   // Either way the chat's pointer to its newest message is kept: an echo keeps the pending
   // copy's ID but can change its time, and so its place.
+  // The person's own message that arrives after someone's read receipt covering its place was
+  // read with the rest.
+  const readByThem =
+    'self' in event.sender && chat.theirReadSortKey !== undefined && fields.sortKey <= chat.theirReadSortKey
   if (pending && send && pending.chatId === chat._id && pending.eventId.startsWith('pending:')) {
-    await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, 'sent') })
+    await ctx.db.patch(pending._id, { ...fields, delivery: advance(pending.delivery, readByThem ? 'read' : 'sent') })
     await settleSend(ctx, send, 'sent')
     charge(ctx, await noteMessage(ctx, chat, { ...pending, ...fields }))
   } else {
-    const messageId = await ctx.db.insert('messages', { userId: event.userId, chatId: chat._id, network, ...fields })
+    const messageId = await ctx.db.insert('messages', {
+      userId: event.userId,
+      chatId: chat._id,
+      network,
+      ...fields,
+      ...(readByThem ? { delivery: 'read' as const } : {}),
+    })
     charge(ctx, await noteMessage(ctx, chat, { _id: messageId, ...fields }))
   }
 
   // Imported history neither notifies, counts as unread, nor reorders the inbox.
   if (event.historical) return
-  const fromSomeoneElse = !('self' in event.sender)
+  // A message that arrives late, but sorts at or before what the person has already read, was
+  // read with the rest: it doesn't count as unread or as a mention.
+  const fromSomeoneElse = !('self' in event.sender) && !readAlready(chat, fields.sortKey)
   await patchChat(ctx, chat, {
     lastMessageAt: Math.max(chat.lastMessageAt, event.networkTs),
     ...(fromSomeoneElse
       ? {
           unreadCount: chat.unreadCount + 1,
+          unreadRev: (chat.unreadRev ?? 0) + 1,
           ...(event.mentionsMe ? { mentionCount: (chat.mentionCount ?? 0) + 1 } : {}),
           // A new message wakes a snoozed chat early.
           ...(chat.snoozedUntil !== undefined && !chat.woke ? { woke: true } : {}),
@@ -365,10 +379,69 @@ async function applyReceipt(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
       networkTs: event.networkTs,
     })
   }
+  const read = await findMessage(ctx, event.userId, network, event.upToEventId)
+  // A receipt for a message this chat doesn't have says nothing about what's been read here.
+  if (!read || read.chatId !== chat._id) return
   // The person reading a chat elsewhere (on their phone) clears it here too, up to the
-  // message the receipt covers: a delayed receipt doesn't clear messages that came after it.
-  if (key === 'self')
-    await ctx.db.patch(chat._id, await unreadAfter(ctx, chat, event.userId, network, event.upToEventId))
+  // message the receipt covers: a delayed receipt doesn't clear messages that came after it,
+  // and one older than what they've already read here changes nothing.
+  if (key === 'self') {
+    if (readAlready(chat, read.sortKey)) return
+    await ctx.db.patch(chat._id, { ...(await unreadAfter(ctx, chat, read)), readSortKey: read.sortKey })
+    return
+  }
+  // Someone else reading the chat has read the person's own messages up to there. Those up to
+  // an earlier receipt were marked by it, or as they arrived (applyMessage).
+  if (chat.theirReadSortKey !== undefined && read.sortKey <= chat.theirReadSortKey) return
+  await ctx.db.patch(chat._id, { theirReadSortKey: read.sortKey })
+  await markOwnReadRange(ctx, chat._id, chat.theirReadSortKey ?? null, read.sortKey)
+}
+
+/** Whether a message at `sortKey` is at or before the newest one the person has read. */
+export function readAlready(chat: Pick<Doc<'chats'>, 'readSortKey'>, sortKey: string) {
+  return chat.readSortKey !== undefined && sortKey <= chat.readSortKey
+}
+
+/** The most messages one pass of `markOwnReadRange` looks through, before carrying on later. */
+const MAX_MARKED_READ = 100
+
+/**
+ * Marks the person's own messages after `after` (exclusive; from the start when null) and up to
+ * `upTo` read, oldest first. Every one in the range is looked at, even past one already read: a
+ * message can arrive late among ones read before it. Delivery only moves forward (`advance`); a
+ * copy still pending isn't on the network yet, so no receipt can cover it. It reads at most 100
+ * rows within the same budget as a recount, then schedules the rest
+ * (`messages.markOwnReadRange`).
+ */
+export async function markOwnReadRange(ctx: MutationCtx, chatId: Id<'chats'>, after: string | null, upTo: string) {
+  let from = after
+  let seen = 0
+  let bytes = 0
+  while (seen < MAX_MARKED_READ) {
+    const room = Math.min(Math.floor((MAX_RECOUNT_BYTES - bytes) / MAX_MESSAGE_ROW_BYTES), MAX_MARKED_READ - seen)
+    if (room < 1) break
+    const batch = await ctx.db
+      .query('messages')
+      .withIndex('by_chat_sort', (q) => {
+        const chat = q.eq('chatId', chatId)
+        return (from === null ? chat : chat.gt('sortKey', from)).lte('sortKey', upTo)
+      })
+      .take(room)
+    charge(ctx, batch)
+    for (const message of batch) {
+      bytes += byteSize(message)
+      if (!('self' in message.sender) || message.eventId.startsWith('pending:')) continue
+      if (message.delivery === 'read') continue
+      await ctx.db.patch(message._id, { delivery: advance(message.delivery, 'read') })
+    }
+    seen += batch.length
+    if (batch.length < room) return
+    from = batch.at(-1)!.sortKey
+  }
+  // Rows are left in the range, or may be: the rest is marked in its own transaction.
+  if (from !== upTo) {
+    await ctx.scheduler.runAfter(0, internal.messages.markOwnReadRange, { chatId, after: from, upTo })
+  }
 }
 
 /**
@@ -379,15 +452,12 @@ const MAX_RECOUNT_BYTES = 4 * 1024 * 1024
 
 /**
  * How many messages from other people, and how many of those mention the person, newer than
- * `eventId` the chat holds. It reads a few rows at a time, only as many as can't pass
+ * `read` the chat holds. It reads a few rows at a time, only as many as can't pass
  * `MAX_RECOUNT_BYTES` however large they are, and at most 100. If it can't see them all, the
  * chat keeps at least the counts it had: a receipt only ever clears what it was seen to cover.
  */
-async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, userId: string, network: Network, eventId: string) {
+async function unreadAfter(ctx: MutationCtx, chat: Doc<'chats'>, read: Doc<'messages'>) {
   const prior = { unreadCount: chat.unreadCount, mentionCount: chat.mentionCount ?? 0 }
-  const read = await findMessage(ctx, userId, network, eventId)
-  // A receipt for a message this chat doesn't have says nothing about what's been read here.
-  if (!read || read.chatId !== chat._id) return prior
   const atLeastPrior = (unread: number, mentions: number) => ({
     unreadCount: Math.max(unread, prior.unreadCount),
     mentionCount: Math.max(mentions, prior.mentionCount),
@@ -563,6 +633,8 @@ async function applyLoginState(
     updatedAt: event.at,
     ...(takesOver || !existing?.hostId ? { hostId: origin.hostId, hostSince: event.at } : {}),
     ...(event.state === 'CONNECTED' ? { lastHealthyAt: event.at } : {}),
+    // Sealed to the owner; the backend only keeps it for their devices to open.
+    ...(event.sealed ? { sealedMeta: event.sealed } : {}),
   }
   let accountId = existing?._id
   if (existing) {
@@ -576,12 +648,89 @@ async function applyLoginState(
       ...fields,
     })
   }
+  // An account of someone an admin removed (members.removeMember), new or one coming back: a
+  // login that finished after the removal, or a logged-out account reconnecting. Logged out at
+  // once, and tracked with the rest of their cleanup so a logout that fails can be retried.
+  if (event.state !== 'LOGGED_OUT' && !(await isMember(ctx, event.userId))) {
+    await queueLogout(ctx, (await ctx.db.get(accountId!))!)
+    await noteCleanup(ctx, event.userId)
+    return
+  }
+  // A login the person cancelled that finished on the bridge host anyway, whose `complete`
+  // step came first: kept, and flagged, so the person decides whether to keep it.
+  if (!existing && event.state !== 'LOGGED_OUT' && (await cancelledLogin(ctx, event.userId, network, event.loginId))) {
+    await ctx.db.patch(accountId!, { connectedAfterCancel: true })
+  }
   // An account on a network an admin removed is logged out, whenever it reports in: one whose
   // login finished as the network was removed, or whose logout didn't take. A network that was
   // never decided on (an older server, before its migrations ran) is left alone.
   if (event.state !== 'LOGGED_OUT' && (await removedNetwork(ctx, network))) {
     await queueLogout(ctx, (await ctx.db.get(accountId!))!)
   }
+}
+
+/**
+ * Whether one of the person's logins on `loginId` was cancelled and then finished on the
+ * bridge host anyway (completedAfterCancel kept its login ID), with no login of theirs
+ * connecting it normally since.
+ */
+async function cancelledLogin(ctx: MutationCtx, userId: string, network: Network, loginId: string) {
+  const sessions = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .order('desc')
+    .take(20)
+  const cancelled = sessions.find((s) => s.state === 'cancelled' && s.network === network && s.loginId === loginId)
+  return (
+    cancelled !== undefined &&
+    !sessions.some(
+      (s) =>
+        s.state === 'complete' &&
+        s.network === network &&
+        s.loginId === loginId &&
+        s._creationTime > cancelled._creationTime,
+    )
+  )
+}
+
+/**
+ * A login the person cancelled (logins.cancel ends it at once) that the bridge host finished
+ * anyway. It stays cancelled, as the person last saw it, and the account it connected is kept
+ * but flagged (`connectedAfterCancel`), so the person decides whether to keep or disconnect
+ * it: logging it out on its own guessed wrong too often (a retry of theirs connecting the same
+ * account, say). An account the person already had, which the login only reconnected, is left
+ * as it is.
+ */
+async function completedAfterCancel(ctx: MutationCtx, session: Doc<'loginSessions'>, loginId: string) {
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', session.network).eq('loginId', loginId))
+    .unique()
+  if (account && account.userId !== session.userId) return
+  if (account && account._creationTime < session._creationTime) return
+  // Kept so the account's own report, if it comes after this, is flagged too.
+  await ctx.db.patch(session._id, { loginId })
+  // A later login of theirs already connected the account normally (a retry that finished
+  // before this late completion reached us): it's theirs, nothing to ask about.
+  if (account && !(await completedSince(ctx, session, loginId))) {
+    await ctx.db.patch(account._id, { connectedAfterCancel: true })
+  }
+}
+
+/** Whether a login of the same person, started after `session`, completed on `loginId`. */
+async function completedSince(ctx: MutationCtx, session: Doc<'loginSessions'>, loginId: string) {
+  const later = await ctx.db
+    .query('loginSessions')
+    .withIndex('by_user', (q) => q.eq('userId', session.userId))
+    .order('desc')
+    .take(20)
+  return later.some(
+    (s) =>
+      s._creationTime > session._creationTime &&
+      s.state === 'complete' &&
+      s.network === session.network &&
+      s.loginId === loginId,
+  )
 }
 
 async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'loginStep' }>, origin: Origin) {
@@ -595,6 +744,10 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
     throw new Unmappable('foreign_host')
   }
   // A login that has ended stays ended, whatever step arrives late.
+  if (session.state === 'cancelled' && event.step.type === 'complete' && event.step.loginId) {
+    await completedAfterCancel(ctx, session, event.step.loginId)
+    return
+  }
   if (session.state === 'complete' || session.state === 'cancelled' || session.state === 'error') return
   // Login steps are instructions, a code or a QR string, and a few fields: never this big.
   if (byteSize(event.step) > MAX_LOGIN_STEP_BYTES) throw new Unmappable('too_large')
@@ -613,6 +766,17 @@ async function applyLoginStep(ctx: MutationCtx, event: Extract<BridgeEventDoc, {
     updatedAt: event.at,
     ...(event.step.loginId ? { loginId: event.step.loginId } : {}),
   })
+  // Connected normally: whatever a cancelled login of theirs did to the account, it's theirs now.
+  if (state === 'complete' && event.step.loginId) {
+    const loginId = event.step.loginId
+    const account = await ctx.db
+      .query('networkAccounts')
+      .withIndex('by_login', (q) => q.eq('network', session.network).eq('loginId', loginId))
+      .unique()
+    if (account?.connectedAfterCancel && account.userId === session.userId) {
+      await ctx.db.patch(account._id, { connectedAfterCancel: undefined })
+    }
+  }
 }
 
 async function applySendStatus(
@@ -706,10 +870,13 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
 export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
   const { network } = origin
   if (hasOversizedId(event)) throw new Unmappable('too_large')
-  if ('sealed' in event) {
+  if ('sealed' in event && event.sealed !== undefined) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
     const limit =
-      event.type === 'chat' || event.type === 'contact' || event.type === 'contactIdentifiers'
+      event.type === 'chat' ||
+      event.type === 'contact' ||
+      event.type === 'contactIdentifiers' ||
+      event.type === 'loginState'
         ? MAX_METADATA_SEALED_BYTES
         : MAX_INCOMING_SEALED_BYTES
     if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')

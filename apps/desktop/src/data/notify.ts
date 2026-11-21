@@ -1,5 +1,6 @@
 import type { Arrival, ArrivalFeed } from '@trioditis/core'
 import type { Chat } from '~/data/chats.ts'
+import type { NotificationDetail } from '~/lib/prefs.ts'
 
 // Which arrivals get a notification, and what it says, with no browser in them so they can be
 // tested. The hook that shows them is features/shell/notifications.ts.
@@ -51,10 +52,17 @@ export function newArrivals(
 }
 
 /**
- * Who sent it and what they said, never the network. The chat's name is the sender in a
- * one-to-one chat; a group shows its own name, since the app doesn't know its members' names
- * yet. A chat whose name isn't known yet would be named after its network, so it has none.
+ * What a notification says, as much as the person chose (`detail`), never the network. With
+ * `sender`, the chat's name is the sender in a one-to-one chat; a group shows its own name,
+ * since the app doesn't know its members' names yet. A chat whose name isn't known yet would be
+ * named after its network, so it has none. With `hidden`, neither name nor text.
  */
-export function notificationText(chat: Chat, text: string | null): { title: string; body: string } {
-  return { title: chat.named ? chat.name : 'New message', body: text ?? 'New message' }
+export function notificationText(
+  chat: Chat,
+  text: string | null,
+  detail: NotificationDetail,
+): { title: string; body: string } {
+  if (detail === 'hidden') return { title: 'Trioditis', body: 'New message' }
+  const title = chat.named ? chat.name : 'New message'
+  return { title, body: (detail === 'message' && text) || 'New message' }
 }

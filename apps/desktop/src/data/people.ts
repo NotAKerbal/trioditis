@@ -1,7 +1,9 @@
 import { api } from '@trioditis/backend/api'
 import {
+  cardTitle,
   CONTACT_LIST_NETWORKS,
   contactKey,
+  MAX_IMPORT_CARDS,
   planImport,
   type ContactIdentifiersPlaintext,
   type ContactPlaintext,
@@ -28,6 +30,8 @@ const PER_CALL = 100
 const MAX_CARD_BYTES = 60 * 1024
 /** Imported pictures are made this small, as wide and high, to keep cards small. */
 const PHOTO_PIXELS = 128
+/** Smaller sizes a picture is made, in turn, when a card is still too large with it. */
+const SMALLER_PHOTOS = [96, 64, 48, 32]
 /** How many times a change is worked out again after another device changed the address book. */
 const RETRIES = 4
 
@@ -39,6 +43,25 @@ export type Change = (people: readonly StoredPerson[]) => Person[]
 
 /** Thrown by a change that no longer applies, such as an edit to a card changed elsewhere. */
 export class Stale extends Error {}
+
+/** Thrown, before anything is saved, by a change with a card that can't be made to fit. */
+export class TooLarge extends Error {}
+
+/**
+ * Thrown by saveMany when a call fails after others went through: the cards those wrote stay
+ * written (each call is its own transaction), so the person is told how far it got.
+ */
+export class PartlySaved extends Error {
+  readonly written: number
+  readonly total: number
+  readonly reason: unknown
+  constructor(written: number, total: number, reason: unknown) {
+    super('Only some were saved.')
+    this.written = written
+    this.total = total
+    this.reason = reason
+  }
+}
 
 const cardCache = new Map<string, PersonPlaintext | null>()
 const contactCache = new Map<string, ContactPlaintext | null>()
@@ -118,16 +141,57 @@ export function contactsByKey(contacts: readonly NetworkContact[] | undefined) {
 }
 
 const cardBytes = (card: PersonPlaintext) => new TextEncoder().encode(JSON.stringify(card)).length
+const fits = (card: PersonPlaintext) => cardBytes(card) <= MAX_CARD_BYTES
 
-/** A card that fits: its photo goes first, then its note is cut. */
-export function fitCard(card: PersonPlaintext): PersonPlaintext {
+/** What fitCard did to a card to make it fit, so the person can be told. */
+export interface Fitted {
+  card: PersonPlaintext
+  /** The photo was made smaller, or left out because the card was too large even with a tiny one. */
+  photo?: 'smaller' | 'dropped'
+  /** How many characters were cut off the end of the note, as a last resort. */
+  noteCut?: number
+  /** Whether the card fits now; it doesn't when nothing more may be taken off. */
+  fits: boolean
+}
+
+/**
+ * A card made to fit what a card can be sealed to. Its photo is made smaller, step by step.
+ * Leaving the photo out, then cutting the note, happen only when allowed (`dropPhoto`,
+ * `cutNote`): an import, which reports them. An edit allows neither, and is refused instead,
+ * so a saved card never loses its photo or note without the person doing it.
+ */
+export async function fitCard(
+  card: PersonPlaintext,
+  shrink: (photo: string, pixels: number) => Promise<string | null>,
+  { cutNote = false, dropPhoto = false } = {},
+): Promise<Fitted> {
   let out = card
-  if (cardBytes(out) > MAX_CARD_BYTES && out.photo) out = { ...out, photo: undefined }
-  if (cardBytes(out) > MAX_CARD_BYTES && out.note) {
-    const over = cardBytes(out) - MAX_CARD_BYTES
-    out = { ...out, note: out.note.slice(0, Math.max(0, out.note.length - over - 16)) }
+  if (fits(out)) return { card: out, fits: true }
+  let photo: Fitted['photo']
+  if (out.photo) {
+    const original = out.photo
+    for (const pixels of SMALLER_PHOTOS) {
+      const smaller = await shrink(original, pixels)
+      if (!smaller) break
+      out = { ...out, photo: smaller }
+      photo = 'smaller'
+      if (fits(out)) return { card: out, photo, fits: true }
+    }
+    if (!dropPhoto) return { card, fits: false }
+    out = { ...out }
+    delete out.photo
+    photo = 'dropped'
+    if (fits(out)) return { card: out, photo, fits: true }
   }
-  return JSON.parse(JSON.stringify(out)) as PersonPlaintext
+  if (!cutNote || !out.note) return { card: out, photo, fits: false }
+  const note = out.note
+  // Cut by what's over in bytes, then by a little more until it fits: escaping in JSON makes
+  // some characters take more than one.
+  let keep = Math.max(0, note.length - (cardBytes(out) - MAX_CARD_BYTES))
+  while (keep > 0 && !fits({ ...out, note: note.slice(0, keep) })) keep = Math.max(0, keep - 256)
+  out = { ...out, note: note.slice(0, keep) }
+  if (!keep) delete out.note
+  return { card: out, photo, noteCut: note.length - keep, fits: fits(out) }
 }
 
 /**
@@ -157,7 +221,7 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
 
   const seal = ({ personKey, card }: Person) => ({
     personKey,
-    sealed: sealJson(fitCard(card), [{ publicKey: session.keyPair.publicKey }], {
+    sealed: sealJson(card, [{ publicKey: session.keyPair.publicKey }], {
       kind: 'person',
       ownerUserId: session.userId,
       objectId: personKey,
@@ -184,38 +248,50 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
     }
   }
 
+  /**
+   * Cards made to fit before any is written: a photo made smaller, never a note cut. One that
+   * still doesn't fit stops the whole change, so nothing is half done or quietly shortened.
+   */
+  async function fitted(changed: readonly Person[]) {
+    const out: Person[] = []
+    for (const p of changed) {
+      const fit = await fitCard(p.card, shrinkPhoto)
+      if (!fit.fits) {
+        throw new TooLarge(
+          `${cardTitle(p.card)} is too large to save${p.card.photo ? ', even with a smaller photo' : ''}. ` +
+            'Shorten the note or remove some details, then try again.',
+        )
+      }
+      out.push({ personKey: p.personKey, card: fit.card })
+    }
+    return out
+  }
+
   /** Applies a change, worked out again from the latest cards whenever another device got there first. */
   async function apply(change: Change) {
     await withRevision(async (people, revision) => {
-      const changed = change(people)
+      const changed = await fitted(change(people))
       if (changed.length > PER_CALL) throw new Error('Change at most 100 people at once.')
       if (changed.length) await put({ people: changed.map(seal), revision, sessionId: session.sessionId })
     })
   }
 
-  /**
-   * Saves many cards in calls of 100, as an import does. When a call is refused as stale, the
-   * rest of the change is worked out again from the new cards, so their links are current; the
-   * cards already written are left out, so a change made to one since (or its deletion) stands.
-   * Returns how many cards were written.
-   */
-  async function saveMany(
+  /** Saves many cards in calls of 100, as an import does (saveInCalls). */
+  const saveMany = (
     cards: (people: readonly StoredPerson[]) => Person[],
     onWritten?: (personKeys: readonly string[]) => void,
-  ) {
-    const written = new Set<string>()
-    await withRevision(async (people, revision) => {
-      const planned = cards(people).filter((p) => !written.has(p.personKey))
-      let at = revision
-      for (let i = 0; i < planned.length; i += PER_CALL) {
-        const batch = planned.slice(i, i + PER_CALL)
-        at = await put({ people: batch.map(seal), revision: at, sessionId: session.sessionId })
-        for (const p of batch) written.add(p.personKey)
-        onWritten?.(batch.map((p) => p.personKey))
-      }
-    })
-    return written.size
-  }
+    options?: SaveOptions,
+  ) =>
+    saveInCalls(
+      {
+        attempt: withRevision,
+        fit: fitted,
+        put: (batch, revision) => put({ people: batch.map(seal), revision, sessionId: session.sessionId }),
+      },
+      cards,
+      onWritten,
+      options,
+    )
 
   async function removeAll(personKeys: readonly string[]) {
     let done = 0
@@ -232,6 +308,55 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
   return { apply, saveMany, remove: removeAll }
 }
 
+export interface SaveOptions {
+  /**
+   * Whether a card written once is left out of plans worked out again, so a change made to it
+   * elsewhere since (or its deletion) stands. An import says no: its planner tracks what it has
+   * written by entry, and a card it wrote can be where a later entry now belongs.
+   */
+  skipWritten?: boolean
+}
+
+/**
+ * Saves many cards in calls of 100. When a call is refused as stale (`attempt` runs `write`
+ * again from the new cards), the rest of the change is worked out again, so its links are
+ * current. Everything that can be checked here is checked before the first call: every card
+ * fits, and the new ones fit in the address book. A call failing after others went through
+ * throws PartlySaved, saying how many were written. Returns how many cards were written.
+ */
+export async function saveInCalls<P extends Person>(
+  deps: {
+    attempt: (write: (people: readonly P[], revision: number) => Promise<void>) => Promise<void>
+    fit: (cards: readonly Person[]) => Promise<Person[]>
+    put: (batch: Person[], revision: number) => Promise<number>
+  },
+  cards: (people: readonly P[]) => Person[],
+  onWritten?: (personKeys: readonly string[]) => void,
+  { skipWritten = true }: SaveOptions = {},
+) {
+  const written = new Set<string>()
+  let total = 0
+  try {
+    await deps.attempt(async (people, revision) => {
+      const planned = await deps.fit(cards(people).filter((p) => !skipWritten || !written.has(p.personKey)))
+      total = new Set([...written, ...planned.map((p) => p.personKey)]).size
+      const added = newCards(people, planned)
+      if (people.length + added > MAX_IMPORT_CARDS) throw new TooLarge(tooMany(people.length, added))
+      let at = revision
+      for (let i = 0; i < planned.length; i += PER_CALL) {
+        const batch = planned.slice(i, i + PER_CALL)
+        at = await deps.put(batch, at)
+        for (const p of batch) written.add(p.personKey)
+        onWritten?.(batch.map((p) => p.personKey))
+      }
+    })
+  } catch (err) {
+    if (written.size) throw new PartlySaved(written.size, total, err)
+    throw err
+  }
+  return written.size
+}
+
 /**
  * The cards an import makes or changes (packages/core, planImport), for saveMany. Each entry's
  * new key is picked once, so the plan comes out the same however often it's worked out again,
@@ -240,19 +365,40 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
  */
 export function importPlanner(imported: readonly PersonPlaintext[]) {
   const keys = imported.map(() => newClientId())
+  const own = new Set(keys)
   const done = new Set<number>()
-  const entriesOf = new Map<string, number[]>()
+  // Which entries the latest plan put on each card. Only the latest: a plan worked out again
+  // after another device's change can move an entry to another card, and a write of the card
+  // it was on before mustn't count it as written.
+  let entriesOf = new Map<string, number[]>()
+  // The entries the latest plan left out because each could be more than one card.
+  let ambiguous = new Set<number>()
+  // The entries the latest plan put on a card it changes: each still to be written.
+  let changing: number[] = []
   return {
     plan: (existing: readonly Person[]) => {
+      entriesOf = new Map()
+      ambiguous = new Set()
       const pending = imported.flatMap((card, index) => (done.has(index) ? [] : [{ card, index }]))
       const planned = planImport(
         existing,
         pending.map((p) => p.card),
         (i) => keys[pending[i]!.index]!,
         (i, personKey) => entriesOf.set(personKey, [...(entriesOf.get(personKey) ?? []), pending[i]!.index]),
+        // A card this import made, seen in a later plan, isn't someone else to match.
+        (personKey) => !own.has(personKey),
+        (i) => ambiguous.add(pending[i]!.index),
       )
+      changing = planned.flatMap((p) => entriesOf.get(p.personKey) ?? [])
       return planned
     },
+    /**
+     * The entries a finished import didn't write though its last plan changed a card for them.
+     * None, when every call went through; said in the summary when not, never passed over.
+     */
+    unwritten: () => changing.filter((index) => !done.has(index)).map((index) => imported[index]!),
+    /** The cards left out because each matched several people here, for the import's summary. */
+    ambiguous: () => [...ambiguous].map((index) => imported[index]!),
     written: (personKeys: Iterable<string>) => {
       for (const key of personKeys) for (const index of entriesOf.get(key) ?? []) done.add(index)
     },
@@ -277,12 +423,27 @@ export function useSyncContacts() {
   }
 }
 
+/** How many of `planned` aren't cards yet: the ones that count against the address book's limit. */
+export function newCards(people: readonly Person[], planned: readonly Person[]) {
+  const here = new Set(people.map((p) => p.personKey))
+  return planned.filter((p) => !here.has(p.personKey)).length
+}
+
+/** Why an import that would go past the address book's limit was refused, with the numbers. */
+export function tooMany(have: number, adding: number) {
+  const room = Math.max(0, MAX_IMPORT_CARDS - have)
+  return (
+    `That would add ${adding.toLocaleString()} people, and there’s room for ${room.toLocaleString()} ` +
+    `more (People holds ${MAX_IMPORT_CARDS.toLocaleString()}).`
+  )
+}
+
 /** A picture made small, as a JPEG data URL; null if it can't be read as an image. */
-export async function shrinkPhoto(dataUrl: string): Promise<string | null> {
+export async function shrinkPhoto(dataUrl: string, pixels = PHOTO_PIXELS): Promise<string | null> {
   try {
     const blob = await (await fetch(dataUrl)).blob()
     const bitmap = await createImageBitmap(blob)
-    const scale = Math.min(1, PHOTO_PIXELS / Math.max(bitmap.width, bitmap.height))
+    const scale = Math.min(1, pixels / Math.max(bitmap.width, bitmap.height))
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(bitmap.width * scale))
     canvas.height = Math.max(1, Math.round(bitmap.height * scale))

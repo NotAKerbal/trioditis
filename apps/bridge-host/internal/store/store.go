@@ -4,7 +4,8 @@
 //
 // Nothing here holds plaintext content. Journal payloads are protocol events whose content
 // fields are sealed envelopes. A queued command's payload is sealed to the bridge key and is
-// deleted once the command has run. Everything else is IDs, statuses and public keys.
+// deleted once the command has run, and a kept avatar reference is sealed to it too.
+// Everything else is IDs, statuses and public keys.
 package store
 
 import (
@@ -24,6 +25,7 @@ import (
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
 var upgrades = dbutil.BuildUpgradeTable().
@@ -98,7 +100,86 @@ var upgrades = dbutil.BuildUpgradeTable().
 		}
 		return backfillReactionSenders(ctx, db)
 	}).
+	WithRaw(4, 5, 0, "Kept avatar references", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An avatar's upload lives minutes, its sealed copy far longer: the copy's reference,
+		// sealed to the bridge key, is what lets a later metadata change attach it again.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_avatar_ref (owner_user_id TEXT NOT NULL, avatar_uri TEXT NOT NULL, sealed TEXT NOT NULL, PRIMARY KEY (owner_user_id, avatar_uri))`,
+		})
+	}).
+	WithRaw(5, 6, 0, "Messages being bridged", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A message a network will send again if it isn't acknowledged, from its first part
+		// until bridgev2 says how handling it ended: one left at start-up was cut off, and its
+		// parts are forgotten so the redelivery bridges them all (connector, RecoverInflight).
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_inflight (receiver TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (receiver, message_id))`,
+		})
+	}).
+	WithRaw(6, 7, 0, "Cancelled logins' accounts waiting to be logged out", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An account a cancelled login connected, kept while another login of the person's
+		// could be the one they meant, until that settles (connector, settleDiscarded). Kept
+		// here so a restart in between doesn't leave it connected.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_discarded (session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, login_id TEXT NOT NULL)`,
+		})
+	}).
+	WithRaw(7, 8, 0, "Which login session connected each account", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// The account's current activation: the login session that last connected it, and for
+		// whom, until it is logged out. A cancelled login's account is logged out only while it is
+		// still that login's (connector, settleDiscarded), across restarts too.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_activation (login_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_id TEXT NOT NULL)`,
+		})
+	}).
+	WithRaw(8, 9, 0, "Drop the cancelled-login cleanup tables", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// A cancelled login's account is no longer logged out on the host's own say: it is kept,
+		// reported afterCancel, and the person decides. Nothing reads these any more.
+		return execAll(ctx, db, []string{
+			`DROP TABLE trioditis_discarded`,
+			`DROP TABLE trioditis_activation`,
+		})
+	}).
 	Finish()
+
+// InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
+type InflightMessage struct{ Receiver, MessageID string }
+
+// PutInflight records that a message's parts are being bridged.
+func (s *Store) PutInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO trioditis_inflight (receiver, message_id) VALUES ($1, $2) ON CONFLICT (receiver, message_id) DO NOTHING`, m.Receiver, m.MessageID)
+	return err
+}
+
+// DeleteInflight records that a message's handling ended.
+func (s *Store) DeleteInflight(ctx context.Context, m InflightMessage) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID)
+	return err
+}
+
+// IsInflight reports whether a message's parts are being bridged.
+func (s *Store) IsInflight(ctx context.Context, m InflightMessage) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID).Scan(&n)
+	return n > 0, err
+}
+
+// Inflight lists the messages whose handling hadn't ended when the host last stopped.
+func (s *Store) Inflight(ctx context.Context) ([]InflightMessage, error) {
+	rows, err := s.DB.Query(ctx, `SELECT receiver, message_id FROM trioditis_inflight`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InflightMessage
+	for rows.Next() {
+		var m InflightMessage
+		if err = rows.Scan(&m.Receiver, &m.MessageID); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
 
 // ReactorKey is how the reaction index keeps who gave a reaction, from bridgev2's record of
 // it: `self` for the person (their Matrix user), `ghost:` and the network's ID for anyone
@@ -789,4 +870,33 @@ func (s *Store) GetReaction(ctx context.Context, eventID string) (target, key st
 func (s *Store) DeleteReaction(ctx context.Context, eventID string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_reaction WHERE event_id=$1`, eventID)
 	return err
+}
+
+// PutAvatarRef keeps the sealed reference to an owner's copy of an avatar. The first one
+// stays: an avatar's content URI names one upload, whose copy for an owner never changes.
+func (s *Store) PutAvatarRef(ctx context.Context, ownerUserID, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_ref (owner_user_id, avatar_uri, sealed) VALUES ($1, $2, $3) ON CONFLICT (owner_user_id, avatar_uri) DO NOTHING`,
+		ownerUserID, avatarURI, string(payload))
+	return err
+}
+
+// AvatarRef is the sealed reference PutAvatarRef kept, or ErrNotFound.
+func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*seal.Envelope, error) {
+	var payload string
+	err := s.DB.QueryRow(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var env seal.Envelope
+	if err = json.Unmarshal([]byte(payload), &env); err != nil {
+		return nil, err
+	}
+	return &env, nil
 }

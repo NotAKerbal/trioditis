@@ -4,6 +4,8 @@ import {
   contactKey,
   parseIdentifier,
   START_TARGETS,
+  startIdentifier,
+  type StartIdentifierProblem,
   type Network,
   type NetworkContact,
   type PersonPlaintext,
@@ -14,6 +16,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useMutation } from 'convex/react'
 import { useEffect, useState } from 'react'
+import { accountLabels } from '~/data/account-label.ts'
 import { networkName, useAccounts } from '~/data/chats.ts'
 import { useBridge } from '~/data/messages.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -29,13 +32,19 @@ export type ChatTarget = { ghostId: string } | { identifier: string }
 export interface StartableAccount {
   networkAccountId: Id<'networkAccounts'>
   network: Network
+  /** What tells it apart from the person's other accounts on the network, if they have more (account-label.ts). */
+  detail?: string | null
 }
 
 /** The person's connected accounts that can start chats, in the order they connected. */
 export function useStartableAccounts(): StartableAccount[] {
   const accounts = useAccounts()
+  // Labelled among all their accounts, so one is called the same here as in Settings.
+  const labels = accountLabels((accounts ?? []).map((a) => ({ id: a._id, network: a.network, hint: a.hint })))
   return (accounts ?? []).flatMap((a) =>
-    a.state === 'CONNECTED' && START_TARGETS[a.network] ? [{ networkAccountId: a._id, network: a.network }] : [],
+    a.state === 'CONNECTED' && START_TARGETS[a.network]
+      ? [{ networkAccountId: a._id, network: a.network, detail: labels.get(a._id)?.detail ?? null }]
+      : [],
   )
 }
 
@@ -48,15 +57,48 @@ export function identifierPrompt(network: Network): string | null {
   return null
 }
 
+/**
+ * What the New chat dialog offers: the networks that can start from a number or username, the
+ * one in use (the person's pick, else the first), its accounts, and the account the chat
+ * starts from. With more than one account on the network that's only the one the person
+ * picked: the app doesn't guess which of their logins a new contact should see them on.
+ */
+export function newChatChoice(
+  startable: readonly StartableAccount[],
+  chosenNetwork: Network | undefined,
+  chosenAccount: Id<'networkAccounts'> | undefined,
+) {
+  const usable = startable.filter((a) => identifierPrompt(a.network))
+  const networks = [...new Set(usable.map((a) => a.network))]
+  const network = chosenNetwork && networks.includes(chosenNetwork) ? chosenNetwork : networks[0]
+  const accounts = usable.filter((a) => a.network === network)
+  const account = accounts.length === 1 ? accounts[0] : accounts.find((a) => a.networkAccountId === chosenAccount)
+  return { networks, network, accounts, account }
+}
+
 /** What to tell the person when a chat couldn't start. */
 export function startError(code: ErrorCode | undefined, network: Network): string {
   const name = networkName(network)
-  if (code === 'not_found') return `No one on ${name} has that number or username.`
+  // The number was sent in full and in the form the network takes (startIdentifier), so this
+  // is the network's own answer; it can still be a number saved without its country code.
+  if (code === 'not_found')
+    return `${name} found no one with that number or username. Check it’s complete, with the country code.`
+  if (code === 'invalid_identifier')
+    return `That isn’t a number or username ${name} takes. Check it, with the country code.`
   if (code === 'unsupported') return `${name} can’t start chats from here.`
   if (code === 'not_connected') return `Your ${name} account isn’t connected.`
   if (code === 'rate_limited') return `${name} is limiting new chats. Try again later.`
   if (code === 'expired' || code === 'timeout') return `${name} didn’t answer. Try again.`
   return `${name} couldn’t start that chat.`
+}
+
+/** What to tell the person when what they typed can't start a chat, before it's sent. */
+export function identifierProblem(problem: StartIdentifierProblem, network: Network): string {
+  const name = networkName(network)
+  if (problem === 'needs_country_code') return `${name} needs the number with its country code, like +1 555 123 4567.`
+  if (problem === 'phone_only') return `${name} starts chats from phone numbers, not usernames.`
+  if (problem === 'username_only') return `${name} starts chats from usernames, not phone numbers.`
+  return 'That isn’t a whole phone number. Check it has all its digits.'
 }
 
 /**
@@ -89,9 +131,13 @@ export function useStartChat(onStarted: (chatId: Id<'chats'>) => void) {
       if ('ghostId' in target) {
         await start({ networkAccountId, requestId, ghostId: target.ghostId, sessionId: session.sessionId })
       } else {
+        // Sent in one shape the bridge host takes (people.ts, normalPhone), or not at all.
+        const targets = START_TARGETS[network] ?? { phone: false, username: false }
+        const typed = startIdentifier(target.identifier, network, targets)
+        if ('problem' in typed) return setError(identifierProblem(typed.problem, network))
         if (!bridge.key) return setError('Trioditis isn’t ready to start chats yet. Try again in a moment.')
         const sealedIdentifier = sealJson(
-          { identifier: target.identifier },
+          { identifier: typed.identifier },
           [{ publicKey: fromBase64Url(bridge.key) }],
           {
             kind: 'outbound',
@@ -140,10 +186,12 @@ export function chatOptions(
 ): ChatOption[] {
   const out: ChatOption[] = []
   const onNetwork = (network: Network) => accounts.filter((a) => a.network === network)
-  // "Account 2" is the same account everywhere: numbered in the order the person connected them.
+  // An account is called what Settings calls it (account-label.ts); without that, "account 2"
+  // is the same account everywhere: numbered in the order the person connected them.
   const named = (label: string, network: Network, account: StartableAccount) => {
     const all = onNetwork(network)
-    return all.length > 1 ? `${label} (account ${all.indexOf(account) + 1})` : label
+    if (all.length < 2) return label
+    return `${label} (${account.detail || `account ${all.indexOf(account) + 1}`})`
   }
   // Accounts a linked contact came from, where starting from the contact works for sure.
   const covered = new Set<string>()

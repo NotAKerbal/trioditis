@@ -2,8 +2,6 @@ package networks
 
 import (
 	"testing"
-
-	"go.mau.fi/mautrix-whatsapp/pkg/connector"
 )
 
 func TestWhatsAppAsksForFullHistory(t *testing.T) {
@@ -15,7 +13,7 @@ func TestWhatsAppAsksForFullHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := conn.(*connector.WhatsAppConnector).Config.HistorySync
+	cfg := conn.(*whatsappConnector).Config.HistorySync
 	if !cfg.RequestFullSync || !cfg.BackwardsOnDemand {
 		t.Errorf("history sync: full sync %v, backwards on demand %v; want both on", cfg.RequestFullSync, cfg.BackwardsOnDemand)
 	}

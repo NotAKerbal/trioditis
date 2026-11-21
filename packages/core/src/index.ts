@@ -51,6 +51,11 @@ export interface Attachment {
   width?: number
   height?: number
   durationMs?: number
+  /**
+   * The file arrived but the bridge host couldn't store it: `mediaId`, `key` and `nonce` are
+   * empty and there is nothing to fetch. The rest says what the file was.
+   */
+  failed?: boolean
 }
 
 /** A message's sealed content. See docs/architecture/sealing.md, Message plaintext. */
@@ -75,6 +80,16 @@ export interface ChatPlaintext {
    * rather than clearing it.
    */
   avatarUnchanged?: boolean
+  [extra: string]: unknown
+}
+
+/**
+ * A network account's own metadata, from its `loginState` events: kind `account`, object ID its
+ * `loginId`, sealed to the owner only. `hint` tells it apart from their other accounts on the
+ * network (its phone number or username); the login ID can't, being a keyed hash.
+ */
+export interface AccountPlaintext {
+  hint?: string
   [extra: string]: unknown
 }
 

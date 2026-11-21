@@ -22,6 +22,7 @@ export const ERROR_CODES = [
   'login_failed',
   'internal',
   'not_found',
+  'invalid_identifier',
 ] as const
 export type ErrorCode = (typeof ERROR_CODES)[number]
 
@@ -154,13 +155,25 @@ export interface LoginStateEvent extends EventBase {
   type: 'loginState'
   state: LoginState
   error?: ErrorCode
+  /** `AccountPlaintext`, sealed to the owner: kind `account`, object ID `loginId`. */
+  sealed?: Envelope
 }
 
 export interface LoginStep {
   stepId: string
   type: 'displayAndWait' | 'userInput' | 'cookies' | 'complete' | 'cancelled' | 'error'
   instructions?: string
-  display?: { type: 'qr' | 'code' | 'emoji' | 'nothing'; data?: string }
+  display?: {
+    type: 'qr' | 'code' | 'emoji' | 'nothing'
+    data?: string
+    /**
+     * When to stop showing the code (ms). The bridge host moves it on while the code is good,
+     * so a code from a host that has gone down stops being shown.
+     */
+    expiresAt?: number
+  }
+  /** When the step stops working (bridge host time, ms), where the network says. */
+  expiresAt?: number
   fields?: { id: string; type: string; name: string; description?: string; pattern?: string }[]
   cookies?: {
     url: string
@@ -173,6 +186,8 @@ export interface LoginStep {
   }
   loginId?: string
   error?: ErrorCode
+  /** On a `complete` that came after the person cancelled the login: it connected anyway. */
+  afterCancel?: boolean
 }
 
 export interface LoginStepEvent extends EventBase {
@@ -222,6 +237,8 @@ export interface EventBatch {
   commandAddr?: string
   /** Empty for a heartbeat. */
   events: BridgeEvent[]
+  /** The last heartbeat of a host that is shutting down: it is offline from now. */
+  stopping?: boolean
 }
 
 export type EventBatchResponse = { ackedThrough: number }

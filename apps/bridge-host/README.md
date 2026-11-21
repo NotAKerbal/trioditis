@@ -350,11 +350,19 @@ suite). But the connectors' own storage, in the same database, does:
   message whose handling failed, or was cut off by a crash, be bridged when WhatsApp
   redelivers it (it isn't acknowledged until it is handled). Turning it off would lose that
   message. The row is written in the decrypting transaction, and its plaintext is cleared
-  when the handler returns success: normally once the message is journaled sealed (usually
-  moments), but bridgev2 also reports success when its 5-minute handler limit passes, while
-  handling carries on (see below). Plaintext stays in a row only when handling failed
-  or the process stopped in between (the message wasn't acknowledged, so WhatsApp redelivers
-  it, and the redelivery is bridged and cleared), or when clearing it failed with a database
+  (and the message acknowledged) when the handler returns success: once the message is
+  journaled sealed (usually moments). bridgev2 also reports success when its 5-minute handler
+  limit passes, while handling carries on in the background, so the host wraps
+  mautrix-whatsapp's handler (`wabuffer.Acker`, installed by `networks/whatsapp.go` on each
+  login's client): a handler that took that long says what bridgev2's handling really ended
+  with, which the patched bridgev2 reports when the handler returns
+  (`third_party/mautrix.patch`, `internal/handled`), and failure if that doesn't come within 20
+  minutes or the host is stopping. A message whose handling failed part way, or that a stop cut
+  off (`trioditis_inflight`, undone when the host starts, before any login connects), has its
+  saved parts forgotten so the redelivery is bridged whole. Plaintext stays in a row only when handling failed, the
+  process stopped in between, or a backgrounded message wasn't journaled in time (the message
+  wasn't acknowledged, so WhatsApp redelivers it, and the redelivery is bridged, or applied
+  once if it reached the journal meanwhile, and cleared), or when clearing it failed with a database
   error (whatsmeow logs it and still acknowledges the message, so nothing clears it). Either
   way the row is deleted by the first sweep that succeeds once it is about 14 days old
   (WhatsApp's redelivery window): whatsmeow sweeps only after an incoming message, at most
@@ -362,11 +370,11 @@ suite). But the connectors' own storage, in the same database, does:
   (`internal/wabuffer`), and stops it before the host on shutdown. A sweep that fails (the
   database unavailable, say) leaves the row for the next one. A row
   can't be cleared any sooner: it has no message ID to tell whether it was bridged, and a row
-  without plaintext makes whatsmeow drop the redelivery as already handled. One case loses a
-  message instead: after its 5-minute handler limit bridgev2 reports success while handling
-  carries on in the background, so whatsmeow clears the plaintext and acknowledges; if the
-  process stops before the sealed event is journaled, WhatsApp doesn't redeliver it. Outgoing
-  messages kept for retry receipts stay in memory (`use_whatsapp_retry_store` is off).
+  without plaintext makes whatsmeow drop the redelivery as already handled. whatsmeow has no
+  way to wrap another package's handler, so the wrapper reaches into its unexported handler
+  list; a whatsmeow update that moves it fails `TestWrapHandlersWrapsWhatsmeowsList`, and the
+  login refuses to load rather than run unwrapped. Outgoing messages kept for retry receipts
+  stay in memory (`use_whatsapp_retry_store` is off).
 - A connector's media conversion can write a replacement file (for example a converted
   voice note) wherever the connector chooses; the host reads and removes it, but doesn't
   choose where it was written.
@@ -390,8 +398,6 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   retention window (they are sealed, but they grow).
 - **Legacy journal gaps.** A v1 database migrated to v2 keeps any sequence gaps the old
   identity column left. Detect and repair them on upgrade, or document an operator reset.
-- **Avatar rehydration.** A device that first sees a chat after its avatar upload expired
-  has no avatar until it changes. Keep a durable sealed avatar reference to resend.
 - **Media buffering.** Large media is buffered fully in memory; stream it.
 - **Plaintext at rest** in connector storage (above): decide between an encrypted volume
   only, sealing those columns with a server key, or patching connectors.
@@ -436,8 +442,9 @@ Accepted for the Phase 0 spike, to do in Phase 1:
   Matrix message" with the error). The host can't change them; keep its log level at warn
   or above in production and treat its logs as sensitive.
 - Large media is buffered fully in memory.
-- Avatars older than the 10-minute upload window can't be attached to later `chat` and
-  `contact` events; those carry `avatarUnchanged: true` instead, and clients keep the avatar
-  they have. A client with no copy (a new device) shows none until the avatar changes.
+- An avatar first attached before kept avatar references existed (schema version 5) can't
+  be attached to later `chat` and `contact` events once its upload is gone; those carry
+  `avatarUnchanged: true`, and a client with no copy shows none until the avatar changes.
+  Later avatars are attached again from their reference (sealing.md, Message plaintext).
 - The connector is pinned to `mautrix v0.33.0`. Every bump needs this suite plus the live
   checklist, since mautrix isn't tested against a non-homeserver Matrix side.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../convex/_generated/api'
-import { GATEWAY_SECRET, sealed, setup, type T } from './setup'
+import { GATEWAY_SECRET, sealed, setup, signIn, type T } from './setup'
 
 const HOST = { hostId: 'whatsapp-1', network: 'whatsapp' as const }
 
@@ -91,6 +91,23 @@ describe('ingest', () => {
     const t = setup()
     await ingest(t, [message('e1')])
     expect(await ingest(t, [])).toEqual({ ackedThrough: 1 })
+  })
+
+  it('takes a host that says it is stopping offline at once', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [message('e1')])
+    const lastSeen = () => t.run(async (ctx) => (await ctx.db.query('bridgeHosts').first())?.lastSeenAt)
+    expect(await lastSeen()).toBeGreaterThan(0)
+    expect(
+      await t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, ...HOST, events: [], stopping: true }),
+    ).toEqual({
+      ackedThrough: 1,
+    })
+    expect(await lastSeen()).toBe(0)
+    // The next heartbeat, from the host started again, brings it back.
+    await ingest(t, [])
+    expect(await lastSeen()).toBeGreaterThan(0)
   })
 
   it('rejects plaintext content', async () => {
@@ -564,5 +581,159 @@ describe('ingest', () => {
     await expect(
       t.mutation(api.gateway.ingest, { secret: GATEWAY_SECRET, hostId: 'telegram-1', network: 'telegram', events: [] }),
     ).rejects.toThrow(/not enabled/)
+  })
+})
+
+describe('read watermark and receipts', () => {
+  const selfReceipt = (upToEventId: string, networkTs: number) =>
+    event('receipt', { portalId: 'portal_1', sender: { self: true }, upToEventId, networkTs })
+  const theirReceipt = (upToEventId: string, networkTs: number) =>
+    event('receipt', { portalId: 'portal_1', sender: { ghostId: 'ghost_1' }, upToEventId, networkTs })
+  const own = (eventId: string, networkTs: number) => message(eventId, { networkTs, sender: { self: true } })
+
+  async function deliveries(t: T) {
+    return Object.fromEntries((await messages(t)).map((row) => [row.eventId, row.delivery]))
+  }
+
+  it('doesn’t count a late message from before what the person read here', async () => {
+    seq = 0
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await ingest(t, [message('e1', { networkTs: 1_000 }), message('e3', { networkTs: 3_000, mentionsMe: true })])
+    await a.mutation(api.chats.markRead, { chatId: (await chat(t))._id })
+    // An older message the network delivered late, then a new one.
+    await ingest(t, [message('e2', { networkTs: 2_000, mentionsMe: true }), message('e4', { networkTs: 4_000 })])
+    expect(await chat(t)).toMatchObject({ unreadCount: 1, mentionCount: 0 })
+  })
+
+  it('moves the unread revision on with every message counted, so a repeated count still differs', async () => {
+    seq = 0
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await ingest(t, [message('e1', { networkTs: 1_000 }), message('e5', { networkTs: 5_000 })])
+    const chatId = (await chat(t))._id
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 2, unreadRev: 2 })
+    await a.mutation(api.chats.markRead, { chatId })
+    // The person's own message, then a late one that sorts behind it but after what was read.
+    await ingest(t, [own('o7', 7_000), message('e6', { networkTs: 6_000 })])
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 1, unreadRev: 3 })
+    await a.mutation(api.chats.markRead, { chatId })
+    // Another after the mark: the count is 1 again, the revision isn't.
+    await ingest(t, [message('e8', { networkTs: 8_000 })])
+    expect(await a.query(api.chats.get, { chatId })).toMatchObject({ unreadCount: 1, unreadRev: 4 })
+  })
+
+  it('doesn’t count a late message from before the person’s own receipt', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [
+      message('e1', { networkTs: 1_000 }),
+      message('e3', { networkTs: 3_000 }),
+      selfReceipt('e3', 3_100),
+    ])
+    expect((await chat(t)).unreadCount).toBe(0)
+    await ingest(t, [message('e2', { networkTs: 2_000 })])
+    expect((await chat(t)).unreadCount).toBe(0)
+  })
+
+  it('doesn’t recount from a receipt older than what the person read here', async () => {
+    seq = 0
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await ingest(t, [message('e1', { networkTs: 1_000 }), message('e2', { networkTs: 2_000 })])
+    await a.mutation(api.chats.markRead, { chatId: (await chat(t))._id })
+    // The phone's receipt for e1 lands after the person read both here.
+    await ingest(t, [selfReceipt('e1', 1_500)])
+    expect((await chat(t)).unreadCount).toBe(0)
+  })
+
+  it('marks the person’s own messages read up to someone else’s receipt, never back', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), message('e2', { networkTs: 2_000 }), own('o3', 3_000), own('o4', 4_000)])
+    await ingest(t, [theirReceipt('o3', 3_500)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', e2: undefined, o3: 'read', o4: undefined })
+    // An older receipt from them changes nothing; a newer one carries on.
+    await ingest(t, [theirReceipt('o1', 3_400), theirReceipt('o4', 4_500)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', e2: undefined, o3: 'read', o4: 'read' })
+  })
+
+  it('moves a send’s delivery forward on a receipt but leaves a pending copy alone', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), message('e2', { networkTs: 2_000 })])
+    await t.run(async (ctx) => {
+      const rows = await ctx.db.query('messages').collect()
+      const o1 = rows.find((row) => row.eventId === 'o1')!
+      await ctx.db.patch(o1._id, { delivery: 'delivered' })
+      // A send still waiting for its echo, sorted before the receipt: the network doesn't have it.
+      await ctx.db.insert('messages', {
+        userId: 'user_a',
+        chatId: o1.chatId,
+        network: 'whatsapp',
+        eventId: 'pending:x',
+        networkTs: 1_500,
+        sortKey: '0000000000001500:pending:x',
+        sender: { self: true },
+        sealed: sealed('p'),
+        sealedObjectId: 'x',
+        historical: false,
+        delivery: 'unknown',
+      })
+    })
+    await ingest(t, [theirReceipt('e2', 2_100)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', e2: undefined, 'pending:x': 'unknown' })
+  })
+
+  it('marks the person’s own message read when it arrives late behind someone’s receipt', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), own('o3', 3_000), theirReceipt('o3', 3_500)])
+    // Sent from the phone at 2,000, but the network delivered it to the bridge after the receipt.
+    await ingest(t, [own('o2', 2_000), own('o4', 4_000)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', o2: 'read', o3: 'read', o4: undefined })
+  })
+
+  it('looks past one already read for older ones the receipt covers', async () => {
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o1', 1_000), own('o2', 2_000), own('o3', 3_000)])
+    // A status already said o2 was read; o1, before it, wasn't.
+    await t.run(async (ctx) => {
+      const o2 = (await ctx.db.query('messages').collect()).find((row) => row.eventId === 'o2')!
+      await ctx.db.patch(o2._id, { delivery: 'read' })
+    })
+    await ingest(t, [theirReceipt('o3', 3_500)])
+    expect(await deliveries(t)).toEqual({ o1: 'read', o2: 'read', o3: 'read' })
+  })
+
+  it('carries on past one transaction’s worth of messages', async () => {
+    vi.useFakeTimers()
+    seq = 0
+    const t = setup()
+    await ingest(t, [own('o0', 0)])
+    await t.run(async (ctx) => {
+      const { chatId } = (await ctx.db.query('messages').first())!
+      for (let i = 1; i <= 150; i++) {
+        const eventId = `o${i}`
+        await ctx.db.insert('messages', {
+          userId: 'user_a',
+          chatId,
+          network: 'whatsapp',
+          eventId,
+          networkTs: i,
+          sortKey: `${String(i).padStart(16, '0')}:${eventId}`,
+          sender: { self: true },
+          sealed: sealed(eventId),
+          sealedObjectId: eventId,
+          historical: false,
+        })
+      }
+    })
+    await ingest(t, [theirReceipt('o150', 200)])
+    const before = Object.values(await deliveries(t)).filter((delivery) => delivery === 'read').length
+    expect(before).toBeLessThan(151)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
+    expect(Object.values(await deliveries(t)).every((delivery) => delivery === 'read')).toBe(true)
   })
 })

@@ -42,6 +42,7 @@ import type * as networks from "../networks.js";
 import type * as newChats from "../newChats.js";
 import type * as people from "../people.js";
 import type * as preferences from "../preferences.js";
+import type * as quarantine from "../quarantine.js";
 import type * as rateLimits from "../rateLimits.js";
 import type * as scheduled from "../scheduled.js";
 import type * as server from "../server.js";
@@ -89,6 +90,7 @@ declare const fullApi: ApiFromModules<{
   newChats: typeof newChats;
   people: typeof people;
   preferences: typeof preferences;
+  quarantine: typeof quarantine;
   rateLimits: typeof rateLimits;
   scheduled: typeof scheduled;
   server: typeof server;

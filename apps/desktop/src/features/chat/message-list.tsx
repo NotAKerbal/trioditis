@@ -18,12 +18,26 @@ import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
+import type { SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
   id: Id<'scheduledSends'>
   /** Its text once its copy is opened here; null if the copy doesn't open here; undefined until then. */
   body: string | null | undefined
   sendAt: number
+  /** The event ID of the message it replies to, if it's a reply. */
+  replyTo: string | null
+  /** Its cancel is on its way: Cancel is off until the server answers. */
+  cancelling: boolean
+}
+
+/** A cancelled scheduled message the server keeps until it's restored or discarded. */
+export interface CancelledItem {
+  id: Id<'scheduledSends'>
+  body: string | null | undefined
+  replyTo: string | null
+  /** Restored to the composer from here: it says so, and Restore stays. */
+  restored: boolean
 }
 
 interface MessageListProps {
@@ -38,6 +52,7 @@ interface MessageListProps {
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
   scheduled: ScheduledItem[]
+  cancelled: CancelledItem[]
   typing: number
   canLoadMore: boolean
   /** An earlier page is on its way. */
@@ -46,11 +61,16 @@ interface MessageListProps {
   onReply: (m: Message) => void
   /** Adds the person's reaction with this key, or takes it away if it's theirs already. */
   onReact: (m: Message, key: string) => void
+  /** Makes the next attempt to send it again (send-again.ts). */
   onSendAgain: (m: Message) => void
+  /** Where sending it again stands for this row's chain, and whether another attempt may be made. */
+  againOf: (m: Message) => { state: SendAgainState | undefined; canTry: boolean }
   onDiscard: (m: Message) => void
   onSendScheduledNow: (id: Id<'scheduledSends'>) => void
-  /** Cancels it; `body` is its text to put back: null if it can't be shown, undefined if not here yet. */
-  onCancelScheduled: (id: Id<'scheduledSends'>, body: string | null | undefined) => void
+  /** Cancels it, putting its text (when here) and reply back in the composer. */
+  onCancelScheduled: (item: ScheduledItem) => void
+  onRestoreCancelled: (item: CancelledItem) => void
+  onDiscardCancelled: (item: CancelledItem) => void
 }
 
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
@@ -156,6 +176,7 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
+  // Each of the person's sends in the list, by client message ID: how sending again stands.
   let lastDay = ''
 
   return (
@@ -279,7 +300,7 @@ export function MessageList(props: MessageListProps) {
                     )}
                   >
                     {quoted || m.replyTo ? (
-                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-80">
+                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-90">
                         {(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
                       </span>
                     ) : null}
@@ -315,7 +336,7 @@ export function MessageList(props: MessageListProps) {
                         <span
                           className={cn(
                             'absolute right-3 bottom-[5px] inline-flex',
-                            m.self && !big && !m.deleted ? 'text-primary-foreground/75' : 'text-subtle-foreground',
+                            m.self && !big && !m.deleted ? 'text-primary-foreground/90' : 'text-subtle-foreground',
                           )}
                         >
                           {meta}
@@ -347,7 +368,12 @@ export function MessageList(props: MessageListProps) {
                     </div>
                   ) : null}
                   {m.self ? (
-                    <DeliveryProblem m={m} onSendAgain={props.onSendAgain} onDiscard={props.onDiscard} />
+                    <DeliveryProblem
+                      m={m}
+                      again={props.againOf(m)}
+                      onSendAgain={props.onSendAgain}
+                      onDiscard={props.onDiscard}
+                    />
                   ) : null}
                   {!m.pending && !m.deleted ? (
                     // Beside the bubble, nearest first, on the side away from its sender.
@@ -403,18 +429,26 @@ export function MessageList(props: MessageListProps) {
               >
                 Send now
               </Button>
-              {/* Cancelling needs only the schedule, so it's always offered: the text comes back to the
-                  composer when it's here, and the person is told when it isn't. */}
               <Button
                 variant="link"
                 size="sm"
                 className="h-auto text-xs"
-                onClick={() => props.onCancelScheduled(s.id, s.body)}
+                disabled={s.cancelling}
+                aria-busy={s.cancelling}
+                onClick={() => props.onCancelScheduled(s)}
               >
-                {s.body === null ? 'Cancel send' : 'Cancel'}
+                {s.cancelling ? 'Cancelling…' : 'Cancel'}
               </Button>
             </div>
           </div>
+        ))}
+        {props.cancelled.map((c) => (
+          <CancelledRow
+            key={c.id}
+            item={c}
+            onRestore={() => props.onRestoreCancelled(c)}
+            onDiscard={() => props.onDiscardCancelled(c)}
+          />
         ))}
         {props.typing > 0 ? (
           <div
@@ -447,6 +481,60 @@ export function MessageList(props: MessageListProps) {
           <ArrowDown className="size-[18px]" />
         </Button>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * A cancelled scheduled message, kept on the server until its text is back in the composer or
+ * the person discards it, so a reload or crash in between loses nothing.
+ */
+function CancelledRow({
+  item,
+  onRestore,
+  onDiscard,
+}: {
+  item: CancelledItem
+  onRestore: () => void
+  onDiscard: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  return (
+    <div className="mt-3 ml-auto flex w-fit max-w-[min(78%,38rem)] flex-col items-end">
+      <div className="rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap text-muted-foreground shadow-[inset_0_0_0_1.5px_var(--border-strong)] [overflow-wrap:anywhere]">
+        {item.body === undefined ? (
+          <span className="text-subtle-foreground">Opening…</span>
+        ) : item.body === null ? (
+          <span className="text-subtle-foreground italic">This cancelled message can’t be shown here.</span>
+        ) : (
+          item.body
+        )}
+      </div>
+      <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+        {item.restored ? 'Cancelled message · Restored to your draft' : 'Cancelled message'}
+        {confirming ? (
+          <>
+            <span className="text-danger">Discard it for good?</span>
+            <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(false)}>
+              Keep
+            </Button>
+            <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={onDiscard}>
+              Discard
+            </Button>
+          </>
+        ) : (
+          <>
+            {typeof item.body === 'string' ? (
+              <Button variant="link" size="sm" className="h-auto text-xs" onClick={onRestore}>
+                Restore
+              </Button>
+            ) : null}
+            <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => setConfirming(true)}>
+              Discard
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -533,23 +621,52 @@ function DeliveryIcon({ delivery }: { delivery: Message['delivery'] }) {
   }
 }
 
+const AGAIN_SAYS: Record<Exclude<SendAgainState, 'sending'>, string> = {
+  original: 'Sent',
+  going: 'Being sent again',
+  sent: 'Sent again',
+  maybe: 'May have been sent again',
+  failed: 'Sending again failed',
+}
+
 /** A send that failed or may not have gone, with what the person can do about it. */
 function DeliveryProblem({
   m,
+  again,
   onSendAgain,
   onDiscard,
 }: {
   m: Message
+  /** Where sending it again stands, the same on every row of its chain. */
+  again: { state: SendAgainState | undefined; canTry: boolean }
   onSendAgain: (m: Message) => void
   onDiscard: (m: Message) => void
 }) {
+  const { state, canTry } = again
+  const sendAgain = (label: string) => (
+    <>
+      {state === 'sending' ? (
+        <span className="font-medium text-muted-foreground" aria-busy>
+          Sending…
+        </span>
+      ) : state ? (
+        <span className="font-medium text-muted-foreground" role={state === 'maybe' ? 'alert' : undefined}>
+          {AGAIN_SAYS[state]}
+        </span>
+      ) : null}
+      {/* Another attempt only when none was made or the latest failed: from any row of the chain. */}
+      {canTry ? (
+        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
+          {label}
+        </Button>
+      ) : null}
+    </>
+  )
   if (m.delivery === 'failed')
     return (
       <span className="mx-2.5 mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-danger">
         <AlertCircle className="size-3" /> Not sent
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-          Retry
-        </Button>
+        {sendAgain('Retry')}
         <Button variant="link" size="sm" className="h-auto text-xs text-danger" onClick={() => onDiscard(m)}>
           Delete
         </Button>
@@ -562,9 +679,7 @@ function DeliveryProblem({
         title="The network didn’t confirm this message. Trioditis never resends on its own."
       >
         <AlertCircle className="size-3" /> May not have sent
-        <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onSendAgain(m)}>
-          Send again
-        </Button>
+        {sendAgain('Send again')}
         <Button variant="link" size="sm" className="h-auto text-xs" onClick={() => onDiscard(m)}>
           Discard
         </Button>

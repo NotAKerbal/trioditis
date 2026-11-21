@@ -76,6 +76,23 @@ func TestIdentifiersAreCanonicalForTheirNetwork(t *testing.T) {
 		{"signal", "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", ""},
 		{"twitter", "@jack", "jack"},
 		{"twitter", "+15551234567", ""},
+		// Formatting as people type or paste it is taken off before the lookup.
+		{"gmessages", "(555) 123-4567", "5551234567"},
+		{"whatsapp", "+44 (0)20 7946 0018", "+442079460018"},
+		{"whatsapp", "+44 20 7946 0018", "+442079460018"},
+		{"whatsapp", "0044 20 7946 0018", "+442079460018"},
+		{"whatsapp", "tel:+1-555-123-4567", "+15551234567"},
+		{"whatsapp", "+1\u00a0555\u2013123\u20134567", "+15551234567"},
+		{"whatsapp", "1 555 123 4567", "15551234567"},
+		{"signal", "0044 20 7946 0018", "+442079460018"},
+		{"signal", " +1 555 123 4567 ", "+15551234567"},
+		// A national number on a network that reads digits as international, or one too short
+		// or long to be a number, is written wrong rather than nobody's.
+		{"whatsapp", "020 7946 0018", ""},
+		{"whatsapp", "+1 555", ""},
+		{"whatsapp", "+1234567890123456", ""},
+		{"gmessages", "+1 555 12a 4567", ""},
+		{"gmessages", "1+5551234567", ""},
 	} {
 		if got := New(Options{Network: tc.network}).canonicalIdentifier(tc.in); got != tc.want {
 			t.Errorf("%s %q: got %q, want %q", tc.network, tc.in, got, tc.want)

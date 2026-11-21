@@ -353,5 +353,71 @@ rm -rf "$work/.git"
   check ok "inside another repository, the updater is off, saying why" ||
   { check fail "inside another repository, the updater is off, saying why"; tail -2 "$work/out" >&2; }
 
+# A fresh install makes the backup key, in the form of a key.
+checkout
+install || true
+printf '%s\n' "$(value BACKUP_KEY)" | grep -qxE '[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]' &&
+  check ok "a fresh install makes BACKUP_KEY" || check fail "a fresh install makes BACKUP_KEY"
+
+# deploy/runtime a symlink (to a directory that doesn't exist yet): refused before anything is
+# made there.
+checkout
+ln -s "$work/elsewhere" "$work/checkout/deploy/runtime"
+if install; then status=0; else status=$?; fi
+[ "$status" != 0 ] && grep -q "deploy/runtime is a symlink" "$work/out" && [ ! -e "$work/elsewhere" ] &&
+  check ok "a symlinked deploy/runtime is refused before mkdir follows it" ||
+  { check fail "a symlinked deploy/runtime is refused before mkdir follows it"; tail -2 "$work/out" >&2; }
+
+# Settings an operator writes by hand, held to their form: LOGIN_BROWSER_MAX a whole number from
+# 1 to 64, DEBIAN_SNAPSHOT a snapshot time, UPDATE_BACKUP_DIR an absolute path. Each bad one
+# stops the install, leaving deploy/.env as it was.
+for setting in LOGIN_BROWSER_MAX=0 LOGIN_BROWSER_MAX=65 LOGIN_BROWSER_MAX=lots LOGIN_BROWSER_MAX=04 LOGIN_BROWSER_MAX=-1 \
+  DEBIAN_SNAPSHOT=yesterday DEBIAN_SNAPSHOT=20261101 UPDATE_BACKUP_DIR=backups UPDATE_BACKUP_DIR=/srv/../etc; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  cp "$work/checkout/deploy/.env" "$work/env.before"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -q "has a value that isn't literal" "$work/out" && cmp -s "$work/checkout/deploy/.env" "$work/env.before" &&
+    check ok "$setting stops the install, unchanged" || { check fail "$setting stops the install, unchanged"; tail -2 "$work/out" >&2; }
+done
+for setting in LOGIN_BROWSER_MAX=1 LOGIN_BROWSER_MAX=64 DEBIAN_SNAPSHOT=20261101T000000Z UPDATE_BACKUP_DIR=/srv/trioditis-backups; do
+  checkout
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n%s\n' "$setting" >"$work/checkout/deploy/.env"
+  chmod 600 "$work/checkout/deploy/.env"
+  install || true
+  grep -qx "$setting" "$work/checkout/deploy/.env" && ! grep -q "isn't literal" "$work/out" &&
+    check ok "$setting is kept" || { check fail "$setting is kept"; tail -2 "$work/out" >&2; }
+done
+
+# A restore that didn't finish replacing the data (its marker says loading, or deploy/.env says
+# one is under way with no marker): the installer starts nothing, not even Postgres.
+for case in loading pending; do
+  checkout
+  rm -f "$work/compose.log"
+  printf 'COMPOSE_PROJECT_NAME=trioditis-test\n' >"$work/checkout/deploy/.env"
+  if [ "$case" = loading ]; then
+    printf 'state=loading\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+  else
+    echo 'RESTORE_PENDING=1800000000000' >>"$work/checkout/deploy/.env"
+  fi
+  chmod 600 "$work/checkout/deploy/.env"
+  if install; then status=0; else status=$?; fi
+  [ "$status" != 0 ] && grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ ! -s "$work/compose.log" ] &&
+    check ok "an unfinished restore ($case) stops the install before anything starts" ||
+    { check fail "an unfinished restore ($case) stops the install before anything starts"; tail -2 "$work/out" >&2; }
+done
+# One whose sends are settled but whose bridge hosts weren't checked yet (cut off after
+# settling) goes on: the install gets as far as Compose, and the marker stays.
+checkout
+rm -f "$work/compose.log"
+printf 'COMPOSE_PROJECT_NAME=trioditis-test\nRESTORE_ID=1800000000-0123456789abcdef\n' >"$work/checkout/deploy/.env"
+printf 'state=settled\nbackup_at=1800000000000\n' >"$work/checkout/deploy/.restore-settle"
+chmod 600 "$work/checkout/deploy/.env"
+install || true
+! grep -qE "didn't finish replacing|a restore is under way" "$work/out" && [ -s "$work/compose.log" ] && [ -e "$work/checkout/deploy/.restore-settle" ] &&
+  check ok "a restore settled but not yet checked goes on, keeping its gate" ||
+  { check fail "a restore settled but not yet checked goes on, keeping its gate"; tail -2 "$work/out" >&2; }
+
 if [ "$failures" = 0 ]; then echo "PASS: $test_name"; else echo "FAIL: $test_name ($failures failed)" >&2; fi
 [ "$failures" = 0 ]
