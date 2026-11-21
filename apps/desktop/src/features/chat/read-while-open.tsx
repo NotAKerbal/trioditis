@@ -18,21 +18,26 @@ const seen = () => document.visibilityState === 'visible' && document.hasFocus()
 /** Marks an open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
 export function ReadWhileOpen({
   chatId,
+  paused = false,
   markRead,
 }: {
   chatId: ChatId
+  /** Its messages aren't shown yet: nothing is marked, and it isn't opened until they are. */
+  paused?: boolean
   markRead: (chatId: ChatId) => Promise<unknown>
 }) {
-  useReadWhileOpen(chatId, markRead)
+  useReadWhileOpen(chatId, paused, markRead)
   return null
 }
 
-function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId) => Promise<unknown>) {
+function useReadWhileOpen(chatId: ChatId, paused: boolean, markRead: (chatId: ChatId) => Promise<unknown>) {
   // The same object until the chat's row changes, so the effect runs once per change.
   const chat = useChat(chatId)
   const visible = useSyncExternalStore(subscribeSeen, seen)
   const done = useRef(NOTHING_READ)
   useEffect(() => {
+    // Paused, it keeps what was done: when it goes on, the chat isn't opened again.
+    if (paused) return
     const open = chat && {
       id: chat.id,
       unread: chat.unread,
@@ -42,5 +47,5 @@ function useReadWhileOpen(chatId: ChatId | undefined, markRead: (chatId: ChatId)
     const next = readOnOpen(open, visible, done.current)
     done.current = next.done
     if (next.mark && chat) void markRead(chat.id)
-  }, [chat, visible, markRead])
+  }, [chat, visible, paused, markRead])
 }

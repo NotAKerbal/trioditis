@@ -8,6 +8,7 @@ import {
   requestSendOn,
   stableSlots,
   takeSendRequest,
+  uniqueLabels,
 } from '../src/data/conversations.ts'
 import { horizonOf, mergePages } from '../src/data/messages.ts'
 
@@ -155,5 +156,16 @@ describe('a chat chosen to send on from a profile', () => {
     expect(takeSendRequest(['whatsapp-chat'])).toBeNull()
     expect(takeSendRequest(['whatsapp-chat', 'signal-chat'])).toBe('signal-chat')
     expect(takeSendRequest(['whatsapp-chat', 'signal-chat'])).toBeNull()
+  })
+})
+
+describe('the choices of network to send on', () => {
+  it('never look alike', () => {
+    expect(uniqueLabels(['WhatsApp', 'Signal'])).toEqual(['WhatsApp', 'Signal'])
+    expect(uniqueLabels(['WhatsApp · Alice', 'WhatsApp · Alice', 'Signal'])).toEqual([
+      'WhatsApp · Alice (1)',
+      'WhatsApp · Alice (2)',
+      'Signal',
+    ])
   })
 })

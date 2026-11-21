@@ -248,9 +248,10 @@ export function Sidebar({
       snooze: (until) => act({ type: 'snooze', chat: c, until }),
     }
   }
-  const row = (c: Chat, preview?: ReactNode) => (
+  // A scheduled message's row is keyed by it: a conversation can have several.
+  const row = (c: Chat, preview?: ReactNode, key?: string) => (
     <ChatRow
-      key={`${c.id}${preview ? ':s' : ''}`}
+      key={key ?? c.id}
       chat={c}
       selected={has(c, selectedId)}
       unread={isUnread(c)}
@@ -474,6 +475,7 @@ export function Sidebar({
                         {formatWhen(s.sendAt)}
                         {prefs.previews ? ` · ${s.body}` : null}
                       </>,
+                      s._id,
                     )
                   ) : (
                     // Its chat isn't in a loaded view (not scrolled to yet): it still opens it.

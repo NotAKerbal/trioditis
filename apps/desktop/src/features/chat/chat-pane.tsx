@@ -44,7 +44,14 @@ import {
 import { accountLabels } from '~/data/account-label.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useContacts } from '~/data/contacts.ts'
-import { cardIndex, cardOfChat, stableSlots, takeSendRequest, useSendRequest } from '~/data/conversations.ts'
+import {
+  cardIndex,
+  cardOfChat,
+  stableSlots,
+  takeSendRequest,
+  uniqueLabels,
+  useSendRequest,
+} from '~/data/conversations.ts'
 import { usePeople } from '~/data/people.ts'
 import {
   useBridge,
@@ -210,8 +217,8 @@ function OpenChat({
   // else, once the messages are in, one with a draft already, then where they last wrote from,
   // then the chat that was opened. Kept until the person changes it.
   const [sendId, setSendId] = useState<ChatId | null>(null)
-  const sendIdRef = useRef(sendId)
-  sendIdRef.current = sendId
+  // The chat the composer is on now, for an action that finishes later.
+  const sendIdRef = useRef<ChatId>(chat.id)
   // Asked for this chat: only the pane opened on it takes it, not one it's leaving.
   const request = useSendRequest()
   const requested = request === chat.id
@@ -226,6 +233,26 @@ function OpenChat({
     setSendId(drafted ?? theirs ?? chat.id)
   }, [sendId, waiting, loading, requested, messages, memberIds, chat.id])
   const sendChat = members.find((m) => m.id === sendId) ?? chat
+  sendIdRef.current = sendChat.id
+  // What the network chooser calls each chat: its network, and its account when there are two;
+  // then, for two chats on one account (two numbers of one person), who each is with.
+  const sameAccount = members.filter((m) =>
+    members.some((o) => o !== m && o.network === m.network && o.row.networkAccountId === m.row.networkAccountId),
+  )
+  const sharedNetwork = sameAccount[0]?.network ?? chat.network
+  const whoOf = useContacts(
+    sharedNetwork,
+    sameAccount.flatMap((m) => (m.network === sharedNetwork && m.dmGhostId ? [m.dmGhostId] : [])),
+  )
+  const sendLabels = uniqueLabels(
+    members.map((m) => {
+      const base =
+        (m.row.networkAccountId ? accountNames.get(m.row.networkAccountId)?.full : undefined) ?? networkName(m.network)
+      if (!sameAccount.includes(m)) return base
+      const who = m.network === sharedNetwork && m.dmGhostId ? whoOf.get(m.dmGhostId) : undefined
+      return `${base} · ${who?.handle || who?.name || m.name}`
+    }),
+  )
   // The draft and reply live in the per-chat draft store (drafts.ts), so an action that finishes
   // after this pane was left and opened again still changes what's on screen. Each chat of a
   // conversation keeps its own: the composer shows the draft of the chat it sends on, so what's
@@ -381,7 +408,7 @@ function OpenChat({
     const added = appendToDraft(chatId, body, reply)
     setRestored((now) => new Set(now).add(id))
     // The composer shows it, unless it's on another chat with something in that one's draft.
-    const current = sendIdRef.current ?? chat.id
+    const current = sendIdRef.current
     const busy = current !== chatId && (getDraft(current).text.trim() || getDraft(current).reply)
     if (!busy) setSendId(chatId)
     const where = busy
@@ -705,15 +732,7 @@ function OpenChat({
           via={
             merged
               ? {
-                  options: members.map((m) => ({
-                    id: m.id,
-                    network: m.network,
-                    // Two chats on one network are told apart by their own names.
-                    // Two chats on one network are told apart by their accounts.
-                    label:
-                      (m.row.networkAccountId ? accountNames.get(m.row.networkAccountId)?.full : undefined) ??
-                      networkName(m.network),
-                  })),
+                  options: members.map((m, i) => ({ id: m.id, network: m.network, label: sendLabels[i]! })),
                   current: sendChat.id,
                   onChange: (id) => setSendId(id as ChatId),
                 }
@@ -730,9 +749,10 @@ function OpenChat({
       </main>
       {/* Opening a chat marks it read, as does a new message while it's open and on screen: each
           of a conversation's chats once its messages are shown (a quieter one's may be from before
-          what the others have loaded so far). */}
-      {(waiting ? [] : members.filter((m) => !hidden.includes(m.id))).map((m) => (
-        <ReadWhileOpen key={m.id} chatId={m.id} markRead={actions.markRead} />
+          what the others have loaded so far). Each keeps its tracker while it waits, so a wait
+          isn't a new opening, which would clear the person's own "marked unread". */}
+      {members.map((m) => (
+        <ReadWhileOpen key={m.id} chatId={m.id} paused={waiting || hidden.includes(m.id)} markRead={actions.markRead} />
       ))}
       {panel ? (
         <DetailsPanel

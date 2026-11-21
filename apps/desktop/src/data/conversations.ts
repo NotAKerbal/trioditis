@@ -161,3 +161,11 @@ export function takeSendRequest(chatIds: readonly string[]): string | null {
 export function useSendRequest(): string | null {
   return useSyncExternalStore(subscribe, () => sendRequest)
 }
+
+/** Labels made unique by numbering any that are still the same, so no two choices look alike. */
+export function uniqueLabels(labels: readonly string[]): string[] {
+  return labels.map((label, i) => {
+    const same = labels.filter((l) => l === label).length
+    return same > 1 ? `${label} (${labels.slice(0, i + 1).filter((l) => l === label).length})` : label
+  })
+}
