@@ -251,7 +251,9 @@ describe('a held message', () => {
     setDraftText(a, 'my reply to e2')
     holdDraft<Reply>(a, { text: 'cancelled', reply: { eventId: 'e1', body: 'q' } })
     expect(getDraft(a).text).toBe('my reply to e2')
-    expect(allHeld()).toEqual([[a, [{ text: 'cancelled', reply: { eventId: 'e1', body: 'q' } }]]])
+    expect(allHeld()).toMatchObject([
+      [a, [{ text: 'cancelled', reply: { eventId: 'e1', body: 'q' }, id: expect.any(String) }]],
+    ])
     // The draft goes: the held message takes its place, with its own reply.
     takeDraft(a)
     expect(getDraft<Reply>(a)).toMatchObject({ text: 'cancelled', reply: { eventId: 'e1' } })
@@ -262,5 +264,35 @@ describe('a held message', () => {
     const a = chat()
     holdDraft(a, { text: 'back', reply: null, id: 'kept-id' })
     expect(getDraft(a)).toMatchObject({ text: 'back', id: 'kept-id' })
+  })
+
+  it('gets its identity when it’s held, so two tabs loading it send it as one message', () => {
+    // A cancelled message held with no identity of its own, behind a draft that replies elsewhere.
+    const a = chat()
+    setDraftText(a, 'busy')
+    holdDraft<Reply>(a, { text: 'cancelled', reply: null })
+    const [, list] = allHeld<Reply>().find(([c]) => c === a)!
+    expect(list[0]!.id).toMatch(/\S/)
+    // Saved, then loaded by two tabs.
+    const storage = memory()
+    const me = owner()
+    writeHeld(storage, me, a, list)
+    const tab1 = loadAll<Reply>(storage, me).held.get(a)![0]!
+    const tab2 = loadAll<Reply>(storage, me).held.get(a)![0]!
+    // Each tab puts it in an empty composer and sends it: the same send ID, so the server dedupes.
+    const b = chat()
+    const c = chat()
+    holdDraft(b, tab1)
+    holdDraft(c, tab2)
+    const sendB = draftSendId(getDraft(b).id, getDraft(b).text, undefined)
+    const sendC = draftSendId(getDraft(c).id, getDraft(c).text, undefined)
+    expect(sendB).toBe(sendC)
+    // A restored send under way keeps its identity the same way.
+    writeSending(storage, me, a, 'd_x', { text: 'went?', reply: null, id: 'sent-id' })
+    const [one, two] = [loadAll<Reply>(storage, me).sending[0]!, loadAll<Reply>(storage, me).sending[0]!]
+    expect(one.draft.id).toBe('sent-id')
+    expect(draftSendId(one.draft.id, one.draft.text, undefined)).toBe(
+      draftSendId(two.draft.id, two.draft.text, undefined),
+    )
   })
 })

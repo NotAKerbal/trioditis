@@ -183,8 +183,11 @@ export function adoptDraft<Reply>(chatId: string, text: string, reply: Reply | n
  * draft there sent or cleared). Held messages are saved like drafts.
  */
 export function holdDraft<Reply>(chatId: string, copy: DraftCopy<Reply>) {
-  if (!filled(getDraft(chatId))) return change<Reply>(chatId, { text: copy.text, reply: copy.reply }, copy.id)
-  held.set(chatId, [...(held.get(chatId) ?? []), copy])
+  // Its identity is fixed now and saved with it, so every tab that loads it comes to the same
+  // send ID, and sending it from two of them is one message.
+  const kept = { ...copy, id: copy.id || newDraftId() }
+  if (!filled(getDraft(chatId))) return change<Reply>(chatId, { text: kept.text, reply: kept.reply }, kept.id)
+  held.set(chatId, [...(held.get(chatId) ?? []), kept])
   notify()
 }
 
