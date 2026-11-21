@@ -185,6 +185,41 @@ describe('agent consent', () => {
     expect(after.status).toBe(401)
   })
 
+  it('gives nothing to an agent whose person was removed between approving it and its first call', async () => {
+    const t = setup()
+    const alice = await signIn(t, 'alice')
+    const { sessionId } = (await alice.query(api.members.me, {}))!
+    const { clientId, requestId } = await startConnect(t)
+    const { redirectUrl } = await alice.action(api.mcp.authorize, { requestId: requestId!, approve: true, sessionId })
+    // Removed now: the approval was already given, and the component trades the code on its own.
+    await t.run(async (ctx) => {
+      const member = await ctx.db
+        .query('members')
+        .withIndex('by_userId', (q) => q.eq('userId', 'alice'))
+        .unique()
+      await ctx.db.delete(member!._id)
+    })
+    const token = await tokenFor(t, clientId, redirectUrl!)
+    const response = await t.fetch('/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': '2025-06-18',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'list_networks', arguments: {} },
+      }),
+    })
+    expect(response.status).toBe(401)
+    // The connection it was given is gone too.
+    expect(await t.query(components.mcp.grants.list, { userId: 'alice' })).toEqual([])
+  })
+
   it('denies back to the agent without connecting it', async () => {
     const t = setup()
     const alice = await signIn(t, 'alice')
@@ -210,6 +245,7 @@ describe('list_networks', () => {
   it('tells accounts on one network apart, and says an account is live only while its bridge is', async () => {
     vi.useFakeTimers()
     const t = setup()
+    await signIn(t, 'alice')
     await connectAccount(t, 'alice', 'alice-wa-1', 1)
     await connectAccount(t, 'alice', 'alice-wa-2', 2)
     const accounts = await t.run(async (ctx) => await ctx.db.query('networkAccounts').collect())

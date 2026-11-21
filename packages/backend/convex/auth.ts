@@ -340,6 +340,25 @@ function withRetryAfter(response: Response) {
  * The per-account limit. It runs after Better Auth's per-address one, so requests that one
  * refused don't use up the account's bucket.
  */
+/** What a password sign-in noted about the account before its password was checked. */
+type CredentialNote = { version?: number }
+
+/**
+ * Notes the account's `credentialVersion` as a password sign-in arrives, before Better Auth reads
+ * the password hash, for the session hook in `createAuthOptions` to check again once the session
+ * exists. See account.ts, A password sign-in racing a change or reset.
+ */
+const credentialFence = (ctx: GenericCtx<DataModel>, note: CredentialNote) =>
+  ({
+    id: 'trioditis-credential-fence',
+    onRequest: async (request, auth) => {
+      if (authPath(request, auth.baseURL) !== '/sign-in/email' || !('runQuery' in ctx)) return
+      const email = await requestEmail(request)
+      if (!email) return
+      note.version = await ctx.runQuery(internal.account.credentialVersionFor, { email })
+    },
+  }) satisfies BetterAuthPlugin
+
 const accountRateLimit = (ctx: GenericCtx<DataModel>) =>
   ({
     id: 'trioditis-account-rate-limit',
@@ -433,6 +452,8 @@ export function forConvex(
  * them without starting Better Auth.
  */
 export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
+  // Better Auth is made afresh for each request (createAuth), so this belongs to one sign-in.
+  const signIn: CredentialNote = {}
   return {
     baseURL: siteUrl,
     trustedOrigins: [siteUrl],
@@ -501,6 +522,27 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       revokeSessionsOnPasswordReset: true,
     },
     databaseHooks: {
+      session: {
+        create: {
+          // A password sign-in's session is kept only if the password didn't change while it was
+          // being checked (account.fenceNewSession). Thrown before the cookie is set, so the
+          // ended session's token never reaches the browser.
+          after: async (session) => {
+            if (signIn.version === undefined || !('runMutation' in ctx)) return
+            const kept = await ctx.runMutation(internal.account.fenceNewSession, {
+              sessionId: session.id,
+              userId: session.userId,
+              noted: signIn.version,
+            })
+            if (!kept) {
+              throw new APIError('UNAUTHORIZED', {
+                code: 'PASSWORD_CHANGED',
+                message: 'Your password was just changed. Sign in with the new one.',
+              })
+            }
+          },
+        },
+      },
       user: {
         create: {
           // Runs for every new account, however it is created. Sign-up runs in an HTTP
@@ -560,6 +602,7 @@ export const createAuthOptions = (ctx: GenericCtx<DataModel>) => {
       convex({ authConfig }),
       endSession(ctx),
       accountRateLimit(ctx),
+      credentialFence(ctx, signIn),
       passkeySessionBinding,
     ],
   } satisfies BetterAuthOptions

@@ -1,13 +1,14 @@
 import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
 import { components } from './_generated/api'
-import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server'
 import { authComponent, currentSession, requireSessionIfGiven } from './auth'
 import { requireAdmin } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
 import { queueLoginCancel, queueLogout } from './lib/outbox'
 import { issueReset } from './account'
+import { deleteAllAuthRows } from './lib/authRows'
 
 // Who is on this server. Accounts start from an invitation; the first account, the admin,
 // starts from the setup token the installer generates (TRIODITIS_SETUP_TOKEN).
@@ -278,14 +279,6 @@ export const issuePasswordResetFor = internalMutation({
 /** More than anyone has of each: removing a member clears them in one transaction. */
 const REMOVE_LIMIT = 200
 
-/** Deletes every row of a Better Auth `model` that belongs to `userId`. */
-async function deleteAuthRows(ctx: MutationCtx, model: 'session' | 'account' | 'passkey', userId: string) {
-  await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-    input: { model, where: [{ field: 'userId', value: userId }] },
-    paginationOpts: { cursor: null, numItems: REMOVE_LIMIT },
-  })
-}
-
 /**
  * Removes a member from the server. In this one transaction they lose their membership, so
  * every member function refuses them at once; their sessions, sign-in credential, passkeys and
@@ -293,6 +286,12 @@ async function deleteAuthRows(ctx: MutationCtx, model: 'session' | 'account' | '
  * challenges go; every agent connection they approved is revoked; and their network accounts
  * are logged out and logins in progress ended, through the bridge host as a disconnect does.
  * Their stored chats stay, sealed to a key nobody else holds.
+ *
+ * Some of that finishes later, and is fenced on membership meanwhile: an agent request approved
+ * before the removal can still be exchanged for a token, but every MCP call checks its person is
+ * still a member (mcp.ts); a send still waiting is never handed to a bridge host and is settled
+ * instead (gateway.claimCommands); and the logouts are tracked in `removedMembers` until the
+ * bridge host confirms each, queued again if one runs out of time (lib/commandOutcome.ts).
  *
  * An admin can't remove themselves (another admin can), and the last admin can't be removed,
  * so a server always has one.
@@ -314,6 +313,7 @@ export const removeMember = mutation({
       if (admins.length <= 1) throw new ConvexError('The server’s last admin can’t be removed.')
     }
     const userId = member.userId
+    const user = await authComponent.getAnyUserById(ctx, userId)
     await ctx.db.delete(member._id)
     for (const table of ['keyBackups', 'keyChallenges', 'passwordResets'] as const) {
       const rows = await ctx.db
@@ -329,6 +329,14 @@ export const removeMember = mutation({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .take(REMOVE_LIMIT)
     for (const account of accounts) await queueLogout(ctx, account)
+    if (accounts.some((account) => account.state !== 'LOGGED_OUT')) {
+      await ctx.db.insert('removedMembers', {
+        userId,
+        ...(user?.email ? { email: user.email } : {}),
+        removedBy: admin.userId,
+        removedAt: Date.now(),
+      })
+    }
     const logins = await ctx.db
       .query('loginSessions')
       .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -338,12 +346,84 @@ export const removeMember = mutation({
       await queueLoginCancel(ctx, login)
       await ctx.db.patch(login._id, { state: 'cancelled', updatedAt: Date.now() })
     }
-    for (const model of ['session', 'passkey', 'account'] as const) await deleteAuthRows(ctx, model, userId)
+    for (const model of ['session', 'passkey', 'account'] as const) await deleteAllAuthRows(ctx, model, userId)
     await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
       input: { model: 'user', where: [{ field: '_id', value: userId }] },
     })
     await audit(ctx, { kind: 'user', id: admin.userId }, 'member.remove', userId)
     return null
+  },
+})
+
+/** A removed member's network accounts not yet confirmed logged out. */
+async function leftSignedIn(ctx: QueryCtx, userId: string) {
+  const accounts = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .take(REMOVE_LIMIT)
+  return accounts.filter((account) => account.state !== 'LOGGED_OUT')
+}
+
+/**
+ * Removed members whose network accounts are still being logged out, for Settings → Members: how
+ * many are left, how many wait on the bridge host, and how many failed and can be tried again.
+ */
+export const removedCleanup = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      userId: v.string(),
+      email: v.union(v.null(), v.string()),
+      removedAt: v.number(),
+      accounts: v.number(),
+      pending: v.number(),
+      failed: v.number(),
+    }),
+  ),
+  handler: async (ctx) => {
+    await requireAdmin(ctx)
+    const rows = await ctx.db.query('removedMembers').order('desc').take(100)
+    const out = []
+    for (const row of rows) {
+      const left = await leftSignedIn(ctx, row.userId)
+      if (left.length === 0) continue
+      out.push({
+        userId: row.userId,
+        email: row.email ?? null,
+        removedAt: row.removedAt,
+        accounts: left.length,
+        pending: left.filter((account) => account.logoutPending).length,
+        failed: left.filter((account) => !account.logoutPending).length,
+      })
+    }
+    return out
+  },
+})
+
+/**
+ * Asks the bridge host again to log out a removed member's accounts that aren't logged out and
+ * have no logout waiting. A cleanup with nothing left is forgotten.
+ */
+export const retryCleanup = mutation({
+  args: { userId: v.string(), sessionId: v.optional(v.string()) },
+  returns: v.object({ queued: v.number(), left: v.number() }),
+  handler: async (ctx, args) => {
+    await requireSessionIfGiven(ctx, args.sessionId)
+    const admin = await requireAdmin(ctx)
+    const record = await ctx.db
+      .query('removedMembers')
+      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .first()
+    if (!record) throw new ConvexError('There’s nothing left to clean up for that person.')
+    const left = await leftSignedIn(ctx, record.userId)
+    if (left.length === 0) {
+      await ctx.db.delete(record._id)
+      return { queued: 0, left: 0 }
+    }
+    let queued = 0
+    for (const account of left) if (await queueLogout(ctx, account)) queued++
+    await audit(ctx, { kind: 'user', id: admin.userId }, 'member.cleanup.retry', record.userId)
+    return { queued, left: left.length }
   },
 })
 

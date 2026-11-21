@@ -539,6 +539,8 @@ export const commitPasswordChange = internalMutation({
         update: { password: args.newHash, updatedAt: Date.now() },
       },
     })
+    // A sign-in with the old password still under way ends its session as it starts (auth.ts).
+    await ctx.db.patch(member._id, { credentialVersion: (member.credentialVersion ?? 0) + 1 })
     const revision = await replaceBackup(ctx, member, replacing, {
       kind: 'password',
       nonce: args.nonce,

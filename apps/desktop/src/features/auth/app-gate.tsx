@@ -53,6 +53,7 @@ import { SessionContext, type Session } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { AuthCard, Field, FormError } from './auth-card.tsx'
 import { keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
+import { COLD_START_MS, coldSession, forgetVerified, readVerified, rememberVerified } from '~/lib/verified-session.ts'
 
 /**
  * Everything signed in passes through here: the account must be a member of this server, and
@@ -61,7 +62,9 @@ import { keyGateLoad, SLOW_SERVER_MS } from './gate-load.ts'
 export function AppGate({ children }: { children: ReactNode }) {
   const { isLoading, isAuthenticated } = useConvexAuth()
   const signedOut = useConfirmedSignedOut(!isLoading && !isAuthenticated)
+  const cold = useColdSession(!isAuthenticated && !signedOut)
   if (isAuthenticated) return <MemberGate>{children}</MemberGate>
+  if (signedOut) forgetVerified()
   // A page that was signed in leaves as its session's end says (a sign-out of its own may be
   // finishing, or never heard back): see leaveForSignIn. One that never was just goes to sign in.
   if (signedOut && openedSession()) {
@@ -69,7 +72,41 @@ export function AppGate({ children }: { children: ReactNode }) {
     return <Splash />
   }
   if (signedOut) return <Navigate to="/sign-in" />
-  return <Splash />
+  // No answer from the server yet: open with this device's key for the last confirmed session,
+  // until the server answers and the gate above takes over (lib/verified-session.ts).
+  if (cold) return <SessionContext value={cold}>{children}</SessionContext>
+  return <Splash slow />
+}
+
+/**
+ * The last confirmed session, with this device's key for it, once the server has kept the page
+ * waiting: at once when the browser says it's offline, otherwise after COLD_START_MS. Null while
+ * the server may still answer soon, or when there's nothing here to open with.
+ */
+function useColdSession(waiting: boolean): Session | null {
+  const [cold, setCold] = useState<Session | null>(null)
+  useEffect(() => {
+    if (!waiting) {
+      setCold(null)
+      return
+    }
+    const verified = readVerified()
+    if (!verified) return
+    let cancelled = false
+    const open = () =>
+      void loadIdentity(verified.userId).then(
+        (kept) => !cancelled && setCold(coldSession(verified, kept)),
+        () => undefined,
+      )
+    const timer = setTimeout(open, navigator.onLine ? COLD_START_MS : 0)
+    window.addEventListener('offline', open)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+      window.removeEventListener('offline', open)
+    }
+  }, [waiting])
+  return waiting ? cold : null
 }
 
 /**
@@ -85,9 +122,14 @@ function useConfirmedSignedOut(convexSaysSignedOut: boolean) {
       return
     }
     let cancelled = false
-    void authClient.getSession().then(({ data }) => {
-      if (!cancelled && !data) setSignedOut(true)
-    })
+    // Only an answer counts: a request that failed (offline, the server down) says nothing about
+    // the session, and the page waits, or opens from this device (useColdSession).
+    void authClient.getSession().then(
+      ({ data, error }) => {
+        if (!cancelled && !data && !error) setSignedOut(true)
+      },
+      () => undefined,
+    )
     return () => {
       cancelled = true
     }
@@ -141,10 +183,13 @@ function MemberGate({ children }: { children: ReactNode }) {
   // finds none, rather than going on with the one it holds until it expires.
   // A sign-out under way here goes on to the sign-in page itself, with what it must say.
   if (!me.data) {
+    forgetVerified()
     void leaveForSignIn(opened.current)
     return <Splash />
   }
   if (!me.data.member) {
+    // Removed (or never a member): a cold start here must not open the app again.
+    forgetVerified()
     return (
       <AuthCard
         title="This account isn’t on this server"
@@ -324,7 +369,7 @@ function KeyGate({
   if (held) return setupScreen(held)
   if (local.data && setUpKid && local.data.kid === setUpKid) {
     const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
-    return <SessionContext value={session}>{children}</SessionContext>
+    return <OpenApp session={session}>{children}</OpenApp>
   }
   const load = keyGateLoad({
     token,
@@ -334,7 +379,7 @@ function KeyGate({
   })
   if (load === 'openLocal' && local.data) {
     const session: Session = { userId, sessionId, role, kid: local.data.kid, keyPair: local.data.keyPair }
-    return <SessionContext value={session}>{children}</SessionContext>
+    return <OpenApp session={session}>{children}</OpenApp>
   }
   if (load === 'failed') {
     return (
@@ -399,7 +444,7 @@ function KeyGate({
   }
   if (here) {
     const session: Session = { userId, sessionId, role, kid: here.kid, keyPair: here.keyPair }
-    return <SessionContext value={session}>{children}</SessionContext>
+    return <OpenApp session={session}>{children}</OpenApp>
   }
   // A key already here was opened with WebCrypto, so only unlocking needs the check.
   if (!canKeepKeys()) return <InsecurePage userId={userId} sessionId={sessionId} />
@@ -1331,6 +1376,16 @@ export function SignOutButton({
       </Button>
     </>
   )
+}
+
+/**
+ * The app, for a session the server has just confirmed with this device's key: it's noted as the
+ * last confirmed session, for a cold start offline (lib/verified-session.ts).
+ */
+function OpenApp({ session, children }: { session: Session; children: ReactNode }) {
+  const { userId, sessionId, role, kid } = session
+  useEffect(() => rememberVerified({ userId, sessionId, role, kid }), [userId, sessionId, role, kid])
+  return <SessionContext value={session}>{children}</SessionContext>
 }
 
 /** The splash. With `slow`, it also says the server is taking a while, once it has. */

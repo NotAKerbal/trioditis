@@ -43,8 +43,26 @@ export default defineSchema({
      * from, so two devices can't both link one contact to different cards.
      */
     peopleRevision: v.optional(v.number()),
+    /**
+     * Goes up whenever the sign-in password changes (a change or a reset). A password sign-in
+     * notes it before checking the password, and its new session is ended if it moved meanwhile:
+     * so a sign-in with the old password that races a reset never keeps a session.
+     */
+    credentialVersion: v.optional(v.number()),
     createdAt: v.number(),
   }).index('by_userId', ['userId']),
+
+  /**
+   * Members an admin removed whose network accounts may still be signed in on a bridge host. Kept
+   * until every one of their accounts reports LOGGED_OUT, so an admin can see the cleanup and try
+   * it again (members.removedCleanup, members.retryCleanup). Holds no content.
+   */
+  removedMembers: defineTable({
+    userId: v.string(),
+    email: v.optional(v.string()),
+    removedBy: v.string(),
+    removedAt: v.number(),
+  }).index('by_user', ['userId']),
 
   invitations: defineTable({
     email: v.string(),

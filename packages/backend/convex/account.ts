@@ -12,6 +12,7 @@ import {
 } from './_generated/server'
 import { authComponent, createAuth, requireSessionIfGiven, requireUserId } from './auth'
 import { audit } from './lib/audit'
+import { deleteAllAuthRows } from './lib/authRows'
 import { randomToken, sha256Hex } from './lib/hash'
 import {
   backupsOf,
@@ -270,11 +271,10 @@ export const commitPasswordReset = internalMutation({
         update: { password: args.newHash, updatedAt: Date.now() },
       },
     })
-    // Whoever had the old password is signed out everywhere.
-    await ctx.runMutation(components.betterAuth.adapter.deleteMany, {
-      input: { model: 'session', where: [{ field: 'userId', value: member.userId }] },
-      paginationOpts: { cursor: null, numItems: 200 },
-    })
+    // Whoever had the old password is signed out everywhere: every session, and any sign-in with
+    // the old password still under way ends its session as it starts (see credentialVersion).
+    await ctx.db.patch(member._id, { credentialVersion: (member.credentialVersion ?? 0) + 1 })
+    await deleteAllAuthRows(ctx, 'session', member.userId)
     await ctx.db.delete(reset._id)
     await audit(ctx, { kind: 'user', id: member.userId }, 'password.reset')
     return null
@@ -319,5 +319,50 @@ export const resetPassword = action({
       newWrap: args.newWrap,
     })
     return null
+  },
+})
+
+// A password sign-in racing a change or reset: Better Auth checks the password against the hash
+// it read, then makes the session in a later write, so a sign-in with the old password could
+// otherwise keep a session made just after the reset ended them all. The sign-in notes the
+// account's `credentialVersion` before the password is checked (auth.ts), and its new session is
+// ended if the version moved since. Either the change commits first, and the session ends here;
+// or it commits after the session exists, and ends it with the rest.
+
+/** The `credentialVersion` of the member with `email`, as a password sign-in starts. */
+export const credentialVersionFor = internalQuery({
+  args: { email: v.string() },
+  returns: v.number(),
+  handler: async (ctx, { email }) => {
+    const user = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+      model: 'user',
+      where: [{ field: 'email', value: email.trim().toLowerCase() }],
+    })) as { _id: string } | null
+    if (!user) return 0
+    const member = await ctx.db
+      .query('members')
+      .withIndex('by_userId', (q) => q.eq('userId', user._id))
+      .unique()
+    return member?.credentialVersion ?? 0
+  },
+})
+
+/**
+ * Keeps a password sign-in's new session only if the account's `credentialVersion` is still the
+ * one `noted` before its password was checked; otherwise ends it, and answers false.
+ */
+export const fenceNewSession = internalMutation({
+  args: { sessionId: v.string(), userId: v.string(), noted: v.number() },
+  returns: v.boolean(),
+  handler: async (ctx, { sessionId, userId, noted }) => {
+    const member = await ctx.db
+      .query('members')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .unique()
+    if ((member?.credentialVersion ?? 0) === noted) return true
+    await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+      input: { model: 'session', where: [{ field: '_id', value: sessionId }] },
+    })
+    return false
   },
 })

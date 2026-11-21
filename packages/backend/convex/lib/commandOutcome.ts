@@ -1,6 +1,7 @@
 import type { ErrorCode } from '@trioditis/core/bridge-protocol'
 import type { Doc } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
+import { queueLogout } from './outbox'
 
 // What a command's failure means to the person, beyond the outbox row: a logout that didn't
 // happen, or a new chat that won't come. (A failed login command ends its session in gateway.ts.) `gateway.ts` calls these
@@ -19,6 +20,20 @@ async function failLogout(ctx: MutationCtx, command: Doc<'outbox'>, error: Error
   if (!account || account.userId !== command.userId || !account.logoutPending) return
   if (account.logoutCommandId !== undefined && account.logoutCommandId !== command._id) return
   await ctx.db.patch(account._id, { logoutPending: false, logoutError: error, logoutCommandId: undefined })
+  // A removed member's account has nobody to try again: when the logout only ran out of time
+  // (no bridge host took it, or one took it and went away), it is queued again. A bridge host
+  // refusing it as invalid stays failed, shown to admins in Settings → Members (members.retryCleanup).
+  if ((error === 'expired' || error === 'timeout') && !(await isMember(ctx, account.userId))) {
+    await queueLogout(ctx, { ...account, logoutPending: false })
+  }
+}
+
+async function isMember(ctx: MutationCtx, userId: string) {
+  const member = await ctx.db
+    .query('members')
+    .withIndex('by_userId', (q) => q.eq('userId', userId))
+    .unique()
+  return member !== null
 }
 
 /** A new chat whose command never ran won't come: its request ends with why. */

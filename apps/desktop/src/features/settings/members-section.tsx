@@ -48,6 +48,7 @@ export function Members() {
       ) : (
         <>
           <People />
+          <Cleanup />
           <Invitations closed={server.invitations === false} demo={server.demo} />
         </>
       )}
@@ -207,6 +208,53 @@ function PersonRow({ person }: { person: Person }) {
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Removed people whose network accounts aren't confirmed logged out yet. A logout that only ran
+ * out of time is queued again by itself; one a bridge host refused can be tried again here.
+ */
+function Cleanup() {
+  const session = useSession()
+  const { data: left } = useQuery(convexQuery(api.members.removedCleanup, {}))
+  const retry = useMutation(api.members.retryCleanup)
+  const [busy, setBusy] = useState<string | null>(null)
+  if (!left?.length) return null
+  return (
+    <Group title="Disconnecting removed people">
+      {left.map((row) => (
+        <div key={row.userId} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-semibold">{row.email ?? 'Removed account'}</div>
+            <div className="text-sm text-muted-foreground">
+              {row.failed
+                ? `${row.failed} of ${row.accounts} network ${row.accounts === 1 ? 'account' : 'accounts'} didn’t log out`
+                : `Logging out ${row.accounts} network ${row.accounts === 1 ? 'account' : 'accounts'}…`}
+            </div>
+          </div>
+          {row.failed ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={busy === row.userId}
+              onClick={async () => {
+                setBusy(row.userId)
+                try {
+                  await retry({ userId: row.userId, sessionId: session.sessionId })
+                } catch (e) {
+                  if (sessionChanged(e)) return window.location.reload()
+                  toast(errorMessage(e, 'That couldn’t be tried again.'))
+                }
+                setBusy(null)
+              }}
+            >
+              Try again
+            </Button>
+          ) : null}
+        </div>
+      ))}
+    </Group>
   )
 }
 
