@@ -1,6 +1,8 @@
 package connector
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/store"
 )
 
 func init() {
@@ -73,5 +76,58 @@ func TestAttemptsAtOneMessageGoOneAtATime(t *testing.T) {
 	locks.done(unwatched) // never held: nothing to let go
 	if len(locks.held) != 0 {
 		t.Fatalf("locks left held: %v", locks.held)
+	}
+}
+
+// An earlier attempt whose cleanup failed (the database down) left its record: the next
+// delivery settles it before bridgev2 looks for a duplicate, and if that fails too, the
+// delivery isn't acknowledged, whatever bridgev2 answers (an upsert answers plain success).
+func TestALeftoverAttemptIsSettledFirstOrTheDeliveryFails(t *testing.T) {
+	c := testConnector(t)
+	ctx := context.Background()
+	m := store.InflightMessage{Receiver: "login", MessageID: "m1"}
+	delivery := func() bridgev2.RemoteEvent {
+		evt := &simplevent.Message[string]{
+			EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventMessageUpsert, PortalKey: networkid.PortalKey{ID: "chat", Receiver: "login"}},
+			ID:        "m1",
+		}
+		handled.Begin(evt)
+		return evt
+	}
+	var undone []store.InflightMessage
+	failing := errors.New("database unavailable")
+	old := undoParts
+	t.Cleanup(func() { undoParts = old })
+
+	// The database is still down: the delivery fails.
+	undoParts = func(*Connector, context.Context, store.InflightMessage) error { return failing }
+	if err := c.Store.PutInflight(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	evt := delivery()
+	watch := handled.Begin(evt)
+	c.remoteEventStart(evt)
+	c.remoteEventDone(evt, bridgev2.EventHandlingResultSuccess) // bridgev2's upsert: plain success
+	if done, succeeded := watch.Done(); !done || succeeded {
+		t.Fatalf("a delivery over an unsettled attempt: done %v, succeeded %v; want failed", done, succeeded)
+	}
+
+	// It's back: the leftover parts are undone and the record cleared, before handling.
+	undoParts = func(_ *Connector, _ context.Context, m store.InflightMessage) error {
+		undone = append(undone, m)
+		return nil
+	}
+	evt = delivery()
+	watch = handled.Begin(evt)
+	c.remoteEventStart(evt)
+	if len(undone) != 1 || undone[0] != m {
+		t.Fatalf("undone before handling: %v", undone)
+	}
+	if inflight, err := c.Store.IsInflight(ctx, m); err != nil || inflight {
+		t.Fatalf("the leftover record is still there (%v)", err)
+	}
+	c.remoteEventDone(evt, bridgev2.EventHandlingResultSuccess)
+	if done, succeeded := watch.Done(); !done || !succeeded {
+		t.Fatalf("a delivery once the leftover was settled: done %v, succeeded %v", done, succeeded)
 	}
 }

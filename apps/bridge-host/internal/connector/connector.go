@@ -67,6 +67,9 @@ type Connector struct {
 	// discarded holds the accounts cancelled logins connected, until settleDiscarded decides
 	// (login session ID → *discardedLogin).
 	discarded sync.Map
+	// userLocks serializes a person's logins starting and completing with the logout of a
+	// cancelled login's account (user ID → *sync.Mutex; userLock).
+	userLocks sync.Map
 	// messages serializes the attempts at one message, from handling to settling (messageLocks).
 	messages messageLocks
 	// browserSteps holds the login steps the sign-in browser submitted ("<login session
@@ -133,7 +136,7 @@ func (c *Connector) Init(br *bridgev2.Bridge) {
 	// One connector per process: the patched bridgev2 tells it how each remote event's
 	// handling really ended (third_party/mautrix.patch).
 	bridgev2.RemoteEventDone = c.remoteEventDone
-	bridgev2.RemoteEventStart = c.messages.start
+	bridgev2.RemoteEventStart = c.remoteEventStart
 }
 
 // Start runs after bridgev2 has upgraded its database and before any login connects, so a
@@ -191,14 +194,45 @@ func remoteMessage(evt bridgev2.RemoteEvent) (store.InflightMessage, bool) {
 	return store.InflightMessage{}, false
 }
 
+// remoteEventStart holds evt's message (messageLocks) and, holding it, settles what an earlier
+// attempt left unsettled: an in-flight record still there means that attempt's cleanup
+// failed (the database was down, say) with some of its parts saved. They are undone before
+// bridgev2 looks for a duplicate, which it would otherwise find in them: WhatsApp's upsert
+// answers plain success then, and the partial message would be acknowledged. If they can't be
+// undone either, this delivery is reported failed, so it isn't acknowledged, whatever bridgev2
+// makes of it.
+func (c *Connector) remoteEventStart(evt bridgev2.RemoteEvent) {
+	m, held := c.messages.start(evt)
+	if !held {
+		return
+	}
+	ctx := context.Background()
+	if c.Bridge != nil && c.Bridge.BackgroundCtx != nil {
+		ctx = context.WithoutCancel(c.Bridge.BackgroundCtx)
+	}
+	inflight, err := c.Store.IsInflight(ctx, m)
+	if err == nil && inflight {
+		err = c.settleInflight(ctx, m, true)
+	}
+	if err != nil {
+		c.Log.Err(err).Msg("Settling an earlier attempt at a message failed; leaving this one unacknowledged")
+		handled.Fail(evt)
+	}
+}
+
 // settleInflight ends a message's in-flight record, first forgetting its saved parts if undo.
 func (c *Connector) settleInflight(ctx context.Context, m store.InflightMessage, undo bool) error {
 	if undo {
-		if err := c.Bridge.DB.Message.DeleteAllParts(ctx, networkid.UserLoginID(m.Receiver), networkid.MessageID(m.MessageID)); err != nil {
+		if err := undoParts(c, ctx, m); err != nil {
 			return err
 		}
 	}
 	return c.Store.DeleteInflight(ctx, m)
+}
+
+// undoParts forgets the parts of a message bridgev2 saved; tests replace it.
+var undoParts = func(c *Connector, ctx context.Context, m store.InflightMessage) error {
+	return c.Bridge.DB.Message.DeleteAllParts(ctx, networkid.UserLoginID(m.Receiver), networkid.MessageID(m.MessageID))
 }
 
 // RecoverInflight undoes the messages whose handling the last stop cut off: they weren't

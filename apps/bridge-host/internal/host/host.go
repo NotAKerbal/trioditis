@@ -82,6 +82,8 @@ type Host struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	workerDone chan struct{}
+	// postStart closes once bridgev2's post-start work is done.
+	postStart chan struct{}
 }
 
 // BridgeConfig is bridgev2's configuration for Trioditis. See docs/PLAN.md, Bridge host.
@@ -210,9 +212,19 @@ func (h *Host) Start(ctx context.Context) error {
 	} else if err = h.Store.ScrubLoginDisplays(ctx, acked); err != nil {
 		return fmt.Errorf("host: failed to scrub login codes: %w", err)
 	}
-	if err = h.Bridge.Start(ctx); err != nil {
+	// bridgev2.Start, with its post-start work tracked so Stop can wait for it.
+	bridgeCtx := h.Bridge.Log.WithContext(ctx)
+	if err = h.Bridge.StartConnectors(bridgeCtx); err == nil {
+		err = h.Bridge.StartLogins(bridgeCtx)
+	}
+	if err != nil {
 		return fmt.Errorf("host: failed to start bridge: %w", err)
 	}
+	h.postStart = make(chan struct{})
+	go func() {
+		defer close(h.postStart)
+		h.Bridge.PostStart(bridgeCtx)
+	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,
 	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from
 	// deploy/.env), and the database keeps the last one it settled, so the decision follows
@@ -295,6 +307,10 @@ func (h *Host) Stop() {
 		h.cancel()
 		<-h.done
 		<-h.workerDone
+	}
+	// bridgev2's post-start work (resending bridge info) uses the database; it must be done first.
+	if h.postStart != nil {
+		<-h.postStart
 	}
 	_ = h.DB.Close()
 }

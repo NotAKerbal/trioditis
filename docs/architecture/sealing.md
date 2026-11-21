@@ -218,7 +218,9 @@ event IDs and are applied once. A redelivery that arrives while the first attemp
 unsettled waits until it is settled (the attempts at one message go one at a time, from
 handling to settling), and is then bridged against what that attempt left, an attempt that
 ends after its handler stopped waiting is still settled, and the outcome is passed on only once
-the in-flight record is cleared. It is kept on purpose: a
+the in-flight record is cleared. A record an earlier attempt couldn't clear (the database down)
+is settled by the next delivery before bridgev2 looks for a duplicate, or that delivery isn't
+acknowledged either. It is kept on purpose: a
 message can be decrypted only once, so without it a crash mid-message would lose that
 message. Plaintext stays in a row only when:
 

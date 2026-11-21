@@ -31,13 +31,13 @@ type messageLock struct {
 
 // start holds evt's message, if it brings one a network handler is watching (only those can
 // be redelivered), until done.
-func (l *messageLocks) start(evt bridgev2.RemoteEvent) {
+func (l *messageLocks) start(evt bridgev2.RemoteEvent) (store.InflightMessage, bool) {
 	m, ok := remoteMessage(evt)
 	if !ok {
-		return
+		return m, false
 	}
 	if _, watched := handled.Messages(evt); !watched {
-		return
+		return m, false
 	}
 	l.lock.Lock()
 	if l.held == nil {
@@ -52,6 +52,7 @@ func (l *messageLocks) start(evt bridgev2.RemoteEvent) {
 	l.lock.Unlock()
 	ml.mu.Lock()
 	l.byEvt.Store(evt, m)
+	return m, true
 }
 
 // done lets the next attempt at evt's message go, if start held it.

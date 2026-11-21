@@ -131,9 +131,15 @@ func TestAMessageCutOffPartWayIsBridgedWholeWhenSentAgain(t *testing.T) {
 		t.Fatal("the redelivery after a stop wasn't bridged")
 	}
 
-	// A redelivery while the first attempt is still bridging the message (its parts in
-	// flight; it may yet fail and undo them): bridgev2 takes it for a duplicate, and it is
-	// refused rather than acknowledged in that attempt's place.
+	// An earlier attempt's record left over with only its first part saved (its cleanup failed,
+	// the database down): the next delivery undoes it before bridgev2 looks for a duplicate,
+	// which it would otherwise find in that part, and bridges the message whole.
+	if err = h.host.Bridge.DB.Message.DeleteAllParts(ctx, login, "whole"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.net.IncomingParts(login, "family", "peer-family", "whole", []string{"whole one"}); err != nil {
+		t.Fatal(err)
+	}
 	if err = h.host.Store.PutInflight(ctx, store.InflightMessage{Receiver: string(login), MessageID: "whole"}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,19 +147,16 @@ func TestAMessageCutOffPartWayIsBridgedWholeWhenSentAgain(t *testing.T) {
 	if _, err = h.net.IncomingParts(login, "family", "peer-family", "whole", []string{"whole one", "whole two"}); err != nil {
 		t.Fatal(err)
 	}
-	if done, succeeded := watch.Done(); !done || succeeded {
-		t.Fatalf("a redelivery of a message still in flight: done %v, succeeded %v; want refused", done, succeeded)
+	if done, succeeded := watch.Done(); !done || !succeeded || parts("whole") != 2 || inflight() != 0 {
+		t.Fatalf("over a leftover attempt: done %v, succeeded %v, %d parts, %d in flight; want bridged whole", done, succeeded, parts("whole"), inflight())
 	}
-	// Once that attempt settles, a redelivery is the duplicate it is.
-	if err = h.host.Store.DeleteInflight(ctx, store.InflightMessage{Receiver: string(login), MessageID: "whole"}); err != nil {
-		t.Fatal(err)
-	}
+	// Settled, a redelivery is the duplicate it is.
 	watch = handled.Begin(partsKey("whole"))
 	if _, err = h.net.IncomingParts(login, "family", "peer-family", "whole", []string{"whole one", "whole two"}); err != nil {
 		t.Fatal(err)
 	}
-	if done, succeeded := watch.Done(); !done || !succeeded {
-		t.Fatalf("a settled message's redelivery: done %v, succeeded %v; want taken as a duplicate", done, succeeded)
+	if done, succeeded := watch.Done(); !done || !succeeded || parts("whole") != 2 {
+		t.Fatalf("a settled message's redelivery: done %v, succeeded %v, %d parts; want taken as a duplicate", done, succeeded, parts("whole"))
 	}
 }
 
