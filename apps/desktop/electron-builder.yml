@@ -41,6 +41,9 @@ mac:
     - dmg
     - zip
   artifactName: ${productName}-mac-${arch}.${ext}
+  # build/icon.png is the whole tile, for Windows and Linux; a Mac icon has Apple's margin and
+  # shadow. Both come from packages/brand/generate.mjs.
+  icon: build/icon-mac.png
   # Ad-hoc signed ("-"): there is no Developer ID to sign with, and so no notarizing. Apple
   # silicon refuses to run an app whose signature is broken, which renaming Electron's bundle
   # does, and reports it as damaged; an ad-hoc signature makes it the usual unidentified
@@ -49,7 +52,12 @@ mac:
   identity: '-'
   hardenedRuntime: false
 
+# The disk image's window and volume are named for the app alone, not its version and system.
+dmg:
+  title: Trioditis
+
 win:
+  icon: build/icon.png
   target:
     - nsis
 
@@ -64,6 +72,8 @@ linux:
   synopsis: Your chat networks in one place
   maintainer: Trioditis contributors
   artifactName: ${productName}-linux-${arch}.${ext}
+  # Named here too: without it, Linux falls back to the Mac icon.
+  icon: build/icon.png
   target:
     - AppImage
     - deb

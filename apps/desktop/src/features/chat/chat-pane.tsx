@@ -67,7 +67,7 @@ import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sea
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel } from './details-panel.tsx'
-import { MediaAvatar } from './attachments.tsx'
+import { ChatAvatar } from './chat-avatar.tsx'
 import { MessageList } from './message-list.tsx'
 import { draftSendId } from '~/data/saved-drafts.ts'
 import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
@@ -351,12 +351,10 @@ function OpenChat({
           <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
             <ChevronLeft className="size-5" />
           </Button>
-          <MediaAvatar
-            network={chat.network}
-            picture={chat.avatar}
+          <ChatAvatar
+            chat={chat}
             name={name}
             size={38}
-            shape={chat.row.kind === 'dm' ? 'circle' : 'square'}
             badge={<NetworkBadge network={chat.network} label={networkName(chat.network)} size={16} />}
             className="[--avatar-ring:var(--surface)]"
           />

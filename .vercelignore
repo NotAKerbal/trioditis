@@ -8,6 +8,7 @@
 .env.*
 **/node_modules/
 **/dist/
+**/.astro/
 apps/bridge-host/bin/
 .turbo/
 .vercel/

@@ -72,10 +72,18 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
+  fullPaths:
+    '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
   fileRoutesByTo: FileRoutesByTo
   to: '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
-  id: '__root__' | '/' | '/invite' | '/reset' | '/setup' | '/sign-in' | '/agents/connect'
+  id:
+    | '__root__'
+    | '/'
+    | '/invite'
+    | '/reset'
+    | '/setup'
+    | '/sign-in'
+    | '/agents/connect'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -142,4 +150,6 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   AgentsConnectRoute: AgentsConnectRoute,
 }
-export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>()
+export const routeTree = rootRouteImport
+  ._addFileChildren(rootRouteChildren)
+  ._addFileTypes<FileRouteTypes>()

@@ -135,6 +135,17 @@ export interface ChatStartedEvent extends EventBase {
   error?: ErrorCode
 }
 
+/**
+ * The members whose pictures make a group's picture when it has none of its own: kind `chat`,
+ * object ID `<portalId>/collage`, plaintext `ChatCollagePlaintext`, sealed to the person only.
+ * Apart from the chat's metadata, which it never changes.
+ */
+export interface ChatCollageEvent extends EventBase {
+  type: 'chatCollage'
+  portalId: string
+  sealed: Envelope
+}
+
 export interface ContactIdentifiersEvent extends EventBase {
   type: 'contactIdentifiers'
   ghostId: string
@@ -224,6 +235,7 @@ export type BridgeEvent =
   | ChatEvent
   | ContactEvent
   | ContactIdentifiersEvent
+  | ChatCollageEvent
   | ChatStartedEvent
   | LoginStateEvent
   | LoginStepEvent

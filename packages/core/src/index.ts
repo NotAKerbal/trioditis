@@ -84,6 +84,16 @@ export interface ChatPlaintext {
 }
 
 /**
+ * The contacts (by ghost ID, on the chat's network) whose pictures make a group's picture when
+ * it has none of its own: up to four members other than the person, those with a picture first.
+ * Empty for a direct chat. Sealed with kind `chat`, object ID `<portalId>/collage`.
+ */
+export interface ChatCollagePlaintext {
+  ghosts: string[]
+  [extra: string]: unknown
+}
+
+/**
  * A network account's own metadata, from its `loginState` events: kind `account`, object ID its
  * `loginId`, sealed to the owner only. `hint` tells it apart from their other accounts on the
  * network (its phone number or username); the login ID can't, being a keyed hash.

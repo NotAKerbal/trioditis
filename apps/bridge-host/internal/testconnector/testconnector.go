@@ -7,6 +7,7 @@ package testconnector
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -206,8 +207,17 @@ func (c *Client) IsThisUser(_ context.Context, userID networkid.UserID) bool {
 	return userID == c.self()
 }
 
+// CrowdSize is how many other members a "crowd-" chat has.
+const CrowdSize = 5
+
+// CrowdMember is the nth (from 1) other member of a "crowd-" chat.
+func CrowdMember(chatID networkid.PortalID, n int) networkid.UserID {
+	return networkid.UserID(fmt.Sprintf("%s-m%d", chatID, n))
+}
+
 // GetChatInfo describes a chat from its ID. A chat whose ID is "dm-<user>" is a direct chat
-// with that user, named after them; any other ID is a group with one other member.
+// with that user, named after them; one whose ID starts "crowd-" is a group with CrowdSize
+// other members (CrowdMember); any other ID is a group with one other member.
 func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	other := networkid.UserID("peer-" + string(portal.ID))
 	name := "Chat " + string(portal.ID)
@@ -217,18 +227,42 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 		name = DisplayName(other)
 		roomType = database.RoomTypeDM
 	}
+	members := []bridgev2.ChatMember{{EventSender: bridgev2.EventSender{IsFromMe: true, Sender: c.self()}, Membership: event.MembershipJoin}}
+	if strings.HasPrefix(string(portal.ID), "crowd-") {
+		other = ""
+		for n := 1; n <= CrowdSize; n++ {
+			members = append(members, bridgev2.ChatMember{EventSender: bridgev2.EventSender{Sender: CrowdMember(portal.ID, n)}, Membership: event.MembershipJoin})
+		}
+	} else {
+		members = append(members, bridgev2.ChatMember{EventSender: bridgev2.EventSender{Sender: other}, Membership: event.MembershipJoin})
+	}
 	// A chat whose ID starts "request-" is a message request, until AcceptRequest.
 	request := strings.HasPrefix(string(portal.ID), "request-")
 	return &bridgev2.ChatInfo{
 		Name:           &name,
 		Type:           &roomType,
 		MessageRequest: &request,
-		Members: &bridgev2.ChatMemberList{IsFull: true, OtherUserID: other, Members: []bridgev2.ChatMember{
-			{EventSender: bridgev2.EventSender{IsFromMe: true, Sender: c.self()}, Membership: event.MembershipJoin},
-			{EventSender: bridgev2.EventSender{Sender: other}, Membership: event.MembershipJoin},
-		}},
-		CanBackfill: true,
+		Members:        &bridgev2.ChatMemberList{IsFull: true, OtherUserID: other, Members: members},
+		CanBackfill:    true,
 	}, nil
+}
+
+// SetPicture gives a user a profile picture, uploaded through the Matrix connector as a real
+// network's would be, or with nil data takes it away.
+func (n *Network) SetPicture(ctx context.Context, userID networkid.UserID, data []byte) error {
+	ghost, err := n.Bridge.GetGhostByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	avatar := &bridgev2.Avatar{ID: "", Remove: true}
+	if data != nil {
+		avatar = &bridgev2.Avatar{
+			ID:  networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
+			Get: func(context.Context) ([]byte, error) { return data, nil },
+		}
+	}
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{Avatar: avatar})
+	return nil
 }
 
 // DisplayName is the name the test connector gives a user: their ID with a capital letter, so

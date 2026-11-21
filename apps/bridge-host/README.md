@@ -5,9 +5,9 @@ Matrix homeserver. It implements bridgev2's `MatrixConnector` itself: what a con
 "sends to Matrix" becomes sealed protocol events in a durable journal, pushed to the
 gateway, and gateway commands become the Matrix-side events bridgev2 expects.
 
-Contracts: [`docs/architecture/bridge-protocol.md`](../../docs/architecture/bridge-protocol.md)
-and [`docs/architecture/sealing.md`](../../docs/architecture/sealing.md). Background:
-[`docs/PLAN.md`](../../docs/PLAN.md), Bridge host.
+Contracts: [`bridge-protocol.md`](../docs/src/content/docs/architecture/bridge-protocol.md)
+and [`sealing.md`](../docs/src/content/docs/security/sealing.md). Background:
+[`architecture/overview.md`](../docs/src/content/docs/architecture/overview.md).
 
 ## Layout
 

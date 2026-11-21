@@ -71,4 +71,77 @@ function Avatar({ name, src, size = 40, shape = 'circle', badge, className }: Av
   )
 }
 
-export { Avatar }
+/**
+ * One member's place in an AvatarCollage: their picture, or their initials on their colour. It
+ * fills the cell the collage gives it.
+ */
+function AvatarTile({
+  name,
+  src,
+  size,
+  alone = false,
+}: {
+  name: string
+  src?: string | undefined
+  size: number
+  /** The only tile, filling the whole collage. */
+  alone?: boolean
+}) {
+  return (
+    <span
+      data-slot="avatar-tile"
+      className={cn(
+        'flex size-full min-h-0 min-w-0 items-center justify-center overflow-hidden',
+        !src && colorFor(name),
+      )}
+      style={{ fontSize: Math.max(8, Math.round(size * (alone ? 0.38 : 0.2))) }}
+    >
+      {src ? <img src={src} alt="" className="size-full object-cover" /> : initials(name)}
+    </span>
+  )
+}
+
+/**
+ * A group's picture made of its members' (one to four AvatarTiles): one alone, two side by side,
+ * one beside a stack of two for three, a square of four for four. It has the shape of a group's
+ * Avatar, and its badge.
+ */
+function AvatarCollage({
+  size = 40,
+  badge,
+  className,
+  children,
+}: {
+  size?: number
+  badge?: React.ReactNode
+  className?: string
+  children: React.ReactNode[]
+}) {
+  const count = Math.min(children.length, 4)
+  return (
+    <span
+      data-slot="avatar"
+      className={cn('relative inline-flex shrink-0 font-semibold text-on-color', className)}
+      style={{ width: size, height: size }}
+    >
+      <span
+        className={cn(
+          // The gaps between tiles are the background the avatar sits on.
+          'grid size-full gap-px overflow-hidden rounded-[30%] bg-[var(--avatar-ring,var(--rail))]',
+          count > 1 ? 'grid-cols-2' : 'grid-cols-1',
+          count > 2 && 'grid-rows-2',
+          count === 3 && '[&>*:first-child]:row-span-2',
+        )}
+      >
+        {children.slice(0, count)}
+      </span>
+      {badge ? (
+        <span className="absolute -right-[4px] -bottom-[4px] rounded-[5px] ring-2 ring-[var(--avatar-ring,var(--rail))]">
+          {badge}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+export { Avatar, AvatarCollage, AvatarTile }

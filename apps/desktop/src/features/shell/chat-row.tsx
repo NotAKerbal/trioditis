@@ -16,7 +16,7 @@ import { networkName, type Chat } from '~/data/chats.ts'
 import { useDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
-import { MediaAvatar } from '~/features/chat/attachments.tsx'
+import { ChatAvatar } from '~/features/chat/chat-avatar.tsx'
 import { usePrefs } from '~/lib/prefs.ts'
 import { rowPreview } from './row-preview.ts'
 
@@ -68,12 +68,9 @@ export function ChatRow({
             'bg-surface shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] [--avatar-ring:var(--surface)] hover:bg-surface',
         )}
       >
-        <MediaAvatar
-          network={chat.network}
-          picture={chat.avatar}
-          name={chat.name}
+        <ChatAvatar
+          chat={chat}
           size={40}
-          shape={chat.row.kind === 'dm' ? 'circle' : 'square'}
           badge={
             prefs.networkBadges ? (
               <NetworkBadge network={chat.network} label={networkName(chat.network)} size={16} />

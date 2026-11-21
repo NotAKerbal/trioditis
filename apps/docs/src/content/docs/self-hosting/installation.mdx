@@ -1,0 +1,88 @@
+---
+title: Installation & Modes
+description: Configure Trioditis for a public domain, Tailscale Serve, a reverse proxy, or local access, and create the first admin account.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components'
+
+Every option you pass to `deploy/install/install.sh` is saved to `deploy/.env` and preserved across future runs. Rerunning the installer with no flags leaves your settings untouched; passing a flag updates only that setting.
+
+`deploy/.env` is the **single source of truth** for an installation's configuration and secrets. Both the installer and `deploy/trioditis` ignore exported environment variables of the same name (as well as `COMPOSE_*` variables) so the running server always matches what backups record.
+
+## Access modes
+
+Sign-in cookies and passkeys are bound to a single origin (`SITE_URL`). Pick one address and use it consistently across all of your devices.
+
+<Tabs>
+  <TabItem label="Domain mode (Automatic HTTPS)">
+    Use `--domain` when your server has a public domain and ports `80` and `443` reachable from the internet:
+
+    ```sh
+    deploy/install/install.sh --domain chat.example.com
+    ```
+
+    Caddy listens on `80`/`443` and automatically obtains and renews TLS certificates via ACME. Point your domain's DNS records (`A` and optionally `AAAA`) at the server before running the installer.
+
+    Switch back to local mode later with `--local` or `--public-url`.
+
+  </TabItem>
+  <TabItem label="Tailscale Serve / Reverse Proxy">
+    Use `--public-url` when HTTPS is terminated by Tailscale Serve or another reverse proxy in front of Trioditis:
+
+    ```sh
+    tailscale serve --bg --https=8443 http://127.0.0.1:8080
+    deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
+    ```
+
+    - `--public-url` must be an `https://` origin with a hostname (not an IPv6 literal or loopback name) and no path.
+    - Trioditis binds Caddy to `127.0.0.1` by default so the server is only reachable through the proxy.
+    - To revert to plain local HTTP, pass `--public-url ''`.
+
+  </TabItem>
+  <TabItem label="Local mode (LAN / Loopback)">
+    Without `--domain` or `--public-url`, Caddy serves plain HTTP on a port (default `8080`):
+
+    ```sh
+    deploy/install/install.sh                              # http://<address>:8080
+    deploy/install/install.sh --port 9000 --host 192.168.1.20
+    ```
+
+    - `--host` defaults to this machine's Tailscale IP if running, otherwise its first LAN IP. Pass `--host ''` to re-detect. IPv6 literals are not supported for `--host`.
+    - `--bind` chooses the interface Caddy listens on (all interfaces by default).
+    - For single-machine testing, `--host 127.0.0.1 --bind 127.0.0.1` (or `localhost`) works without HTTPS because browsers treat loopback as a secure context. Ports `3210` and `3211` cannot be used in loopback mode because the backend container reserves them.
+
+  </TabItem>
+</Tabs>
+
+### Reverse proxy trust and client IP headers
+
+When running behind a proxy (`--public-url`), Caddy derives the client IP and scheme from `X-Forwarded-For` and `X-Forwarded-Proto`—strictly from addresses listed in `--trusted-proxies`, using the rightmost untrusted address (`trusted_proxies_strict`).
+
+- **Proxy on the same machine (default loopback bind):** The installer trusts only loopback and the Docker network's gateway IP, refreshing the gateway IP on every installer run. If you recreate the Docker network manually (`deploy/trioditis down` then `up`), rerun `deploy/install/install.sh` so the trusted gateway IP stays accurate.
+- **Proxy on another machine:** Pass `--bind <reachable-ip>` together with `--trusted-proxies <proxy-ip>/32` (required for any non-loopback `--bind`), restrict the port with a firewall so only the proxy can reach it, and configure the proxy to overwrite `X-Forwarded-Proto`.
+
+The Convex backend must be able to reach the server's public origin to verify sign-in tokens against Better Auth's JWKS endpoint (`<origin>/api/auth/convex/jwks`). When the public hostname resolves to the host itself, the installer automatically adds a host mapping (`compose.hostmap.yml`) and, if needed for proxies listening only on a tailnet interface like Tailscale Serve, a small `hairpin` forwarder (`compose.hairpin.yml`).
+
+<Aside type="tip">
+  Caddy strips any client-supplied `X-Trioditis-Client-IP` header and sets it itself before forwarding to Convex. Never
+  expose the Convex backend port directly; the installer verifies (`deploy/scripts/check-ports.sh`) that only Caddy
+  publishes external ports.
+</Aside>
+
+## Networks & Telegram credentials
+
+By default, Trioditis runs bridge hosts for all 12 supported networks and lets admins choose which ones to offer inside **Admin settings → Networks**. To restrict bridge containers on smaller hosts, supply Telegram API credentials, or review per-network capabilities and limits, see [Networks](/networks/).
+
+## First-time admin setup
+
+After installation finishes, open the printed **admin setup link** in a browser to create the first admin account.
+
+- The setup token lives in the URL fragment (`#...`), never sent in HTTP requests, and is stored as `TRIODITIS_SETUP_TOKEN` in `deploy/.env`.
+- Rerunning the installer prints the setup link again until an admin exists; once created, the link stops working permanently.
+- You can also create the admin account directly from the server CLI:
+
+```sh
+deploy/trioditis create-admin you@example.com
+```
+
+This prompts for the password twice and submits the Argon2id-derived sign-in credential (matching what the web app sends) without printing any secrets.

@@ -232,6 +232,8 @@ export interface ChatRow {
   kind: ChatKind
   /** Name, topic and avatar, sealed with kind `chat` and object ID `portalId`. */
   sealedMeta: Envelope | null
+  /** For a group: the members whose pictures make one, sealed with kind `chat`, object ID `<portalId>/collage`. */
+  sealedCollage: Envelope | null
   portalId: string
   unreadCount: number
   /**

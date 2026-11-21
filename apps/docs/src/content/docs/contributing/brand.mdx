@@ -1,0 +1,72 @@
+---
+title: Brand Guide
+description: Official Trioditis transit-junction mark, wordmark, light and dark lockups, color palette, and asset generator.
+---
+
+import iconSvg from '../../../assets/icon.svg'
+import lockupLight from '../../../assets/lockup.svg'
+import lockupDark from '../../../assets/lockup-dark.svg'
+
+_Trioditis_ means **"of the three roads"**: a crossroads for all of your conversations. The mark is that crossroads drawn like a transit map—three routes entering from beyond the edge of the tile and meeting at a single interchange, just as every messaging network meets in one inbox.
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-block: 1.5rem;">
+  <div style="background: #ffffff; border: 1px solid #e6e8ed; border-radius: 12px; padding: 1.75rem; display: flex; align-items: center; justify-content: center;">
+    <img src={lockupLight.src} alt="Trioditis light lockup" style="height: 44px; width: auto; margin: 0;" />
+  </div>
+  <div style="background: #0f1115; border: 1px solid #252a33; border-radius: 12px; padding: 1.75rem; display: flex; align-items: center; justify-content: center;">
+    <img src={lockupDark.src} alt="Trioditis dark lockup" style="height: 44px; width: auto; margin: 0;" />
+  </div>
+  <div style="background: #f4f5f7; border: 1px solid #e6e8ed; border-radius: 12px; padding: 1.75rem; display: flex; align-items: center; justify-content: center;">
+    <img src={iconSvg.src} alt="Trioditis transit-junction icon" style="height: 56px; width: 56px; margin: 0;" />
+  </div>
+</div>
+
+## Brand assets
+
+All canonical brand files live in `assets/brand/`:
+
+| File                                     | Description                                             | Usage                                         |
+| ---------------------------------------- | ------------------------------------------------------- | --------------------------------------------- |
+| `assets/brand/icon.svg`                  | Transit-junction mark on the `#0284c7` tile             | App icon, favicon, avatars, square placements |
+| `assets/brand/icon-mono.svg`             | Single-color tile (`currentColor`) with routes cut out  | System tray, notifications, monochrome print  |
+| `assets/brand/wordmark.svg`, `-dark.svg` | Outlined "Trioditis" in DM Sans Bold with accent i-dots | Standalone name lockups                       |
+| `assets/brand/lockup.svg`, `-dark.svg`   | Icon and wordmark paired together                       | Site headers, README, documentation           |
+| `assets/brand/social-card.png` (`.svg`)  | 1200 × 630 lockup and tagline on ink                    | Open Graph & link previews                    |
+| `assets/brand/png/icon-*.png`            | Raster icons from 16 px to 1024 px                      | Installers, Electron, stores, PWA manifests   |
+| `assets/brand/favicon.ico`               | Multi-size ICO (16, 32, 48 px)                          | Legacy browser favicon fallback               |
+| `@trioditis/ui/wordmark`                 | React inline SVG component following theme tokens       | Inside the Trioditis web & desktop apps       |
+
+The `-dark` variants are for dark surfaces. The square icon tile stays identical across light and dark themes.
+
+## The wordmark
+
+The name is set in **DM Sans Bold** at `-0.01em` tracking, matching the app. **"Trioditis" has three `i`'s, and all three dots are set in the brand accent color**—one for each road—while the letterforms stay ink.
+
+Never retype the wordmark in a live font when placing a logo; always use the generated SVG lockups/wordmarks or `@trioditis/ui/wordmark` so the split accent dots stay exact. In lockups, the wordmark is 60% of the icon height with a 30% gap.
+
+## Color palette
+
+Brand colors match `packages/ui/src/styles/tokens.css`:
+
+| Role            | Light     | Dark      |
+| --------------- | --------- | --------- |
+| **Accent**      | `#0284c7` | `#38bdf8` |
+| **Ink**         | `#0f172a` | `#e9ebf0` |
+| **Icon routes** | `#ffffff` | `#ffffff` |
+
+## Usage rules
+
+- Leave clear space around the icon of at least **¼ of its width**.
+- Do not recolor the blue tile, rotate the mark, or alter the route geometry (use `icon-mono.svg` for single-color contexts).
+- Do not enclose the mark inside another container shape or add drop shadows, outlines, or gradients.
+- Do not detach the routes from the rounded tile—the edges are what make it read as a cropped transit map.
+
+## Regenerating assets
+
+Every asset is generated deterministically from `packages/brand/generate.mjs`. After modifying geometry or colors, regenerate and commit all outputs together:
+
+```sh
+pnpm --filter @trioditis/brand generate
+```
+
+This updates `assets/brand/`, `apps/desktop/public/`, `apps/desktop/electron/`, the installed app's icons in `apps/desktop/build/` (the whole tile for Windows and Linux, and a Mac icon on Apple's grid with a shadow), `apps/site/`, `apps/docs/`, and `packages/ui/src/components/wordmark.tsx` in one pass.
