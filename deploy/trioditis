@@ -529,6 +529,19 @@ case "${1:-}" in
     done
     [ -n "$source" ] || { echo "$usage" >&2; exit 2; }
     refuse() { echo "$*" >&2; echo "Nothing was changed." >&2; exit 1; }
+    # A restore with no install that was cut off after it wrote deploy/.env (its marker says it
+    # was one with no install, and names the RESTORE_ID that file has) is still that restore:
+    # run again with its key file, it carries on as one with no install, the file being its own.
+    if [ "$fresh" = 0 ] && [ -n "$key_file" ] && [ -f "$here/.restore-settle" ] &&
+      grep -qx 'fresh=1' "$here/.restore-settle" && grep -qxE 'state=(loading|ready)' "$here/.restore-settle"; then
+      marker_restore=$(sed -n 's/^restore_id=//p' "$here/.restore-settle")
+      env_restore=$(sed -n 's/^RESTORE_ID=//p' "$env_file" 2>/dev/null || true)
+      if [ -n "$marker_restore" ] && [ "$marker_restore" = "$env_restore" ]; then
+        echo "Carrying on with the restore that was cut off (deploy/.env is its own)."
+        fresh=1
+        env_text=''
+      fi
+    fi
     # Under the lock (taken above), before anything else: deploy/.env as it is, checked, or,
     # with no install, the key file that brings the server's keys.
     if [ "$fresh" = 1 ]; then
@@ -564,9 +577,18 @@ case "${1:-}" in
     # once, whichever volumes the backup had), and put on every volume it makes, so it only ever
     # empties a volume it made. With no install, a run of the same backup cut off before (its
     # marker names this backup) carries on with that run's ID and volumes.
+    # What names the backup for that: its ID, or, for an older backup without one, a fingerprint
+    # of its settings file and the start of its archive.
+    if [ -n "$id" ]; then
+      backup_key_id=$id
+    elif [ "$encrypted" = 0 ]; then
+      backup_key_id="legacy-$({ cat "$source_dir/secrets.env"; head -c 65536 "$source_dir/archive.tgz"; } | sha256sum | cut -c1-32)"
+    else
+      backup_key_id="legacy-$({ head -c 65536 "$source_dir/secrets.env.enc"; head -c 65536 "$source_dir/archive.enc"; } | sha256sum | cut -c1-32)"
+    fi
     resume_id=''
-    if [ "$fresh" = 1 ] && [ -n "$id" ] && [ -f "$here/.restore-settle" ] &&
-      [ "$(sed -n 's/^backup_id=//p' "$here/.restore-settle")" = "$id" ]; then
+    if [ "$fresh" = 1 ] && [ -f "$here/.restore-settle" ] &&
+      [ "$(sed -n 's/^backup_id=//p' "$here/.restore-settle")" = "$backup_key_id" ]; then
       resume_id=$(sed -n 's/^restore_id=//p' "$here/.restore-settle" | grep -xE '[0-9]{1,12}-[0-9a-f]{16}' || true)
     fi
     restore_id=${resume_id:-$(date +%s)-$(random_hex)}
@@ -756,7 +778,7 @@ case "${1:-}" in
     trap '' INT TERM HUP
     write_marker() {
       marker_tmp=$(mktemp "$here/.restore-settle.XXXXXX") &&
-        printf 'state=%s\nbackup_at=%s\nrestore_id=%s\nbackup_id=%s\n' "$1" "$backup_at" "$restore_id" "$id" >"$marker_tmp" &&
+        printf 'state=%s\nbackup_at=%s\nrestore_id=%s\nbackup_id=%s\nfresh=%s\n' "$1" "$backup_at" "$restore_id" "$backup_key_id" "$fresh" >"$marker_tmp" &&
         mv -f "$marker_tmp" "$here/.restore-settle" ||
         { rm -f "$marker_tmp"; echo "Couldn't write deploy/.restore-settle." >&2; return 1; }
     }
@@ -766,7 +788,19 @@ case "${1:-}" in
       { printf '%s\n' "$env_text" | grep -vE '^(RESTORE_PENDING|RESTORE_ID)=' || true
         echo "RESTORE_PENDING=$backup_at"; echo "RESTORE_ID=$restore_id"; } |
         sed '/^$/d' | env_write "$env_file" || { echo "Couldn't mark deploy/.env as restoring." >&2; exit 1; }
-      compose rm -f -s gateway >/dev/null 2>&1 || { echo "Couldn't remove the gateway's container." >&2; exit 1; }
+      # The gateway's container and every bridge host's go, those of networks no longer enabled
+      # included: each was made with the settings from before, and a bridge host started again
+      # as it was wouldn't know this restore's ID, so would run its restored queue. Whatever
+      # makes them again makes them from deploy/.env as it is now. Checked with Docker, not taken
+      # on trust.
+      stale=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}} {{.Label "com.docker.compose.service"}}' |
+        awk '$2 == "gateway" || $2 ~ /^bridge-/ { print $1 }') || true
+      # shellcheck disable=SC2086 # one ID per word
+      [ -z "$stale" ] || docker rm -f $stale >/dev/null 2>&1 || true
+      remaining=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Label "com.docker.compose.service"}}') ||
+        { echo "Couldn't list the server's containers. The data wasn't touched; run the restore again." >&2; exit 1; }
+      left=$(printf '%s\n' "$remaining" | grep -xE 'gateway|bridge-.*') || left=''
+      [ -z "$left" ] || { echo "Couldn't remove the containers of: $(echo $left). The data wasn't touched; run the restore again." >&2; exit 1; }
     fi
     # load DIR VOLUMES MANIFEST: empties each volume and fills it from DIR's archive, then
     # checks every one against the manifest's count of entries and bytes.

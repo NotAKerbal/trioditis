@@ -160,6 +160,14 @@ cp "$root/env.now" "$env_file"
   check ok "a private key that isn't its public key's half is refused, changing nothing" ||
   { check fail "a private key that isn't its public key's half is refused, changing nothing"; cat "$root/out" >&2; }
 
+# Containers made with the settings from before: the gateway, a bridge host, and one of a
+# network no longer enabled. A restore removes them all, so none starts again as it was.
+for service in gateway bridge-whatsapp bridge-telegram; do
+  docker create --name "$project-old-$service" --label "com.docker.compose.project=$project" \
+    --label "com.docker.compose.service=$service" --label com.docker.compose.oneoff=False \
+    --label com.docker.compose.container-number=1 --entrypoint true "$tool" >/dev/null
+done
+
 # It restores: the volumes and settings are the backup's, the server's keys and hand-added
 # settings stay, the server as it was is backed up, and the installer starts it holding the
 # lock, with the settle marker saying when the backup was taken.
@@ -171,6 +179,9 @@ created=$(sed -n 's/^created=//p' "$b1/backup.info")
 [ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] &&
   check ok "it restores every volume as it was backed up, owners and modes included" ||
   { check fail "it restores every volume as it was backed up, owners and modes included"; cat "$root/out" >&2; contents >&2; }
+[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "name=$project-old-")" ] &&
+  check ok "it removes the gateway's and every bridge host's container from before" ||
+  { check fail "it removes the gateway's and every bridge host's container from before"; docker ps -a --filter "label=com.docker.compose.project=$project" >&2; }
 [ "$(cat "$root/installs" 2>/dev/null)" = "--no-setup-link lock=held state=ready backup_at=${created}000 bridge=named" ] &&
   check ok "the installer starts it, holding the lock, with the sends to settle from the backup's time, and the bridge's queue marked to settle" ||
   check fail "the installer starts it, holding the lock, with the sends to settle from the backup's time, and the bridge's queue marked to settle ($(cat "$root/installs" 2>/dev/null))"
@@ -305,5 +316,31 @@ run restore --yes --keys "$backups/keys" "$b1"
   [ "$(grep -v '^RESTORE_ID=' "$env_file" | sort)" = "$(grep -vE '^(OPERATOR_NOTE|RESTORE_ID)=' "$root/env.lost" | sort)" ] &&
   [ -e "$root/installs" ] && check ok "with --keys it carries on from the run that was cut off, onto a checkout with no install" ||
   { check fail "with --keys it carries on from the run that was cut off, onto a checkout with no install"; cat "$root/out" >&2; }
+
+# Cut off after it wrote deploy/.env (here: its installer failed, so its marker stays): the
+# same command, run again, carries on with that restore rather than refusing deploy/.env as an
+# install's. An older backup without an ID is told apart by a fingerprint.
+mkdir -m 700 "$backups/older-again"
+decrypt "$b1/secrets.env.enc" >"$backups/older-again/secrets.env"
+# shellcheck disable=SC2016 # expanded in the container
+decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
+  mkdir /x && cd /x && tar -xzf - &&
+  sed -i -e "1s/.*/trioditis-backup 1/" -e "/^\(id\|created\|version\|postgres\) /d" trioditis-backup.manifest &&
+  tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/older-again/archive.tgz"
+rm -f "$env_file" "$root/deploy/.restore-settle"
+docker volume ls -q --filter "label=com.docker.compose.project=$project" | xargs -r docker volume rm -f >/dev/null
+touch "$root/install-fails"
+run restore --yes --keys "$backups/keys" "$backups/older-again"
+rm -f "$root/install-fails"
+first_id=$(sed -n 's/^RESTORE_ID=//p' "$env_file" 2>/dev/null)
+[ "$status" != 0 ] && [ -e "$env_file" ] && grep -qx 'fresh=1' "$root/deploy/.restore-settle" &&
+  grep -qE '^backup_id=legacy-[0-9a-f]{32}$' "$root/deploy/.restore-settle" &&
+  check ok "an older backup's restore with no install, cut off after deploy/.env, leaves its marker" ||
+  { check fail "an older backup's restore with no install, cut off after deploy/.env, leaves its marker"; cat "$root/out" "$root/deploy/.restore-settle" >&2; }
+run restore --yes --keys "$backups/keys" "$backups/older-again"
+[ "$status" = 0 ] && grep -q "Carrying on with the restore that was cut off" "$root/out" && [ "$(contents)" = "$as_backed_up" ] &&
+  [ -n "$first_id" ] && grep -qx "RESTORE_ID=$first_id" "$env_file" &&
+  check ok "the same command carries on with it, deploy/.env and all" ||
+  { check fail "the same command carries on with it, deploy/.env and all"; cat "$root/out" >&2; }
 
 finish
