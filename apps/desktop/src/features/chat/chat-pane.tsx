@@ -115,6 +115,8 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
   // What each read tracker has done, kept above the retry boundary: a retry isn't a new opening,
   // which would clear the person's own "marked unread". Opening another chat starts again.
   const readStates = useMemo(() => new Map<string, ReadOnOpen>(), [chatId])
+  // The chat chosen to send on, kept above it too, so a retry opens the composer where it was.
+  const chosen = useMemo(() => ({ current: null as ChatId | null }), [chatId])
   useEffect(() => {
     if (chatId && chat === null) onGone()
   }, [chatId, chat, onGone])
@@ -153,6 +155,7 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
           chatIds={chatIds}
           attempt={attempt}
           readStates={readStates}
+          chosen={chosen}
           act={act}
           onBack={onBack}
           onOpenPerson={onOpenPerson}
@@ -168,6 +171,7 @@ function OpenChat({
   chatIds,
   attempt,
   readStates,
+  chosen,
   act,
   onBack,
   onOpenPerson,
@@ -176,6 +180,7 @@ function OpenChat({
   chat: Chat
   attempt: number
   readStates: Map<string, ReadOnOpen>
+  chosen: { current: ChatId | null }
 }) {
   const session = useSession()
   const actions = useChatActions()
@@ -262,7 +267,11 @@ function OpenChat({
   // by replying to a message in it), or the one a profile's Message or Open came here to send on;
   // else, once the messages are in, one with a draft already, then where they last wrote from,
   // then the chat that was opened. Kept until the person changes it.
-  const [sendId, setSendId] = useState<ChatId | null>(null)
+  const [sendId, setSendIdState] = useState<ChatId | null>(() => chosen.current)
+  const setSendId = (id: ChatId) => {
+    chosen.current = id
+    setSendIdState(id)
+  }
   // The chat the composer is on now, for an action that finishes later.
   const sendIdRef = useRef<ChatId>(chat.id)
   // Asked for this chat: only the pane opened on it takes it, not one it's leaving.
@@ -278,6 +287,10 @@ function OpenChat({
     const theirs = [...messages].reverse().find((m) => !m.self && memberIds.includes(m.chatId))?.chatId
     setSendId(drafted ?? theirs ?? chat.id)
   }, [sendId, waiting, loading, requested, messages, memberIds, chat.id])
+  // A chosen chat that's no longer in the conversation (its link moved, or the list it came from
+  // failed) isn't swapped for another under the person's fingers: nothing sends until they
+  // choose again, and its own draft stays on screen meanwhile.
+  const lost = sendId !== null && !members.some((m) => m.id === sendId)
   const sendChat = members.find((m) => m.id === sendId) ?? chat
   sendIdRef.current = sendChat.id
   // What the network chooser (and a scheduled message) calls each chat: its network, and its
@@ -303,7 +316,7 @@ function OpenChat({
   // after this pane was left and opened again still changes what's on screen. Each chat of a
   // conversation keeps its own: the composer shows the draft of the chat it sends on, so what's
   // typed for one network only ever goes on that one, and choosing another moves nothing.
-  const { text: draft, reply: replyTo } = useDraft<Message>(sendChat.id)
+  const { text: draft, reply: replyTo } = useDraft<Message>(lost ? sendId! : sendChat.id)
   // Cancelled messages restored to the composer from this pane, to say so. Restore stays.
   const [restored, setRestored] = useState<ReadonlySet<string>>(new Set())
   const setDraft = (text: string) => setDraftText(sendChat.id, text)
@@ -366,7 +379,7 @@ function OpenChat({
   }
 
   async function onSend() {
-    if (!draft.trim()) return
+    if (!draft.trim() || lost) return
     // Nothing leaves the composer until it can be sent.
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
     const to = sendChat.id
@@ -406,7 +419,7 @@ function OpenChat({
   }
 
   async function onSchedule(sendAt: number) {
-    if (!draft.trim()) return
+    if (!draft.trim() || lost) return
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
     try {
       checkWithinAYear(sendAt)
@@ -778,12 +791,12 @@ function OpenChat({
         />
         <Composer
           network={sendChat.network}
-          destination={sendChat.id}
+          destination={lost ? '' : sendChat.id}
           via={
-            merged
+            merged || lost
               ? {
                   options: members.map((m, i) => ({ id: m.id, network: m.network, label: sendLabels[i]! })),
-                  current: sendChat.id,
+                  current: lost ? '' : sendChat.id,
                   onChange: (id) => setSendId(id as ChatId),
                 }
               : undefined
@@ -794,7 +807,7 @@ function OpenChat({
           onCancelReply={() => setReplyTo(null)}
           onSend={() => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
-          disabled={composerBlocked(sendChat.row, bridge.status)}
+          disabled={lost ? 'Choose where to send this.' : composerBlocked(sendChat.row, bridge.status)}
         />
       </main>
       {/* Opening a chat marks it read, as does a new message while it's open and on screen: each
