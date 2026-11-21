@@ -19,7 +19,15 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { dotBitmap } from './badge.ts'
 import { invitationFrom, linkArgument, PROTOCOL, type Invitation } from './links.ts'
-import { isExternalAllowed, normalizeServer, pageIsReady, sameOrigin, serverKind, TOO_OLD } from './server.ts'
+import {
+  isExternalAllowed,
+  normalizeServer,
+  pageIsReady,
+  quitsWhenAllClosed,
+  sameOrigin,
+  serverKind,
+  TOO_OLD,
+} from './server.ts'
 
 // The desktop app: a window onto one Trioditis server's web app, with native notifications,
 // a dock badge and a menu. Nothing from the server runs with Node: its pages are sandboxed and
@@ -416,10 +424,13 @@ async function switchServer(origin: string, url?: string): Promise<{ error?: str
       if (previous) openServer(previous)
       return { error: 'That server couldn’t be saved. Try again.' }
     }
+    openServer(origin, url)
   } finally {
     committing = false
+    // Nothing left open, which only a failure with no server to go back to could do: the
+    // picker, rather than an app with no window.
+    if (BrowserWindow.getAllWindows().length === 0) showConnect()
   }
-  openServer(origin, url)
   connectWindow?.close()
   return {}
 }
@@ -559,8 +570,10 @@ if (!app.requestSingleInstanceLock()) {
   // Windows and Linux start the app again with the link; this, the first, takes it.
   app.on('second-instance', (_event, argv) => openLink(linkArgument(argv)))
   app.on('before-quit', () => (quitting = true))
+  // Not while changing server: an invitation link can close the only window before the new
+  // server's opens, and that isn't the person quitting.
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit()
+    if (quitsWhenAllClosed(process.platform, committing)) app.quit()
   })
   app.on('activate', () => {
     if (serverWindow) reveal(serverWindow)
