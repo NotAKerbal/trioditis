@@ -276,40 +276,22 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
     })
   }
 
-  /**
-   * Saves many cards in calls of 100, as an import does. When a call is refused as stale, the
-   * rest of the change is worked out again from the new cards, so their links are current; the
-   * cards already written are left out, so a change made to one since (or its deletion) stands.
-   * Everything that can be checked here is checked before the first call: every card fits, and
-   * the new ones fit in the address book. A call failing after others went through throws
-   * PartlySaved, saying how many were written. Returns how many cards were written.
-   */
-  async function saveMany(
+  /** Saves many cards in calls of 100, as an import does (saveInCalls). */
+  const saveMany = (
     cards: (people: readonly StoredPerson[]) => Person[],
     onWritten?: (personKeys: readonly string[]) => void,
-  ) {
-    const written = new Set<string>()
-    let total = 0
-    try {
-      await withRevision(async (people, revision) => {
-        const planned = await fitted(cards(people).filter((p) => !written.has(p.personKey)))
-        total = written.size + planned.length
-        const added = newCards(people, planned)
-        if (people.length + added > MAX_IMPORT_CARDS) throw new TooLarge(tooMany(people.length, added))
-        let at = revision
-        for (let i = 0; i < planned.length; i += PER_CALL) {
-          const batch = planned.slice(i, i + PER_CALL)
-          at = await put({ people: batch.map(seal), revision: at, sessionId: session.sessionId })
-          for (const p of batch) written.add(p.personKey)
-          onWritten?.(batch.map((p) => p.personKey))
-        }
-      })
-    } catch (err) {
-      if (written.size) throw new PartlySaved(written.size, total, err)
-      throw err
-    }
-    return written.size
-  }
+    options?: SaveOptions,
+  ) =>
+    saveInCalls(
+      {
+        attempt: withRevision,
+        fit: fitted,
+        put: (batch, revision) => put({ people: batch.map(seal), revision, sessionId: session.sessionId }),
+      },
+      cards,
+      onWritten,
+      options,
+    )
 
   async function removeAll(personKeys: readonly string[]) {
     let done = 0
@@ -324,6 +306,55 @@ export function usePeopleActions(people: StoredPerson[] | undefined) {
   }
 
   return { apply, saveMany, remove: removeAll }
+}
+
+export interface SaveOptions {
+  /**
+   * Whether a card written once is left out of plans worked out again, so a change made to it
+   * elsewhere since (or its deletion) stands. An import says no: its planner tracks what it has
+   * written by entry, and a card it wrote can be where a later entry now belongs.
+   */
+  skipWritten?: boolean
+}
+
+/**
+ * Saves many cards in calls of 100. When a call is refused as stale (`attempt` runs `write`
+ * again from the new cards), the rest of the change is worked out again, so its links are
+ * current. Everything that can be checked here is checked before the first call: every card
+ * fits, and the new ones fit in the address book. A call failing after others went through
+ * throws PartlySaved, saying how many were written. Returns how many cards were written.
+ */
+export async function saveInCalls<P extends Person>(
+  deps: {
+    attempt: (write: (people: readonly P[], revision: number) => Promise<void>) => Promise<void>
+    fit: (cards: readonly Person[]) => Promise<Person[]>
+    put: (batch: Person[], revision: number) => Promise<number>
+  },
+  cards: (people: readonly P[]) => Person[],
+  onWritten?: (personKeys: readonly string[]) => void,
+  { skipWritten = true }: SaveOptions = {},
+) {
+  const written = new Set<string>()
+  let total = 0
+  try {
+    await deps.attempt(async (people, revision) => {
+      const planned = await deps.fit(cards(people).filter((p) => !skipWritten || !written.has(p.personKey)))
+      total = new Set([...written, ...planned.map((p) => p.personKey)]).size
+      const added = newCards(people, planned)
+      if (people.length + added > MAX_IMPORT_CARDS) throw new TooLarge(tooMany(people.length, added))
+      let at = revision
+      for (let i = 0; i < planned.length; i += PER_CALL) {
+        const batch = planned.slice(i, i + PER_CALL)
+        at = await deps.put(batch, at)
+        for (const p of batch) written.add(p.personKey)
+        onWritten?.(batch.map((p) => p.personKey))
+      }
+    })
+  } catch (err) {
+    if (written.size) throw new PartlySaved(written.size, total, err)
+    throw err
+  }
+  return written.size
 }
 
 /**
@@ -342,6 +373,8 @@ export function importPlanner(imported: readonly PersonPlaintext[]) {
   let entriesOf = new Map<string, number[]>()
   // The entries the latest plan left out because each could be more than one card.
   let ambiguous = new Set<number>()
+  // The entries the latest plan put on a card it changes: each still to be written.
+  let changing: number[] = []
   return {
     plan: (existing: readonly Person[]) => {
       entriesOf = new Map()
@@ -356,8 +389,14 @@ export function importPlanner(imported: readonly PersonPlaintext[]) {
         (personKey) => !own.has(personKey),
         (i) => ambiguous.add(pending[i]!.index),
       )
+      changing = planned.flatMap((p) => entriesOf.get(p.personKey) ?? [])
       return planned
     },
+    /**
+     * The entries a finished import didn't write though its last plan changed a card for them.
+     * None, when every call went through; said in the summary when not, never passed over.
+     */
+    unwritten: () => changing.filter((index) => !done.has(index)).map((index) => imported[index]!),
     /** The cards left out because each matched several people here, for the import's summary. */
     ambiguous: () => [...ambiguous].map((index) => imported[index]!),
     written: (personKeys: Iterable<string>) => {

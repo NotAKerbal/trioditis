@@ -95,6 +95,12 @@ describe('big imports', () => {
     )
   })
 
+  it('names entries a finished import didn’t write, rather than passing over them', () => {
+    expect(importSummary({ ...emptyReport(), written: 2, notImported: ['Cat'] })).toBe(
+      'Imported 2 people. Cat wasn’t imported. Import the file again to add them.',
+    )
+  })
+
   it('says how far a stopped import got, and that importing again won’t duplicate', () => {
     expect(partlyImported(300, 1000, 'Your connection dropped.')).toBe(
       'Imported 300 of 1,000 people before it stopped: Your connection dropped. ' +
