@@ -26,6 +26,7 @@ import { useAction, useMutation } from 'convex/react'
 import {
   Bell,
   Bot,
+  Contact,
   Eye,
   KeyRound,
   Network as NetworkIcon,
@@ -55,6 +56,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Accounts } from './accounts-section.tsx'
 import { Agents } from './agents-section.tsx'
+import { Contacts } from './contacts-section.tsx'
 import { Group, Heading, Setting } from './layout.tsx'
 import { Members } from './members-section.tsx'
 import { Networks } from './networks.tsx'
@@ -74,6 +76,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'agents', name: 'Agents', icon: <Bot /> },
   { id: 'networks', name: 'Networks', icon: <NetworkIcon />, admin: true },
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
+  { id: 'contacts', name: 'Contacts', icon: <Contact />, admin: true },
   { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
 ] as const
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]['id']
@@ -149,6 +152,8 @@ export function SettingsDialog({
             <Networks />
           ) : current.id === 'members' ? (
             <Members />
+          ) : current.id === 'contacts' ? (
+            <Contacts />
           ) : current.id === 'updates' ? (
             <Updates />
           ) : (

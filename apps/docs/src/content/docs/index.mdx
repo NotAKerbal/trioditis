@@ -1,0 +1,79 @@
+---
+title: Trioditis
+description: Every chat, in one app, on a server you own.
+template: splash
+hero:
+  title: Every chat, in one app, on a server you own.
+  tagline: >
+    "Of the three roads" — an open-source, self-hosted universal messaging hub for
+    WhatsApp, Signal, Google Messages, Google Voice, Telegram, Messenger, Instagram,
+    Slack, GroupMe, LinkedIn, X, and Bluesky. Stored messages are sealed to each person's own keys.
+  image:
+    file: ../../assets/icon.svg
+    alt: Trioditis transit-junction mark
+  actions:
+    - text: Get Started
+      link: /getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: Read the Architecture
+      link: /architecture/overview/
+      icon: open-book
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components'
+
+## Why Trioditis?
+
+<CardGrid stagger>
+  <Card title="Your server, your data" icon="laptop">
+    Bridges and message storage run on hardware you control—a home server, Proxmox VM, or VPS. Nothing in the message
+    path depends on someone else's cloud.
+  </Card>
+  <Card title="Sealed by default" icon="approve-check-circle">
+    Stored messages, attachments, chat names, and contact profiles are encrypted to each person's own X25519 keys. The
+    server operator can run and back up the instance without reading anyone's history.
+  </Card>
+  <Card title="Honest delivery" icon="warning">
+    No silent drops and no reckless duplicate sends. When a network outcome is ambiguous, Trioditis marks the message as
+    uncertain and lets you decide whether to retry or discard.
+  </Card>
+  <Card title="No Matrix homeserver" icon="rocket">
+    Trioditis implements mautrix bridgev2's connector interface directly in Go—giving you full history backfill, simpler
+    operations, and earliest-possible sealing without running Synapse.
+  </Card>
+  <Card title="12 networks, one inbox" icon="list-format">
+    Run bridge hosts for WhatsApp, Signal, Google Messages, Google Voice, Telegram, Messenger, Instagram, Slack,
+    GroupMe, LinkedIn, X, and Bluesky—managed right from Admin settings.
+  </Card>
+  <Card title="Agents on a leash" icon="puzzle">
+    Connect external AI agents over MCP with OAuth 2.1, per-chat grants, human-in-the-loop approval cards, rate limits,
+    and an append-only audit log.
+  </Card>
+</CardGrid>
+
+## Explore the documentation
+
+<CardGrid>
+  <LinkCard
+    title="Quickstart"
+    description="Install a self-hosted Trioditis server with Docker Engine 28+ or Proxmox VE in minutes."
+    href="/getting-started/quickstart/"
+  />
+  <LinkCard
+    title="Networks & Sign-in Browser"
+    description="Per-network guides, implementation status, known limits, and the isolated Chromium sign-in browser."
+    href="/networks/"
+  />
+  <LinkCard
+    title="Security & Sealed Storage"
+    description="Learn how keys, per-object envelopes, and the bridge host trust boundary work."
+    href="/security/overview/"
+  />
+  <LinkCard
+    title="Contributing & Brand"
+    description="Run a local per-worktree dev stack with pnpm dev, check our brand guide, and explore the roadmap."
+    href="/contributing/local-development/"
+  />
+</CardGrid>

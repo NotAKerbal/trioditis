@@ -126,7 +126,7 @@ function main() {
   } else if (command === 'added' && base) {
     if (addedNotes(base, root).length === 0) {
       console.error(
-        `This change adds no release note. Add a file to ${NOTES_DIR}/ saying what it changes (docs/CONTRIBUTING.md, Release notes).`,
+        `This change adds no release note. Add a file to ${NOTES_DIR}/ saying what it changes (apps/docs/src/content/docs/contributing/workflow.md).`,
       )
       process.exit(1)
     }

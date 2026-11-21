@@ -14,7 +14,7 @@ import { BottomBar } from './bottom-bar.tsx'
 import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
-import { SidebarBoundary } from './sidebar-boundary.tsx'
+import { LoadError, RetryBoundary } from './retry-boundary.tsx'
 import { UpdateNotice } from './update-notice.tsx'
 
 /** The signed-in app: one sidebar, the open chat, and its details. */
@@ -134,20 +134,26 @@ export function Shell() {
           <BottomBar name={auth?.user.name ?? ''} email={auth?.user.email ?? ''} openSettings={openSettings} />
         }
       >
-        <SidebarBoundary offline={session.offline} onError={() => (shownRef.current = null)}>
-          <Sidebar
-            selectedId={selectedId}
-            openedUnreadId={openedUnreadId}
-            onOpen={open}
-            onOpenId={select}
-            onClose={() => select(undefined)}
-            onAction={onSidebarAction}
-            onPeople={() => openPeople('all')}
-            onNewChat={() => setNewChat(true)}
-            shownRef={shownRef}
-            chatsRef={chatsById}
-          />
-        </SidebarBoundary>
+        <RetryBoundary
+          offline={session.offline}
+          onError={() => (shownRef.current = null)}
+          fallback={(say, retry) => <LoadError say={say('Couldn’t load your chats.')} onRetry={retry} />}
+        >
+          {() => (
+            <Sidebar
+              selectedId={selectedId}
+              openedUnreadId={openedUnreadId}
+              onOpen={open}
+              onOpenId={select}
+              onClose={() => select(undefined)}
+              onAction={onSidebarAction}
+              onPeople={() => openPeople('all')}
+              onNewChat={() => setNewChat(true)}
+              shownRef={shownRef}
+              chatsRef={chatsById}
+            />
+          )}
+        </RetryBoundary>
       </SidebarFrame>
       <ChatPane
         chatId={selectedId as ChatId | undefined}

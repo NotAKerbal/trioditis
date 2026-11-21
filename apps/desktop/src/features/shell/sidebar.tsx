@@ -537,7 +537,7 @@ export function Sidebar({
 
 /**
  * The sidebar's column, with the bottom bar outside the list, so its menus stay open and
- * Settings stays in reach while SidebarBoundary retries a list that couldn't load.
+ * Settings stays in reach while RetryBoundary retries a list that couldn't load.
  */
 export function SidebarFrame({
   bottomBar,

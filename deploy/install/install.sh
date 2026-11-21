@@ -147,7 +147,7 @@ encrypted_volume() {
   lsblk -s -no TYPE "$source" 2>/dev/null | grep -qx crypt
 }
 if ! encrypted_volume "$docker_root"; then
-  warn "Docker's data ($docker_root) doesn't look like it's on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. If it's encrypted in a way this can't see, such as on the VM host, ignore this. See docs/deploy.md, Encryption at rest."
+  warn "Docker's data ($docker_root) doesn't look like it's on an encrypted volume. Trioditis seals stored messages, but the network connectors keep names, phone numbers and history not yet imported in plaintext, so put this server's disk (and its backups) on encrypted storage. If it's encrypted in a way this can't see, such as on the VM host, ignore this. See https://docs.trioditis.app/self-hosting/backup-and-keys/#encryption-at-rest."
 fi
 
 # One install, backup or other write command for this install at a time (deploy/trioditis
@@ -354,12 +354,12 @@ telegram_api_hash=${telegram_api_hash-$(get TELEGRAM_API_HASH)}
   die "--telegram-api-hash must be the 32 hex digits my.telegram.org shows as App api_hash."
 if [[ " ${network_list[*]} " == *" telegram "* ]] && { [ -z "$telegram_api_id" ] || [ -z "$telegram_api_hash" ]; }; then
   if [ "$networks" = all ]; then
-    say "Leaving Telegram out: its bridge needs your own API ID and hash. To add it, create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash> (docs/networks/telegram.md)."
+    say "Leaving Telegram out: its bridge needs your own API ID and hash. To add it, create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash> (https://docs.trioditis.app/networks/telegram/)."
     without_telegram=()
     for network in "${network_list[@]}"; do [ "$network" = telegram ] || without_telegram+=("$network"); done
     network_list=("${without_telegram[@]}")
   else
-    die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See docs/networks/telegram.md."
+    die "Telegram needs your own API ID and hash: create an app at https://my.telegram.org/apps, then run this again with --telegram-api-id <api_id> --telegram-api-hash <api_hash>. See https://docs.trioditis.app/networks/telegram/."
   fi
 fi
 # The bridged networks, comma-separated, as Compose (profiles) and the backend (what admins
@@ -496,7 +496,7 @@ else
       ;;
     127.*) die "For a loopback address, use 127.0.0.1 or localhost." ;;
     \[* | *:*) die "--host can't be an IPv6 address: use 127.0.0.1, localhost, or an IPv4 address or name." ;;
-    *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking, and the setup form would send its token and password unencrypted. Serve it over HTTPS before anyone signs up from another device: --public-url with Tailscale Serve, or --domain. See docs/deploy.md, HTTPS in local mode." ;;
+    *) warn "Browsers treat $public_url as insecure, so the web app can't keep anyone's key there and sign-in stops at unlocking, and the setup form would send its token and password unencrypted. Serve it over HTTPS before anyone signs up from another device: --public-url with Tailscale Serve, or --domain. See https://docs.trioditis.app/self-hosting/installation/." ;;
   esac
   caddy_site=':80'
   caddy_global='auto_https off'
@@ -588,7 +588,7 @@ for pair in BRIDGE AGENT_ACCESS; do
   elif [ "$new_server_keys" = 1 ]; then
     new_pairs+=("$pair")
   else
-    die "deploy/.env has only half of the server's ${pair} key pair (as after restoring a backup's secrets.env, which leaves the private keys out). Import the keys you exported: deploy/trioditis keys import <file>, then run this again. Only if they're lost, run this again with --new-server-keys: sends sealed to the old key then fail, and agent access must be granted again (docs/deploy.md, Keys lost)."
+    die "deploy/.env has only half of the server's ${pair} key pair (as after restoring a backup's secrets.env, which leaves the private keys out). Import the keys you exported: deploy/trioditis keys import <file>, then run this again. Only if they're lost, run this again with --new-server-keys: sends sealed to the old key then fail, and agent access must be granted again (https://docs.trioditis.app/self-hosting/backup-and-keys/#if-the-server-keys-are-lost)."
   fi
 done
 if [ "$new_server_keys" = 1 ] && [ "${#new_pairs[@]}" -eq 0 ]; then

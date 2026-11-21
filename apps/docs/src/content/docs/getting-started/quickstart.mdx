@@ -1,0 +1,99 @@
+---
+title: Quickstart
+description: Get a self-hosted Trioditis server running with Docker Compose or Proxmox VE in minutes.
+---
+
+import { Steps, Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+A Trioditis server runs as a self-contained Docker Compose bundle on any Linux machine, VM, Proxmox host, or VPS (`x86_64` or `arm64`). One script installs the stack, and built-in automatic updates (or rerunning the installer) keep it current.
+
+## Prerequisites
+
+- **Docker Engine 28 or later** with the **Compose plugin** (`docker compose`) — required for the isolated `signin` Docker network used by the sign-in browser
+- **git**
+- At least **8 GiB** of free disk space where Docker stores its data (8 GB RAM recommended during builds and initial history imports)
+- **Encrypted storage** for Docker's data directory (see [Encryption at rest](/self-hosting/backup-and-keys/#encryption-at-rest))
+
+## Install the server
+
+<Tabs>
+  <TabItem label="Linux / Docker">
+    <Steps>
+      1. **Clone the repository** on the `dev` branch (the bundle lives on `dev` until the first stable release):
+
+         ```sh
+         git clone --branch dev https://github.com/NotAKerbal/trioditis.git
+         cd trioditis
+         ```
+
+      2. **Run the installer** using the access mode that matches your setup:
+
+         ```sh
+         # Option A: Public domain with automatic HTTPS (ports 80 & 443 open)
+         deploy/install/install.sh --domain chat.example.com
+
+         # Option B: Tailscale Serve with automatic tailnet HTTPS
+         tailscale serve --bg --https=8443 http://127.0.0.1:8080
+         deploy/install/install.sh --public-url https://<machine>.<tailnet>.ts.net:8443
+
+         # Option C: Local-only (loopback on this machine)
+         deploy/install/install.sh --host 127.0.0.1 --bind 127.0.0.1
+         ```
+
+      3. **Create the admin account** by opening the **admin setup link** printed at the end of installation.
+
+         The setup token is carried in the URL fragment (`#...`), which browsers never send to the server, and is consumed the moment the first admin account is created.
+
+      4. **Configure your update channel and networks** in the app:
+
+         - Open **Admin settings → Updates** and switch the channel to **Nightly** while running from `dev` (the default **Stable** channel tracks `main`).
+         - Open **Admin settings → Networks** to install the messaging networks you want members to connect.
+    </Steps>
+
+  </TabItem>
+  <TabItem label="Proxmox VE">
+    Run the helper script as `root` on your Proxmox VE host to provision an Ubuntu 24.04 VM (recommended) and install Trioditis automatically:
+
+    ```sh
+    git clone --branch dev https://github.com/NotAKerbal/trioditis.git
+    cd trioditis
+    bash deploy/install/proxmox.sh
+    ```
+
+    This creates VM `9100` (2 cores, 8 GiB RAM, 64 GiB disk) verified against Ubuntu's published cloud-image checksum. See the [Proxmox VE guide](/self-hosting/proxmox/) for storage, network bridge, and LXC options.
+
+  </TabItem>
+</Tabs>
+
+<Aside type="caution" title="Always use HTTPS from other devices">
+  Browsers treat plain HTTP pages (except `localhost` / `127.0.0.1`) as insecure contexts and disable the Web Crypto API
+  that Trioditis uses to protect your identity key. Before signing up or signing in from another device, serve Trioditis
+  over HTTPS using `--domain` or `--public-url` behind Tailscale Serve or a reverse proxy.
+</Aside>
+
+## What the installer does
+
+On a fresh run, `deploy/install/install.sh`:
+
+1. Verifies Docker Engine 28+, CPU architecture, free disk space, and whether Docker's data lives on an encrypted volume.
+2. Generates server secrets, `BACKUP_KEY`, and X25519 key pairs into `deploy/.env` (mode `0600`).
+3. Builds the container images from your checkout (web/Caddy, gateway/functions, bridge host, and `login-browser`).
+4. Starts PostgreSQL 17 and the self-hosted Convex backend, initializing databases and the Convex admin key.
+5. Pushes Convex functions, runs migrations, and starts the gateway, bridge host containers, `login-browser`, and Caddy.
+6. Sets up the systemd auto-updater service (when systemd is available), waits for every service to pass health checks, verifies the backend can reach the public origin, and prints the one-time **admin setup link**.
+
+## Export your server keys
+
+Right after your first install succeeds, export the server's private keys and `BACKUP_KEY`, then store that file safely **apart from your backups** (in a password manager or offline media):
+
+```sh
+deploy/trioditis keys export ~/trioditis-server-keys.env
+```
+
+Move the file off the server and delete the temporary copy. Regular encrypted backups intentionally omit these keys—without `BACKUP_KEY` a backup cannot be decrypted. See [Backups, Restore & Keys](/self-hosting/backup-and-keys/) for details.
+
+## Next steps
+
+- Configure reverse proxies, ports, and HTTPS modes in [Installation & Modes](/self-hosting/installation/).
+- Limit memory usage with `--networks`, add Telegram API credentials, or check per-network limits in [Networks](/networks/).
+- Learn about auto-updates, `deploy/trioditis`, and day-to-day commands in [Operations & Auto-Updates](/self-hosting/operations/).

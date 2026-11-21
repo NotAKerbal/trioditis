@@ -3,11 +3,11 @@ import type { Doc, Id } from '@trioditis/backend/dataModel'
 import type { DeliveryState } from '@trioditis/core'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMutation } from 'convex/react'
+import { useMutation, usePaginatedQuery } from 'convex/react'
 // The cached hook keeps a chat's pages subscribed for a while after its pane closes (main.tsx),
 // so going back to a chat shows its latest messages at once, already up to date, instead of
 // loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
-import { usePaginatedQuery } from 'convex-helpers/react/cache/hooks'
+import { usePaginatedQuery as useCachedPaginatedQuery } from 'convex-helpers/react/cache/hooks'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
@@ -61,24 +61,50 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
   }
 }
 
-const usePage = (chatId: ChatId | undefined) =>
-  usePaginatedQuery(api.messages.list, chatId ? { chatId } : 'skip', { initialNumItems: 50 })
+const PAGE = 50
+
+/**
+ * One chat's pages. The cached hook keeps a page's subscription, its error too, for minutes
+ * after it's let go, under a key made from its arguments (its pagination ID is always 0): asked
+ * again the same way, a failed page fails again, and every page it keeps is asked again at once
+ * when the connection comes back. So a retry (`retrying`, after RetryBoundary caught a page that
+ * couldn't load) uses Convex's own hook instead, which asks under a new pagination ID each time
+ * it mounts and lets its pages go as soon as it unmounts.
+ */
+function usePage(chatId: ChatId | undefined, retrying: boolean) {
+  const cached = useCachedPaginatedQuery(api.messages.list, chatId && !retrying ? { chatId } : 'skip', {
+    initialNumItems: PAGE,
+  })
+  const fresh = usePaginatedQuery(api.messages.list, chatId && retrying ? { chatId } : 'skip', {
+    initialNumItems: PAGE,
+  })
+  return retrying ? fresh : cached
+}
 
 /**
  * The messages of a chat, or of every chat of a conversation together (at most MAX_MERGED),
- * oldest first for display, loading older pages on request.
+ * oldest first for display, loading older pages on request. `attempt` counts the retries after a
+ * page couldn't load (RetryBoundary; see usePage).
  *
  * Each chat pages on its own, so their pages reach back to different times. Only what every
  * chat has loaded back to is shown together (`mergePages`): older messages of one wait until
  * the others have loaded back that far, so nothing appears out of place and then has another
  * chat's messages arrive in between. Loading more loads more of each that has more.
  */
-export function useMessages(chatIds: ChatId | readonly (ChatId | undefined)[]) {
+export function useMessages(chatIds: ChatId | readonly (ChatId | undefined)[], attempt = 0) {
   const session = useSession()
+  const retrying = attempt > 0
   // One page per slot, always as many: an empty slot is skipped. A chat keeps its slot as the
   // conversation's order changes (stableSlots), so its pages aren't loaded again from the start.
   const ids = typeof chatIds === 'string' ? [chatIds] : chatIds
-  const all = [usePage(ids[0]), usePage(ids[1]), usePage(ids[2]), usePage(ids[3]), usePage(ids[4]), usePage(ids[5])]
+  const all = [
+    usePage(ids[0], retrying),
+    usePage(ids[1], retrying),
+    usePage(ids[2], retrying),
+    usePage(ids[3], retrying),
+    usePage(ids[4], retrying),
+    usePage(ids[5], retrying),
+  ]
   const slots = all.flatMap((p, i) => (ids[i] ? [{ ...p, chatId: ids[i] }] : []))
   const statuses = slots.map((p) => `${p.chatId}:${p.status}`).join()
   const { messages, hidden } = useMemo(() => {
@@ -103,7 +129,7 @@ export function useMessages(chatIds: ChatId | readonly (ChatId | undefined)[]) {
     canLoadMore: slots.some((p) => p.status === 'CanLoadMore'),
     loadingMore: slots.some((p) => p.status === 'LoadingMore'),
     loadMore: () => {
-      for (const p of slots) if (p.status === 'CanLoadMore') p.loadMore(50)
+      for (const p of slots) if (p.status === 'CanLoadMore') p.loadMore(PAGE)
     },
   }
 }

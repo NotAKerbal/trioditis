@@ -75,6 +75,7 @@ import {
   whileSending,
 } from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
+import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -108,6 +109,7 @@ interface ChatPaneProps {
 }
 
 export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, onOpenChat }: ChatPaneProps) {
+  const session = useSession()
   const chat = useChat(chatId)
   useEffect(() => {
     if (chatId && chat === null) onGone()
@@ -125,27 +127,49 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
       </main>
     )
   }
+  // A page of messages the server couldn't answer in time (a busy server, or every query asked
+  // again at once after the computer wakes) takes down only this pane, which then tries again.
+  // The draft lives in the draft store, so it's still there when the chat comes back.
   return (
-    <OpenChat
+    <RetryBoundary
       key={chat.id}
-      chat={chat}
-      chatIds={chatIds}
-      act={act}
-      onBack={onBack}
-      onOpenPerson={onOpenPerson}
-      onOpenChat={onOpenChat}
-    />
+      offline={session.offline}
+      fallback={(say, retry) => (
+        <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
+          <Button variant="ghost" size="icon" aria-label="Back to chats" className="m-1.5 md:hidden" onClick={onBack}>
+            <ChevronLeft className="size-5" />
+          </Button>
+          <LoadError say={say('Couldn’t load this chat.')} onRetry={retry} />
+        </main>
+      )}
+    >
+      {(attempt) => (
+        <OpenChat
+          chat={chat}
+          chatIds={chatIds}
+          attempt={attempt}
+          act={act}
+          onBack={onBack}
+          onOpenPerson={onOpenPerson}
+          onOpenChat={onOpenChat}
+        />
+      )}
+    </RetryBoundary>
   )
 }
 
 function OpenChat({
   chat,
   chatIds,
+  attempt,
   act,
   onBack,
   onOpenPerson,
   onOpenChat,
-}: Pick<ChatPaneProps, 'chatIds' | 'act' | 'onBack' | 'onOpenPerson' | 'onOpenChat'> & { chat: Chat }) {
+}: Pick<ChatPaneProps, 'chatIds' | 'act' | 'onBack' | 'onOpenPerson' | 'onOpenChat'> & {
+  chat: Chat
+  attempt: number
+}) {
   const session = useSession()
   const actions = useChatActions()
   // The person's direct chats on other networks, shown with this one as one conversation.
@@ -178,6 +202,7 @@ function OpenChat({
   slotsRef.current = stableSlots(slotsRef.current, memberIds)
   const { messages, hidden, loading, canLoadMore, loadingMore, loadMore } = useMessages(
     slotsRef.current as (ChatId | undefined)[],
+    attempt,
   )
   // A conversation's chats and their first pages are still on their way: until they're in, what
   // it shows of each (and so what it marks read) isn't known.
