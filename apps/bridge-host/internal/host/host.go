@@ -234,7 +234,7 @@ func (h *Host) Start(ctx context.Context) error {
 			return fmt.Errorf("host: failed to listen: %w", err)
 		}
 		h.listener = listener
-		srv := &server.Server{Token: h.Config.InternalToken, Handler: h.Connector, Browsers: h.Connector, Log: h.Config.Log.With().Str("component", "server").Logger()}
+		srv := &server.Server{Token: h.Config.InternalToken, Handler: h.Connector, Browsers: h.Connector, Media: h.Connector.Media, Log: h.Config.Log.With().Str("component", "server").Logger()}
 		if h.Config.Signin != nil {
 			srv.Refuse = signin.FromBrowser(h.Config.Signin.URL)
 		}

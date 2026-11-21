@@ -7,13 +7,18 @@
 // that point it encrypts a copy for the person the object is sealed to, writes only the
 // ciphertext to disk, and hands the key to the caller to put in the sealed plaintext.
 //
+// Each sealed copy is written under its owner's directory, so the gateway can fetch it for
+// them (Open) and nobody else: the ciphertext goes to the client, which has the key.
+//
 // Outbound attachments go the other way: the client encrypted the file, and the key
 // arrives in a sealed send. Register makes it readable for the length of the send.
 package media
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +95,26 @@ func (s *Store) path(mediaID string) string {
 	return filepath.Join(s.dir, mediaID)
 }
 
+// ownerDir is where an owner's sealed copies are written. It is named by a hash, so a user ID
+// is never part of a path.
+func (s *Store) ownerDir(ownerUserID string) string {
+	sum := sha256.Sum256([]byte("trioditis/media-owner/" + ownerUserID))
+	return filepath.Join(s.dir, "owners", hex.EncodeToString(sum[:16]))
+}
+
+// validID reports whether mediaID is one the store could have made, so it is safe in a path.
+func validID(mediaID string) bool {
+	if len(mediaID) < 16 || len(mediaID) > 64 {
+		return false
+	}
+	for _, r := range mediaID {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) sweepLocked(now time.Time) {
 	for key, up := range s.uploads {
 		if now.After(up.expires) {
@@ -141,7 +166,11 @@ func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*pro
 	if err != nil {
 		return nil, err
 	}
-	if err = writeNew(s.path(copyID), enc.Ciphertext); err != nil {
+	dir := s.ownerDir(ownerUserID)
+	if err = os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("media: failed to make the owner's directory: %w", err)
+	}
+	if err = writeNew(filepath.Join(dir, copyID), enc.Ciphertext); err != nil {
 		return nil, fmt.Errorf("media: failed to write file: %w", err)
 	}
 	att := protocol.Attachment{MediaID: copyID, Mime: up.mime, Size: len(up.data), Name: up.name, Key: enc.Key, Nonce: enc.Nonce}
@@ -200,6 +229,32 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 	return seal.DecryptMedia(ct, key, nonce, owner, mediaID)
 }
 
+// Open opens the ciphertext of a sealed copy for its owner, for the gateway to pass to their
+// client. The caller closes it. A copy of anyone else's is ErrUnavailable, as is one that
+// doesn't exist.
+//
+// Copies written before owners had directories are in the store's own directory, with no
+// record of whose they are. Those are opened for anyone who names one: a media ID is 128
+// random bits that only ever appear inside the owner's sealed plaintext, and the file is
+// ciphertext under a key that does too, so what it gives away is its size.
+func (s *Store) Open(mediaID, ownerUserID string) (*os.File, error) {
+	if !validID(mediaID) || ownerUserID == "" {
+		return nil, ErrUnavailable
+	}
+	f, err := openNoFollow(filepath.Join(s.ownerDir(ownerUserID), mediaID))
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = openNoFollow(s.path(mediaID))
+	}
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, ErrUnavailable
+	}
+	return f, nil
+}
+
 // writeNew writes a new file, refusing to follow a symlink or replace anything at path.
 func writeNew(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
@@ -216,10 +271,14 @@ func writeNew(path string, data []byte) error {
 // readNoFollow reads a file without following a symlink in its place, so nothing else that
 // can write to the media directory can point the store at another file.
 func readNoFollow(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openNoFollow(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	return io.ReadAll(f)
+}
+
+func openNoFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }

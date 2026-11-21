@@ -6,10 +6,20 @@ import type { LastShown } from '~/features/shell/row-preview.ts'
 // Opened last messages (openCached), so the list doesn't decrypt every row on each render.
 const cache = new Map<string, MessagePlaintext | null>()
 
+/**
+ * What a message says besides its file. A network gives a picture without a caption the file's
+ * name as its body (bridgev2 does), which isn't worth repeating under the picture.
+ */
+export function captionOf(message: MessagePlaintext): string {
+  const body = message.body?.trim() ?? ''
+  const name = message.attachments?.[0]?.name?.trim()
+  return message.attachments?.length && body === name ? '' : body
+}
+
 /** What a message says in one line, for a preview: its text, or what kind of thing it is. */
 export function summarize(message: MessagePlaintext | null): string | null {
   if (!message) return null
-  const body = message.body?.trim()
+  const body = captionOf(message)
   if (body) return message.type === 'emote' ? `* ${body}` : body
   switch (message.type) {
     case 'image':

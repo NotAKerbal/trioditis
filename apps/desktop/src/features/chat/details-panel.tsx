@@ -1,5 +1,4 @@
 import { api } from '@trioditis/backend/api'
-import { Avatar } from '@trioditis/ui/avatar'
 import { Button } from '@trioditis/ui/button'
 import { Input } from '@trioditis/ui/input'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
@@ -10,6 +9,7 @@ import { Ban, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { networkName, useChatActions, useLabels, type Chat, type ChatId, type LabelId } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
+import { MediaAvatar } from './attachments.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { LABEL_COLORS, newClientId, sealLabel, type LabelColor } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
@@ -32,7 +32,14 @@ export function DetailsPanel({
   return (
     <aside className="w-[292px] shrink-0 overflow-y-auto border-l border-border bg-surface" aria-label="Chat details">
       <div className="px-5 pt-6 pb-2 text-center">
-        <Avatar name={chat.name} size={68} shape={chat.row.kind === 'dm' ? 'circle' : 'square'} className="mx-auto" />
+        <MediaAvatar
+          network={chat.network}
+          picture={chat.avatar}
+          name={chat.name}
+          size={68}
+          shape={chat.row.kind === 'dm' ? 'circle' : 'square'}
+          className="mx-auto"
+        />
         <h2 className="mt-2.5 text-lg font-bold">{chat.name}</h2>
         <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-subtle-foreground">
           <NetworkBadge network={chat.network} label={networkName(chat.network)} size={14} />{' '}

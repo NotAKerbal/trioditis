@@ -34,6 +34,7 @@ import type * as lib_seal from "../lib/seal.js";
 import type * as lib_send from "../lib/send.js";
 import type * as logins from "../logins.js";
 import type * as mcp from "../mcp.js";
+import type * as media from "../media.js";
 import type * as members from "../members.js";
 import type * as messages from "../messages.js";
 import type * as migrations from "../migrations.js";
@@ -80,6 +81,7 @@ declare const fullApi: ApiFromModules<{
   "lib/send": typeof lib_send;
   logins: typeof logins;
   mcp: typeof mcp;
+  media: typeof media;
   members: typeof members;
   messages: typeof messages;
   migrations: typeof migrations;

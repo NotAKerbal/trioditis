@@ -4,6 +4,7 @@ import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
 import type { Backend } from './backend.ts'
 import { describeError } from './log.ts'
+import type { createMediaHandler } from './media.ts'
 
 // The gateway's public listener: the sign-in browser's websocket, which Caddy forwards
 // /login-browser to (docs/architecture/signin-browser.md, Tickets). The socket's address holds
@@ -42,6 +43,8 @@ export interface SigninOptions {
   log?: (message: string) => void
   maxConnections?: number
   handshakeTimeoutMs?: number
+  /** Serves GET /media/<mediaId> on the same listener (media.ts). */
+  media?: ReturnType<typeof createMediaHandler>
 }
 
 /** Answers on a socket that hasn't been upgraded, and closes it. */
@@ -130,6 +133,8 @@ export function createSigninServer(backend: Pick<Backend, 'redeemSigninTicket'>,
       response.writeHead(200, { 'content-type': 'application/json' })
       return response.end(JSON.stringify({ ok: true }))
     }
+    const media = url.pathname.match(/^\/media\/([^/]+)$/)
+    if (media && options.media) return void options.media(request, response, media[1]!)
     // The browser is only ever a websocket.
     response.writeHead(url.pathname === '/login-browser' ? 400 : 404, { 'content-length': '0' })
     response.end()

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -298,6 +299,21 @@ func (h *harness) command(cmd protocol.Command) (int, string) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(data)
+}
+
+// media fetches a file as the gateway does for a person.
+func (h *harness) media(mediaID, userID string) (int, []byte) {
+	h.t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, "http://"+h.host.Addr()+"/v1/media/"+url.PathEscape(mediaID), nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("X-Trioditis-User-Id", userID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, data
 }
 
 func (h *harness) mustCommand(cmd protocol.Command) {
@@ -1056,13 +1072,33 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("expected one attachment, got %+v", plain.Attachments)
 		}
 		att := plain.Attachments[0]
-		ct, err := os.ReadFile(filepath.Join(dir, "media", "testnet", att.MediaID))
-		if err != nil {
-			t.Fatal(err)
+		// The gateway fetches the ciphertext for its owner; nobody else gets it.
+		status, ct := h.media(att.MediaID, "alice")
+		if status != http.StatusOK {
+			t.Fatalf("fetching alice's attachment: %d", status)
 		}
 		got, err := seal.DecryptMedia(ct, att.Key, att.Nonce, "alice", att.MediaID)
 		if err != nil || !bytes.Equal(got, image) {
 			t.Fatalf("attachment doesn't decrypt to the image: %v", err)
+		}
+		if status, _ = h.media(att.MediaID, "bob"); status != http.StatusNotFound {
+			t.Fatalf("bob fetching alice's attachment: %d, want 404", status)
+		}
+		if status, _ = h.media("../../../etc/passwd", "alice"); status != http.StatusNotFound {
+			t.Fatalf("a path for a media ID: %d, want 404", status)
+		}
+		err = filepath.WalkDir(filepath.Join(dir, "media"), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err == nil && bytes.Contains(data, image) {
+				t.Errorf("%s holds the image in plaintext", path)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	})
 
