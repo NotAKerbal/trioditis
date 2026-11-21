@@ -17,9 +17,8 @@ export function replacementId(clientMessageId: string): string {
 }
 
 /**
- * Where a message's replacement stands: on its way; gone; or `used`, when the server already
- * had its ID but the copy isn't in the chat (it was sent again before, and that copy discarded),
- * so nothing went this time.
+ * Where a message's replacement stands: on its way; gone; or `used`, when the server said its
+ * ID had gone already (from another tab, or before a reload), so nothing went this time.
  */
 export type SendAgainState = 'sending' | 'sent' | 'used'
 
@@ -36,24 +35,24 @@ function set(clientMessageId: string, state: SendAgainState | undefined) {
 /**
  * Sends `clientMessageId`'s replacement with `send`, given its ID, unless one is on its way or
  * has gone already from this page. If it fails, it can be tried again: with the same ID, so a
- * send that did reach the server isn't made twice. `listed` says, once it has gone, whether
- * the replacement's copy is in the chat: if not, the server had the ID already and sent nothing.
+ * send that did reach the server isn't made twice. `send` answers as messages.send does:
+ * `queued` for a new send, or what the ID had gone as already.
  */
 export async function sendAgain(
   clientMessageId: string,
-  send: (replacement: string) => Promise<void>,
-  listed: (replacement: string) => Promise<boolean>,
+  send: (replacement: string) => Promise<'queued' | 'sent' | 'scheduled'>,
 ): Promise<SendAgainState | undefined> {
   if (states.has(clientMessageId)) return states.get(clientMessageId)
   set(clientMessageId, 'sending')
   const replacement = replacementId(clientMessageId)
+  let outcome: 'queued' | 'sent' | 'scheduled'
   try {
-    await send(replacement)
+    outcome = await send(replacement)
   } catch {
     set(clientMessageId, undefined)
     return undefined
   }
-  const state = (await listed(replacement)) ? 'sent' : 'used'
+  const state = outcome === 'queued' ? 'sent' : 'used'
   set(clientMessageId, state)
   return state
 }

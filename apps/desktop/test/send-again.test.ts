@@ -6,7 +6,6 @@ beforeAll(ready)
 
 const VALID = /^[A-Za-z0-9_-]{16,64}$/
 const original = '0123456789abcdef0123456789abcdef'
-const listed = async () => true
 
 describe('a replacement send’s ID', () => {
   it('is the same every time for the same message, and one the server takes', () => {
@@ -33,43 +32,39 @@ describe('a replacement send’s ID', () => {
 describe('sending again', () => {
   it('sends once, however many clicks come while it is on its way or after', async () => {
     const sent: string[] = []
-    let finish!: () => void
+    let finish!: (outcome: 'queued') => void
     const send = (id: string) => {
       sent.push(id)
-      return new Promise<void>((resolve) => (finish = resolve))
+      return new Promise<'queued'>((resolve) => (finish = resolve))
     }
-    const first = sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
-    void sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
-    void sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    const first = sendAgain('aaaaaaaaaaaaaaaa1', send)
+    void sendAgain('aaaaaaaaaaaaaaaa1', send)
+    void sendAgain('aaaaaaaaaaaaaaaa1', send)
     expect(sent).toEqual([replacementId('aaaaaaaaaaaaaaaa1')])
-    finish()
+    finish('queued')
     expect(await first).toBe('sent')
-    await sendAgain('aaaaaaaaaaaaaaaa1', send, listed)
+    await sendAgain('aaaaaaaaaaaaaaaa1', send)
     expect(sent).toHaveLength(1)
   })
 
   it('can be tried again after a failure, with the same ID', async () => {
     const sent: string[] = []
-    await sendAgain(
-      'bbbbbbbbbbbbbbbb1',
-      async (id) => {
-        sent.push(id)
-        throw new Error('offline')
-      },
-      listed,
-    )
-    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => void sent.push(id), listed)
+    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => {
+      sent.push(id)
+      throw new Error('offline')
+    })
+    await sendAgain('bbbbbbbbbbbbbbbb1', async (id) => {
+      sent.push(id)
+      return 'queued' as const
+    })
     expect(sent).toEqual([replacementId('bbbbbbbbbbbbbbbb1'), replacementId('bbbbbbbbbbbbbbbb1')])
   })
 
-  it('says so, rather than “Sent again”, when the server had the ID and no copy came', async () => {
-    expect(
-      await sendAgain(
-        'cccccccccccccccc1',
-        async () => undefined,
-        async () => false,
-      ),
-    ).toBe('used')
+  it('goes by what the server says, not by what the list shows, so leaving the chat changes nothing', async () => {
+    // The server had the ID already: nothing went this time.
+    expect(await sendAgain('cccccccccccccccc1', async () => 'sent' as const)).toBe('used')
+    expect(await sendAgain('cccccccccccccccc2', async () => 'scheduled' as const)).toBe('used')
+    expect(await sendAgain('cccccccccccccccc3', async () => 'queued' as const)).toBe('sent')
   })
 
   it('counts a replacement in the list as sent, from whichever tab sent it', () => {
