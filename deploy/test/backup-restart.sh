@@ -52,6 +52,7 @@ trioditis backup "$backups" >"$root/out" 2>&1 && status=0 || status=$?
 [ "$(state idle)" = exited ] && check ok "the stopped one stays stopped" || check fail "the stopped one stays stopped ($(state idle))"
 [ "$(runs)" = 1 ] && check ok "the finished one-shot job isn't run again" || check fail "the finished one-shot job isn't run again (ran $(runs) times)"
 
+
 # A step whose healthcheck fails for a while and then passes (a stub docker that reports
 # the first three healthy answers as unhealthy): the restart waits it out, and the next
 # step starts.
@@ -91,5 +92,12 @@ PATH="$root/stub:$PATH" "$root/deploy/trioditis" backup "$backups" >"$root/out" 
   check ok "a step not healthy in time stops the restart, naming it, and the backup fails" ||
   { check fail "a step not healthy in time stops the restart, naming it, and the backup fails"; cat "$root/out" >&2; }
 [ "$(state gateway)" = exited ] && check ok "the next step isn't started" || check fail "the next step isn't started ($(state gateway))"
+
+# --keep-stopped (the updater's): once the backup is made, the server is left stopped.
+trioditis up -d svc >/dev/null 2>&1
+trioditis backup --keep-stopped "$backups" >"$root/out" 2>&1 && status=0 || status=$?
+[ "$status" = 0 ] && [ "$(state svc)" = exited ] && grep -q "left stopped" "$root/out" &&
+  check ok "with --keep-stopped, the server is left stopped" ||
+  { check fail "with --keep-stopped, the server is left stopped ($(state svc))"; cat "$root/out" >&2; }
 
 finish

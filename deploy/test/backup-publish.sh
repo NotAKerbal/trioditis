@@ -82,6 +82,28 @@ decrypt "$backup/archive.enc" | docker run --rm --log-driver none -i --entrypoin
   check fail "the archive holds no key, and its manifest says when and which Postgres"
 [ "$(entries | wc -l)" = 1 ] && check ok "nothing else is left in the directory" || check fail "nothing else is left in the directory"
 
+# A destination inside the checkout is refused before anything is made there.
+trioditis backup "$root/deploy/not-here/backups" >"$root/out" 2>&1 && status=0 || status=$?
+[ "$status" != 0 ] && grep -q "Back up outside the checkout" "$root/out" && [ ! -e "$root/deploy/not-here" ] &&
+  check ok "a destination inside the checkout is refused before it's made" ||
+  { check fail "a destination inside the checkout is refused before it's made"; cat "$root/out" >&2; }
+
+# The settings in the clear, and the keys' values the last check looks for, never reach the
+# destination's filesystem: only encrypted files and backup.info are written there.
+if command -v strace >/dev/null; then
+  rm -rf "${backups:?}"/*
+  strace -f -e trace=openat,creat,rename,renameat,renameat2 -o "$root/strace" "$root/deploy/trioditis" backup "$backups" >"$root/out" 2>&1 || true
+  written=$(grep -E "\"$backups/[^\"]*\"" "$root/strace" | grep -E 'O_WRONLY|O_RDWR|O_CREAT|creat\(|rename' |
+    grep -oE "\"$backups/[^\"]*\"" | sed 's|.*/||; s|"$||' | sort -u | tr '\n' ' ')
+  case " $written " in
+    *" secrets.env "* | *" .patterns "*) check fail "nothing in the clear is written to the destination (wrote: $written)" ;;
+    *) check ok "nothing in the clear is written to the destination" ;;
+  esac
+  rm -rf "${backups:?}"/*
+else
+  echo "  skipped: strace isn't installed, so what reaches the destination isn't checked"
+fi
+
 # Every name it could take for the next two minutes is taken already: in turn by a file, a
 # directory, and a symlink (to a file outside).
 rm -rf "${backups:?}"/*
@@ -332,6 +354,11 @@ if [ -n "$part" ] && [ -n "$streaming" ]; then
   /bin/kill -s INT -- "-$(ps -o pgid= -p "$streaming" | tr -d ' ')"
   wait || true
   [ -z "$(entries)" ] && check ok "an interrupted backup leaves nothing" || check fail "an interrupted backup leaves nothing ($(entries))"
+  # Docker may still be removing it a moment after the backup has ended.
+  for _ in $(seq 30); do
+    [ -n "$(docker ps -aq --filter "name=^$project-backup")" ] || break
+    sleep 1
+  done
   [ -z "$(docker ps -aq --filter "name=^$project-backup")" ] &&
     check ok "its archive container is gone" || check fail "its archive container is gone"
 else

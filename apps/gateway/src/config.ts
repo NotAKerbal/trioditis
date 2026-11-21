@@ -41,6 +41,14 @@ function address(value: string | undefined, defaultPort: number) {
 }
 
 export function loadConfig(): Config {
+  // Set by deploy/trioditis restore until the installer has settled the restored backup's sends
+  // (docs/deploy.md, Restore): until then a send it holds as on its way may already have gone
+  // out, so the gateway doesn't start at all, however it was started.
+  if (process.env.TRIODITIS_RESTORE_PENDING) {
+    throw new Error(
+      "A restore's sends aren't settled yet, so the gateway won't start: run deploy/install/install.sh, which settles them first.",
+    )
+  }
   return {
     convexUrl: required('CONVEX_URL'),
     gatewaySecret: required('GATEWAY_SECRET'),

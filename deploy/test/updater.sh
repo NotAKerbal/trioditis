@@ -4,11 +4,13 @@
 # restores, and a stub docker that records the reports: it backs the server up first, and an
 # update whose backup fails installs nothing; it moves the checkout's local branch for the
 # channel forward to the channel's newest commit (so a later `git pull` works) and runs that
-# commit's installer; after a failed install it goes back to the commit it was on and restores
-# the backup from before the update (which installs that commit again), and says so, and if
-# that restore fails it installs the commit on its own and says the data wasn't put back; it
-# keeps only its newest backups; it leaves a checkout that's up to date, ahead of the channel
-# (saying which channel it's on), diverged from it, or has local changes where it is; each step
+# commit's installer, the backup having left the server stopped; after a failed install it goes
+# back to the commit it was on and restores the backup from before the update (which installs
+# that commit again), and says so, and if that restore fails it stops the server rather than run
+# the older code on the newer data, and says so; it keeps only its newest backups, in a
+# directory of its own, never one the operator put beside them; it leaves a checkout that's up to
+# date, ahead of the channel (saying which channel it's on, after a check, an update, or an hourly
+# look), diverged from it, or has local changes where it is; each step
 # reaches the admins as a report; and the release notes an update adds reach them too, before
 # it installs and once it has.
 set -eu
@@ -71,8 +73,11 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 lock=no
 if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
 case "$1" in
+  stop | start) echo "$1 lock=$lock" >>"$UPDATER_TEST_LOG.server" ;;
   backup)
-    echo "backup $2 lock=$lock" >>"$UPDATER_TEST_LOG.backups"
+    kept=started
+    [ "$2" != --keep-stopped ] || { kept=stopped; shift; }
+    echo "backup $2 $kept lock=$lock" >>"$UPDATER_TEST_LOG.backups"
     [ ! -e "$UPDATER_TEST_LOG.backup-fails" ] || { echo "The disk is full." >&2; echo "The backup failed." >&2; exit 1; }
     n=$(cat "$UPDATER_TEST_LOG.n" 2>/dev/null || echo 0)
     n=$((n + 1))
@@ -126,6 +131,7 @@ run() {
   : >"$work/reports"
   : >"$work/reports.installed"
   : >"$work/installs.backups"
+  : >"$work/installs.server"
   : >"$work/installs.restores"
   bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
@@ -156,8 +162,8 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
 [ "$(cat "$work/installs.how")" = "--no-setup-link lock=held" ] &&
   check ok "the installer runs holding the updater's lock, and prints no setup link" ||
   check fail "the installer runs holding the updater's lock, and prints no setup link ($(cat "$work/installs.how"))"
-[ "$(cat "$work/installs.backups")" = "backup $work/backups lock=held" ] &&
-  check ok "it backs the server up first, holding the lock" ||
+[ "$(cat "$work/installs.backups")" = "backup $work/backups/updater-backups stopped lock=held" ] &&
+  check ok "it backs the server up first, holding the lock, and leaves it stopped for the install" ||
   check fail "it backs the server up first, holding the lock ($(cat "$work/installs.backups"))"
 [ "$(git -C "$work/checkout" symbolic-ref --short HEAD)" = dev ] &&
   [ "$(git -C "$work/checkout" rev-parse --abbrev-ref dev@{upstream})" = origin/dev ] &&
@@ -175,10 +181,10 @@ git_ -C "$work/source" commit -qm 'Break the build'
 c3=$(git -C "$work/source" rev-parse HEAD)
 git_ -C "$work/source" push -q "$work/origin.git" dev
 run update nightly
-backup=$(find "$work/backups" -mindepth 1 -maxdepth 1 -type d | sort | tail -1)
+backup=$(find "$work/backups/updater-backups" -mindepth 1 -maxdepth 1 -type d | sort | tail -1)
 head_is "$c2" && [ "$(cat "$work/installs")" = "$(printf 'installed %s\ninstalled %s' "$c3" "$c2")" ] &&
   grep -q "^failed|The update to ${c3%"${c3#???????}"} failed: The build broke. The server is back on ${c2%"${c2#???????}"}.$" "$work/out" &&
-  [ "$(cat "$work/installs.restores")" = "restore --yes --recovery-dir $work/backups $backup at $c2 lock=held" ] &&
+  [ "$(cat "$work/installs.restores")" = "restore --yes --recovery-dir $work/backups/updater-backups $backup at $c2 lock=held" ] &&
   check ok "a failed install goes back to the commit it was on, restores the backup from before, and says why" ||
   check fail "a failed install goes back to the commit it was on, restores the backup from before, and says why ($(cat "$work/out" "$work/installs" "$work/installs.restores"))"
 state=$work/checkout/deploy/.updater-state
@@ -186,19 +192,23 @@ grep -qx "failed_target=$c3" "$state" && grep -qx 'pending_target=' "$state" &&
   check ok "the failed commit outlasts a restart, and nothing is left pending" ||
   check fail "the failed commit outlasts a restart, and nothing is left pending ($(cat "$state"))"
 
-# A restore that can't be done: the commit it was on is installed on its own, and the report
-# says the data wasn't put back.
+# A restore that can't be done: the older code never runs on the data the failed version may
+# have changed; the server is stopped, and the report says so.
 git_ -C "$work/checkout" checkout -q "$c2"
 rm -f "$state"
+# A backup of the operator's own beside the updater's, which it never removes.
+mkdir -p "$work/backups/trioditis-test-20250101-000000" && echo format=2 >"$work/backups/trioditis-test-20250101-000000/backup.info"
 touch "$work/installs.restore-fails"
 run update nightly
 rm -f "$work/installs.restore-fails"
-head_is "$c2" && [ "$(cat "$work/installs")" = "$(printf 'installed %s\ninstalled %s' "$c3" "$c2")" ] &&
-  grep -q "^failed|The update to .* failed: The build broke. The server is back on ${c2%"${c2#???????}"}, but restoring its backup failed (The backup is from another version.), so the data wasn't put back." "$work/out" &&
-  check ok "when the backup can't be restored, it installs the commit it was on and says the data wasn't put back" ||
-  check fail "when the backup can't be restored, it installs the commit it was on and says the data wasn't put back ($(cat "$work/out" "$work/installs"))"
-[ "$(find "$work/backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 3 ] &&
-  check ok "it keeps only its three newest backups" || check fail "it keeps only its three newest backups ($(ls "$work/backups"))"
+head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c3" ] && grep -qx 'stop lock=held' "$work/installs.server" &&
+  grep -q "^failed|The update to .* failed: The build broke. Going back to ${c2%"${c2#???????}"} failed too: restoring its backup failed (The backup is from another version.), so the server is stopped" "$work/out" &&
+  check ok "when the backup can't be restored, it stops the server rather than run the older code, and says so" ||
+  check fail "when the backup can't be restored, it stops the server rather than run the older code, and says so ($(cat "$work/out" "$work/installs" "$work/installs.server"))"
+[ "$(find "$work/backups/updater-backups" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 3 ] &&
+  [ -d "$work/backups/trioditis-test-20250101-000000" ] &&
+  check ok "it keeps only its three newest backups, in its own directory" ||
+  check fail "it keeps only its three newest backups, in its own directory ($(ls -R "$work/backups"))"
 
 # From c1, with dev at c3: a request cancelled before the update claimed it, and a lock held
 # by someone else, both leave the checkout where it is.
@@ -242,12 +252,12 @@ head_is "$c1" && [ "$(cat "$work/installs")" = "installed $c1" ] &&
 
 # Cut off with its backup taken: going back restores it, on the branch it was moving.
 git_ -C "$work/checkout" checkout -q --detach "$c2"
-saved="$work/backups/trioditis-test-20260109-000000"
+saved="$work/backups/updater-backups/trioditis-test-20260109-000000"
 mkdir -p "$saved" && echo format=2 >"$saved/backup.info"
 printf 'pending_target=%s\npending_previous=%s\npending_request=req6\npending_phase=install\npending_branch=dev\npending_backup=%s\n' "$c2" "$c1" "$saved" >"$state"
 run recover
 head_is "$c1" && [ "$(git -C "$work/checkout" symbolic-ref --short HEAD)" = dev ] &&
-  [ "$(cat "$work/installs.restores")" = "restore --yes --recovery-dir $work/backups $saved at $c1 lock=held" ] &&
+  [ "$(cat "$work/installs.restores")" = "restore --yes --recovery-dir $work/backups/updater-backups $saved at $c1 lock=held" ] &&
   grep -qx 'pending_backup=' "$state" &&
   check ok "an update cut off after its backup goes back by restoring it" ||
   check fail "an update cut off after its backup goes back by restoring it ($(cat "$work/out" "$work/installs.restores" "$state"))"
@@ -296,6 +306,9 @@ head_is "$c2" && grep -q "^idle|This server runs a newer version than Stable (ma
 run handle 'stable 0 - check'
 grep -q "^idle|This server runs a newer version than Stable (main), from Nightly (dev)" "$work/reports" &&
   check ok "a check says so too" || check fail "a check says so too ($(cat "$work/reports"))"
+run handle 'stable 0 - -'
+grep -q "^idle|This server runs a newer version than Stable (main), from Nightly (dev)" "$work/reports" &&
+  check ok "and so does the hourly look, with no one asking" || check fail "and so does the hourly look, with no one asking ($(cat "$work/reports"))"
 
 # Diverged: main gets a commit dev doesn't have.
 git_ -C "$work/source" checkout -q main

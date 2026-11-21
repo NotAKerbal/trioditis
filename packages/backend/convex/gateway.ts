@@ -659,7 +659,8 @@ const RESTORE_BATCH = 20
  * Restore). A backup is a moment in the past, and the server ran on after it, so a send the
  * backup holds as still on its way may have gone out since. None is sent again: each becomes
  * `unknown`, and the person decides. In order, one batch a call, until `phase` is null:
- * scheduled messages whose time has come by now become sends (and so `unknown`); queued and
+ * every scheduled message becomes a send (and so `unknown`), even one whose time is still to
+ * come, since one sent early with Send now after the backup can't be told apart; queued and
  * claimed commands expire as `unknown`; accepted ones are settled as `unknown`, as if overdue;
  * and a send the backend expired as `failed` when it started (its deadline came after
  * `backupAt`, so it may have gone in the meantime) is `unknown` too. Logins, logouts and new
@@ -673,14 +674,13 @@ export const settleAfterRestore = internalMutation({
   },
   returns: v.object({ phase: v.union(restorePhase, v.null()), cursor: v.union(v.string(), v.null()) }),
   handler: async (ctx, { backupAt, phase = 'scheduled', cursor = null }) => {
-    const now = Date.now()
     const next = (more: boolean, nextCursor: string | null) =>
       more
         ? { phase, cursor: nextCursor }
         : { phase: RESTORE_PHASES[RESTORE_PHASES.indexOf(phase) + 1] ?? null, cursor: null }
     if (phase === 'scheduled') {
       const page = await ctx.db.query('scheduledSends').paginate({ cursor, numItems: RESTORE_BATCH })
-      for (const row of page.page) if (row.state === 'scheduled' && row.sendAt <= now) await sendScheduled(ctx, row)
+      for (const row of page.page) if (row.state === 'scheduled') await sendScheduled(ctx, row)
       return next(!page.isDone, page.continueCursor)
     }
     if (phase === 'queued' || phase === 'claimed') {

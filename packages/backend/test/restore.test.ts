@@ -150,7 +150,7 @@ describe('settling after a restore', () => {
     expect(await delivery(t, 2)).toMatchObject({ copy: 'unknown', command: 'unknown' })
   })
 
-  it('makes a scheduled message whose time has come unknown, and leaves one still to come', async () => {
+  it('makes every scheduled message unknown, even one still to come, and none fires later', async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 })
     const { t, as, chatId } = await ready()
     for (const [n, ahead] of [
@@ -165,22 +165,20 @@ describe('settling after a restore', () => {
         sendAt: Date.now() + ahead,
       })
     }
-    // Restored after the first one's time, before the scheduler has run it.
+    // Restored after the first one's time, before the scheduler has run it. The second may have
+    // gone early with Send now after the backup, which nothing in the backup shows.
     vi.advanceTimersByTime(61_000)
     await settle(t, Date.now() - 120_000)
-    expect(await delivery(t, 7)).toMatchObject({ copy: 'unknown', command: 'unknown', state: 'expired' })
-    // Its job, when it runs, finds it already gone and sends nothing.
-    await t.finishInProgressScheduledFunctions()
+    for (const n of [7, 8]) {
+      expect(await delivery(t, n)).toMatchObject({ copy: 'unknown', command: 'unknown', state: 'expired' })
+    }
+    // Their jobs, when they run, find them already gone and send nothing.
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000)
+    await t.finishAllScheduledFunctions(vi.runAllTimers)
     await heartbeat(t)
     expect(await claim(t, 10)).toHaveLength(0)
-    const later = await t.run(
-      async (ctx) =>
-        await ctx.db
-          .query('scheduledSends')
-          .withIndex('by_clientMessageId', (q) => q.eq('userId', 'user_a').eq('clientMessageId', id(8)))
-          .first(),
-    )
-    expect(later?.state).toBe('scheduled')
+    const rows = await t.run(async (ctx) => await ctx.db.query('scheduledSends').collect())
+    expect(rows.map((row) => row.state)).toEqual(['sent', 'sent'])
   })
 
   it('works through more rows than one batch, and changes nothing when run again', async () => {

@@ -139,6 +139,9 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET}
       TRIODITIS_INTERNAL_TOKEN: ${TRIODITIS_INTERNAL_TOKEN}
       GATEWAY_INTERNAL_ADDR: 0.0.0.0:8601
+      # Set while a restore's sends aren't settled; the gateway then refuses to start
+      # (docs/deploy.md, Restore).
+      TRIODITIS_RESTORE_PENDING: ${RESTORE_PENDING:-}
       # The sign-in browser's viewers and people's encrypted files, through Caddy (/login-browser,
       # /media/*).
       GATEWAY_PUBLIC_ADDR: 0.0.0.0:8602

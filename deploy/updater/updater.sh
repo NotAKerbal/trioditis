@@ -55,7 +55,10 @@ load_settings() {
   # Where its backups go: UPDATE_BACKUP_DIR if the operator set one (an absolute path, checked
   # by the installer), else the operator's own state directory, outside the checkout.
   backup_dir=$(printf '%s\n' "$text" | env_value UPDATE_BACKUP_DIR)
-  backup_dir=${backup_dir:-${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}/.local/state/trioditis/$project/update-backups}
+  backup_dir=${backup_dir:-${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}/.local/state/trioditis/$project}
+  # Its own subdirectory, the only place it removes old backups from, so backups an operator keeps
+  # in UPDATE_BACKUP_DIR are never touched.
+  backup_dir=$backup_dir/updater-backups
 }
 
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
@@ -131,6 +134,7 @@ release_lock() { exec 9>&-; }
 outcome() {
   outcome_state=$1
   outcome_message=$2
+  outcome_note=0
 }
 
 describe_current() {
@@ -259,14 +263,16 @@ last_error() {
 }
 
 # take_backup: backs the server up with deploy/trioditis backup into $backup_dir, holding the
-# lock (which it's handed), and keeps the newest KEEP_BACKUPS of the backups there. Sets
-# `update_backup` to the new one, or `backup_error` to why there's none.
+# lock (which it's handed), and leaves it stopped (--keep-stopped), so nothing it does before the
+# new version is up and checked can be lost by going back to the backup; then keeps the newest
+# KEEP_BACKUPS of the backups there. Sets `update_backup` to the new one, or `backup_error` to
+# why there's none (and then the backup has started the server again).
 take_backup() {
   local output status old
   update_backup='' backup_error=''
   output=$(mktemp)
   log "Backing up the server to $backup_dir."
-  (umask 077 && mkdir -p "$backup_dir") && "$root/deploy/trioditis" backup "$backup_dir" >"$output" 2>&1
+  (umask 077 && mkdir -p "$backup_dir") && "$root/deploy/trioditis" backup --keep-stopped "$backup_dir" >"$output" 2>&1
   status=$?
   cat "$output" >&2
   if [ "$status" = 0 ]; then
@@ -308,6 +314,19 @@ position_note() {
     echo "This server is newer than $name, so there's nothing to install."
   else
     echo "This server runs commits $name doesn't have, so it stays where it is."
+  fi
+}
+
+# refresh CHANNEL: check_latest, then, whenever it got through, what the page should say about
+# where the server stands: why nothing installs when it's ahead of or off the channel (and which
+# channel it's on), and nothing more once it isn't, until something else happens.
+refresh() {
+  check_latest "$1" || return 1
+  if [ "$ahead" != 0 ]; then
+    outcome idle "$(position_note "$1")"
+    outcome_note=1
+  elif [ "${outcome_note:-0}" = 1 ]; then
+    outcome idle ''
   fi
 }
 
@@ -369,7 +388,13 @@ update() {
   fi
   pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=install
   pending_branch=$branch pending_backup=$update_backup
-  save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
+  if ! save_state; then
+    # The backup left the server stopped; with nothing installed, it starts again as it was.
+    "$root/deploy/trioditis" start >&2 || log "Couldn't start the server again."
+    release_lock
+    outcome failed "Couldn't save the updater's state on the server."
+    return
+  fi
   log "Updating from $previous to $target ($name)."
   finish_update
 }
@@ -405,18 +430,24 @@ finish_update() {
 
 # go_back COMMIT: back to the commit the update started from. With the backup taken before it,
 # the checkout goes there and the backup is restored (deploy/trioditis restore, which keeps a
-# copy of the failed state and runs the installer); if the restore can't be done, the installer
-# runs on its own, and `backup_note` says the data wasn't put back. On failure, `install_error`
-# says why.
+# copy of the failed state, checks the backup is from that commit, and runs the installer). The
+# failed version's migrations or database images may have changed the data, so the older code
+# never runs on it without that backup: if the backup is gone or can't be restored, the server
+# is stopped and left for the operator, and `install_error` says so. (An update from an updater
+# that took no backup goes back the old way, installing the commit.)
 go_back() {
   local output status
   backup_note=''
-  if [ -z "$pending_backup" ] || [ ! -f "$pending_backup/backup.info" ]; then
-    [ -z "$pending_backup" ] || backup_note="its backup was gone, so the data wasn't put back"
+  if [ -z "$pending_backup" ]; then
     run_install "$1" "$pending_branch"
     return
   fi
-  checkout "$1" "$pending_branch" || return 1
+  if [ ! -f "$pending_backup/backup.info" ]; then
+    stop_server
+    install_error="its backup, $pending_backup, is gone, so the server is stopped rather than run on data the failed version may have changed"
+    return 1
+  fi
+  checkout "$1" "$pending_branch" || { stop_server; return 1; }
   output=$(mktemp)
   log "Restoring the backup from before the update, $pending_backup."
   "$root/deploy/trioditis" restore --yes --recovery-dir "$backup_dir" "$pending_backup" >"$output" 2>&1
@@ -426,10 +457,17 @@ go_back() {
     rm -f "$output"
     return 0
   fi
-  backup_note="restoring its backup failed ($(last_error "$output")), so the data wasn't put back"
+  install_error="restoring its backup failed ($(last_error "$output")), so the server is stopped rather than run on data the failed version may have changed; restore $pending_backup by hand"
   rm -f "$output"
-  log "Restoring the backup failed; running the installer on its own."
-  run_install "$1" "$pending_branch"
+  stop_server
+  return 1
+}
+
+# stop_server: stops everything (the lock is handed on), so a server whose data can't be
+# vouched for takes no writes and sends nothing.
+stop_server() {
+  log "Stopping the server."
+  "$root/deploy/trioditis" stop >&2 || log "Couldn't stop the server."
 }
 
 # conclude RESULT: the update in progress is over (updated, back on the previous commit, or
@@ -456,7 +494,7 @@ report_done() {
       installed_from=$done_previous installed_to=$done_target
       installed_notes=$(release_notes "$done_previous" "$done_target")
       ;;
-    back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous${backup_note:+, but ${backup_note}}." ;;
+    back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
   if UPDATER_INSTALLED_FROM=$installed_from UPDATER_INSTALLED_TO=$installed_to \
@@ -569,21 +607,16 @@ handle() {
     update "$channel"
   elif [ "$kind" = check ]; then
     report checking
-    if ! check_latest "$channel"; then
-      outcome failed "Couldn't reach the repository to look for updates."
-    elif [ "$ahead" != 0 ]; then
-      # Nothing to install from this channel, and why, rather than a check that says nothing.
-      outcome idle "$(position_note "$channel")"
-    else
-      outcome idle ''
-    fi
+    outcome idle ''
+    refresh "$channel" || outcome failed "Couldn't reach the repository to look for updates."
+
   elif [ "$channel" != "$latest_channel" ] || [ $(($(date +%s) - last_fetch)) -ge "$FETCH_SECONDS" ]; then
-    check_latest "$channel" || true
+    refresh "$channel" || true
   fi
   if [ "$kind" != update ] && auto_due; then
     auto_day=$(date +%F)
     save_state
-    if check_latest "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
+    if refresh "$channel" && [ "$behind" != 0 ] && [ "$ahead" = 0 ] && [ "$latest" != "$failed_target" ]; then
       update "$channel" 1
     fi
   fi

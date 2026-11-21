@@ -404,13 +404,15 @@ What the updater does:
 2. Every hour, when asked, and when the channel changes, it fetches the channel's branch from
    the checkout's `origin` remote and compares its newest commit with the one the checkout
    is at.
-3. To update, it backs the server up first, with `deploy/trioditis backup` (see
-   [Backup and restore](#backup-and-restore)): the server stops for the backup and starts
-   again. If the backup fails, nothing is installed and the page says why. Its backups go in
+3. To update, it backs the server up first, with `deploy/trioditis backup --keep-stopped` (see
+   [Backup and restore](#backup-and-restore)): the server stops for the backup and stays
+   stopped until the new version starts, so nothing it does after the backup could be lost by
+   going back to it. If the backup fails, the server starts again, nothing is installed and the
+   page says why. Its backups go in an `updater-backups` directory of its own, inside
    `UPDATE_BACKUP_DIR` from `deploy/.env` if you set one (an absolute path, outside the
-   checkout), else `~/.local/state/trioditis/<project>/update-backups` of the operator's user;
-   it keeps the newest three there. They're encrypted like any backup, and need room: about
-   the size of the server's data each.
+   checkout), else inside `~/.local/state/trioditis/<project>` of the operator's user; it keeps
+   the newest three there, and never touches anything else in that directory. They're
+   encrypted like any backup, and need room: about the size of the server's data each.
 4. It moves the checkout's local branch for the channel (`main` or `dev`, following the
    remote's) to that commit, so the checkout stays one `git pull` works in, and runs the
    installer, the same as [Upgrade](#upgrade): every setting is kept, and only what changed
@@ -421,8 +423,8 @@ What the updater does:
 It only ever moves forward: it installs a commit only when the checkout is behind the branch
 and has nothing the branch lacks, so switching from Nightly to an older Stable leaves the
 server where it is until Stable passes it, and a branch that was rewritten or diverged is
-never installed. A server ahead of its channel says so on the page, and, when it's on the
-other channel's branch (as after installing from `dev` while admins have Stable), names that
+never installed. A server ahead of its channel says so on the page (after a check, an
+update, or the hourly look), and, when it's on the other channel's branch (as after installing from `dev` while admins have Stable), names that
 channel to choose. It won't move a checkout with changes to tracked files. It takes the
 install's lock before it moves the checkout and holds it until the installer is done (the
 installer it runs uses that lock rather than taking its own), so a backup or an install the
@@ -430,9 +432,10 @@ operator starts can't run in between; if one is already running, the update says
 doesn't start. If the installer fails, it checks out the commit it was on and restores the
 backup from before the update, data and settings (`deploy/trioditis restore`, which first keeps a
 backup of the failed state beside it and then runs the installer), since the failed version's
-migrations or database images may have changed the data in ways the older code can't read. If
-that restore can't be done, it runs the installer on its own and the report says the data
-wasn't put back. It reports both the failure and the way back; a commit whose update failed
+migrations or database images may have changed the data in ways the older code can't read. The
+older code never runs on that data otherwise: if the backup is gone or can't be restored, the
+updater stops the server and the report says so, for you to restore the backup by hand. It
+reports both the failure and the way back; a commit whose update failed
 isn't tried again automatically (Update now still tries it). The installer runs with `--no-setup-link`, since its
 output goes to the journal.
 
@@ -457,11 +460,17 @@ the operator's user (a deploy key or a credential helper).
 
 ### Updating live
 
-An update doesn't sign anyone out. The backup before it stops the server for as long as
-the backup takes, and starts again what was running; after that, it doesn't restart the whole
-server:
+An update doesn't sign anyone out, but it does stop the server: from the backup before it
+until the new version's functions and migrations have run. The installer then starts the
+gateway, Caddy and the sidecars, and the bridge hosts once the gateway is healthy, so a version
+whose functions or migrations fail never takes a write or sends anything. What's left is the
+installer's last checks, that the gateway, Caddy and the bridge hosts become healthy (up to 90
+seconds each): if one fails there, going back restores the backup, so what people did in those
+seconds is lost from the server, and a send that went out then comes back from the backup as
+never sent (the person still has the message they wrote; the network has it too). A manual
+upgrade with the installer starts in the same order, without the stop. Within a run, as before:
 
-- The Convex backend and Postgres keep running (their images are pinned, and move only when
+- On a manual upgrade, the Convex backend and Postgres keep running (their images are pinned, and move only when
   the bundle changes them). New functions are deployed into the running backend, and open
   pages get their results straight away.
 - The installer rebuilds the images and Compose recreates only the containers whose image
@@ -525,10 +534,12 @@ isn't); if one isn't healthy in time, it stops there, names it, and the backup c
 (`deploy/trioditis up -d` starts the rest). So there's
 either a whole backup at the name or none: an interrupted backup (Ctrl-C), even while the
 server is still stopping, leaves nothing behind, and if the server doesn't start again the
-backup counts as failed. The destination must be outside the checkout (symlinks resolved):
-image builds copy the checkout.
+backup counts as failed. The destination must be outside the checkout (symlinks resolved,
+before anything is made there): image builds copy the checkout.
 
-Both files are encrypted with `BACKUP_KEY`, a random key the installer makes into
+The settings are put together, checked and encrypted in a private directory in memory (the
+user's runtime directory, or `/dev/shm`), so the destination only ever gets the encrypted files
+and `backup.info`. Both files are encrypted with `BACKUP_KEY`, a random key the installer makes into
 `deploy/.env` (`deploy/scripts/backup-crypt.mjs`, run in the bundle's Node image with no
 network: AES-256-GCM in 64 KiB chunks under a key derived for each file, so a file that's
 damaged, cut short or reordered doesn't decrypt). The archive goes straight from the volumes
@@ -581,40 +592,49 @@ settings. It asks before it changes anything (`--yes` skips that). In order:
    version this checkout is at, whose schema wrote its data; if it isn't, the restore says which
    version to check out (`backup.info` names it too) and changes nothing. A backup from an older
    version this one descends from restores with `--from-older-version`, and the installer then
-   runs this version's migrations on it; a newer one never does. Then the whole archive is
-   decrypted and read: its manifest, every entry inside a volume it lists, and its Postgres
-   major version the one this bundle runs.
+   runs this version's migrations on it; a newer one never does. Each private key in
+   `deploy/.env` (or the key file) must be its public key's private half, derived to check. Then
+   the whole archive is decrypted and read: its manifest, every entry inside a volume it lists,
+   and its Postgres major version the one this bundle runs (read from the archived data for a
+   backup whose manifest doesn't say). Both files are bound to the backup's ID in `backup.info`,
+   so one backup's archive beside another's settings doesn't open, and the manifest must name
+   the same ID and version as the settings.
 2. **It stops the server and backs it up as it is**, with `deploy/trioditis backup`, beside the
    backup being restored (or in `--recovery-dir <dir>`), so the restore can be undone with
    `deploy/trioditis restore <that backup>`. If that backup fails, the server starts again and
    nothing has changed.
-3. **It replaces the data.** From here interrupts are held off. It writes
-   `deploy/.restore-settle`, empties every volume the backup has (making any that's missing) and
-   fills it from the archive, owners and modes as they were, and checks each against the
-   manifest's count of entries and bytes. If that fails partway, it puts the copy from step 2
-   back and starts the server as it was. Volumes the backup doesn't have (a network added
-   since) are left as they are.
+3. **It replaces the data.** From here interrupts are held off. First it closes the gate:
+   it writes `deploy/.restore-settle` and `RESTORE_PENDING` into `deploy/.env`, and removes the
+   gateway's container. Until the installer has settled the restored sends, `deploy/trioditis`
+   refuses `up`, `start`, `restart`, `run` and the like, and Compose hands the gateway
+   `RESTORE_PENDING`, which it refuses to start with, however it's started. Then it empties
+   every volume the backup has (making any that's missing), fills it from the archive, owners and
+   modes as they were, and checks each against the manifest's count of entries and bytes. If that
+   fails partway, it puts the copy from step 2 back and checks it the same way, and only then
+   opens the gate and starts the server as it was; if that fails too, the gate stays closed.
+   Volumes the backup doesn't have (a network added since) are left as they are.
 4. **It restores the settings**: the backup's, with this server's private keys and
    `BACKUP_KEY` (the backup has only the public halves, the same ones) and any setting you
    added by hand, which backups leave out.
 5. **It starts the server through the installer**, which builds this version's images and,
-   while `deploy/.restore-settle` is there, deploys the functions and settles the restored
-   sends before it starts the gateway (below), then checks everything is healthy. If the
-   installer fails, the data and settings are the backup's: fix the cause and run the installer
-   again, which settles before it starts anything that sends.
+   while the gate is closed, deploys the functions and settles the restored sends, then opens
+   it and starts the gateway (below), then checks everything is healthy. Its check that an
+   upgrade changing the database images has a backup doesn't apply: the data is the backup's.
+   If the installer fails, the data and settings are the backup's and the gate stays closed: fix
+   the cause and run the installer again, which settles before it starts anything that sends.
 
 **Sends in a backup are never sent twice.** The backup is a moment in the past, and the server
 ran on after it, so a send it holds as still on its way (queued, handed to the gateway, or
 accepted by a bridge host without an outcome) may have gone out since. Before the gateway
 starts, every such send becomes `unknown` (`gateway.settleAfterRestore`, through
 `deploy/scripts/settle-restore.mjs`): it isn't sent again, and the person sees it and decides,
-as with any send whose outcome isn't known (docs/PLAN.md, Reliability). So does a scheduled
-message whose time came after the backup, and a send the backend marked failed as it started
-because its deadline passed while the backup sat on disk (it may have gone out meanwhile).
-Logins, logouts and new chats waiting on such a command end as if it expired, and can be
-started again. Scheduled messages still to come stay scheduled; one sent early with **Send now**
-after the backup was taken can't be known about, and goes out again at its time unless
-cancelled.
+as with any send whose outcome isn't known (docs/PLAN.md, Reliability). So does every
+scheduled message, even one whose time is still to come, since one sent early with **Send now**
+after the backup can't be told apart: each shows in its chat as a send whose outcome isn't
+known, for the person to send again or discard, and none goes out on its own. So does a send
+the backend marked failed as it started because its deadline passed while the backup sat on
+disk (it may have gone out meanwhile). Logins, logouts and new chats waiting on such a command
+end as if it expired, and can be started again.
 
 What a restore can't bring back: anything that happened after the backup (messages that arrived
 since come in again only if the network sends its history again), and the networks' own view of
@@ -631,7 +651,9 @@ deploy/trioditis restore --keys ~/trioditis-server-keys.env <backup>
 ```
 
 With no install there, `--keys` brings the server's keys: each pair must be the one the backup
-is sealed to, and the file's `BACKUP_KEY` opens the backup. The restore writes `deploy/.env`
+is sealed to, and the file's `BACKUP_KEY` opens the backup. A checkout with no install can't
+stop or back up another checkout's server, so if the backup's project already has volumes or
+containers on this Docker, the restore refuses: restore from that install's own checkout. The restore writes `deploy/.env`
 from the backup's settings and those keys, restores the volumes, and runs the installer, which
 builds the images and starts the server. Then update from the app as usual.
 
@@ -727,19 +749,19 @@ and the bundle's Node image (pulled if missing), and `flock`; `restore.sh` also 
 `install-settings.sh` runs the installer against a stub `docker` and needs none of that,
 `updater.sh` a stub `docker` and git, and `backup-crypt.sh` only node.
 
-| Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backup-crypt.sh`     | What the backup encryption encrypts decrypts to the same bytes at every size around its chunk boundary; a file cut short, changed, or opened with another key fails; a `BACKUP_KEY` that isn't exactly a key is refused (needs node, not Docker)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `restore.sh`          | A restore refuses, changing nothing, without `--yes` and a terminal, with another `BACKUP_KEY`, another server's keys, a damaged archive, another version (an older one only with `--from-older-version`), or another Postgres major version; it restores every volume, owners and modes included, keeps the server's keys and hand-added settings, backs the server up first (and that copy restores it), and runs the installer holding the lock with the settle marker; a failing installer leaves the marker; volumes that don't match the manifest put the server back as it was; an older unencrypted backup restores; with no install, it restores with `--keys`                                                                                                                                                                                                                                               |
-| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, both encrypted with `BACKUP_KEY` and opening with it, and neither holds a key; one without a `BACKUP_KEY` is refused; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `backup-restart.sh`   | A backup starts again only the containers that were running: not a finished one-shot job a running service depends on, nor a stopped service                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `keys.sh`             | `keys export` writes the keys and `BACKUP_KEY` to a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `lock.sh`             | Nothing may come before the command (`-p`, `-f`, `--env-file`, `--project-directory`, `--dry-run`, an unknown option) and unknown commands are refused; `logs -f` passes; while the lock is held, `start`, `up`, `stop`, `create-admin` and `backup` are refused and `ps`, `config` and `logs` run; a command that can start a service is refused while `deploy/.env` has a setting out of its form (`LOGIN_BROWSER_MAX=lots`); `restore` with no install asks for the key file                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one; every network is bridged by default, but Telegram only with its credentials; `--networks` limits them and is kept, and an unknown one (`fake`) stops the installer; an install from before moves to every network and loses the fake network and `--e2e`; the updater is on by default in a git checkout with an `origin` remote, off (saying why) outside one, kept off once turned off, and `--updater` where it can't run stops the installer unchanged; a fresh install makes `BACKUP_KEY`; a symlinked `deploy/runtime` is refused before anything is made there; `LOGIN_BROWSER_MAX`, `DEBIAN_SNAPSHOT` and `UPDATE_BACKUP_DIR` out of their form stop it, unchanged |
-| `updater.sh`          | Against a throwaway git remote, a stub installer and a stub `deploy/trioditis`: the updater backs up first (and installs nothing if that fails), moves the channel's local branch to its newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, restores the backup from before, and reports the installer's error (and, if the restore fails, installs the commit on its own and says so); an update cut off after its backup goes back by restoring it; it keeps three backups; it leaves a checkout that's up to date, ahead of the channel (naming the channel it's on), diverged from it, or has local changes where it is                                                                                                                                                                                                                                 |
+| Test                  | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backup-crypt.sh`     | What the backup encryption encrypts decrypts to the same bytes at every size around its chunk boundary; a file cut short, changed, or opened with another key fails; a `BACKUP_KEY` that isn't exactly a key is refused (needs node, not Docker)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `restore.sh`          | A restore refuses, changing nothing, without `--yes` and a terminal, with another `BACKUP_KEY`, another server's keys, a damaged archive, another version (an older one only with `--from-older-version`), or another Postgres major version; it restores every volume, owners and modes included, keeps the server's keys and hand-added settings, backs the server up first (and that copy restores it), and runs the installer holding the lock with the settle marker; a failing installer leaves the gate closed, and while it is `up`, `start`, `restart` and `run` are refused and the gateway would get `RESTORE_PENDING`; one backup's archive beside another's settings, and a private key that isn't its public key's half, are refused; with no install, it won't overwrite a project another checkout has on this Docker; volumes that don't match the manifest put the server back as it was; an older unencrypted backup restores; with no install, it restores with `--keys` |
+| `backup-publish.sh`   | A cold backup works and starts nothing; it is a 0700 directory of 0600 files, both encrypted with `BACKUP_KEY` and opening with it, and neither holds a key; one without a `BACKUP_KEY` is refused; a name taken by a file, directory or symlink moves the backup to the next one; a rename that silently does nothing fails it; Ctrl-C while it streams leaves nothing behind; so does Ctrl-C after it reserved its name; a `deploy/.env` not in `NAME=value` form (which could hide a private key) is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `backup-restart.sh`   | A backup starts again only the containers that were running: not a finished one-shot job a running service depends on, nor a stopped service                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `keys.sh`             | `keys export` writes the keys and `BACKUP_KEY` to a new 0600 file, never over another or inside the checkout; `keys import` adds the private keys, and refuses a pair that isn't this server's or whose private key isn't the saved public key's half (mixed pairs); neither prints a key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `lock.sh`             | Nothing may come before the command (`-p`, `-f`, `--env-file`, `--project-directory`, `--dry-run`, an unknown option) and unknown commands are refused; `logs -f` passes; while the lock is held, `start`, `up`, `stop`, `create-admin` and `backup` are refused and `ps`, `config` and `logs` run; a command that can start a service is refused while `deploy/.env` has a setting out of its form (`LOGIN_BROWSER_MAX=lots`); `restore` with no install asks for the key file                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `env-source.sh`       | Exported variables, `COMPOSE_*` ones included, don't override `deploy/.env` for Compose, with several compose files saved                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `caddy-headers.sh`    | The backend is told the address Caddy saw, never one a client sent (on `/api/auth/*` and `/convex/http/*`); a trusted proxy's `X-Forwarded-For` is used, rightmost first, and an untrusted peer's is ignored; and, published as each mode publishes it, the client address in each mode, IPv6 included                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ports.sh`            | Only Caddy is published, for every combination of compose files, and no sidecar forwards to the backend's ports; the check catches a published backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `install-settings.sh` | An unreadable `deploy/.env` stops the installer unchanged; a symlinked `runtime/config.json` is replaced, not followed; Compose gets no exported value; half a key pair stops the installer, and only `--new-server-keys` makes a new one; every network is bridged by default, but Telegram only with its credentials; `--networks` limits them and is kept, and an unknown one (`fake`) stops the installer; an install from before moves to every network and loses the fake network and `--e2e`; the updater is on by default in a git checkout with an `origin` remote, off (saying why) outside one, kept off once turned off, and `--updater` where it can't run stops the installer unchanged; a fresh install makes `BACKUP_KEY`; a symlinked `deploy/runtime` is refused before anything is made there; `LOGIN_BROWSER_MAX`, `DEBIAN_SNAPSHOT` and `UPDATE_BACKUP_DIR` out of their form stop it, unchanged                                                                        |
+| `updater.sh`          | Against a throwaway git remote, a stub installer and a stub `deploy/trioditis`: the updater backs up first, leaving the server stopped (and installs nothing if that fails), moves the channel's local branch to its newest commit, installs it and reports it done; after a failed install it goes back to the commit it was on, restores the backup from before, and reports the installer's error (and, if the restore fails, stops the server rather than run the older code, and says so); an update cut off after its backup goes back by restoring it; it keeps three backups, in its own directory, never touching one the operator put beside them; the hourly look names the channel a server ahead of its own is on; it leaves a checkout that's up to date, ahead of the channel (naming the channel it's on), diverged from it, or has local changes where it is                                                                                                                |
 
 `TRIODITIS_WRAPPER=<path>` (or `TRIODITIS_INSTALLER=<path>` for `install-settings.sh`) runs
 a test against another version of `deploy/trioditis` (or `install.sh`).
