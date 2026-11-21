@@ -1,49 +1,24 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { useCancelledScheduled, useScheduled, useScheduledTexts, type Chat } from './chats.ts'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useCancelledIn, useScheduled, useScheduledTexts, type Chat } from './chats.ts'
 import { useContactProfiles } from './contacts.ts'
 import { useMessages, useReactions } from './messages.ts'
 import { warmList } from './warm-list.ts'
 
 /**
- * What an open chat shows from the server: its messages, their reactions, a group's senders and
- * its scheduled messages. The open pane and a chat fetched ahead (WarmChats) ask through this one
- * hook, so they ask the very same queries, and a chat fetched ahead opens from the cache.
+ * Fetches ahead what a chat's pane will ask for when it opens on that chat alone (chat-pane.tsx):
+ * its first page of messages, their reactions, a group's senders and its scheduled messages,
+ * with the very same arguments, so the pane finds them in the cache. A conversation of several
+ * chats asks for its other chats' pages too; this one's are here already.
  */
-export function useChatContent(chat: Chat, attempt = 0) {
-  const page = useMessages(chat.id, attempt)
-  const { messages } = page
-  // Deleted messages and pending copies have no reactions: leaving them out saves requests for
-  // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
-  const reacting = useMemo(() => messages.filter((m) => !m.deleted && !m.pending), [messages])
-  const reactions = useReactions(chat.id, reacting)
-  // Only a group's senders are shown, so only a group asks who they are.
+export function useWarmChat(chat: Chat) {
+  const { messages } = useMessages(chat.id)
+  useReactions(messages.filter((m) => !m.deleted && !m.pending))
   const group = chat.row.kind === 'group'
-  const senders = useContactProfiles(
-    chat.network,
-    group ? messages.flatMap((m) => (m.ghostId && !m.self ? [m.ghostId] : [])) : [],
-  )
+  useContactProfiles(chat.network, group ? messages.flatMap((m) => (m.ghostId && !m.self ? [m.ghostId] : [])) : [])
   const scheduledRows = useScheduled(chat.id)
-  const cancelledRows = useCancelledScheduled(chat.id)
-  // Only those still to go: a failed one's chat was gone, and the sidebar lists it to dismiss.
-  const pendingScheduled = useMemo(() => (scheduledRows ?? []).filter((s) => s.state !== 'failed'), [scheduledRows])
-  const scheduledIds = [...pendingScheduled, ...(cancelledRows ?? [])].map((s) => s._id)
-  const scheduledTexts = useScheduledTexts(scheduledIds)
-  return {
-    ...page,
-    serverReactions: reactions.reactions,
-    senders: senders.profiles,
-    pendingScheduled,
-    cancelledRows,
-    scheduledTexts,
-    /** Something shown alongside the messages is still on its way. */
-    extrasPending:
-      reactions.pending ||
-      senders.pending ||
-      scheduledRows === undefined ||
-      cancelledRows === undefined ||
-      // A copy that can't be opened or fetched is there too, as null; only one on its way is missing.
-      scheduledIds.some((id) => !scheduledTexts.has(id)),
-  }
+  const cancelledRows = useCancelledIn([chat.id])
+  const pending = (scheduledRows ?? []).filter((s) => s.state !== 'failed' && s.chatId === chat.id)
+  useScheduledTexts([...pending, ...(cancelledRows ?? [])].map((s) => s._id))
 }
 
 /** How long the messages wait, once they're here, for what's shown alongside them. */

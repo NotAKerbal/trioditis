@@ -2,7 +2,7 @@ import { api } from '@trioditis/backend/api'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { Component, type ReactNode } from 'react'
-import { useChatContent, useWarmChats } from '~/data/chat-content.ts'
+import { useWarmChat, useWarmChats } from '~/data/chat-content.ts'
 import type { Chat } from '~/data/chats.ts'
 import { useNetworkContacts, usePeople, usePeopleWarm } from '~/data/people.ts'
 
@@ -37,7 +37,7 @@ function WarmAddressBook() {
 
 function WarmChat({ chat }: { chat: Chat }) {
   useQuery({ ...convexQuery(api.chats.get, { chatId: chat.id }), retry: false })
-  useChatContent(chat)
+  useWarmChat(chat)
   return null
 }
 

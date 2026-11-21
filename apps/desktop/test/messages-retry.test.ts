@@ -22,18 +22,19 @@ async function render(attempt: number) {
   const Pane = () => (useMessages('chat1' as never, attempt), null)
   await act(async () => root.render(createElement(Pane)))
   await act(async () => root.unmount())
-  return new Set(asked.map((a) => `${a.hook}:${a.args === 'skip' ? 'skip' : 'chat'}`))
+  // Which hooks were given the chat: a conversation's empty page slots skip both.
+  return new Set(asked.flatMap((a) => (a.args === 'skip' ? [] : [a.hook])))
 }
 
 describe('a chat’s messages', () => {
   it('come from the cache at first', async () => {
-    expect(await render(0)).toEqual(new Set(['cached:chat', 'fresh:skip']))
+    expect(await render(0)).toEqual(new Set(['cached']))
   })
 
   // The cache would answer with the error it kept, and keep one more page to ask again on
   // every reconnect.
   it('are asked for outside the cache after a page couldn’t load', async () => {
-    expect(await render(1)).toEqual(new Set(['cached:skip', 'fresh:chat']))
-    expect(await render(4)).toEqual(new Set(['cached:skip', 'fresh:chat']))
+    expect(await render(1)).toEqual(new Set(['fresh']))
+    expect(await render(4)).toEqual(new Set(['fresh']))
   })
 })

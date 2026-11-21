@@ -66,3 +66,46 @@ export function useContactProfiles(
   }, [answers, session, network])
   return { profiles, pending }
 }
+
+/**
+ * Profiles of contacts on any networks, by `network/ghostId`: `useContacts` for each network, in
+ * one set of requests.
+ */
+export function useContactsAcross(contacts: readonly { network: Network; ghostId: string }[]) {
+  const session = useSession()
+  const byNetwork = new Map<Network, string[]>()
+  for (const c of contacts) byNetwork.set(c.network, [...(byNetwork.get(c.network) ?? []), c.ghostId])
+  const asked = [...byNetwork]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([network, ids]) => {
+      const sorted = [...new Set(ids)].sort()
+      const runs: { network: Network; ghostIds: string[] }[] = []
+      for (let i = 0; i < sorted.length; i += MAX_IDS_PER_REQUEST)
+        runs.push({ network, ghostIds: sorted.slice(i, i + MAX_IDS_PER_REQUEST) })
+      return runs
+    })
+  const { answers } = useQueries({
+    queries: asked.map((args) => convexQuery(api.contacts.get, args)),
+    combine: dataOf,
+  })
+  const networks = asked.map((a) => a.network).join()
+  return useMemo(() => {
+    const out = new Map<string, ContactPlaintext>()
+    answers.forEach((answer, i) => {
+      const network = networks.split(',')[i] as Network
+      for (const { ghostId, sealedProfile } of answer ?? []) {
+        const profile = openCached<ContactPlaintext>(
+          profileCache,
+          sealedProfile,
+          session.keyPair,
+          session.kid,
+          'contact',
+          session.userId,
+          ghostId,
+        )
+        if (profile) out.set(`${network}/${ghostId}`, profile)
+      }
+    })
+    return out
+  }, [answers, networks, session])
+}
