@@ -1158,12 +1158,17 @@ Matching happens on the device, since only it can open both sides (packages/core
   `/google-contacts.html`), reads `people.connections.list`, and imports the cards as a file's
   would (`cardFromGoogle`; each card's UID is `google:<resourceName>`, so reading the account again
   updates them). The token stays in the page's memory for that one import: the server never
-  sees it or the contacts. In a browser the sign-in is a popup, which answers its opener over a
+  sees it or the contacts. As with everything sealed (sealing.md, Goal and limits), this holds
+  for the app as the server serves it: an operator who changes the served page could read the
+  token, as they could read what the page opens. In a browser the sign-in is a popup, which answers its opener over a
   `BroadcastChannel`, by the state it asked with. The desktop app opens it in the system's
   browser, and `/google-contacts.html` hands the answer back as
   `trioditis://<server>/google-contacts#state=…&access_token=…`, which the app gives only to the
-  server that asked, with the same state. Without a client ID, People says how to export a vCard
-  file from Google and import it.
+  server that asked, with the same state. The app only asks where the system has it as the
+  scheme's handler; where it isn't (a development run, an AppImage without desktop integration),
+  and where there's no client ID, People says how to export a vCard file from Google and import
+  it. On Windows and Linux the system hands the link over in the app's launch arguments, which
+  other programs of the same user can read while it starts.
 - **Suggested links.** `suggestLinks` suggests a card for each contact on none that shares a
   phone number, email or username with it, or failing that has exactly the same name as one
   card. Numbers match with or without their country code (the shorter must end the longer;

@@ -17,7 +17,10 @@ const WAIT_MS = 10 * 60_000
 export const googleRedirectUri = (origin = window.location.origin) => `${origin}/google-contacts.html`
 
 export class GoogleSignInError extends Error {
-  /** `blocked` (the popup was), `access_denied` (the person said no), `timeout`, `superseded`, or Google's own code. */
+  /**
+   * `blocked` (the popup was), `access_denied` (the person said no), `timeout`, `superseded`,
+   * `unavailable` (a desktop app that can't be handed Google's answer), or Google's own code.
+   */
   readonly code: string
   constructor(code: string) {
     super(code)
@@ -87,6 +90,7 @@ export function googleSignInProblem(err: unknown): string | null {
   switch (err.code) {
     case 'access_denied':
     case 'superseded':
+    case 'unavailable':
       return null
     case 'blocked':
       return 'The Google sign-in window was blocked. Allow pop-ups for this site, then try again.'

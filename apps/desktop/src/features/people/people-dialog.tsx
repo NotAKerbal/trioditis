@@ -66,7 +66,7 @@ import { fromHandleField, toHandleField, type HandleField } from '~/features/peo
 import { emptyReport, importSummary, partlyImported } from '~/features/people/import-report.ts'
 import { usePage } from '~/features/people/paging.ts'
 import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId } from '~/data/google-contacts.ts'
-import { canSignInToGoogle, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
+import { canSignInToGoogle, GoogleSignInError, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
 import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
 import { Group, Loading } from '~/features/settings/layout.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -259,6 +259,7 @@ function People({
           return { cards, unreadablePhotos: await fetchGooglePhotos(cards) }
         }, 'There are no contacts in that Google account.'),
       (err: unknown) => {
+        if (err instanceof GoogleSignInError && err.code === 'unavailable') return setGoogleGuide(true)
         const problem = googleSignInProblem(err)
         if (problem) toast(problem)
       },

@@ -17,7 +17,8 @@
     location.replace(`trioditis://${location.host}/google-contacts#${reply}`)
   } else if (/^w[A-Za-z0-9_-]{16,128}$/.test(state)) {
     const channel = new BroadcastChannel('trioditis-google-contacts')
-    channel.postMessage(Object.fromEntries(reply.entries()))
+    // The same fields the listener reads (src/lib/google-sign-in.ts, GoogleAnswer).
+    channel.postMessage(token ? { state, accessToken: token } : { state, error: reply.get('error') })
     channel.close()
     status.textContent = 'You can close this window.'
     // A moment for the message to go before the window does.

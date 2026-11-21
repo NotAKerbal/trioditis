@@ -544,6 +544,10 @@ ipcMain.handle('desktop:google-sign-in', (event, target: unknown) => {
   const origin = serverOrigin!
   const state = googleSignInState(target, origin)
   if (!state) return { error: 'refused' }
+  // Google's answer comes back as a trioditis:// link, which only reaches an app the system
+  // has as the scheme's handler: not a development run, or an AppImage run without desktop
+  // integration. The page then shows how to import a file instead of waiting on nothing.
+  if (!app.isDefaultProtocolClient(PROTOCOL)) return { error: 'unavailable' }
   // A newer sign-in replaces one still waiting: the person closed that browser tab, say.
   googleWaiting?.finish({ error: 'superseded' })
   return new Promise<{ accessToken?: string; error?: string }>((resolve) => {

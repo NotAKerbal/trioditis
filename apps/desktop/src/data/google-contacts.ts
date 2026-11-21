@@ -83,7 +83,13 @@ export async function fetchGooglePhotos(cards: PersonPlaintext[], signal?: Abort
   const next = async () => {
     for (let card = waiting.shift(); card; card = waiting.shift()) {
       try {
-        const response = await fetch(card.photo!, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' })
+        // Never cached: the browser would keep the picture on disk, unsealed.
+        const response = await fetch(card.photo!, {
+          signal,
+          cache: 'no-store',
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+        })
         if (!response.ok) throw new Error(String(response.status))
         card.photo = await dataUrl(await response.blob())
       } catch {
