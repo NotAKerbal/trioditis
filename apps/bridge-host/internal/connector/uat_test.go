@@ -323,6 +323,37 @@ func TestALateCancelledLoginLeavesARetryConnected(t *testing.T) {
 	}
 }
 
+// Signed in, then disconnected: the login that first connected the account no longer speaks
+// for it, so a cancelled re-pair of the same account that completes late is logged out.
+func TestADisconnectedAccountsCancelledRepairIsLoggedOut(t *testing.T) {
+	var loggedOut []*bridgev2.UserLogin
+	old := logoutDiscarded
+	logoutDiscarded = func(_ context.Context, login *bridgev2.UserLogin) { loggedOut = append(loggedOut, login) }
+	t.Cleanup(func() { logoutDiscarded = old })
+	account := &bridgev2.UserLogin{}
+	completes := &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete, StepID: "done",
+		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: "15551234567", UserLogin: account}}
+	c := testConnector(t)
+	c.Opaque = ids.NewOpaquer([]byte("test id key"))
+	startedSession(c, "signin").advance(completes, nil)
+	if err := c.SendBridgeStatus(context.Background(), &status.BridgeState{
+		StateEvent: status.StateLoggedOut, RemoteID: "15551234567", UserID: ids.UserMXID("alice"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repair := startedSession(c, "repair")
+	if err := c.handleLoginCancel(context.Background(), &protocol.Command{Type: protocol.CommandLoginCancel, UserID: "alice", LoginSessionID: "repair"}, false); err != nil {
+		t.Fatal(err)
+	}
+	repair.advance(completes, nil)
+	if len(loggedOut) != 1 {
+		t.Fatalf("the cancelled re-pair's account must be logged out; %d logouts", len(loggedOut))
+	}
+	if kept, err := c.Store.Discarded(context.Background()); err != nil || len(kept) != 0 {
+		t.Fatalf("decided, but still kept: %v %v", kept, err)
+	}
+}
+
 // A QR or pairing code says when to stop showing it, and the host moves that on while the
 // code is still the login's step, so a code from a host that went down disappears.
 func TestALoginCodeExpiresUnlessKeptUp(t *testing.T) {

@@ -147,7 +147,7 @@ func (c *Connector) Start(ctx context.Context) error { return c.RecoverInflight(
 // so without that a message whose second part failed would never get it; the parts already
 // journaled come again with the same event IDs and are applied once.
 func (c *Connector) remoteEventDone(evt bridgev2.RemoteEvent, res bridgev2.EventHandlingResult) {
-	messages, watched := handled.Finished(evt, res.Success)
+	messages, watched := handled.Messages(evt)
 	if !watched {
 		return
 	}
@@ -155,11 +155,39 @@ func (c *Connector) remoteEventDone(evt bridgev2.RemoteEvent, res bridgev2.Event
 	if c.Bridge != nil && c.Bridge.BackgroundCtx != nil {
 		ctx = context.WithoutCancel(c.Bridge.BackgroundCtx)
 	}
+	succeeded := res.Success
+	// Settled before the outcome is reported: the handler acknowledges on it, and a record
+	// left after the acknowledgement would have the next start undo a message the network
+	// won't send again. One that can't be cleared is reported failed instead.
 	for _, m := range messages {
 		if err := c.settleInflight(ctx, store.InflightMessage{Receiver: m.Receiver, MessageID: m.ID}, !res.Success); err != nil {
 			c.Log.Err(err).Msg("Settling a bridged message failed; it is settled at the next start")
+			succeeded = false
 		}
 	}
+	// A redelivery bridgev2 took for a duplicate of a message another attempt is still
+	// bridging (its parts in flight) is refused, so the network sends it again later, rather
+	// than acknowledged while that attempt may yet fail and undo its parts.
+	if succeeded && res.Ignored && len(messages) == 0 {
+		if m, ok := remoteMessage(evt); ok {
+			inflight, err := c.Store.IsInflight(ctx, m)
+			if err != nil || inflight {
+				succeeded = false
+			}
+		}
+	}
+	handled.Finished(evt, succeeded)
+}
+
+// remoteMessage names the message a remote event brings, if it brings one.
+func remoteMessage(evt bridgev2.RemoteEvent) (store.InflightMessage, bool) {
+	switch evt.GetType() {
+	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventMessageUpsert:
+		if msg, ok := evt.(bridgev2.RemoteMessage); ok {
+			return store.InflightMessage{Receiver: string(evt.GetPortalKey().Receiver), MessageID: string(msg.GetID())}, true
+		}
+	}
+	return store.InflightMessage{}, false
 }
 
 // settleInflight ends a message's in-flight record, first forgetting its saved parts if undo.
@@ -312,6 +340,9 @@ func (c *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeSt
 		mapped, code = "UNKNOWN_ERROR", protocol.ErrInternal
 	case status.StateLoggedOut:
 		mapped = "LOGGED_OUT"
+		// The login that connected it is no longer what the account is: a cancelled re-pair of it
+		// later is logged out as any new account would be (settleDiscarded).
+		c.connectedBy.Delete(networkid.UserLoginID(state.RemoteID))
 	default:
 		return nil
 	}

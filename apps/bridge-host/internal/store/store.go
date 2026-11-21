@@ -115,6 +115,14 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_inflight (receiver TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (receiver, message_id))`,
 		})
 	}).
+	WithRaw(6, 7, 0, "Cancelled logins' accounts waiting to be logged out", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// An account a cancelled login connected, kept while another login of the person's
+		// could be the one they meant, until that settles (connector, settleDiscarded). Kept
+		// here so a restart in between doesn't leave it connected.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_discarded (session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, login_id TEXT NOT NULL)`,
+		})
+	}).
 	Finish()
 
 // InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
@@ -130,6 +138,47 @@ func (s *Store) PutInflight(ctx context.Context, m InflightMessage) error {
 func (s *Store) DeleteInflight(ctx context.Context, m InflightMessage) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID)
 	return err
+}
+
+// IsInflight reports whether a message's parts are being bridged.
+func (s *Store) IsInflight(ctx context.Context, m InflightMessage) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_inflight WHERE receiver=$1 AND message_id=$2`, m.Receiver, m.MessageID).Scan(&n)
+	return n > 0, err
+}
+
+// DiscardedLogin is an account a cancelled login connected, waiting to be logged out until no
+// other login of the person's could be the one they kept.
+type DiscardedLogin struct{ SessionID, UserID, LoginID string }
+
+// PutDiscarded keeps a decision put off, so a restart doesn't strand the account connected.
+func (s *Store) PutDiscarded(ctx context.Context, d DiscardedLogin) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO trioditis_discarded (session_id, user_id, login_id) VALUES ($1, $2, $3) ON CONFLICT (session_id) DO NOTHING`, d.SessionID, d.UserID, d.LoginID)
+	return err
+}
+
+// DeleteDiscarded forgets a decision once made.
+func (s *Store) DeleteDiscarded(ctx context.Context, sessionID string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_discarded WHERE session_id=$1`, sessionID)
+	return err
+}
+
+// Discarded lists the decisions still put off.
+func (s *Store) Discarded(ctx context.Context) ([]DiscardedLogin, error) {
+	rows, err := s.DB.Query(ctx, `SELECT session_id, user_id, login_id FROM trioditis_discarded`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DiscardedLogin
+	for rows.Next() {
+		var d DiscardedLogin
+		if err = rows.Scan(&d.SessionID, &d.UserID, &d.LoginID); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // Inflight lists the messages whose handling hadn't ended when the host last stopped.
