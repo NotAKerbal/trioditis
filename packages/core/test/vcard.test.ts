@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseContactsCsv, parseContactsFile, parseVCards, toVCards } from '../src/index.ts'
+import { MAX_IMPORT_CARDS, parseContactsCsv, parseContactsFile, parseVCards, toVCards } from '../src/index.ts'
 
 describe('vCard', () => {
   it('reads an iPhone export: groups, Apple labels, folded lines, photos and no-year birthdays', () => {
@@ -226,5 +226,34 @@ describe('CSV', () => {
         emails: [{ value: 'bob@example.com' }],
       },
     ])
+  })
+})
+
+describe('telling files apart', () => {
+  it('reads a CSV whose first note says BEGIN:VCARD as a CSV', () => {
+    const csv = ['Name,Notes,Phone 1 - Value', 'Ann,"BEGIN:VCARD pasted here",+15551234567'].join('\n')
+    expect(parseContactsFile(csv)).toEqual([
+      { name: 'Ann', note: 'BEGIN:VCARD pasted here', phones: [{ value: '+15551234567' }] },
+    ])
+  })
+
+  it('reads a vCard file after a byte-order mark and blank lines', () => {
+    expect(parseContactsFile('\uFEFF\r\n\r\nBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ann\r\nEND:VCARD\r\n')).toEqual([
+      { name: 'Ann' },
+    ])
+  })
+})
+
+describe('large files', () => {
+  it('reads every card, past the address book’s limit, so the import can say how many are over', () => {
+    const count = MAX_IMPORT_CARDS + 1
+    const vcf = Array.from({ length: count }, (_, i) => `BEGIN:VCARD\nFN:P${i}\nEND:VCARD`).join('\n')
+    expect(parseVCards(vcf)).toHaveLength(count)
+    const csv = ['Name', ...Array.from({ length: count }, (_, i) => `P${i}`)].join('\n')
+    expect(parseContactsCsv(csv)).toHaveLength(count)
+  })
+
+  it('reads a CSV’s UID column, so importing it again updates the same cards', () => {
+    expect(parseContactsCsv('Name,UID\nAnn,abc-1')).toEqual([{ name: 'Ann', uid: 'abc-1' }])
   })
 })

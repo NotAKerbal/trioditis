@@ -3,9 +3,11 @@ import {
   cardFromContacts,
   groupUnlinked,
   moveLinks,
+  normalPhone,
   parseIdentifier,
   planImport,
   samePhone,
+  startIdentifier,
   suggestLinks,
   type NetworkContact,
   type Person,
@@ -181,5 +183,132 @@ describe('importing again', () => {
     const plan = planImport([], [{ name: 'X', uid: 'u2' }, { name: 'X2', uid: 'u2' }, { name: 'Y' }], newKey)
     expect(plan.map((p) => p.card.name)).toEqual(['X2', 'Y'])
     expect(new Set(plan.map((p) => p.personKey)).size).toBe(2)
+  })
+})
+
+describe('reimporting a file without UIDs', () => {
+  const newKey = (i: number) => `new-card-key-${String(i).padStart(4, '0')}`
+  const rows = [
+    { name: 'Ann Lee', phones: [{ value: '+1 555 123 4567' }] },
+    { name: 'Bob Stone', emails: [{ value: 'bob@example.com' }] },
+    { name: 'Just A Name' },
+  ]
+
+  it('updates the cards the first import made instead of adding everyone again', () => {
+    const first = planImport([], rows, newKey)
+    expect(first).toHaveLength(3)
+    // Same people, edited a little in the address book they came from.
+    const again = planImport(first, [{ ...rows[0]!, org: 'Acme' }, rows[1]!, rows[2]!], (i) => `other-key-${i}-0000000`)
+    expect(again).toEqual([{ personKey: first[0]!.personKey, card: { ...rows[0]!, org: 'Acme' } }])
+  })
+
+  it('matches by number written another way, and keeps the card’s UID and links', () => {
+    const existing: Person = {
+      personKey: 'person-ann-0000000',
+      card: {
+        name: 'ann lee',
+        phones: [{ value: 'tel:+15551234567' }],
+        uid: 'vcf-1',
+        links: [{ network: 'signal', ghostId: 'g1' }],
+      },
+    }
+    const plan = planImport(
+      [existing],
+      [{ name: 'Ann Lee', phones: [{ value: '+1 (555) 123-4567' }], note: 'hi' }],
+      newKey,
+    )
+    expect(plan).toEqual([
+      {
+        personKey: existing.personKey,
+        card: {
+          name: 'Ann Lee',
+          phones: [{ value: '+1 (555) 123-4567' }],
+          note: 'hi',
+          uid: 'vcf-1',
+          links: existing.card.links,
+        },
+      },
+    ])
+  })
+
+  it('keeps apart people who only share a name, and cards with their own different UIDs', () => {
+    const existing: Person[] = [
+      { personKey: 'person-ann-0000000', card: { name: 'Ann Lee', phones: [{ value: '+15551234567' }] } },
+      { personKey: 'person-bob-0000000', card: { name: 'Bob', uid: 'a', emails: [{ value: 'b@x.co' }] } },
+    ]
+    const plan = planImport(
+      existing,
+      [
+        { name: 'Ann Lee', phones: [{ value: '+15559999999' }] },
+        { name: 'Bob', uid: 'b', emails: [{ value: 'b@x.co' }] },
+      ],
+      newKey,
+    )
+    expect(plan.map((p) => p.personKey)).toEqual([newKey(0), newKey(1)])
+  })
+
+  it('matches each card once, so two rows that are the same make two cards again', () => {
+    const first = planImport([], [rows[2]!, rows[2]!], newKey)
+    expect(first).toHaveLength(2)
+    expect(planImport(first, [rows[2]!, rows[2]!], (i) => `other-key-${i}-0000000`)).toEqual([])
+  })
+
+  it('doesn’t match a card this same import made', () => {
+    const first = planImport([], [rows[2]!, rows[2]!], newKey)
+    // The first call wrote one; working the rest out again mustn't fold the second into it.
+    const again = planImport(
+      [first[0]!],
+      [rows[2]!],
+      () => newKey(1),
+      undefined,
+      (k) => k !== first[0]!.personKey,
+    )
+    expect(again.map((p) => p.personKey)).toEqual([newKey(1)])
+  })
+})
+
+describe('typed phone numbers', () => {
+  it('puts the ways people write numbers in one shape', () => {
+    expect(normalPhone('+1 (555) 123-4567')).toBe('+15551234567')
+    expect(normalPhone('(555) 123-4567')).toBe('5551234567')
+    expect(normalPhone('555.123.4567')).toBe('5551234567')
+    expect(normalPhone('tel:+1-555-123-4567')).toBe('+15551234567')
+    expect(normalPhone('0044 7700 900123')).toBe('+447700900123')
+    expect(normalPhone('+44 (0)20 7946 0958')).toBe('+442079460958')
+    expect(normalPhone('+1\u00a0555\u2013123\u20134567')).toBe('+15551234567')
+    expect(normalPhone('+1 555 123 4567 ext. 89')).toBe('+15551234567')
+    expect(normalPhone('020 7946 0958')).toBe('02079460958')
+  })
+
+  it('isn’t fooled by what isn’t a number', () => {
+    expect(normalPhone('1-800-FLOWERS')).toBeNull()
+    expect(normalPhone('12345')).toBeNull()
+    expect(normalPhone('+1234567890123456')).toBeNull()
+    expect(normalPhone('alice')).toBeNull()
+  })
+
+  it('says why a chat can’t start from it, instead of sending it', () => {
+    const both = { phone: true, username: true }
+    expect(startIdentifier('(555) 123-4567', 'whatsapp', { phone: true, username: false })).toEqual({
+      identifier: '5551234567',
+    })
+    expect(startIdentifier('(555) 123-4567', 'signal', both)).toEqual({ problem: 'needs_country_code' })
+    expect(startIdentifier('+1 (555) 123-4567', 'signal', both)).toEqual({ identifier: '+15551234567' })
+    expect(startIdentifier('@alice.01', 'signal', both)).toEqual({ identifier: 'alice.01' })
+    expect(startIdentifier('alice', 'whatsapp', { phone: true, username: false })).toEqual({ problem: 'phone_only' })
+    expect(startIdentifier('+15551234567', 'twitter', { phone: false, username: true })).toEqual({
+      problem: 'username_only',
+    })
+    expect(startIdentifier('555-12', 'whatsapp', { phone: true, username: false })).toEqual({ problem: 'not_a_number' })
+    // X usernames can be digits alone.
+    expect(startIdentifier('12345', 'twitter', { phone: false, username: true })).toEqual({ identifier: '12345' })
+  })
+
+  it('gives the bridge host only what its phone pattern takes', () => {
+    // apps/bridge-host/internal/connector/commands.go, phonePattern.
+    const goPattern = /^\+?[0-9][0-9 ().-]{5,}[0-9]$/
+    for (const raw of ['(555) 123-4567', 'tel:+1 555 123 4567', '0044 7700 900123', '+44 (0)20 7946 0958']) {
+      expect(normalPhone(raw)).toMatch(goPattern)
+    }
   })
 })
