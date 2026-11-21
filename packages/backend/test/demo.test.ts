@@ -101,7 +101,10 @@ describe('demo data', () => {
       }).name,
     ).toBeTruthy()
     // A direct chat says who it's with, sealed with the rest, as a bridge host's does.
-    for (const dm of chats.filter((c) => c.kind === 'dm')) {
+    const dms = chats.filter((c) => c.kind === 'dm')
+    // Every chat but the two groups, so the check below can't pass by finding none.
+    expect(dms).toHaveLength(7)
+    for (const dm of dms) {
       const meta = openJson<{ dmGhostId?: string }>(dm.sealedMeta!, identity, {
         kind: 'chat',
         ownerUserId: 'demo_user',
