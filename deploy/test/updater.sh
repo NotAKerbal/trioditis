@@ -73,7 +73,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 lock=no
 if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
 case "$1" in
-  stop | start) echo "$1 lock=$lock" >>"$UPDATER_TEST_LOG.server" ;;
+  stop | start)
+    echo "$1 lock=$lock" >>"$UPDATER_TEST_LOG.server"
+    [ "$1" != start ] || [ ! -e "$UPDATER_TEST_LOG.start-fails" ]
+    ;;
   backup)
     kept=started
     [ "$2" != --keep-stopped ] || { kept=stopped; shift; }
@@ -221,10 +224,22 @@ touch "$work/installs.restore-fails" "$work/reports.still-running"
 run update nightly
 rm -f "$work/installs.restore-fails" "$work/reports.still-running"
 grep -qx 'pending_phase=rollback' "$state" && grep -qx "pending_target=$c3" "$state" && grep -qx 'done_result=' "$state" &&
-  grep -q "couldn't be confirmed stopped" "$work/reports" &&
-  check ok "a server that can't be confirmed stopped keeps the update in progress, to try again" ||
+  grep -q "^updating|Going back to .*couldn't be confirmed stopped" "$work/reports" &&
+  check ok "a server that can't be confirmed stopped keeps the update in progress, reported as updating, to try again" ||
   check fail "a server that can't be confirmed stopped keeps the update in progress, to try again ($(cat "$state" "$work/reports"))"
 rm -f "$state"
+
+# Cut off while backing up, and the server won't start again: the backup phase is kept, still
+# reported as updating, for the next start to try again.
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+printf 'pending_target=%s\npending_previous=%s\npending_request=req4\npending_phase=backup\n' "$c3" "$c2" >"$state"
+touch "$work/installs.start-fails"
+run recover
+rm -f "$work/installs.start-fails"
+grep -qx 'pending_phase=backup' "$state" && grep -qx "pending_target=$c3" "$state" && ! grep -q '^done_result=.' "$state" &&
+  grep -q "^updating|Starting the server again" "$work/reports" && grep -qx 'start lock=held' "$work/installs.server" &&
+  check ok "when the server won't start after a cut-off backup, the backup phase is kept, reported as updating" ||
+  check fail "when the server won't start after a cut-off backup, the backup phase is kept, reported as updating ($(cat "$state" "$work/reports"))"
 
 # Cut off while backing up (the server may be stopped, nothing installed): the next start starts
 # it again, reports the request done, and doesn't count the target as failed.

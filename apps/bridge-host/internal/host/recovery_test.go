@@ -63,10 +63,12 @@ func TestAcknowledgedCommandRunsAfterRestart(t *testing.T) {
 	gw.waitFor(t, "stored send sent", hasStatus("cm-stored", protocol.StatusSent))
 }
 
-// After a restore from a backup (the restore's marker in the data directory), a send the
+func withRestoreID(id string) hostOption { return func(c *Config) { c.RestoreID = id } }
+
+// After a restore from a backup (a RESTORE_ID this database hasn't settled), a send the
 // restored queue holds may have gone out from the original server since: it is settled as
-// unknown and never run, queued or started, and the marker goes once that's recorded. The next
-// start, with no marker, runs the queue as usual.
+// unknown and never run, queued or started, and the ID is recorded. The next start with the
+// same ID runs the queue as after any restart; so does one with no ID.
 func TestRestoredQueueIsSettledNotRun(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
@@ -74,7 +76,7 @@ func TestRestoredQueueIsSettledNotRun(t *testing.T) {
 	loginID, portalID := setUpChat(t, h, "chat", "hello")
 	h.host.Stop()
 
-	h2 := buildHost(t, dir, gw)
+	h2 := buildHost(t, dir, gw, withRestoreID("restore-1"))
 	ctx := context.Background()
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
@@ -89,22 +91,18 @@ func TestRestoredQueueIsSettledNotRun(t *testing.T) {
 	if err := h2.host.Store.SetCommandState(ctx, started.CommandID, store.CommandStarted); err != nil {
 		t.Fatal(err)
 	}
-	marker := dir + "/" + RestoreMarker
-	if err := os.WriteFile(marker, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	if err := h2.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	gw.waitFor(t, "restored queued send unknown", hasStatus("cm-restored-queued", protocol.StatusUnknown))
 	gw.waitFor(t, "restored started send unknown", hasStatus("cm-restored-started", protocol.StatusUnknown))
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("the restore marker is still there (%v)", err)
+	if id, err := h2.host.Store.SettledRestore(ctx); err != nil || id != "restore-1" {
+		t.Fatalf("the restore wasn't recorded as settled (%q, %v)", id, err)
 	}
 	h2.host.Stop()
 
-	// No marker: the queue runs again, as after any restart.
-	h3 := buildHost(t, dir, gw)
+	// The same restore, already settled: the queue runs again, as after any restart.
+	h3 := buildHost(t, dir, gw, withRestoreID("restore-1"))
 	if err := h3.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}

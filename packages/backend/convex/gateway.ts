@@ -256,7 +256,7 @@ async function markCopy(ctx: MutationCtx, command: Doc<'outbox'>, delivery: 'fai
  * step the login has moved past changes nothing. A cancel that never arrived still cancels
  * here, as the person asked.
  */
-async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
+async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>, settleCancelled = true) {
   const { payload } = command
   if (payload.type !== 'loginStart' && payload.type !== 'loginSubmit' && payload.type !== 'loginCancel') return
   const sessionId = ctx.db.normalizeId('loginSessions', payload.loginSessionId)
@@ -265,7 +265,7 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
   const now = Date.now()
   if (payload.type === 'loginCancel') {
     await ctx.db.patch(session._id, { state: 'cancelled', updatedAt: now })
-    await settleCancelledLogins(ctx, session.userId, session.network)
+    if (settleCancelled) await settleCancelledLogins(ctx, session.userId, session.network)
     return
   }
   const waitingOnIt =
@@ -278,7 +278,7 @@ async function expireLogin(ctx: MutationCtx, command: Doc<'outbox'>) {
     step: { stepId: 'expired', type: 'error', error: 'expired' },
     updatedAt: now,
   })
-  await settleCancelledLogins(ctx, session.userId, session.network)
+  if (settleCancelled) await settleCancelledLogins(ctx, session.userId, session.network)
 }
 
 /**
@@ -300,7 +300,7 @@ async function expire(
   })
   await deletePayload(ctx, command._id)
   await markCopy(ctx, command, delivery)
-  await expireLogin(ctx, command)
+  await expireLogin(ctx, command, requeue)
   await onCommandExpired(ctx, command, requeue)
 }
 
@@ -334,7 +334,7 @@ async function settle(ctx: MutationCtx, command: Doc<'outbox'>, requeue = true) 
   const unsettled = command.delivery === 'queued' || command.delivery === 'claimed' || command.delivery === 'submitted'
   await ctx.db.patch(command._id, { expiresAt: undefined, ...(unsettled ? { delivery: 'unknown' as const } : {}) })
   if (unsettled) await markCopy(ctx, command, 'unknown')
-  await expireLogin(ctx, command)
+  await expireLogin(ctx, command, requeue)
   await onCommandOverdue(ctx, command, requeue)
 }
 
@@ -679,7 +679,7 @@ export const redeemSigninTicket = mutation({
   },
 })
 
-const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired', 'logouts'] as const
+const RESTORE_PHASES = ['scheduled', 'queued', 'claimed', 'dispatched', 'expired', 'logouts', 'cancelled'] as const
 const restorePhase = v.union(...RESTORE_PHASES.map((phase) => v.literal(phase)))
 /** Rows one call of `settleAfterRestore` handles; each is bounded like an expiry. */
 const RESTORE_BATCH = 20
@@ -734,6 +734,20 @@ export const settleAfterRestore = internalMutation({
         .take(RESTORE_BATCH)
       for (const command of rows) await settle(ctx, command, false)
       return next(rows.length === RESTORE_BATCH, null)
+    }
+    if (phase === 'cancelled') {
+      // The logouts a cancelled login's account gets (settleCancelledLogins) aren't queued while
+      // settling, which would expire them again; they're decided here, once the queue is
+      // settled, for each person and network with a cancelled login. Queuing is idempotent.
+      const page = await ctx.db.query('loginSessions').paginate({ cursor, numItems: RESTORE_BATCH })
+      const done = new Set<string>()
+      for (const session of page.page) {
+        const key = `${session.userId} ${session.network}`
+        if (session.state !== 'cancelled' || done.has(key)) continue
+        done.add(key)
+        await settleCancelledLogins(ctx, session.userId, session.network)
+      }
+      return next(!page.isDone, page.continueCursor)
     }
     if (phase === 'logouts') {
       // Removed members' logouts that settling ended, queued again once, as failLogout would.

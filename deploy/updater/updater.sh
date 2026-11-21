@@ -431,7 +431,9 @@ finish_update() {
     # left as if it were over: the update stays in progress, as going back, and the updater
     # exits so its next start (systemd starts it again) tries to stop it again.
     log "Couldn't confirm the server stopped after going back failed; trying again on the next start."
-    done_id='' report failed "The update to ${target:0:7} failed, and going back failed too (${install_error:0:200}). The server couldn't be confirmed stopped; the updater keeps trying." || true
+    # Reported as still updating, not as over: the rollback isn't done, and admins mustn't be
+    # able to cancel it or start another update meanwhile.
+    done_id='' report updating "Going back to ${previous:0:7} after the update to ${target:0:7} failed: ${install_error:0:200}. The server couldn't be confirmed stopped; the updater keeps trying." || true
     release_lock
     exit 1
   else
@@ -538,7 +540,14 @@ recover() {
   if [ "$pending_phase" = backup ]; then
     log "The update to $pending_target was cut off while backing up; starting the server again as it was."
     take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
-    "$root/deploy/trioditis" start >&2 || log "Couldn't start the server again; run deploy/trioditis up -d."
+    # Until the server is started again, the update stays in its backup phase, still updating:
+    # the updater exits and its next start (systemd starts it again) tries again.
+    if ! "$root/deploy/trioditis" start >&2; then
+      log "Couldn't start the server again after the cut-off backup; trying again on the next start."
+      done_id='' report updating "Starting the server again: the update to ${pending_target:0:7} was cut off while backing up, and the server hasn't started yet; the updater keeps trying." || true
+      release_lock
+      return 1
+    fi
     conclude resumed
     describe_current
     report_done
