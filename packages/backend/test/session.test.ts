@@ -172,3 +172,25 @@ describe('end-session with real sign-ins', () => {
     expect(stillBea?.session.id).toBe(bea.session.id)
   })
 })
+
+describe('who is signed in', () => {
+  it('is someone only while their session is there, theirs and unexpired', async () => {
+    const t = setup()
+    const ann = await signIn(t, 'user_ann')
+    const { sessionId } = (await ann.query(api.members.me, {}))!
+    expect(sessionId).toBeTruthy()
+    // A token naming someone else's session, or no session at all, is no one.
+    await signIn(t, 'user_bea')
+    expect(await t.withIdentity({ subject: 'user_bea', sessionId }).query(api.members.me, {})).toBeNull()
+    expect(await t.withIdentity({ subject: 'user_ann', sessionId: 'not-an-id' }).query(api.members.me, {})).toBeNull()
+    expect(await t.withIdentity({ subject: 'user_ann' }).query(api.members.me, {})).toBeNull()
+    // Nor is a token whose session has expired, though the token itself still works.
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, {
+        input: { model: 'session', where: [{ field: '_id', value: sessionId }], update: { expiresAt: Date.now() - 1 } },
+      })
+    })
+    expect(await ann.query(api.members.me, {})).toBeNull()
+    await expect(ann.query(api.chats.counts, {})).rejects.toThrow(/signed out/)
+  })
+})

@@ -1,7 +1,7 @@
 import { ConvexError } from 'convex/values'
 import type { Doc } from '../_generated/dataModel'
 import type { QueryCtx } from '../_generated/server'
-import { requireUserId } from '../auth'
+import { requireUserId } from './session'
 
 /** The signed-in person's membership on this server, or an error. */
 export async function requireMember(ctx: QueryCtx): Promise<Doc<'members'>> {

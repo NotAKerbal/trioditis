@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api'
 import { internalMutation, mutation, query } from './_generated/server'
-import { requireSessionIfGiven } from './auth'
+import { requireSessionIfGiven } from './lib/session'
 import { requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
 import { LOGIN_COMMAND_TTL_MS, queueCommand } from './lib/outbox'

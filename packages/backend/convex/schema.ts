@@ -36,12 +36,11 @@ export default defineSchema({
      * removed and made again.
      */
     backupRevision: v.optional(v.number()),
-    /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
-    peopleCount: v.optional(v.number()),
     /**
-     * Goes up with every change to the address book. Each write names the one it was made
-     * from, so two devices can't both link one contact to different cards.
+     * The address book's count and revision from before they moved to `addressBooks`: still
+     * read for a person whose address book hasn't changed since, never written.
      */
+    peopleCount: v.optional(v.number()),
     peopleRevision: v.optional(v.number()),
     /**
      * Goes up whenever the sign-in password changes (a change or a reset). A password sign-in
@@ -325,6 +324,19 @@ export default defineSchema({
     .index('by_command', ['commandId'])
     .index('by_user_createdAt', ['userId', 'createdAt'])
     .index('by_createdAt', ['createdAt']),
+
+  /**
+   * The person's address book (`people`): how many cards it has, kept by people.ts for its cap,
+   * and its revision, which goes up with every change. Each write names the revision it was
+   * made from, so two devices can't both link one contact to different cards. Apart from the
+   * person's `members` row, which every query reads to check membership: kept there, each card
+   * saved ran all of the person's queries again.
+   */
+  addressBooks: defineTable({
+    userId: v.string(),
+    count: v.number(),
+    revision: v.number(),
+  }).index('by_user', ['userId']),
 
   people: defineTable({
     userId: v.string(),

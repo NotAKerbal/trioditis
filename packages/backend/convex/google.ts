@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { googleClientIdProblem } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
-import { requireSessionIfGiven } from './auth'
+import { requireSessionIfGiven } from './lib/session'
 import { requireAdmin, requireMember } from './lib/access'
 import { audit } from './lib/audit'
 

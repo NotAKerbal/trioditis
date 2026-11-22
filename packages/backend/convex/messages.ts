@@ -313,27 +313,29 @@ export const reactions = query({
   args: { chatId: v.id('chats'), messageIds: v.array(v.id('messages')) },
   handler: async (ctx, { chatId, messageIds }) => {
     const member = await requireMember(ctx)
-    await ownChat(ctx, member.userId, chatId)
     if (messageIds.length > 100) throw new ConvexError('Ask for at most 100 messages’ reactions at once.')
+    // The chat row isn't read unless a message is being cleaned up: it changes with every
+    // message, and reading it ran every open chat's reactions again on each one. The person's
+    // own rows are picked out below, so another's chat gets only empty lists.
     const out: Record<string, { key: string; senderKey: string }[]> = {}
-    let bytes = 0
-    for (const messageId of messageIds) {
-      if (MAX_REACTION_BYTES - bytes < (MAX_REACTIONS_PER_MESSAGE + MAX_OWN_REACTIONS) * MAX_REACTION_ROW_BYTES) break
+    // A message's rows and the bytes read for them, or null for one left out: deleted in this chat.
+    const one = async (messageId: Id<'messages'>) => {
       const deleted = await ctx.db
         .query('reactionCleanups')
         .withIndex('by_message', (q) => q.eq('messageId', messageId))
         .first()
       if (deleted) {
+        // Which messages of a chat are deleted is the chat's owner's to know.
+        await ownChat(ctx, member.userId, chatId)
         // A deleted message in this chat is left out; one in another chat isn't this chat's,
         // so it gets an empty list like any other ID that isn't a message here.
-        if (deleted.chatId !== undefined && deleted.chatId !== chatId) out[messageId] = []
-        continue
+        return deleted.chatId !== undefined && deleted.chatId !== chatId ? { rows: [], read: 0 } : null
       }
       const rows = await ctx.db
         .query('reactions')
         .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
         .take(MAX_REACTIONS_PER_MESSAGE)
-      bytes += byteSize(rows)
+      let read = byteSize(rows)
       if (rows.length === MAX_REACTIONS_PER_MESSAGE) {
         const seen = new Set(rows.map((row) => row._id))
         const own = await ctx.db
@@ -343,11 +345,31 @@ export const reactions = query({
           )
           .take(MAX_OWN_REACTIONS)
         rows.push(...own.filter((row) => !seen.has(row._id)))
-        bytes += byteSize(own)
+        read += byteSize(own)
       }
-      out[messageId] = rows
-        .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
-        .map(({ key, senderKey }) => ({ key, senderKey }))
+      return { rows, read }
+    }
+    // The messages are read a batch at a time, all of a batch at once: one after another, each
+    // of a page's 200 reads waits for the last. A batch is as many messages as the budget left
+    // could hold at their largest, so it stops where reading one by one would have: at the
+    // first message that might not fit.
+    const worst = (MAX_REACTIONS_PER_MESSAGE + MAX_OWN_REACTIONS) * MAX_REACTION_ROW_BYTES
+    let bytes = 0
+    let next = 0
+    while (next < messageIds.length) {
+      const room = Math.floor((MAX_REACTION_BYTES - bytes) / worst)
+      if (room < 1) break
+      const batch = messageIds.slice(next, next + room)
+      next += batch.length
+      const lists = await Promise.all(batch.map(one))
+      batch.forEach((messageId, i) => {
+        const list = lists[i]
+        if (!list) return
+        bytes += list.read
+        out[messageId] = list.rows
+          .filter((row) => row.userId === member.userId && row.chatId === chatId && row.removedAt === undefined)
+          .map(({ key, senderKey }) => ({ key, senderKey }))
+      })
     }
     return out
   },
