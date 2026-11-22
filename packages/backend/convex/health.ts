@@ -1,5 +1,4 @@
 import { v } from 'convex/values'
-import { BRIDGE_HOST_STALE_MS } from '@trioditis/core'
 import { internal } from './_generated/api'
 import { internalAction, internalMutation, internalQuery, query } from './_generated/server'
 import { requireAdmin } from './lib/access'
@@ -77,36 +76,36 @@ export const server = query({
     bridges: v.array(
       v.object({
         network,
-        /** Whether the host has been heard from lately; its counts are as it last said otherwise. */
-        live: v.boolean(),
         backlog: v.number(),
         pushMs: v.number(),
         failedPushes: v.number(),
+        /** When the host last said this; it was live then, unless it said it was stopping. */
         at: v.number(),
+        stopped: v.boolean(),
       }),
     ),
   }),
   handler: async (ctx) => {
     await requireAdmin(ctx)
     const probes = (await ctx.db.query('serverProbes').first())?.samples ?? []
-    const now = Date.now()
-    const hosts = await ctx.db.query('bridgeHosts').take(100)
+    // Not `bridgeHosts`: every batch writes it, and this page would run again on each. Whether a
+    // host is live is judged on the page, from when it last said how it's doing.
     const pressure = await ctx.db.query('bridgePressure').take(100)
-    const bridges = pressure.flatMap((p) => {
-      const host = hosts.find((h) => h.hostId === p.hostId)
+    const bridges = pressure.flatMap((p) =>
       // A network that was removed keeps its old rows; only the ones it can still name show.
-      if (!host || (p.network as string) === 'fake') return []
-      return [
-        {
-          network: p.network,
-          live: now - host.lastSeenAt <= BRIDGE_HOST_STALE_MS,
-          backlog: p.backlog,
-          pushMs: p.pushMs,
-          failedPushes: p.failedPushes,
-          at: p.at,
-        },
-      ]
-    })
+      (p.network as string) === 'fake'
+        ? []
+        : [
+            {
+              network: p.network,
+              backlog: p.backlog,
+              pushMs: p.pushMs,
+              failedPushes: p.failedPushes,
+              at: p.at,
+              stopped: p.stopped === true,
+            },
+          ],
+    )
     return { probes, bridges }
   },
 })

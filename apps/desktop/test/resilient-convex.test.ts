@@ -13,12 +13,16 @@ class FakeQuery {
   result: { value: unknown } | { error: unknown } | undefined
   subs = new Set<() => void>()
   runs = 0
+  /** The journal the current answer came with, and the one each run was asked with. */
+  journal: string | undefined
+  askedWith: (string | undefined)[] = []
 
-  watch(): Watch<unknown> {
+  watch(journal?: string): Watch<unknown> {
     return {
       onUpdate: (callback) => {
         if (this.subs.size === 0) {
           this.runs++
+          this.askedWith.push(journal)
           this.result = undefined
         }
         this.subs.add(callback)
@@ -29,7 +33,7 @@ class FakeQuery {
         if ('error' in this.result) throw this.result.error
         return this.result.value
       },
-      journal: () => undefined,
+      journal: () => this.journal,
     }
   }
 
@@ -67,7 +71,7 @@ function setup() {
     },
     () => 0.5,
   )
-  const watch = resubscriber.wrap('chats:get|{}', server.watch())
+  const watch = resubscriber.wrap('chats:get|{}', server.watch(), (journal) => server.watch(journal as string))
   return { server, trouble, waits, watch }
 }
 
@@ -140,7 +144,39 @@ describe('a query the server fails to answer', () => {
   })
 })
 
+describe('a page of a list', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('is asked again from where its last answer ended, so no gap opens before the next page', () => {
+    const { server, waits, watch } = setup()
+    watch.onUpdate(() => {})
+    server.journal = 'ends at message 50'
+    server.answer({ value: 'page' })
+    server.answer({ error: timeout() })
+    vi.advanceTimersByTime(waits[0]!)
+    expect(server.askedWith).toEqual([undefined, 'ends at message 50'])
+  })
+})
+
 describe('the server refusing', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('after a timeout, settles it: nothing is asked again, the server isn’t busy, and the old answer is gone', () => {
+    const { server, trouble, waits, watch } = setup()
+    watch.onUpdate(() => {})
+    server.answer({ value: 'row' })
+    server.answer({ error: timeout() })
+    server.answer({ error: new ConvexError('Your account isn’t a member of this server.') })
+    expect(trouble.answers).toEqual(['chats:get|{}'])
+    vi.advanceTimersByTime(waits[0]!)
+    expect(server.runs).toBe(1)
+    // A later timeout mustn't bring back what was shown before the refusal.
+    server.answer({ error: timeout() })
+    expect(watch.localQueryResult()).toBeUndefined()
+  })
+
   it('passes a ConvexError on: that chat is gone, and asking again won’t change it', () => {
     const { server, trouble, watch } = setup()
     const changes = vi.fn()

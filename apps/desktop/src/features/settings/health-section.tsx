@@ -1,4 +1,5 @@
 import { api } from '@trioditis/backend/api'
+import { BRIDGE_HOST_STALE_MS } from '@trioditis/core'
 import { cn } from '@trioditis/ui/lib/utils'
 import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
@@ -45,8 +46,9 @@ export function serverState(probes: Health['probes'], now: number) {
 }
 
 /** How a bridge's deliveries to the server are going. */
-export function bridgeState(bridge: Health['bridges'][number]) {
-  if (!bridge.live) return { say: 'Offline', warn: true }
+export function bridgeState(bridge: Health['bridges'][number], now: number) {
+  // A live host says how it's doing at least every minute (its heartbeat, kept every 30 seconds).
+  if (bridge.stopped || now - bridge.at > BRIDGE_HOST_STALE_MS) return { say: 'Offline', warn: true }
   const parts = [bridge.backlog > 0 ? `${count.format(bridge.backlog)} waiting` : 'Caught up']
   if (bridge.pushMs >= 1000) parts.push(`${duration(bridge.pushMs)} a delivery`)
   if (bridge.failedPushes > 0) parts.push(`${count.format(bridge.failedPushes)} failed`)
@@ -99,7 +101,7 @@ export function ServerHealth() {
         <Group title="Bridges">
           {data.bridges.map((bridge) => (
             <Setting key={`${bridge.network}/${bridge.at}`} title={networkName(bridge.network)}>
-              <State {...bridgeState(bridge)} />
+              <State {...bridgeState(bridge, now)} />
             </Setting>
           ))}
         </Group>

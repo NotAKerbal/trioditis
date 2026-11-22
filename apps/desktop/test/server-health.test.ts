@@ -23,12 +23,20 @@ describe('Server health', () => {
   })
 
   it('sums up how a bridge’s deliveries are going', () => {
-    const bridge = { network: 'signal' as const, live: true, at: now, backlog: 0, pushMs: 200, failedPushes: 0 }
-    expect(bridgeState(bridge)).toEqual({ say: 'Caught up', warn: false })
-    expect(bridgeState({ ...bridge, backlog: 1240, pushMs: 2500, failedPushes: 3 })).toEqual({
+    const bridge = {
+      network: 'signal' as const,
+      stopped: false,
+      at: now - MIN,
+      backlog: 0,
+      pushMs: 200,
+      failedPushes: 0,
+    }
+    expect(bridgeState(bridge, now)).toEqual({ say: 'Caught up', warn: false })
+    expect(bridgeState({ ...bridge, backlog: 1240, pushMs: 2500, failedPushes: 3 }, now)).toEqual({
       say: '1,240 waiting, 2.5 s a delivery, 3 failed',
       warn: true,
     })
-    expect(bridgeState({ ...bridge, live: false })).toEqual({ say: 'Offline', warn: true })
+    expect(bridgeState({ ...bridge, stopped: true }, now)).toEqual({ say: 'Offline', warn: true })
+    expect(bridgeState({ ...bridge, at: now - 5 * MIN }, now)).toEqual({ say: 'Offline', warn: true })
   })
 })

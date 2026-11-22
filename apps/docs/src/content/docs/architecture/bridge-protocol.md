@@ -54,7 +54,7 @@ Every batch, heartbeats included, may carry `"pressure": {"backlog": 12, "pushMs
 The host also acts on them, so a server short of CPU isn't swamped by history while people are using it:
 
 - After a delivery that took a second or more, the next waits as long again (at most 10 seconds).
-- A batch of older history (the backfill queue, or someone scrolling back, `forward: false` in bridgev2's batch send) waits before it is journaled while the server is behind: more than 300 events unacknowledged, a delivery slower than two seconds, or one that failed in the last 30 seconds. It waits two minutes at most. Live messages and forward catch-up never wait.
+- Older history waits while the server is behind: more than 300 events unacknowledged, a delivery slower than two seconds, or one that failed in the last 30 seconds. bridgev2's backfill queue (which also runs someone scrolling back) waits before its next task, before it takes any chat's lock, for two minutes at most (`BeforeBackfillTask`, third_party/mautrix.patch). Live messages and a chat's forward catch-up never wait.
 
 ### Event types
 

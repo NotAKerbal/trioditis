@@ -641,6 +641,8 @@ export default defineSchema({
     /** Its deliveries that failed in the five minutes before. */
     failedPushes: v.number(),
     at: v.number(),
+    /** The host said it was stopping: offline from `at`, not once it goes quiet. */
+    stopped: v.optional(v.boolean()),
   }).index('by_hostId', ['hostId']),
 
   /**

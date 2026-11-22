@@ -21,11 +21,24 @@ describe('server health', () => {
     await heartbeat(400)
     const admin = await signIn(t, 'admin_a', 'admin')
     expect((await admin.query(api.health.server, {})).bridges).toEqual([
-      { network: 'whatsapp', live: true, backlog: 500, pushMs: 1200, failedPushes: 2, at: 1_000_000 },
+      { network: 'whatsapp', backlog: 500, pushMs: 1200, failedPushes: 2, at: 1_000_000, stopped: false },
     ])
     vi.setSystemTime(1_031_000)
     await heartbeat(20)
     expect((await admin.query(api.health.server, {})).bridges[0]).toMatchObject({ backlog: 20, at: 1_031_000 })
+    // A host stopping is written at once, and so is its coming back.
+    vi.setSystemTime(1_032_000)
+    await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      ...HOST,
+      events: [],
+      stopping: true,
+      pressure: pressure(0),
+    })
+    expect((await admin.query(api.health.server, {})).bridges[0]).toMatchObject({ stopped: true, at: 1_032_000 })
+    vi.setSystemTime(1_033_000)
+    await heartbeat(0)
+    expect((await admin.query(api.health.server, {})).bridges[0]).toMatchObject({ stopped: false, at: 1_033_000 })
   })
 
   it('keeps the last hour of the server timing itself', async () => {

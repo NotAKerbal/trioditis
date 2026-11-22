@@ -97,21 +97,30 @@ export const PRESSURE_EVERY_MS = 30_000
 /**
  * Keeps what the host said of its deliveries, for the health page. Written at most every 30
  * seconds, in its own table, so the batches a busy host sends don't each write it too, and the
- * pages watching the hosts' rows aren't woken by it.
+ * pages watching the hosts' rows aren't woken by it. Its time is when the host was last heard
+ * from, as of then, so the health page needn't read `bridgeHosts`, which every batch writes; a
+ * host stopping, or back after it stopped, is written at once.
  */
 async function notePressure(
   ctx: MutationCtx,
   host: Doc<'bridgeHosts'>,
   pressure: { backlog: number; pushMs: number; failedPushes: number },
   now: number,
+  stopping: boolean,
 ) {
   const kept = await ctx.db
     .query('bridgePressure')
     .withIndex('by_hostId', (q) => q.eq('hostId', host.hostId))
     .unique()
-  const row = { hostId: host.hostId, network: host.network, ...pressure, at: now }
+  const row = {
+    hostId: host.hostId,
+    network: host.network,
+    ...pressure,
+    at: now,
+    ...(stopping ? { stopped: true } : {}),
+  }
   if (!kept) await ctx.db.insert('bridgePressure', row)
-  else if (now - kept.at >= PRESSURE_EVERY_MS) await ctx.db.replace(kept._id, row)
+  else if (stopping || kept.stopped || now - kept.at >= PRESSURE_EVERY_MS) await ctx.db.replace(kept._id, row)
 }
 
 /**
@@ -178,7 +187,7 @@ export const ingest = mutation({
     // live goes), rather than once its heartbeats have gone stale.
     const stopping = args.stopping === true && args.events.length === 0
     await ctx.db.patch(host._id, { lastSeq, lastSeenAt: stopping ? 0 : now })
-    if (args.pressure) await notePressure(ctx, host, args.pressure, now)
+    if (args.pressure) await notePressure(ctx, host, args.pressure, now, stopping)
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
   },
 })

@@ -1,4 +1,5 @@
 import type { ConvexReactClient, Watch, WatchQueryOptions } from 'convex/react'
+import type { QueryJournal } from 'convex/browser'
 import { getFunctionName, type FunctionReference } from 'convex/server'
 import { ConvexError, convexToJson, type Value } from 'convex/values'
 import { retryDelay } from '~/features/shell/retry-delay.ts'
@@ -77,8 +78,17 @@ interface Listener {
   unsubscribe: () => void
 }
 
+/** A watch of the same query made again, carrying on from a journal (a paginated query's end cursor). */
+type Remake = (journal: QueryJournal) => Watch<unknown>
+
 interface Entry {
   inner: Watch<unknown>
+  remake: Remake | undefined
+  /**
+   * The journal of the last answer. A paginated query's page keeps where it ends in its journal;
+   * asked again without it, a page could end elsewhere, leaving a gap before the next page.
+   */
+  journal: QueryJournal | undefined
   listeners: Set<Listener>
   /** The last answer that came, kept while a failure is asked again. */
   lastGood: { value: unknown } | undefined
@@ -114,18 +124,27 @@ export class Resubscriber {
     this.jitter = jitter
   }
 
-  wrap<T>(key: string, inner: Watch<T>): Watch<T> {
+  wrap<T>(key: string, inner: Watch<T>, remake?: (journal: QueryJournal) => Watch<T>): Watch<T> {
     return {
       ...inner,
-      onUpdate: (callback) => this.subscribe(key, inner as Watch<unknown>, callback),
+      onUpdate: (callback) => this.subscribe(key, inner as Watch<unknown>, remake as Remake | undefined, callback),
       localQueryResult: () => this.result(key, inner as Watch<unknown>) as T | undefined,
     }
   }
 
-  private subscribe(key: string, inner: Watch<unknown>, callback: () => void) {
+  private subscribe(key: string, inner: Watch<unknown>, remake: Remake | undefined, callback: () => void) {
     let entry = this.entries.get(key)
     if (!entry) {
-      entry = { inner, listeners: new Set(), lastGood: undefined, lastError: undefined, failures: 0, timer: undefined }
+      entry = {
+        inner,
+        remake,
+        journal: undefined,
+        listeners: new Set(),
+        lastGood: undefined,
+        lastError: undefined,
+        failures: 0,
+        timer: undefined,
+      }
       this.entries.set(key, entry)
     }
     const handler = () => {
@@ -149,7 +168,10 @@ export class Resubscriber {
     try {
       value = entry.inner.localQueryResult()
     } catch (error) {
-      if (!isTransient(error)) return true
+      if (!isTransient(error)) {
+        this.refused(key, entry)
+        return true
+      }
       this.failed(key, entry, error)
       return false
     }
@@ -164,7 +186,10 @@ export class Resubscriber {
     try {
       value = inner.localQueryResult()
     } catch (error) {
-      if (!isTransient(error)) throw error
+      if (!isTransient(error)) {
+        if (entry) this.refused(key, entry)
+        throw error
+      }
       if (entry) this.failed(key, entry, error)
       return entry?.lastGood?.value
     }
@@ -175,7 +200,21 @@ export class Resubscriber {
 
   private answered(key: string, entry: Entry, value: unknown) {
     entry.lastGood = { value }
-    if (entry.failures === 0) return
+    entry.journal = entry.inner.journal() ?? entry.journal
+    this.settled(key, entry)
+  }
+
+  /**
+   * The server said no: that's its answer, not a failure to ask again. What it showed before
+   * mustn't come back through a later timeout either.
+   */
+  private refused(key: string, entry: Entry) {
+    entry.lastGood = undefined
+    this.settled(key, entry)
+  }
+
+  private settled(key: string, entry: Entry) {
+    if (entry.failures === 0 && entry.timer === undefined) return
     entry.failures = 0
     entry.lastError = undefined
     clearTimeout(entry.timer)
@@ -198,8 +237,9 @@ export class Resubscriber {
     entry.timer = undefined
     if (this.entries.get(key) !== entry || entry.listeners.size === 0) return
     // All of them first, so the query has no subscriber left and the server drops it; then each
-    // again, which has it run anew.
+    // again, which has it run anew, from where its last answer left off.
     for (const listener of entry.listeners) listener.unsubscribe()
+    if (entry.journal !== undefined && entry.remake) entry.inner = entry.remake(entry.journal)
     for (const listener of entry.listeners) listener.unsubscribe = entry.inner.onUpdate(listener.handler)
   }
 }
@@ -216,9 +256,18 @@ export function resilient(client: ConvexReactClient, resubscriber = new Resubscr
   const watchQuery = client.watchQuery.bind(client)
   const mutation = client.mutation.bind(client) as (...params: unknown[]) => Promise<unknown>
   const action = client.action.bind(client) as (...params: unknown[]) => Promise<unknown>
-  client.watchQuery = ((query: FunctionReference<'query'>, ...rest: [Record<string, Value>?, WatchQueryOptions?]) => {
-    const key = `${getFunctionName(query)}|${JSON.stringify(convexToJson((rest[0] ?? {}) as Value))}`
-    return resubscriber.wrap(key, watchQuery(query, ...(rest as [])))
+  const watch = watchQuery as (
+    query: FunctionReference<'query'>,
+    args?: Record<string, Value>,
+    options?: WatchQueryOptions,
+  ) => Watch<unknown>
+  client.watchQuery = ((
+    query: FunctionReference<'query'>,
+    args?: Record<string, Value>,
+    options?: WatchQueryOptions,
+  ) => {
+    const key = `${getFunctionName(query)}|${JSON.stringify(convexToJson((args ?? {}) as Value))}`
+    return resubscriber.wrap(key, watch(query, args, options), (journal) => watch(query, args, { ...options, journal }))
   }) as typeof client.watchQuery
   client.mutation = ((...params: unknown[]) => counted(mutation(...params))) as typeof client.mutation
   client.action = ((...params: unknown[]) => counted(action(...params))) as typeof client.action

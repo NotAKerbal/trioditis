@@ -45,13 +45,23 @@ const tokens = new Map<string, Promise<Token>>()
 /** Token requests in a row that the server failed to answer, by network, for the wait before the next. */
 const tokenFailures = new Map<string, number>()
 
-function tokenFor(userId: string, network: Network, fresh = false): Promise<Token> {
+/**
+ * A media token for this network: the one held while it lasts, else a new one. `stale` is a token
+ * the gateway refused (401): it's replaced, but once only, however many files were refused it.
+ */
+function tokenFor(userId: string, network: Network, stale?: string): Promise<Token> {
   const key = `${userId}/${network}`
   const held = tokens.get(key)
-  if (held && !fresh) {
-    // A held token is used until it nears its end; a failed request for one is asked again.
-    return held.then((t) => (t.expiresAt - Date.now() > TOKEN_MARGIN_MS ? t : tokenFor(userId, network, true)))
-  }
+  if (!held) return askToken(key, network)
+  // A failed request for one is shared while it cools down (askToken), then asked again.
+  return held.then((t) => {
+    if (t.token !== stale && t.expiresAt - Date.now() > TOKEN_MARGIN_MS) return t
+    const now = tokens.get(key)
+    return now && now !== held ? now : askToken(key, network)
+  })
+}
+
+function askToken(key: string, network: Network): Promise<Token> {
   const asked = convex.mutation(api.media.access, { network }).catch((error: unknown) => {
     throw isTransient(error) ? new ServerBusy('The server is busy.') : error
   })
@@ -83,21 +93,25 @@ async function inTurn<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-async function fetchCiphertext(userId: string, network: Network, mediaId: string): Promise<Uint8Array> {
+/** Exported for its tests. */
+export async function fetchCiphertext(userId: string, network: Network, mediaId: string): Promise<Uint8Array> {
+  let { token } = await tokenFor(userId, network)
   for (let attempt = 0; ; attempt++) {
-    const { token } = await tokenFor(userId, network, attempt > 0)
     // Each fetch goes through the gateway's checks, never the browser's cache.
     const response = await fetch(`/media/${encodeURIComponent(mediaId)}`, {
       headers: { authorization: `Bearer ${token}` },
       cache: 'no-store',
     })
     if (response.ok) return new Uint8Array(await response.arrayBuffer())
-    // A token the gateway no longer takes is asked for again; a busy gateway, waited for.
-    const again = response.status === 401 || response.status === 503
     const busy = response.status >= 502 && response.status <= 504
-    if (busy && (!again || attempt >= 2)) throw new ServerBusy('The server is busy.')
-    if (!again || attempt >= 2) throw new Error(`The file couldn’t be fetched (${response.status}).`)
-    if (response.status === 503) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+    if (attempt >= 2 || (!busy && response.status !== 401)) {
+      if (busy) throw new ServerBusy('The server is busy.')
+      throw new Error(`The file couldn’t be fetched (${response.status}).`)
+    }
+    // A token the gateway no longer takes is replaced; a busy gateway is waited for, with the
+    // same token, which it took: asking for another would only add to what keeps it busy.
+    if (response.status === 401) ({ token } = await tokenFor(userId, network, token))
+    else await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
   }
 }
 
