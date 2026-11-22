@@ -17,6 +17,7 @@ import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
 import { LoadError, RetryBoundary } from './retry-boundary.tsx'
+import { countsAsUnread } from './unread-fill.ts'
 import { UpdateNotice } from './update-notice.tsx'
 
 /** The signed-in app: one sidebar, the open chat, and its details. */
@@ -28,6 +29,8 @@ export function Shell() {
   const session = useSession()
   const [openedUnreadId, setOpenedUnreadId] = useState<string | undefined>()
   const shownRef = useRef<string[] | null>(null)
+  // Changes of what the sidebar shows (search, open sheet, filters), so one can stop a move on.
+  const sidebarContext = useRef(0)
   // The chats the sidebar has loaded, by ID, so auto-advance can open the next one properly.
   const chatsById = useRef(new Map<string, Chat>())
   const selectedId = search.chat
@@ -56,7 +59,8 @@ export function Shell() {
     const members = membersOf(chat)
     const isOpen = members.some((m) => m.id === selectedId)
     if (!isOpen) {
-      setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
+      // Unread chat by chat, by the rule the sidebar puts rows under Unread with.
+      setOpenedUnreadId(members.some(countsAsUnread) ? chat.id : undefined)
       select(chat.id)
     }
     // Opening another chat marks it read once it's shown (read-while-open.tsx). Choosing the open
@@ -76,6 +80,7 @@ export function Shell() {
   async function act(chatId: ChatId, run: () => Promise<boolean>) {
     // Null while the list is loading or couldn't load: then there's no knowing what it showed.
     const before = shownRef.current ? [...shownRef.current] : null
+    const context = sidebarContext.current
     const wasOpenAndShown = before !== null && chatId === selectedId && before.includes(chatId)
     const ok = await run()
     if (!ok || !wasOpenAndShown) return
@@ -84,6 +89,9 @@ export function Shell() {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     // If the person opened another chat (or closed it) meanwhile, that choice stands.
     if (selectedRef.current !== chatId) return
+    // So did moving to another list (a search, a sheet, a filter): the next chat in the list the
+    // action started from isn't on screen any more, and opening it would read it unasked.
+    if (sidebarContext.current !== context) return
     const shown = shownRef.current
     if (!shown || shown.includes(chatId)) return
     const i = before.indexOf(chatId)
@@ -158,6 +166,7 @@ export function Shell() {
               onPeople={() => openPeople('all')}
               onNewChat={() => setNewChat(true)}
               shownRef={shownRef}
+              contextRef={sidebarContext}
               chatsRef={chatsById}
             />
           )}

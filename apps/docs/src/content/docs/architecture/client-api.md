@@ -130,6 +130,7 @@ Every chat belongs to exactly one view (ordered highest priority first):
 - Each `ChatRow` includes `sealedMeta` (open with kind `chat`, object ID `portalId`), `sealedCollage` (for a group, the members whose contacts' pictures make its picture when it has none: open with kind `chat`, object ID `<portalId>/collage`, plaintext `ChatCollagePlaintext`; `null` until sent) and `lastMessage` (newest message preview up to 4 KiB sealed; open with kind `message`, object ID `lastMessage.objectId`).
 - `api.chats.counts` returns `{ inbox, requests, woke }` capped at 99 with a `more` flag.
 - Chat actions: `chats.markRead`, `chats.markUnread`, `chats.setArchived`, `chats.setPinned`, `chats.setMuted`, `chats.snooze`, `chats.wake`, `chats.acceptRequest`, `chats.setBlocked`, `chats.setLabels` (up to 20 labels per chat).
+- A timed mute (`chats.setMuted` with `until`) ends with a write at `until`, which clears `mutedUntil`, so `counts` and the lists see the chat again then, as a woken snooze does. `counts` treats a chat as muted while `mutedUntil` is stored, not by the clock, so it agrees with what clients load.
 
 ## Conversations
 

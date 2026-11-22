@@ -158,6 +158,15 @@ describe('chat views', () => {
     expect(await a.query(api.chats.get, { chatId })).toMatchObject({ woke: true, archived: false })
   })
 
+  it('counts a chat as muted while its mute is stored, past its time until its end is written', async () => {
+    // So the count agrees with what clients load, whatever their clocks say (chats.muteEnded).
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await aChat(t, 'user_a', 'mute-ending', { unreadCount: 1, mutedUntil: Date.now() - 1 })
+    await aChat(t, 'user_a', 'unmuted', { unreadCount: 1 })
+    expect((await a.query(api.chats.counts, {})).inbox).toEqual({ count: 1, more: false })
+  })
+
   it('counts badges from bounded ranges, capped at 99', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
@@ -244,6 +253,46 @@ describe('chat actions', () => {
     await expect(
       a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day }),
     ).rejects.toThrow(/year/)
+  })
+
+  it('ends a timed mute at its time, so the unread count sees the chat again', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 2 })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 60_000 })
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(0)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBeNull()
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(1)
+
+    // A mute changed before the first one's time leaves the later one standing.
+    const first = Date.now() + 60_000
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: first })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('ends the timed mutes set before mutes scheduled their own ends', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const now = Date.now()
+    const over = await aChat(t, 'user_a', 'over', { mutedUntil: now - 1 })
+    const later = await aChat(t, 'user_a', 'later', { mutedUntil: now + 60_000 })
+    const forever = await aChat(t, 'user_a', 'forever', { mutedUntil: Number.MAX_SAFE_INTEGER })
+    const mutedUntil = async (chatId: Id<'chats'>) => (await a.query(api.chats.get, { chatId })).mutedUntil
+    await t.mutation(internal.migrations.scheduleMuteEnds, {})
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(over)).toBeNull()
+    expect(await mutedUntil(later)).toBe(now + 60_000)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(later)).toBeNull()
+    expect(await mutedUntil(forever)).toBe(Number.MAX_SAFE_INTEGER)
   })
 })
 

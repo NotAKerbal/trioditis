@@ -238,7 +238,6 @@ export const counts = query({
   handler: async (ctx) => {
     const member = await requireMember(ctx)
     const userId = member.userId
-    const now = Date.now()
     const scan = 4 * COUNT_CAP
     const inbox = await ctx.db
       .query('chats')
@@ -251,10 +250,10 @@ export const counts = query({
       .take(COUNT_CAP + 1)
     const capped = (n: number, partial: boolean) => ({ count: Math.min(n, COUNT_CAP), more: n > COUNT_CAP || partial })
     const scannedAll = inbox.length < scan
+    // Muted as stored, not by the clock: a query isn't run again as time passes, and a timed mute
+    // is cleared by a write when it ends (`muteEnded`), so the count and the client agree.
     const unread = inbox.filter(
-      (chat) =>
-        (chat.unreadCount > 0 || chat.markedUnread === true) &&
-        !(chat.mutedUntil !== undefined && chat.mutedUntil > now),
+      (chat) => (chat.unreadCount > 0 || chat.markedUnread === true) && chat.mutedUntil === undefined,
     ).length
     return {
       inbox: capped(unread, !scannedAll),
@@ -356,6 +355,21 @@ export const setMuted = mutation({
     if (until !== undefined) checkUntil(until)
     // "Until I unmute" is stored as the largest time a number holds exactly.
     await patchChat(ctx, chat, { mutedUntil: until ?? Number.MAX_SAFE_INTEGER })
+    // A query can't see time pass, so the unread badge (`counts`) and the lists would keep
+    // treating the chat as muted after `until` until something else wrote to it. Ending the
+    // mute with a write at `until` brings them up to date.
+    if (until !== undefined) await ctx.scheduler.runAt(until, internal.chats.muteEnded, { chatId: chat._id, until })
+    return null
+  },
+})
+
+/** Runs at a timed mute's end. A later mute or unmute of the same chat stands; this does nothing then. */
+export const muteEnded = internalMutation({
+  args: { chatId: v.id('chats'), until: v.number() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, until }) => {
+    const chat = await ctx.db.get(chatId)
+    if (chat && chat.mutedUntil === until) await patchChat(ctx, chat, { mutedUntil: undefined })
     return null
   },
 })
