@@ -129,9 +129,9 @@ export class SimClient {
 
   /**
    * Subscribes under `key` (once; a second ask shares it, as the app's cache does) and
-   * resolves with the first answer, or null if it failed or didn't come within ANSWER_MS.
-   * `onValue(value, replay)` sees every answer; `replay` is true when it's the cached answer
-   * handed to a listener that just joined, not one the server sent now.
+   * resolves with its answer: the one it has, or the next to come, or null if that fails or
+   * doesn't come within ANSWER_MS. `onValue(value, replay)` sees every answer; `replay` is true
+   * when it's the cached answer handed to a listener that just joined, not one the server sent now.
    */
   watch(key, name, args, onValue = NOOP) {
     if (this.closed) return Promise.resolve(null)
@@ -142,72 +142,87 @@ export class SimClient {
         held.listeners.add(onValue)
         if (held.value !== undefined) onValue(held.value, true)
       }
-      return held.first
+      if (held.value !== undefined) return Promise.resolve(held.value)
+      // Failed and let go meanwhile: asked afresh now that something needs it again.
+      if (held.retryWhenAsked) held.retryNow()
+      return held.next()
     }
-    const started = performance.now()
-    let resolveFirst
-    const sub = {
-      name,
-      value: undefined,
-      readyAt: null,
-      listeners: new Set([onValue]),
-      first: new Promise((r) => (resolveFirst = r)),
-    }
+    const sub = { name, value: undefined, readyAt: null, listeners: new Set([onValue]), waiters: new Set() }
     this.subs.set(key, sub)
     this.metrics.subscriptions++
     this.metrics.peakSubscriptions = Math.max(this.metrics.peakSubscriptions, this.subs.size)
-    let answered = false
-    // Closing the client settles what's still waiting, so nothing waits on it afterwards.
-    sub.settle = () => {
-      if (answered) return
-      answered = true
-      clearTimeout(deadline)
-      resolveFirst(null)
+    /** The next answer, or null on the next failure or after ANSWER_MS. */
+    sub.next = () =>
+      new Promise((resolve) => {
+        const started = performance.now()
+        const waiter = (value) => {
+          clearTimeout(deadline)
+          sub.waiters.delete(waiter)
+          if (value !== null) (this.metrics.firstResult[name] ??= []).push(performance.now() - started)
+          resolve(value)
+        }
+        const deadline = setTimeout(() => {
+          if (!sub.waiters.has(waiter)) return
+          this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
+          waiter(null)
+        }, ANSWER_MS)
+        deadline.unref?.()
+        sub.waiters.add(waiter)
+      })
+    const settleWaiters = (value) => {
+      for (const waiter of sub.waiters) waiter(value)
     }
-    const deadline = setTimeout(() => {
-      if (answered) return
-      answered = true
-      this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
-      resolveFirst(null)
-    }, ANSWER_MS)
-    deadline.unref?.()
+    // Closing the client settles what's still waiting, so nothing waits on it afterwards.
+    sub.settle = () => settleWaiters(null)
     const onValueFromServer = (value) => {
       sub.value = value
       sub.readyAt ??= Date.now()
-      if (!answered) {
-        answered = true
-        clearTimeout(deadline)
-        ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
-        resolveFirst(value)
-      }
+      settleWaiters(value)
       for (const listener of sub.listeners) listener(value, false)
     }
     // A query that fails is dead. The desktop's RetryBoundary (features/shell/retry-boundary.tsx)
     // mounts the part again after a wait that grows with errors in a row, though not after a
     // ConvexError, the server saying why, which waits for the person; this does the same, under
-    // the same key.
+    // the same key. One let go meanwhile isn't on screen, so it waits to be asked for again, as
+    // the desktop's cache keeps a failure until a view needs the page.
     sub.failures = 0
     sub.lastErrorAt = 0
+    sub.retryWhenAsked = false
+    const subscribe = () => {
+      sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
+    }
+    sub.retryNow = () => {
+      sub.retryWhenAsked = false
+      this.metrics.retries = (this.metrics.retries ?? 0) + 1
+      subscribe()
+    }
     const onError = (error) => {
       this.error(name, error)
-      if (!answered) {
-        answered = true
-        clearTimeout(deadline)
-        resolveFirst(null)
-      }
+      sub.value = undefined
+      settleWaiters(null)
       if (error instanceof ConvexError || this.closed) return
       sub.failures = failuresInARow(sub.failures, sub.lastErrorAt, Date.now())
       sub.lastErrorAt = Date.now()
       sub.unsubscribe()
       const retry = setTimeout(() => {
         if (this.closed || this.subs.get(key) !== sub) return
-        this.metrics.retries = (this.metrics.retries ?? 0) + 1
-        sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
+        if (this.released.has(key)) sub.retryWhenAsked = true
+        else sub.retryNow()
       }, retryDelay(sub.failures))
       retry.unref?.()
     }
-    sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
-    return sub.first
+    const first = sub.next()
+    subscribe()
+    return first
+  }
+
+  /** A held query's answer: the one it has, or the next (null if it fails), asking afresh if it's waiting to. */
+  answerOf(key) {
+    const sub = this.subs.get(key)
+    if (!sub) return Promise.resolve(null)
+    if (sub.value !== undefined) return Promise.resolve(sub.value)
+    if (sub.retryWhenAsked) sub.retryNow()
+    return sub.next()
   }
 
   /** Stops `listener` hearing about `key`, keeping the query itself. */
@@ -399,7 +414,7 @@ export class SimClient {
       state.fixed = [`scheduled:${chat._id}`, `cancelled:${chat._id}`]
       void this.watch(state.fixed[0], 'scheduled:list', { chatId: chat._id })
       void this.watch(state.fixed[1], 'scheduled:cancelled', { chatId: chat._id })
-      state.first = this.loadPage(state, null)
+      void this.loadPage(state, null)
     }
     // At most six warm chats; the oldest is let go to the cache.
     this.warm = [state, ...this.warm.filter((w) => w !== state)]
@@ -475,7 +490,7 @@ export class SimClient {
     }
     for (const key of state.contactKeys) if (!contacts.has(key)) this.release(key)
     state.contactKeys = contacts
-    state.extras = Promise.all([...waits, ...state.fixed.map((k) => this.subs.get(k)?.first)])
+    state.extras = Promise.all([...waits, ...state.fixed.map((k) => this.answerOf(k))])
   }
 
   /**
@@ -514,7 +529,7 @@ export class SimClient {
       for (const k of previous.keys) this.release(k)
       if (!this.warm.includes(previous.state)) this.letGo(previous.state)
     }
-    const [row, page] = await Promise.all([got, state.first])
+    const [row, page] = await Promise.all([got, this.answerOf(state.pages[0])])
     if (!row || !page) {
       this.metrics.failedOpens++
       return
@@ -582,7 +597,7 @@ export class SimClient {
       const chats = this.visibleChats()
       if (chats.length) {
         this.count('hover')
-        await this.warmChat(chats[this.rand.int(Math.min(chats.length, 30))]).first
+        await this.answerOf(this.warmChat(chats[this.rand.int(Math.min(chats.length, 30))]).pages[0])
       }
       return
     }

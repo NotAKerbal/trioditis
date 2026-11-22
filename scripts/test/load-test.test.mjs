@@ -347,3 +347,72 @@ void test('a client that never finished opening the app fails the run', () => {
   assert.equal(verdict.passed, false)
   assert.match(verdict.checks.find((c) => !c.passed).detail, /1 of 2 finished starting/)
 })
+
+void test('a failed query is asked again as the app asks, and its callers get the answer that comes', async () => {
+  const { SimClient, clientMetrics } = await import('../load-test/clients.mjs')
+  const { random: seeded } = await import('../load-test/inbox.mjs')
+  const metrics = clientMetrics()
+  const person = { token: async () => 'token' }
+  const sim = new SimClient({
+    id: 0,
+    convexUrl: 'http://127.0.0.1:9',
+    person,
+    metrics,
+    sent: new Map(),
+    rand: seeded(1),
+    networks: [],
+  })
+  await sim.client.close()
+  // A stand-in for the Convex client: the first subscription fails, the next answers.
+  const subscribed = []
+  sim.client = {
+    onUpdate(_ref, args, onValue, onError) {
+      subscribed.push(args)
+      const attempt = subscribed.length
+      setTimeout(() => (attempt === 1 ? onError(new Error('Server Error')) : onValue({ page: [], isDone: true })), 10)
+      return () => {}
+    },
+    close: async () => {},
+  }
+  assert.equal(await sim.watch('k', 'people:list', { a: 1 }), null)
+  // Asked for again while it waits out the app's retry delay: the retry's answer.
+  const again = await sim.watch('k', 'people:list', { a: 1 })
+  assert.deepEqual(again, { page: [], isDone: true })
+  assert.equal(subscribed.length, 2)
+  assert.equal(metrics.retries, 1)
+  assert.equal(metrics.errors, 1)
+  await sim.close()
+})
+
+void test("a failed query that was let go isn't asked again until something needs it", async () => {
+  const { SimClient, clientMetrics } = await import('../load-test/clients.mjs')
+  const { random: seeded } = await import('../load-test/inbox.mjs')
+  const metrics = clientMetrics()
+  const sim = new SimClient({
+    id: 0,
+    convexUrl: 'http://127.0.0.1:9',
+    person: { token: async () => 'token' },
+    metrics,
+    sent: new Map(),
+    rand: seeded(1),
+    networks: [],
+  })
+  await sim.client.close()
+  let subscriptions = 0
+  sim.client = {
+    onUpdate(_ref, _args, onValue, onError) {
+      const attempt = ++subscriptions
+      setTimeout(() => (attempt === 1 ? onError(new Error('Server Error')) : onValue('answer')), 10)
+      return () => {}
+    },
+    close: async () => {},
+  }
+  assert.equal(await sim.watch('k', 'people:list', {}), null)
+  sim.release('k')
+  // Past the app's first retry delay (2 s): nothing asked, as nothing shows it.
+  await new Promise((r) => setTimeout(r, 2300))
+  assert.equal(subscriptions, 1)
+  assert.equal(await sim.watch('k', 'people:list', {}), 'answer')
+  assert.equal(subscriptions, 2)
+  await sim.close()
+})
