@@ -15,6 +15,7 @@ import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
 import { LoadError, RetryBoundary } from './retry-boundary.tsx'
+import { countsAsUnread } from './unread-fill.ts'
 import { UpdateNotice } from './update-notice.tsx'
 
 /** The signed-in app: one sidebar, the open chat, and its details. */
@@ -26,8 +27,8 @@ export function Shell() {
   const session = useSession()
   const [openedUnreadId, setOpenedUnreadId] = useState<string | undefined>()
   const shownRef = useRef<string[] | null>(null)
-  // What the sidebar is showing (search, open sheet, filters), so a change of it can stop a move on.
-  const sidebarContext = useRef('')
+  // Changes of what the sidebar shows (search, open sheet, filters), so one can stop a move on.
+  const sidebarContext = useRef(0)
   // The chats the sidebar has loaded, by ID, so auto-advance can open the next one properly.
   const chatsById = useRef(new Map<string, Chat>())
   const selectedId = search.chat
@@ -56,7 +57,8 @@ export function Shell() {
     const members = membersOf(chat)
     const isOpen = members.some((m) => m.id === selectedId)
     if (!isOpen) {
-      setOpenedUnreadId(chat.hasUnread && !chat.muted ? chat.id : undefined)
+      // Unread chat by chat, by the rule the sidebar puts rows under Unread with.
+      setOpenedUnreadId(members.some(countsAsUnread) ? chat.id : undefined)
       select(chat.id)
     }
     // Opening another chat marks it read once it's shown (read-while-open.tsx). Choosing the open

@@ -84,8 +84,8 @@ interface SidebarProps {
    * while the list is still loading, when there's nothing to compare against.
    */
   shownRef: { current: string[] | null }
-  /** Kept up to date with what the list is showing (search, open sheet, filters). */
-  contextRef: { current: string }
+  /** Counts the changes of what the list is showing (search, open sheet, filters). */
+  contextRef: { current: number }
   chatsRef: { current: Map<string, Chat> }
 }
 
@@ -358,11 +358,19 @@ export function Sidebar({
   // opening a chat marks it read, and nobody asked to read it. Judged from the chats themselves,
   // not from what the lists show, as the chat's page may be one still to come: the open chat as
   // the server has it now (the same subscription the chat pane uses), and the other chats of
-  // its conversation as the lists last had them. It stays open while any of them still matches.
+  // its conversation as the lists last had them. While another of them still matches, that one
+  // becomes the open chat: the pane then shows the conversation as the filtered list has it, and
+  // its row stays selected. Only selected, not opened afresh: it was on screen already.
   const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
-  contextRef.current = `${q}|${sheetOpen ? sheet : ''}|${filterKey}`
+  // A new revision for each change of what the list shows, so leaving and coming back is a change.
+  const context = `${q}|${sheetOpen ? sheet : ''}|${filterKey}`
+  const lastContext = useRef(context)
+  if (lastContext.current !== context) {
+    lastContext.current = context
+    contextRef.current += 1
+  }
   // The open conversation's chats as of the last render, before a filter change empties the lists.
   const openMembers = useRef<Chat[]>([])
   // The chat open when the filter changed, still to be judged once the server answers; a chat
@@ -384,7 +392,10 @@ export function Sidebar({
     if (openChat === undefined) return
     toJudge.current = undefined
     const shows = (c: Chat) => inFilter(c, { network, labelId, view: focused ? null : simpleShow })
-    if (openChat && !shows(openChat) && !judging.others.some(shows)) onClose()
+    if (!openChat || shows(openChat)) return
+    const other = judging.others.find(shows)
+    if (other) onOpenId(other.id)
+    else onClose()
   })
   useEffect(() => {
     const open = selectedId ? everything.find((c) => has(c, selectedId)) : undefined
