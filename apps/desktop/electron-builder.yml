@@ -8,7 +8,7 @@
 #
 # Releases (docs/CONTRIBUTING.md, Desktop releases) attach the installers under fixed names, with
 # no version in them, so trioditis.app can link to the latest release's files directly
-# (releases/latest/download/<name>). Keep apps/site/index.html in step with these names.
+# (releases/latest/download/<name>). Keep apps/site/download/index.html in step with these names.
 appId: org.trioditis.desktop
 productName: Trioditis
 executableName: trioditis

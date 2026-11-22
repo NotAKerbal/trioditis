@@ -54,6 +54,11 @@
   box-sizing: border-box;
 }
 
+/* Classes that set display would otherwise show an element the page has hidden. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   scroll-behavior: smooth;
   -webkit-text-size-adjust: 100%;
@@ -134,7 +139,8 @@ nav a {
   text-decoration: none;
 }
 
-nav a:hover {
+nav a:hover,
+nav a[aria-current='page'] {
   color: var(--fg);
 }
 
@@ -342,22 +348,88 @@ h3 {
   font-size: 15px;
 }
 
-.downloads {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: 28px 40px;
-  margin-block: 28px;
+.actions.start {
+  justify-content: flex-start;
+  margin-top: 24px;
 }
 
-.downloads > div {
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 20px;
+}
+
+.platform {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+}
+
+/* Where the top button leads when the browser can't tell which of a system's files fits. */
+.platform:target {
+  border-color: var(--accent);
+}
+
+.platform h3 {
+  margin: 0;
+}
+
+.platform .req {
+  margin: -14px 0 0;
+  color: var(--fg-muted);
+  font-size: 15px;
+}
+
+.files {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
-.downloads h3 {
-  flex-basis: 100%;
-  margin: 0;
+/* A whole row to click: what it's for on the left, its format on the right. */
+.file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding-inline: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 15.5px;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+
+.file:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.file .kind {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 13.5px;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 12px 0 0;
+  font-size: 15px;
+}
+
+.first-open {
+  margin: auto 0 0;
+  color: var(--fg-muted);
+  font-size: 15px;
 }
 
 p code {
