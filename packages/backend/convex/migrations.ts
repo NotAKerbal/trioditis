@@ -3,6 +3,7 @@ import type { Network } from '@trioditis/core'
 import { internal } from './_generated/api'
 import type { Id } from './_generated/dataModel'
 import { internalAction, internalMutation, type MutationCtx } from './_generated/server'
+import { patchChat } from './lib/chatView'
 import { refreshLast } from './lib/lastMessage'
 
 // One-off fixes for rows written by an older version. Each is safe to run any number of times.
@@ -65,6 +66,33 @@ export const backfillChatLast = internalMutation({
     for (const chat of page.page) if (chat.last === undefined) await refreshLast(ctx, chat._id)
     if (!page.isDone) {
       await ctx.scheduler.runAfter(0, internal.migrations.backfillChatLast, { cursor: page.continueCursor })
+    }
+    return null
+  },
+})
+
+/**
+ * Ends the timed mutes set before `chats.setMuted` scheduled their ends (`chats.muteEnded`):
+ * one already over is cleared now, and the rest are given their end, a batch at a time,
+ * carrying on until it has been through every chat. A mute set since has its own end too; a
+ * second one does nothing, since an end only clears the mute it was made for:
+ * `npx convex run migrations:scheduleMuteEnds`.
+ */
+export const scheduleMuteEnds = internalMutation({
+  args: { cursor: v.optional(v.union(v.null(), v.string())) },
+  returns: v.null(),
+  handler: async (ctx, { cursor }) => {
+    const now = Date.now()
+    const page = await ctx.db.query('chats').paginate({ numItems: BATCH, cursor: cursor ?? null })
+    for (const chat of page.page) {
+      const until = chat.mutedUntil
+      // "Until I unmute" is stored as the largest exact number, and never ends.
+      if (until === undefined || until >= Number.MAX_SAFE_INTEGER) continue
+      if (until <= now) await patchChat(ctx, chat, { mutedUntil: undefined })
+      else await ctx.scheduler.runAt(until, internal.chats.muteEnded, { chatId: chat._id, until })
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.migrations.scheduleMuteEnds, { cursor: page.continueCursor })
     }
     return null
   },
@@ -279,6 +307,7 @@ export const runAll = internalAction({
     await ctx.runMutation(internal.migrations.backfillChatLast, {})
     await ctx.runMutation(internal.migrations.installConnectedNetworks, {})
     await ctx.runMutation(internal.migrations.purgeFakeNetwork, {})
+    await ctx.runMutation(internal.migrations.scheduleMuteEnds, {})
     return null
   },
 })

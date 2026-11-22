@@ -130,6 +130,18 @@ Every chat belongs to exactly one view (ordered highest priority first):
 - Each `ChatRow` includes `sealedMeta` (open with kind `chat`, object ID `portalId`), `sealedCollage` (for a group, the members whose contacts' pictures make its picture when it has none: open with kind `chat`, object ID `<portalId>/collage`, plaintext `ChatCollagePlaintext`; `null` until sent) and `lastMessage` (newest message preview up to 4 KiB sealed; open with kind `message`, object ID `lastMessage.objectId`).
 - `api.chats.counts` returns `{ inbox, requests, woke }` capped at 99 with a `more` flag.
 - Chat actions: `chats.markRead`, `chats.markUnread`, `chats.setArchived`, `chats.setPinned`, `chats.setMuted`, `chats.snooze`, `chats.wake`, `chats.acceptRequest`, `chats.setBlocked`, `chats.setLabels` (up to 20 labels per chat).
+- A timed mute (`chats.setMuted` with `until`) ends with a write at `until`, which clears `mutedUntil`, so `counts` and the lists see the chat again then, as a woken snooze does. `counts` treats a chat as muted while `mutedUntil` is stored, not by the clock, so it agrees with what clients load.
+
+## Conversations
+
+A member's direct chats with one person on several networks are shown as one conversation once a People card links the contacts they're with. The server can't put them together, since who a direct chat is with (`dmGhostId` in its sealed metadata) and a card's links are both sealed, so the client does (apps/desktop `data/conversations.ts`):
+
+- **The list.** In each view, a person's direct chats (at most six) come together in the place of the first of them. The row is named and pictured after the card, unread if any chat is, muted only if all are, and shows the newest message of any. A chat stays in its own view.
+- **The pane.** Messages of every chat, merged by time, each chat keeping its order. Each chat pages on its own in a slot it keeps as the order changes; only what every chat with more to load has reached is shown, and loading earlier messages loads more of each. A run of messages says its network where it changes. Pinning, archiving, snoozing, muting, labels and blocking change every chat. Opening it marks each chat read once its messages are shown: nothing until every chat and its first page have loaded, and a quieter chat whose messages are all from before what the others have loaded waits.
+- **Sending.** A message goes by one chat: the one chosen in the composer, or by replying to a message in it, or the one a profile's Message or Open opened the pane on; otherwise one with a draft, then where they last wrote from, then the one opened. Each chat keeps its own draft and the composer shows the draft of the chat it sends on, so text typed for one network only goes on that one. Choices are named by network, account, and (for two chats on one account) who each is with, numbered in a fixed order if still alike; scheduled and cancelled messages say which chat they're for.
+- **Profiles.** A direct chat's details, and a group sender's avatar or name, show the person's profile: their card's networks, each with its chat when there is one, and its numbers, emails and usernames; or, with no card, the contact's own profile and a way to add them to People (a new card, or the one they belong on). Adding is refused if another device has put them on a different card since.
+
+A chat described before `dmGhostId` existed has none until its bridge host describes it again, which each host does once for every direct chat at its first start with the field.
 
 ## Messages, sending & scheduling
 

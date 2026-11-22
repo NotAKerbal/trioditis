@@ -230,6 +230,9 @@ func (h *Host) Start(ctx context.Context) error {
 		if err := h.Connector.RefreshCollages(postCtx); err != nil && postCtx.Err() == nil {
 			h.Bridge.Log.Warn().Err(err).Msg("Choosing chats' collages failed; they're chosen again at the next start")
 		}
+		if err := h.Connector.DescribeDirectChats(postCtx); err != nil && postCtx.Err() == nil {
+			h.Config.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Describing direct chats again failed; it is tried again at the next start")
+		}
 	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,
 	// so nothing it holds runs (SettleRestored). Every restore names itself (RestoreID, from

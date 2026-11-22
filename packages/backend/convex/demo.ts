@@ -58,6 +58,16 @@ const CHATS: Fixture[] = [
     pinned: true,
   },
   {
+    // Alice on Signal too: link her two contacts on one People card and her chats are one.
+    portalId: 'p_demo_alice_signal',
+    network: 'signal',
+    kind: 'dm',
+    name: 'Alice Moreno',
+    people: ['g_demo_alice'],
+    lines: ['Sent you the photos on here', 'Got them, thanks!', 'The one by the lake is my favourite'],
+    unread: 1,
+  },
+  {
     portalId: 'p_demo_family',
     network: 'whatsapp',
     kind: 'group',
@@ -367,7 +377,7 @@ export const writeChat = internalMutation({
 
 /**
  * Loads the demo data for the signed-in person, once: a connected account on each of seven
- * networks, six contacts and eight chats (two groups, a pinned chat, a message request, a snoozed chat and an
+ * networks, six contacts and nine chats (two groups, Alice on two networks, a pinned chat, a message request, a snoozed chat and an
  * archived one) of 20 messages each. It needs `keys.setup` done first. Each contact batch and
  * each chat is written whole, so if it stops partway, calling it again finishes the rest;
  * once everything is there, calling it does nothing (`seeded: false`).
@@ -435,7 +445,12 @@ export const seedForMe = action({
         network: chat.network,
         portalId: chat.portalId,
         kind: chat.kind,
-        sealed: seal({ name: chat.name }, 'chat', chat.portalId),
+        // A direct chat says who it's with, as a bridge host's does (sealing.md).
+        sealed: seal(
+          { name: chat.name, ...(chat.kind === 'dm' ? { dmGhostId: chat.people[0] } : {}) },
+          'chat',
+          chat.portalId,
+        ),
         // A demo group has no picture, so its members make one, as a bridge host would say.
         ...(chat.kind === 'group'
           ? { sealedCollage: seal({ ghosts: chat.people }, 'chat', `${chat.portalId}/collage`) }
