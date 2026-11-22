@@ -68,7 +68,11 @@ import { usePage } from '~/features/people/paging.ts'
 import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId } from '~/data/google-contacts.ts'
 import { canSignInToGoogle, GoogleSignInError, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
 import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
-import { Group, Loading } from '~/features/settings/layout.tsx'
+import { Group } from '~/features/settings/layout.tsx'
+import { failedAhead } from '~/data/fetched-ahead.ts'
+import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
+import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
+import { useSession } from '~/lib/session.tsx'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { newClientId } from '~/lib/sealed.ts'
 
@@ -100,10 +104,25 @@ export function PeopleDialog({
   /** Opens a chat a card started, closing the window. */
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
+  const session = useSession()
   return (
     <Dialog open={!!view} onOpenChange={(open) => !open && onViewChange(undefined)}>
       <DialogContent className="flex h-[660px] w-[min(980px,calc(100vw-32px))]" aria-describedby={undefined}>
-        {view ? <People view={view} onViewChange={onViewChange} onOpenChat={onOpenChat} /> : null}
+        {/* A page of the address book the server couldn't answer takes down only this window,
+            which then tries again, asking afresh (usePages), rather than the whole app. */}
+        {view ? (
+          <RetryBoundary
+            offline={session.offline}
+            fallback={(say, retry) => (
+              <div className="flex min-w-0 flex-1 flex-col">
+                <DialogTitle className="sr-only">People</DialogTitle>
+                <LoadError say={say('Couldn’t load your people.')} onRetry={retry} />
+              </div>
+            )}
+          >
+            {(attempt) => <People view={view} retries={attempt} onViewChange={onViewChange} onOpenChat={onOpenChat} />}
+          </RetryBoundary>
+        ) : null}
       </DialogContent>
     </Dialog>
   )
@@ -123,15 +142,22 @@ function matches(card: PersonPlaintext, query: string) {
 
 function People({
   view,
+  retries,
   onViewChange,
   onOpenChat,
 }: {
   view: PeopleView
+  /** Retries so far after a page couldn't load (RetryBoundary): each asks afresh. */
+  retries: number
   onViewChange: (view: PeopleView | undefined) => void
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
-  const people = usePeople()
-  const contacts = useNetworkContacts()
+  // From the cache, so the window opens full; afresh on a retry, or when fetching ahead failed
+  // (data/fetched-ahead.ts), past the failed page the cache keeps.
+  const [failedBefore] = useState(() => failedAhead('people'))
+  const from = retries > 0 || failedBefore ? 'fresh' : 'cached'
+  const people = usePeople(from)
+  const contacts = useNetworkContacts(from)
   const actions = usePeopleActions(people)
   const syncContacts = useSyncContacts()
   const [query, setQuery] = useState('')
@@ -160,6 +186,10 @@ function People({
   }, [people, contacts, suggestions])
   const byContact = useMemo(() => contactsByKey(contacts), [contacts])
   const selected = view.startsWith('p:') ? sorted.find((p) => `p:${p.personKey}` === view) : undefined
+  // The list shows once the cards and the contacts are both here: the rows for suggested links
+  // and contacts not in People come from the two together, and would push the list down after.
+  const listed = !!people && !!contacts
+  const connected = useConnected()
 
   /** Runs a write, saying so if it fails. True once it's saved. */
   async function attempt(write: () => Promise<unknown>, failure: string) {
@@ -298,7 +328,7 @@ function People({
       >
         <DialogTitle className="sr-only">People</DialogTitle>
         {/* On a narrow window the list is full width, under the window's close button. */}
-        <div className="flex h-14 shrink-0 items-center gap-1 border-b border-border pr-14 pl-2.5 md:px-2.5">
+        <div className="relative flex h-14 shrink-0 items-center gap-1 border-b border-border pr-14 pl-2.5 md:px-2.5">
           <InputGroup className="flex-1" icon={<Search className="size-4 shrink-0" />}>
             <Input
               value={query}
@@ -347,6 +377,7 @@ function People({
               if (file) void importFile(file)
             }}
           />
+          <SyncBar active={!listed || !connected} offline={!connected} />
           <GoogleGuide
             open={googleGuide}
             onOpenChange={setGoogleGuide}
@@ -356,8 +387,10 @@ function People({
             }}
           />
         </div>
-        <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2" aria-label="People" aria-busy={busy || !people}>
-          {suggestions.length && !query ? (
+        <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-2" aria-label="People" aria-busy={busy || !listed}>
+          {!listed ? (
+            <PeopleSkeleton />
+          ) : suggestions.length && !query ? (
             <NavRow
               icon={<Link2 />}
               active={view === 'suggested'}
@@ -377,11 +410,7 @@ function People({
               Not in People
             </NavRow>
           ) : null}
-          {!people ? (
-            <div className="px-2">
-              <Loading />
-            </div>
-          ) : shown.length ? (
+          {!listed ? null : shown.length ? (
             shown.map((p) => (
               <Button
                 variant="bare"
@@ -1219,5 +1248,20 @@ function PersonForm({
         </Button>
       </div>
     </form>
+  )
+}
+
+/** Where the list of people will be, while it loads: rows' shapes, as the list will sit. */
+function PeopleSkeleton() {
+  return (
+    // It waits a moment first, so a list that loads quickly never shows it.
+    <div aria-label="Loading people" className="animate-fade-in-late">
+      {Array.from({ length: 8 }, (_, i) => (
+        <div key={i} className="flex h-11 items-center gap-2.5 px-2">
+          <span className="size-7 shrink-0 rounded-full bg-muted" />
+          <span className="h-3 flex-1 rounded bg-muted" />
+        </div>
+      ))}
+    </div>
   )
 }

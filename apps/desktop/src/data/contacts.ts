@@ -16,7 +16,10 @@ const profileCache = new Map<string, ContactPlaintext | null>()
 
 type Answer = { ghostId: string; sealedProfile: Envelope }[]
 // Outside the hook, so useQueries can keep its result while the answers don't change.
-const dataOf = (results: { data?: Answer | undefined }[]) => results.map((r) => r.data)
+const dataOf = (results: { data?: Answer | undefined; isPending: boolean }[]) => ({
+  answers: results.map((r) => r.data),
+  pending: results.some((r) => r.isPending),
+})
 
 /**
  * The profiles of these senders on a network, by ghost ID, opened here. Asked for in sorted runs
@@ -25,15 +28,23 @@ const dataOf = (results: { data?: Answer | undefined }[]) => results.map((r) => 
  * is missing.
  */
 export function useContacts(network: Network, ghostIds: readonly string[]): Map<string, ContactPlaintext> {
+  return useContactProfiles(network, ghostIds).profiles
+}
+
+/** `useContacts`, and whether any of them is still on its way. */
+export function useContactProfiles(
+  network: Network,
+  ghostIds: readonly string[],
+): { profiles: Map<string, ContactPlaintext>; pending: boolean } {
   const session = useSession()
   const sorted = [...new Set(ghostIds)].sort()
   const runs: string[][] = []
   for (let i = 0; i < sorted.length; i += MAX_IDS_PER_REQUEST) runs.push(sorted.slice(i, i + MAX_IDS_PER_REQUEST))
-  const answers = useQueries({
+  const { answers, pending } = useQueries({
     queries: runs.map((ids) => convexQuery(api.contacts.get, { network, ghostIds: ids })),
     combine: dataOf,
   })
-  return useMemo(() => {
+  const profiles = useMemo(() => {
     const out = new Map<string, ContactPlaintext>()
     for (const answer of answers) {
       for (const { ghostId, sealedProfile } of answer ?? []) {
@@ -53,6 +64,7 @@ export function useContacts(network: Network, ghostIds: readonly string[]): Map<
     }
     return out
   }, [answers, session, network])
+  return { profiles, pending }
 }
 
 /**
@@ -72,7 +84,7 @@ export function useContactsAcross(contacts: readonly { network: Network; ghostId
         runs.push({ network, ghostIds: sorted.slice(i, i + MAX_IDS_PER_REQUEST) })
       return runs
     })
-  const answers = useQueries({
+  const { answers } = useQueries({
     queries: asked.map((args) => convexQuery(api.contacts.get, args)),
     combine: dataOf,
   })
