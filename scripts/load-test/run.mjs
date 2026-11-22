@@ -240,7 +240,7 @@ async function main() {
     await bridges.drained()
     clearInterval(timers.pop())
     await person.refresh()
-    const seeded = await seedClientState(crypto, person, inbox, log)
+    const seeded = await seedClientState(crypto, person, inbox, stack.convexUrl, log)
     const seedSeconds = (Date.now() - seedStarted) / 1000
     log(`Seeded in ${seedSeconds.toFixed(0)} s (${seeded.chats} chats)`)
 

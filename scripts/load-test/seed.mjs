@@ -1,6 +1,7 @@
 // What the person does to their inbox from the app, on top of what the bridge hosts sent: their
 // address book, labels, and pins, archives, snoozes and mutes. Through the app's own mutations,
 // sealed as the app seals (kind `person`, `label`), so the rows are what a real client leaves.
+import { ConvexClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
 
 /** Every chat's ID, by `<network>/<portalId>`, from the lists the app pages through. */
@@ -18,8 +19,20 @@ export async function chatIds(http) {
   return ids
 }
 
-export async function seedClientState(crypto, person, inbox, log = console.log) {
-  const { http, userId, publicKey } = person
+export async function seedClientState(crypto, person, inbox, convexUrl, log = console.log) {
+  // Over a websocket, signed in once, as the app is: each call over HTTP has the backend check
+  // its token afresh, fetching Better Auth's keys each time, which makes seeding crawl.
+  const socket = new ConvexClient(convexUrl, { skipConvexDeploymentUrlCheck: true, unsavedChangesWarning: false })
+  socket.setAuth(() => person.token())
+  try {
+    return await seedWith(socket, crypto, person, inbox, log)
+  } finally {
+    await socket.close()
+  }
+}
+
+async function seedWith(http, crypto, person, inbox, log) {
+  const { userId, publicKey } = person
   const seal = (value, kind, objectId) =>
     crypto.sealJson(value, [{ publicKey }], { kind, ownerUserId: userId, objectId })
 
@@ -47,7 +60,7 @@ export async function seedClientState(crypto, person, inbox, log = console.log) 
   if (missing) throw new Error(`${missing} of the inbox's chats aren't in the lists after seeding.`)
   const later = Date.now() + 7 * 24 * 3600_000
   let changes = 0
-  // A few at a time, as a person's clicks come.
+  // 32 at a time, as several devices and clicks would.
   const work = []
   for (const chat of inbox.chats) {
     const chatId = idOf(chat)
@@ -61,9 +74,9 @@ export async function seedClientState(crypto, person, inbox, log = console.log) 
       )
   }
   log(`Pinning, archiving, snoozing, muting and labelling (${work.length} changes)`)
-  for (let i = 0; i < work.length; i += 8) {
-    await Promise.all(work.slice(i, i + 8).map((fn) => fn()))
-    changes += Math.min(8, work.length - i)
+  for (let i = 0; i < work.length; i += 32) {
+    await Promise.all(work.slice(i, i + 32).map((fn) => fn()))
+    changes += Math.min(32, work.length - i)
   }
   return { chats: ids.size, changes, labels: labelIds.size, people: inbox.people.length }
 }
