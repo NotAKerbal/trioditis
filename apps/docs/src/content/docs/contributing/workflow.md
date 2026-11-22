@@ -40,13 +40,32 @@ Run the full check suite from the repository root before opening a pull request:
 pnpm check
 ```
 
-`pnpm check` mirrors `.github/workflows/checks.yml`:
+`pnpm check` runs what every pull request runs in `.github/workflows/checks.yml`:
 
 1. `pnpm typecheck`
 2. `pnpm lint` (`oxlint` with type-aware checks, Convex plugin rules, and design system rules)
-3. `pnpm test` (Vitest across all TypeScript packages and `convex-test`)
-4. `pnpm test:scripts` (Node test runner for `scripts/`)
-5. `go vet ./...` and `go test ./...` inside `apps/bridge-host`
+3. `pnpm format:check` (Prettier; `pnpm format` fixes it)
+4. `pnpm test` (Vitest across all TypeScript packages and `convex-test`)
+5. `pnpm test:scripts` (Node test runner for `scripts/`)
+6. `pnpm build` (the web app and the docs site)
+7. The release notes' format
+8. `go vet ./...` and `go test ./...` inside `apps/bridge-host`, and the patched mautrix copies
+
+Astro, which the docs site's typecheck and build run, needs a CPU with AVX. On a machine without it, such as some virtual machines, `pnpm check` reports those two steps as **Blocked** and leaves them to CI.
+
+### What CI runs
+
+CI runs automatically on every pull request, on every push to `dev` and `main`, and nightly on `dev`. It can also be started by hand from the **Actions** tab (**Checks → Run workflow**).
+
+| Job           | What it checks                                                                                                             | When                                                                          |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| TypeScript    | Everything in `pnpm check` above, and that the pull request adds a release note                                            | Always                                                                        |
+| Bridge host   | `go vet`, `go vet -tags libsignal`, `go test`, and the patched mautrix copies                                              | Always                                                                        |
+| Deploy bundle | `deploy/test/run.sh` against throwaway Compose projects (about eight minutes). Run it locally with `pnpm check --deploy`   | When a pull request changes `deploy/`; always otherwise                       |
+| Image (×4)    | Builds the web, Node, sign-in browser and bridge host (with Signal) images every server builds when it installs or updates | When a pull request changes anything an image is built from; always otherwise |
+| All checks    | Passes only when every job above passed or was skipped as not needed                                                       | Always                                                                        |
+
+`scripts/ci-changes.mjs` decides which of the two slow jobs a pull request needs. A pull request that changes only docs, the site, release notes or tests skips the images. Pushes to `dev` and `main` always run both, so a skip never lets a broken bundle reach a server unseen. **All checks** is the one check to require before merging. The nightly run catches what nothing pins, such as Debian's packages in the images, before a server on the **Nightly** channel updates into it.
 
 ### Design system lint rules
 

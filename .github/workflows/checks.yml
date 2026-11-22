@@ -1,6 +1,11 @@
-# The checks docs/CONTRIBUTING.md asks for, on every pull request and on pushes to dev and
-# main: TypeScript typecheck, lint and tests, release notes, and the bridge host's Go vet and
-# tests.
+# Every check docs/CONTRIBUTING.md asks for, run on every pull request, on pushes to dev and
+# main, and nightly on dev: TypeScript typecheck, lint, format, tests and builds, release notes,
+# the bridge host's Go vet and tests, the deploy bundle's tests, and the server's images.
+#
+# The two slow jobs, the deploy bundle's tests and the images, run on a pull request only when
+# it changes what they cover (scripts/ci-changes.mjs); pushes to dev and main and the nightly
+# run always run them. "All checks" passes only when every job passed or was skipped for that
+# reason, so it is the one check to require before merging.
 #
 # Jobs run only on GitHub's hosted runners. The repository is public, so a pull request from
 # a fork runs here too, and a self-hosted runner would hand that code a machine we keep.
@@ -10,24 +15,64 @@ on:
   pull_request:
   push:
     branches: [dev, main]
+  # Nightly, on dev, so what nothing pins (Debian's packages in the images, GitHub's runners)
+  # breaking shows before a server on the Nightly channel updates into it. Scheduled runs use
+  # the default branch's copy of this file, so this starts once it reaches main.
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer commit cancels the older run.
+# A newer commit cancels the older run. The nightly run has its own group: it runs on main's
+# ref but checks out dev, and must not cancel a push to main.
 concurrency:
-  group: checks-${{ github.ref }}
+  group: checks-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
   cancel-in-progress: true
 
+env:
+  # The nightly run checks dev; everything else checks the commit it was started for.
+  CHECKOUT_REF: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+
 jobs:
-  typescript:
-    name: TypeScript
+  changes:
+    name: What changed
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      deploy: ${{ steps.areas.outputs.deploy }}
+      images: ${{ steps.areas.outputs.images }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.CHECKOUT_REF }}
+          # A pull request's checkout is its merge into the base branch, whose first parent is
+          # the base, so HEAD^1 to HEAD is what it changes.
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - id: areas
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            node scripts/ci-changes.mjs HEAD^1
+          else
+            node scripts/ci-changes.mjs all
+          fi
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.CHECKOUT_REF }}
           # The base too, for the release note check.
           fetch-depth: 2
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -38,8 +83,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm format:check
       - run: pnpm test
       - run: pnpm test:scripts
+      # The web app and the docs site: neither is otherwise built before it merges, since
+      # Vercel builds previews only on request.
+      - run: pnpm build
       - run: node scripts/release-notes.mjs check
       # A pull request's checkout is its merge into the base branch, whose first parent is the
       # base, so the note must be among the changes it brings (docs/CONTRIBUTING.md).
@@ -58,38 +107,117 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check for the Go module
-        id: module
-        working-directory: .
-        run: |
-          if [ -f apps/bridge-host/go.mod ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
-      - if: steps.module.outputs.present == 'true'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+          ref: ${{ env.CHECKOUT_REF }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: apps/bridge-host/go.mod
           cache-dependency-path: apps/bridge-host/go.sum
-      - if: steps.module.outputs.present == 'true'
-        run: go vet ./...
+      - run: go vet ./...
       # Signal's connector is only built with -tags libsignal and libsignal (Rust) to link,
-      # which is too slow to build on every run. Vetting needs no library, so this keeps the
-      # Signal code compiling; docs/networks/signal.md has the full build.
-      - if: steps.module.outputs.present == 'true'
-        name: go vet -tags libsignal ./...
+      # which the Bridge host image (below) does. Vetting needs no library, so this keeps the
+      # Signal code compiling on every run; docs/networks/signal.md has the full build.
+      - name: go vet -tags libsignal ./...
         run: go vet -tags libsignal ./...
       # The runner's /usr/bin/chromium is a bare build that aborts at startup because AppArmor
       # blocks its sandbox; Google Chrome's own AppArmor profile lets it sandbox.
-      - if: steps.module.outputs.present == 'true'
-        run: go test ./...
+      - run: go test ./...
         env:
           CHROMIUM_PATH: google-chrome
       # The bridge host builds against patched copies of mautrix-signal and mautrix
       # (apps/bridge-host/third_party/README.md); this fails unless each copy is upstream at
       # go.mod's version plus its patch (third_party/<name>.patch), so the patch is the whole change.
-      - if: steps.module.outputs.present == 'true'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-      - if: steps.module.outputs.present == 'true'
-        name: mautrix-signal and mautrix copies match their patches
+      - name: mautrix-signal and mautrix copies match their patches
         working-directory: .
         run: node scripts/signal-fork.mjs check
+
+  # deploy/test: the bundle's scripts (backups, restore, keys, the updater, ports) against
+  # throwaway Compose projects on the runner's Docker. Nothing is built or started.
+  deploy:
+    name: Deploy bundle
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.CHECKOUT_REF }}
+      # backup-crypt.sh runs the backup cipher on the runner's own Node.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: sh deploy/test/run.sh
+
+  # The images every server builds when it installs or updates (install.sh, compose.yml), so a
+  # change that breaks one fails here instead of on the servers updating to it. Nothing is
+  # pushed anywhere.
+  images:
+    name: Image (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-24.04
+    # libsignal's first build, before the layer cache has it, takes most of this.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Web
+            dockerfile: deploy/docker/web.Dockerfile
+            scope: web
+            build-args: ''
+          - name: Node
+            dockerfile: deploy/docker/node.Dockerfile
+            scope: node
+            build-args: ''
+          - name: Sign-in browser
+            dockerfile: deploy/docker/login-browser.Dockerfile
+            scope: login-browser
+            build-args: ''
+          # With Signal, as install.sh builds it when Signal is bridged, which by default it is.
+          - name: Bridge host
+            dockerfile: deploy/docker/bridge-host.Dockerfile
+            scope: bridge-host
+            build-args: WITH_SIGNAL=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.CHECKOUT_REF }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Layers come from the Actions cache. Only pushes and the nightly and manual runs write
+      # it: a pull request reads its base's layers but doesn't spend the cache's space on its
+      # own, which libsignal's toolchain would soon fill.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build-args }}
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.scope }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.scope) || '' }}
+
+  # The one check to require: it fails when any job above failed or was cancelled, and passes
+  # when each passed or wasn't needed.
+  all:
+    name: All checks
+    if: always()
+    needs: [changes, typescript, go, deploy, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ] && [ "$result" != skipped ]; then
+              echo "::error::A job ended $result"
+              exit 1
+            fi
+          done
