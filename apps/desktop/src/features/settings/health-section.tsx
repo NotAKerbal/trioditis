@@ -17,14 +17,31 @@ const HOUR_MS = 60 * 60_000
 const count = new Intl.NumberFormat()
 const duration = (ms: number) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
 
-/** What the server's timing of itself says, worst news first. */
+/** A probe runs every minute; one missing for longer than this didn't get an answer kept. */
+const PROBE_EVERY_MS = 60_000
+const LATE_MS = 3 * PROBE_EVERY_MS
+
+/**
+ * What the server's timing of itself says, worst news first. A server too starved to answer
+ * can't keep its own probe's answer either, so a missing probe counts as a timeout, and a last
+ * answer from minutes ago says it isn't answering now.
+ */
 export function serverState(probes: Health['probes'], now: number) {
   const hour = probes.filter((p) => now - p.at < HOUR_MS)
+  let missed = 0
+  hour.forEach((p, i) => {
+    const after = hour[i + 1]?.at ?? now
+    missed += Math.max(0, Math.floor((after - p.at) / PROBE_EVERY_MS) - 1)
+  })
+  const timeouts = hour.filter((p) => !p.ok).length + missed
+  const slowest = Math.max(0, ...hour.map((p) => p.ms))
   const last = hour.at(-1)
-  if (!last) return { say: 'Not checked yet', warn: false, hour }
-  if (!last.ok) return { say: 'Timing out', warn: true, hour }
-  if (last.ms >= SLOW_MS) return { say: `Slow, ${duration(last.ms)}`, warn: true, hour }
-  return { say: `Keeping up, ${duration(last.ms)}`, warn: false, hour }
+  const base = { hour, timeouts, slowest }
+  if (!last) return { ...base, say: probes.length ? 'Not answering' : 'Not checked yet', warn: probes.length > 0 }
+  if (now - last.at > LATE_MS) return { ...base, say: 'Not answering', warn: true }
+  if (!last.ok) return { ...base, say: 'Timing out', warn: true }
+  if (last.ms >= SLOW_MS) return { ...base, say: `Slow, ${duration(last.ms)}`, warn: true }
+  return { ...base, say: `Keeping up, ${duration(last.ms)}`, warn: false }
 }
 
 /** How a bridge's deliveries to the server are going. */
@@ -59,8 +76,7 @@ export function ServerHealth() {
       </>
     )
   const server = serverState(data.probes, now)
-  const slowest = Math.max(0, ...server.hour.map((p) => p.ms))
-  const timeouts = server.hour.filter((p) => !p.ok).length
+  const { slowest, timeouts } = server
   return (
     <>
       <Heading title="Server health" />

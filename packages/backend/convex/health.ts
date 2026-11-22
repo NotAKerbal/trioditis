@@ -11,6 +11,9 @@ import { network } from './validators'
 
 /** The probes kept: an hour's, at one a minute. */
 const PROBES_KEPT = 60
+/** Tries at keeping a probe's answer, this far apart: all within the minute before the next. */
+const RECORD_TRIES = 5
+const RECORD_WAIT_MS = 8_000
 
 /** A small query, timed by `probe`: one read, as the lightest of the app's own queries make. */
 export const ping = internalQuery({
@@ -38,8 +41,18 @@ export const probe = internalAction({
     } catch {
       ok = false
     }
-    await ctx.runMutation(internal.health.record, { at, ms: Date.now() - at, ok })
-    return null
+    const sample = { at, ms: Date.now() - at, ok }
+    // On a starved server the write times out too, and a lost failure would read as a quiet
+    // hour: it's tried again, within the minute, until it's kept.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await ctx.runMutation(internal.health.record, sample)
+        return null
+      } catch (error) {
+        if (attempt >= RECORD_TRIES - 1) throw error
+        await new Promise((resolve) => setTimeout(resolve, RECORD_WAIT_MS))
+      }
+    }
   },
 })
 
