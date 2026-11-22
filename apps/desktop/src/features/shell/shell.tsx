@@ -5,6 +5,7 @@ import { membersOf, onEach, useChatActions, type Chat, type ChatId } from '~/dat
 import { requestSendOn, setConversations, setDmChats, useConversationIds } from '~/data/conversations.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { ChatPane } from '~/features/chat/chat-pane.tsx'
+import { isShownNow } from '~/features/chat/read-while-open.tsx'
 import { WarmChats, WarmPeople } from '~/features/chat/warm-chats.tsx'
 import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
 import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
@@ -59,8 +60,9 @@ export function Shell() {
       select(chat.id)
     }
     // Opening another chat marks it read once it's shown (read-while-open.tsx). Choosing the open
-    // one again doesn't open it again, so a chat marked unread while open is marked read here.
-    if (isOpen) for (const m of members) if (m.hasUnread) void actions.markRead(m.id)
+    // one again doesn't open it again, so a chat marked unread while open is marked read here:
+    // each of its chats whose messages are on screen, not one still loading or held back.
+    if (isOpen) for (const m of members) if (m.hasUnread && isShownNow(m.id)) void actions.markRead(m.id)
   }
 
   useMessageNotifications(openIds, open)

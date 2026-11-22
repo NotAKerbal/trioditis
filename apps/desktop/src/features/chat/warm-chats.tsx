@@ -30,8 +30,9 @@ export function WarmPeople() {
 }
 
 function WarmAddressBook() {
-  usePeople()
-  useNetworkContacts()
+  // Into the cache the People window reads from (data/people.ts, PagesFrom).
+  usePeople('cached')
+  useNetworkContacts('cached')
   return null
 }
 

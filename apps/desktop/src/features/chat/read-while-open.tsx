@@ -15,6 +15,13 @@ function subscribeSeen(onChange: () => void) {
 }
 const seen = () => document.visibilityState === 'visible' && document.hasFocus()
 
+// The open chats whose messages are on screen now, as their trackers see them: choosing the open
+// chat again marks only these read (Shell), never one still loading or held back.
+const shownNow = new Set<string>()
+
+/** Whether this chat's messages are on screen, with the server's copy of the chat. */
+export const isShownNow = (chatId: string) => shownNow.has(chatId)
+
 /** Marks an open chat read when it's opened and as messages arrive in it (data/read-on-open.ts). */
 export function ReadWhileOpen({
   chatId,
@@ -45,6 +52,12 @@ function useReadWhileOpen(
   const open = useOpenChat(chatId)
   const chat = open.confirmed ? open.chat : undefined
   const visible = useSyncExternalStore(subscribeSeen, seen)
+  const showing = !paused && !!chat
+  useEffect(() => {
+    if (!showing) return
+    shownNow.add(chatId)
+    return () => void shownNow.delete(chatId)
+  }, [showing, chatId])
   useEffect(() => {
     // Paused, it keeps what was done: when it goes on, the chat isn't opened again.
     if (paused) return

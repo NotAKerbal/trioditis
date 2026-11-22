@@ -151,8 +151,10 @@ function People({
   onViewChange: (view: PeopleView | undefined) => void
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
-  const people = usePeople(retries)
-  const contacts = useNetworkContacts(retries)
+  // From the cache, so the window opens full; afresh on a retry, past a failed cached page.
+  const from = retries > 0 ? 'fresh' : 'cached'
+  const people = usePeople(from)
+  const contacts = useNetworkContacts(from)
   const actions = usePeopleActions(people)
   const syncContacts = useSyncContacts()
   const [query, setQuery] = useState('')

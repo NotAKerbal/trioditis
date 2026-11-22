@@ -71,16 +71,21 @@ const contactCache = new Map<string, ContactPlaintext | null>()
 const identifierCache = new Map<string, ContactIdentifiersPlaintext | null>()
 
 /**
- * A list's pages, from the cache, or asked afresh on a retry (`attempt` above 0): the cached hook
- * keeps a failed page, under the same key, for minutes, so asking it again the same way fails
- * again. Convex's own hook asks under a new pagination ID each time (as useMessages does).
+ * Where a list's pages come from. `cached` keeps them for minutes after they're let go, so the
+ * People window opens again full; but it keeps a failed page too, under the same key, so asking
+ * again the same way fails again. Only the People window (inside its own RetryBoundary, which
+ * asks `fresh` on a retry) and its fetch-ahead use it. Everything else asks `fresh`: Convex's
+ * own hook, under a new pagination ID each time, as it always did, so a failure there never
+ * comes back from the cache.
  */
+export type PagesFrom = 'cached' | 'fresh'
+
 function usePages<Q extends typeof api.people.list | typeof api.contacts.list | typeof api.contacts.identifiers>(
   query: Q,
   initialNumItems: number,
-  attempt: number,
+  from: PagesFrom,
 ) {
-  const retrying = attempt > 0
+  const retrying = from === 'fresh'
   // None of these lists takes arguments but its page.
   const args = {} as PaginatedQueryArgs<Q>
   const cached = useCachedPaginatedQuery(query, retrying ? 'skip' : args, { initialNumItems })
@@ -96,9 +101,9 @@ function useEveryPage(status: string, loadMore: (n: number) => void, pageSize: n
 }
 
 /** Every card, opened, or undefined until they've all loaded. Ones this device can't open are left out. */
-export function usePeople(attempt = 0): StoredPerson[] | undefined {
+export function usePeople(from: PagesFrom = 'fresh'): StoredPerson[] | undefined {
   const session = useSession()
-  const { results, status, loadMore } = usePages(api.people.list, 100, attempt)
+  const { results, status, loadMore } = usePages(api.people.list, 100, from)
   useEveryPage(status, loadMore, 100)
   return useMemo(() => {
     if (status !== 'Exhausted') return undefined
@@ -118,11 +123,11 @@ export function usePeople(attempt = 0): StoredPerson[] | undefined {
 }
 
 /** Every contact on every network, opened with what the person's logins know them by, or undefined until loaded. */
-export function useNetworkContacts(attempt = 0): NetworkContact[] | undefined {
+export function useNetworkContacts(from: PagesFrom = 'fresh'): NetworkContact[] | undefined {
   const session = useSession()
-  const contacts = usePages(api.contacts.list, 500, attempt)
+  const contacts = usePages(api.contacts.list, 500, from)
   useEveryPage(contacts.status, contacts.loadMore, 500)
-  const identifiers = usePages(api.contacts.identifiers, 500, attempt)
+  const identifiers = usePages(api.contacts.identifiers, 500, from)
   useEveryPage(identifiers.status, identifiers.loadMore, 500)
   return useMemo(() => {
     if (contacts.status !== 'Exhausted' || identifiers.status !== 'Exhausted') return undefined
