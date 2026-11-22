@@ -2,7 +2,9 @@ import { api } from '@trioditis/backend/api'
 import type { Attachment, Network } from '@trioditis/core'
 import { decryptMedia } from '@trioditis/crypto'
 import { useEffect, useRef, useState } from 'react'
+import { retryDelay } from '~/features/shell/retry-delay.ts'
 import { convex } from '~/lib/convex.ts'
+import { isTransient } from '~/lib/resilient-convex.ts'
 import { useSession } from '~/lib/session.tsx'
 
 // People's pictures and files (docs/architecture/client-api.md, Media). The gateway passes along
@@ -32,19 +34,49 @@ export const isAudio = (a: Attachment) => /^audio\/[a-z0-9.+-]+$/.test(a.mime.to
 export const loadsByItself = (a: Attachment) => isImage(a) && a.size <= AUTO_LOAD_BYTES
 export const playable = (a: Attachment) => (isVideo(a) || isAudio(a)) && a.size <= PLAYABLE_BYTES
 
+/**
+ * The server too busy to give a file now (a media token timed out, the gateway answered 502–504):
+ * the picture keeps loading and is tried again, rather than showing as broken.
+ */
+export class ServerBusy extends Error {}
+
 type Token = { token: string; expiresAt: number }
 const tokens = new Map<string, Promise<Token>>()
+/** Token requests in a row that the server failed to answer, by network, for the wait before the next. */
+const tokenFailures = new Map<string, number>()
 
-function tokenFor(userId: string, network: Network, fresh = false): Promise<Token> {
+/**
+ * A media token for this network: the one held while it lasts, else a new one. `stale` is a token
+ * the gateway refused (401): it's replaced, but once only, however many files were refused it.
+ */
+function tokenFor(userId: string, network: Network, stale?: string): Promise<Token> {
   const key = `${userId}/${network}`
   const held = tokens.get(key)
-  if (held && !fresh) {
-    // A held token is used until it nears its end; a failed request for one is asked again.
-    return held.then((t) => (t.expiresAt - Date.now() > TOKEN_MARGIN_MS ? t : tokenFor(userId, network, true)))
-  }
-  const asked = convex.mutation(api.media.access, { network })
+  if (!held) return askToken(key, network)
+  // A failed request for one is shared while it cools down (askToken), then asked again.
+  return held.then((t) => {
+    if (t.token !== stale && t.expiresAt - Date.now() > TOKEN_MARGIN_MS) return t
+    const now = tokens.get(key)
+    return now && now !== held ? now : askToken(key, network)
+  })
+}
+
+function askToken(key: string, network: Network): Promise<Token> {
+  const asked = convex.mutation(api.media.access, { network }).catch((error: unknown) => {
+    throw isTransient(error) ? new ServerBusy('The server is busy.') : error
+  })
   tokens.set(key, asked)
-  asked.catch(() => tokens.get(key) === asked && tokens.delete(key))
+  asked.then(
+    () => tokenFailures.delete(key),
+    (error: unknown) => {
+      if (!(error instanceof ServerBusy)) return tokens.get(key) === asked && tokens.delete(key)
+      // Every picture waiting on this token shares the failure for a while, so a chat full of
+      // them asks a busy server once, not once each, and less often while it stays busy.
+      const failures = (tokenFailures.get(key) ?? 0) + 1
+      tokenFailures.set(key, failures)
+      setTimeout(() => tokens.get(key) === asked && tokens.delete(key), retryDelay(failures))
+    },
+  )
   return asked
 }
 
@@ -61,19 +93,25 @@ async function inTurn<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-async function fetchCiphertext(userId: string, network: Network, mediaId: string): Promise<Uint8Array> {
+/** Exported for its tests. */
+export async function fetchCiphertext(userId: string, network: Network, mediaId: string): Promise<Uint8Array> {
+  let { token } = await tokenFor(userId, network)
   for (let attempt = 0; ; attempt++) {
-    const { token } = await tokenFor(userId, network, attempt > 0)
     // Each fetch goes through the gateway's checks, never the browser's cache.
     const response = await fetch(`/media/${encodeURIComponent(mediaId)}`, {
       headers: { authorization: `Bearer ${token}` },
       cache: 'no-store',
     })
     if (response.ok) return new Uint8Array(await response.arrayBuffer())
-    // A token the gateway no longer takes is asked for again; a busy gateway, waited for.
-    const again = response.status === 401 || response.status === 503
-    if (!again || attempt >= 2) throw new Error(`The file couldn’t be fetched (${response.status}).`)
-    if (response.status === 503) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+    const busy = response.status >= 502 && response.status <= 504
+    if (attempt >= 2 || (!busy && response.status !== 401)) {
+      if (busy) throw new ServerBusy('The server is busy.')
+      throw new Error(`The file couldn’t be fetched (${response.status}).`)
+    }
+    // A token the gateway no longer takes is replaced; a busy gateway is waited for, with the
+    // same token, which it took: asking for another would only add to what keeps it busy.
+    if (response.status === 401) ({ token } = await tokenFor(userId, network, token))
+    else await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
   }
 }
 
@@ -193,8 +231,15 @@ export function useMedia(
     setState({ state: 'loading', mediaId: attachment.mediaId })
     mediaUrl(session.userId, network, attachment).then(
       (url) => current && setState({ state: 'ready', url, mediaId: attachment.mediaId }),
-      () => {
+      (error: unknown) => {
         if (!current) return
+        // A busy server isn't a broken picture: it stays loading, and is tried again for as long
+        // as it's shown, waiting longer while the server stays busy.
+        if (error instanceof ServerBusy) {
+          retries.current.count++
+          retry = setTimeout(() => setAsked((n) => n + 1), retryDelay(retries.current.count))
+          return
+        }
         setState({ state: 'failed', mediaId: attachment.mediaId })
         // A bridge host restarting fails a picture for a moment; one that loads by itself
         // shouldn't stay broken for it.

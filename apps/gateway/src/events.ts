@@ -1,4 +1,4 @@
-import type { BridgeEvent } from '@trioditis/core/bridge-protocol'
+import type { BridgeEvent, BridgePressure } from '@trioditis/core/bridge-protocol'
 import { NETWORKS, type Network } from '@trioditis/core'
 import { convexToJson, type Value } from 'convex/values'
 import { isEnvelope } from '@trioditis/backend/envelope'
@@ -31,6 +31,21 @@ interface Batch {
   events: BridgeEvent[]
   /** The host's last heartbeat before it shuts down. */
   stopping?: true
+  /** How the host's deliveries are going, passed on for the health page. */
+  pressure?: BridgePressure
+}
+
+const count = (value: unknown) =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.min(Math.floor(value), 1e9) : null
+
+/** The host's pressure counts, if they are counts; anything else is left out, not refused. */
+export function parsePressure(value: unknown): BridgePressure | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { backlog, pushMs, failedPushes } = value as Record<string, unknown>
+  const counts = [count(backlog), count(pushMs), count(failedPushes)]
+  if (counts.some((c) => c === null)) return undefined
+  const [b, p, f] = counts as number[]
+  return { backlog: b!, pushMs: p!, failedPushes: f! }
 }
 
 const isText = (value: unknown) => typeof value === 'string' && value.length > 0
@@ -52,11 +67,13 @@ export function parseBatch(value: unknown): Batch | null {
   const events = batch.events as BridgeEvent[]
   // Only a heartbeat can say the host is stopping: a batch with events isn't its last word.
   const stopping = batch.stopping === true && events.length === 0
+  const pressure = parsePressure(batch.pressure)
   return {
     hostId: batch.hostId as string,
     network: batch.network as Network,
     events,
     ...(stopping ? { stopping } : {}),
+    ...(pressure ? { pressure } : {}),
   }
 }
 
@@ -114,7 +131,12 @@ type Outcome = { ackedThrough: number } | { expectedSeq: number }
  * instead and quarantines the ones refused, so one malformed event doesn't stop the feed.
  */
 async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[]): Promise<Outcome> {
-  const target = { hostId: batch.hostId, network: batch.network, ...(batch.stopping ? { stopping: true } : {}) }
+  const target = {
+    hostId: batch.hostId,
+    network: batch.network,
+    ...(batch.stopping ? { stopping: true } : {}),
+    ...(batch.pressure ? { pressure: batch.pressure } : {}),
+  }
   // A chunk holding an event that can't be sent goes one event at a time from the start.
   if (events.every(sendable)) {
     try {
@@ -134,7 +156,13 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
         invalid = true
       }
     }
-    if (invalid) outcome = await backend.quarantineInvalid({ ...target, seq: event.seq, type: typeOf(event) })
+    if (invalid)
+      outcome = await backend.quarantineInvalid({
+        hostId: target.hostId,
+        network: target.network,
+        seq: event.seq,
+        type: typeOf(event),
+      })
     if ('expectedSeq' in outcome) return outcome
   }
   return outcome
@@ -147,7 +175,7 @@ async function applyChunk(backend: Backend, batch: Batch, events: BridgeEvent[])
  */
 async function ingestAll(
   backend: Backend,
-  target: { hostId: string; network: Network; stopping?: boolean },
+  target: { hostId: string; network: Network; stopping?: boolean; pressure?: BridgePressure },
   events: BridgeEvent[],
 ): Promise<Outcome> {
   const last = events.at(-1)?.seq ?? 0

@@ -1,3 +1,30 @@
+diff --git a/bridgev2/backfillqueue.go b/bridgev2/backfillqueue.go
+index 4ac591e7a08acc6176b77d5af7f8a7e29fb5fb0d..b3dbcb84efc23199e4d40d6c2db5cebd37961948 100644
+--- a/bridgev2/backfillqueue.go
++++ b/bridgev2/backfillqueue.go
+@@ -24,6 +24,11 @@ const BackfillMinBackoffAfterRoomCreate = 1 * time.Minute
+ const BackfillQueueErrorBackoff = 1 * time.Minute
+ const BackfillQueueMaxEmptyBackoff = 10 * time.Minute
+ 
++// Trioditis: BeforeBackfillTask, if set, is called by the backfill queue before each task it
++// runs (queued or manual), before any portal lock is taken, and may block: the host holds older
++// history back there while its server is behind, without holding up a chat's live events.
++var BeforeBackfillTask func(ctx context.Context)
++
+ func (br *Bridge) WakeupBackfillQueue(manualTask ...*ManualBackfill) {
+ 	if br.IsStopping() {
+ 		for _, task := range manualTask {
+@@ -106,6 +111,10 @@ func (br *Bridge) RunBackfillQueue() {
+ 			return
+ 		case <-time.After(nextDelay):
+ 		}
++		// Trioditis: see BeforeBackfillTask.
++		if BeforeBackfillTask != nil {
++			BeforeBackfillTask(ctx)
++		}
+ 		select {
+ 		case manualTask := <-br.manualBackfills:
+ 			manualTask.addLogAndDo(ctx)
 diff --git a/bridgev2/portal.go b/bridgev2/portal.go
 index 1eef3b9b491326870c9cfd4961d42a608488fb3c..f7b6b354d9eaad9202b67259ea9610eb3aa00c97 100644
 --- a/bridgev2/portal.go

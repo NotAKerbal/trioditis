@@ -9,5 +9,7 @@ crons.interval('prune rate limits', { minutes: 10 }, internal.rateLimits.prune, 
 crons.interval('prune chat starts', { hours: 1 }, internal.newChats.prune, {})
 // A cancelled message's copy waits 30 days to be restored or discarded (scheduled.ts).
 crons.interval('forget old cancelled messages', { hours: 6 }, internal.scheduled.forgetOldCancelled, {})
+// How quickly the server answers a small query of its own, for Admin settings → Server health.
+crons.interval('time the server', { minutes: 1 }, internal.health.probe, {})
 
 export default crons

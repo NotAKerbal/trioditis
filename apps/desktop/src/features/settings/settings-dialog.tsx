@@ -24,6 +24,7 @@ import { convexQuery } from '@convex-dev/react-query'
 import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import {
+  Activity,
   Bell,
   Bot,
   Contact,
@@ -58,6 +59,7 @@ import { Accounts } from './accounts-section.tsx'
 import { Agents } from './agents-section.tsx'
 import { Contacts } from './contacts-section.tsx'
 import { Group, Heading, Setting } from './layout.tsx'
+import { ServerHealth } from './health-section.tsx'
 import { Members } from './members-section.tsx'
 import { Networks } from './networks.tsx'
 import { Notifications } from './notifications.tsx'
@@ -78,6 +80,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'members', name: 'Members', icon: <Users />, admin: true },
   { id: 'contacts', name: 'Contacts', icon: <Contact />, admin: true },
   { id: 'updates', name: 'Updates', icon: <RefreshCw />, admin: true },
+  { id: 'health', name: 'Server health', icon: <Activity />, admin: true },
 ] as const
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]['id']
 const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
@@ -156,6 +159,8 @@ export function SettingsDialog({
             <Contacts />
           ) : current.id === 'updates' ? (
             <Updates />
+          ) : current.id === 'health' ? (
+            <ServerHealth />
           ) : (
             <Keys />
           )}

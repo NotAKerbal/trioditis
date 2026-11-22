@@ -47,6 +47,15 @@ The gateway listens on `GATEWAY_INTERNAL_ADDR` (default `127.0.0.1:8601`). Each 
 - **Heartbeats:** On startup and every 30 seconds, the host posts an empty batch (`events: []`) to register liveness and learn `ackedThrough`. Hosts silent for over 2 minutes stop receiving commands.
 - **Size limits:** Max 100 events and 8 MiB JSON per batch (gateway rejects bodies over 32 MiB). Individual events over 1 MiB are quarantined.
 
+### Pressure and backpressure
+
+Every batch, heartbeats included, may carry `"pressure": {"backlog": 12, "pushMs": 850, "failedPushes": 0}`: the journal events not yet acknowledged, how long the host's last delivery took to be answered (ms), and its deliveries that failed in the last five minutes. They are counts only. The gateway passes them on if all three are non-negative numbers and drops them otherwise; Convex keeps each host's at most every 30 seconds (`bridgePressure`) for **Admin settings → Server health**.
+
+The host also acts on them, so a server short of CPU isn't swamped by history while people are using it:
+
+- After a delivery that took a second or more, the next waits as long again (at most 10 seconds).
+- Older history waits while the server is behind: more than 300 events unacknowledged, a delivery slower than two seconds, or one that failed in the last 30 seconds. bridgev2's backfill queue (which also runs someone scrolling back) waits before its next task, before it takes any chat's lock, for two minutes at most (`BeforeBackfillTask`, third_party/mautrix.patch). Live messages and a chat's forward catch-up never wait.
+
 ### Event types
 
 Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
