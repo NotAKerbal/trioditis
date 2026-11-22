@@ -8,11 +8,15 @@ const key = (n: number) => `person-key-${String(n).padStart(6, '0')}`
 
 async function count(t: T, userId: string) {
   return await t.run(async (ctx) => {
+    const book = await ctx.db
+      .query('addressBooks')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .unique()
     const member = await ctx.db
       .query('members')
       .withIndex('by_userId', (q) => q.eq('userId', userId))
       .unique()
-    return member?.peopleCount ?? 0
+    return book?.count ?? member?.peopleCount ?? 0
   })
 }
 
@@ -99,6 +103,34 @@ describe('people', () => {
     // A batch that fails stores nothing.
     expect((await a.query(api.people.list, { paginationOpts: first })).page).toEqual([])
     expect(await a.query(api.people.revision, {})).toBe(0)
+  })
+
+  it('keeps the count and revision off the membership row, carrying on from what it held', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    // As a person's row was before they moved: every query reads it, so it's no longer written.
+    const member = await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query('members')
+        .withIndex('by_userId', (q) => q.eq('userId', 'user_a'))
+        .unique()
+      await ctx.db.patch(row!._id, { peopleCount: 3, peopleRevision: 7 })
+      return (await ctx.db.get(row!._id))!
+    })
+    expect(await a.query(api.people.revision, {})).toBe(7)
+    await expect(
+      a.mutation(api.people.put, { people: [{ personKey: key(1), sealed: sealed() }], revision: 6 }),
+    ).rejects.toThrow(/changed on another device/)
+    const revision = await a.mutation(api.people.put, {
+      people: [{ personKey: key(1), sealed: sealed() }],
+      revision: 7,
+    })
+    expect(revision).toBe(8)
+    expect(await a.query(api.people.revision, {})).toBe(8)
+    expect(await count(t, 'user_a')).toBe(4)
+    expect(await a.mutation(api.people.remove, { personKeys: [key(1)], revision })).toBe(9)
+    expect(await count(t, 'user_a')).toBe(3)
+    expect(await t.run(async (ctx) => await ctx.db.get(member._id))).toEqual(member)
   })
 
   it('stops at the cap, counting only new cards', async () => {
