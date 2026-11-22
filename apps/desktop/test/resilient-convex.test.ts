@@ -30,7 +30,11 @@ class FakeQuery {
       },
       localQueryResult: () => {
         if (!this.result) return undefined
-        if ('error' in this.result) throw this.result.error
+        // As Convex does: a new error object each time a failed answer is read.
+        if ('error' in this.result) {
+          const error = this.result.error as Error
+          throw error instanceof ConvexError ? new ConvexError(error.data) : new Error(error.message)
+        }
         return this.result.value
       },
       journal: () => this.journal,
@@ -46,9 +50,13 @@ class FakeQuery {
 
 class Trouble {
   failures: (string | undefined)[] = []
+  quiet: (string | undefined)[] = []
   answers: string[] = []
   forgotten: string[] = []
-  failed(key?: string) {
+  failed(key?: string, shown = true) {
+    ;(shown ? this.failures : this.quiet).push(key)
+  }
+  waiting(key: string) {
     this.failures.push(key)
   }
   answered(key: string) {
@@ -59,7 +67,7 @@ class Trouble {
   }
 }
 
-function setup() {
+function setup(passive = false) {
   const server = new FakeQuery()
   const trouble = new Trouble()
   const waits: number[] = []
@@ -71,8 +79,8 @@ function setup() {
     },
     () => 0.5,
   )
-  const watch = resubscriber.wrap('chats:get|{}', server.watch(), (journal) => server.watch(journal as string))
-  return { server, trouble, waits, watch }
+  const watch = resubscriber.wrap('chats:get|{}', server.watch(), (journal) => server.watch(journal as string), passive)
+  return { server, trouble, waits, watch, resubscriber }
 }
 
 describe('a query the server fails to answer', () => {
@@ -111,7 +119,7 @@ describe('a query the server fails to answer', () => {
     expect(changes).not.toHaveBeenCalled()
   })
 
-  it('waits longer each time it fails again, and drops every subscription so it runs afresh', () => {
+  it('waits longer each time it fails again, and drops its subscription so it runs afresh', () => {
     const { server, waits, watch } = setup()
     watch.onUpdate(() => {})
     watch.onUpdate(() => {})
@@ -121,7 +129,8 @@ describe('a query the server fails to answer', () => {
     }
     expect(waits).toEqual([2_000, 4_000, 8_000])
     expect(server.runs).toBe(4)
-    expect(server.subs.size).toBe(2)
+    // One subscription to the server, however many watch it.
+    expect(server.subs.size).toBe(1)
   })
 
   it('counts one failure once, however many watch it', () => {
@@ -131,6 +140,26 @@ describe('a query the server fails to answer', () => {
     server.answer({ error: timeout() })
     watch.localQueryResult()
     expect(trouble.failures).toHaveLength(1)
+  })
+
+  it('waits, without making the server busy, while it is only kept warm, until something wants it', () => {
+    const { server, trouble, waits, watch, resubscriber } = setup(true)
+    watch.onUpdate(() => {})
+    server.answer({ value: 'page' })
+    server.answer({ error: timeout() })
+    expect(waits).toEqual([])
+    expect(trouble.failures).toEqual([])
+    expect(trouble.quiet).toEqual(['chats:get|{}'])
+    // A page that shows it opens: it's asked again, and the server counts as busy meanwhile.
+    resubscriber.demand('chats:get|{}', 1)
+    expect(trouble.failures).toEqual(['chats:get|{}'])
+    vi.advanceTimersByTime(waits[0]!)
+    expect(server.runs).toBe(2)
+    // And when nothing wants it again, a pending retry is dropped.
+    server.answer({ error: timeout() })
+    resubscriber.demand('chats:get|{}', -1)
+    vi.advanceTimersByTime(60_000)
+    expect(server.runs).toBe(2)
   })
 
   it('stops asking once nothing watches it', () => {

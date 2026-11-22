@@ -95,11 +95,10 @@ async function registerHost(ctx: MutationCtx, hostId: string, hostNetwork: Doc<'
 export const PRESSURE_EVERY_MS = 30_000
 
 /**
- * Keeps what the host said of its deliveries, for the health page. Written at most every 30
- * seconds, in its own table, so the batches a busy host sends don't each write it too, and the
- * pages watching the hosts' rows aren't woken by it. Its time is when the host was last heard
- * from, as of then, so the health page needn't read `bridgeHosts`, which every batch writes; a
- * host stopping, or back after it stopped, is written at once.
+ * Keeps what the host said of its deliveries, for the health page, when a sample is due (ingest
+ * decides from `bridgeHosts.pressureAt`, which it reads anyway). In its own table, so the pages
+ * watching the hosts' rows aren't woken by it. Its time is when the host was last heard from, as
+ * of then, so the health page needn't read `bridgeHosts`, which every batch writes.
  */
 async function notePressure(
   ctx: MutationCtx,
@@ -119,8 +118,8 @@ async function notePressure(
     at: now,
     ...(stopping ? { stopped: true } : {}),
   }
-  if (!kept) await ctx.db.insert('bridgePressure', row)
-  else if (stopping || kept.stopped || now - kept.at >= PRESSURE_EVERY_MS) await ctx.db.replace(kept._id, row)
+  if (kept) await ctx.db.replace(kept._id, row)
+  else await ctx.db.insert('bridgePressure', row)
 }
 
 /**
@@ -186,8 +185,14 @@ export const ingest = mutation({
     // A host that says it is stopping is offline at once (never heard from, as far as being
     // live goes), rather than once its heartbeats have gone stale.
     const stopping = args.stopping === true && args.events.length === 0
-    await ctx.db.patch(host._id, { lastSeq, lastSeenAt: stopping ? 0 : now })
-    if (args.pressure) await notePressure(ctx, host, args.pressure, now, stopping)
+    // A host stopping, or back after it stopped (0), is written at once; otherwise every 30 seconds.
+    const pressureDue = !!args.pressure && (stopping || !host.pressureAt || now - host.pressureAt >= PRESSURE_EVERY_MS)
+    await ctx.db.patch(host._id, {
+      lastSeq,
+      lastSeenAt: stopping ? 0 : now,
+      ...(pressureDue ? { pressureAt: stopping ? 0 : now } : {}),
+    })
+    if (args.pressure && pressureDue) await notePressure(ctx, host, args.pressure, now, stopping)
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
   },
 })

@@ -625,6 +625,11 @@ export default defineSchema({
     lastSeq: v.number(),
     /** The last batch or heartbeat. Commands only go to hosts heard from recently. */
     lastSeenAt: v.number(),
+    /**
+     * When its `bridgePressure` row was last written (0 once it stopped), so ingest knows when
+     * the next is due without reading that row on every batch.
+     */
+    pressureAt: v.optional(v.number()),
   }).index('by_hostId', ['hostId']),
 
   /**
