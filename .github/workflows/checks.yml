@@ -15,9 +15,10 @@ on:
   pull_request:
   push:
     branches: [dev, main]
-  # Nightly, on dev, so what nothing pins (Debian's packages in the images, GitHub's runners)
-  # breaking shows before a server on the Nightly channel updates into it. Scheduled runs use
-  # the default branch's copy of this file, so this starts once it reaches main.
+  # Nightly, on dev, building the images from scratch, so what nothing pins (Debian's packages
+  # in the images, GitHub's runners) breaking shows up even on a day no pull request touches
+  # them. Scheduled runs use the default branch's copy of this file, so this starts once it
+  # reaches main.
   schedule:
     - cron: '23 9 * * *'
   workflow_dispatch:
@@ -209,17 +210,27 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.scope }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.scope) || '' }}
 
-  # The one check to require: it fails when any job above failed or was cancelled, and passes
-  # when each passed or wasn't needed.
+  # The one check to require: it fails when any job above failed or was cancelled, or a job
+  # the changes needed didn't pass, and passes when each passed or wasn't needed.
   all:
     name: All checks
     if: always()
     needs: [changes, typescript, go, deploy, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      # To read each image build's own result (below).
+      actions: read
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          CHANGES: ${{ needs.changes.result }}
+          TYPESCRIPT: ${{ needs.typescript.result }}
+          GO: ${{ needs.go.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          IMAGES: ${{ needs.images.result }}
+          DEPLOY_NEEDED: ${{ needs.changes.outputs.deploy != 'false' }}
+          IMAGES_NEEDED: ${{ needs.changes.outputs.images != 'false' }}
         run: |
           echo "Results: $RESULTS"
           for result in $RESULTS; do
@@ -228,3 +239,35 @@ jobs:
               exit 1
             fi
           done
+          # Skipped is only fine for a slow job the changes didn't need.
+          for pair in "What changed:$CHANGES" "TypeScript:$TYPESCRIPT" "Bridge host:$GO"; do
+            if [ "${pair##*:}" != success ]; then echo "::error::${pair%:*} ended ${pair##*:}" && exit 1; fi
+          done
+          if [ "$DEPLOY_NEEDED" = true ] && [ "$DEPLOY" != success ]; then
+            echo "::error::Deploy bundle was needed and ended $DEPLOY"
+            exit 1
+          fi
+          if [ "$IMAGES_NEEDED" = true ] && [ "$IMAGES" != success ]; then
+            echo "::error::The images were needed and ended $IMAGES"
+            exit 1
+          fi
+      # A matrix's result above is one for all its builds, and a build cancelled before it got a
+      # runner can leave it success, so each image's own job must have passed.
+      - name: Every image built
+        if: needs.changes.outputs.images != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          # One per entry in the images job's matrix; keep the two in step.
+          EXPECTED: 4
+        run: |
+          conclusions="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name | startswith("Image (")) | "\(.conclusion) \(.name)"')"
+          echo "$conclusions"
+          passed="$(printf '%s\n' "$conclusions" | grep -c '^success ' || true)"
+          if [ "$passed" != "$EXPECTED" ]; then
+            echo "::error::$passed of $EXPECTED images built"
+            exit 1
+          fi

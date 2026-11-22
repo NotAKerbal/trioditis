@@ -65,7 +65,7 @@ CI runs automatically on every pull request, on every push to `dev` and `main`, 
 | Image (×4)    | Builds the web, Node, sign-in browser and bridge host (with Signal) images every server builds when it installs or updates | When a pull request changes anything an image is built from; always otherwise |
 | All checks    | Passes only when every job above passed or was skipped as not needed                                                       | Always                                                                        |
 
-`scripts/ci-changes.mjs` decides which of the two slow jobs a pull request needs. A pull request that changes only docs, the site, release notes or tests skips the images. Pushes to `dev` and `main` always run both, so a skip never lets a broken bundle reach a server unseen. **All checks** is the one check to require before merging. The nightly run catches what nothing pins, such as Debian's packages in the images, before a server on the **Nightly** channel updates into it.
+`scripts/ci-changes.mjs` decides which of the two slow jobs a pull request needs. A pull request that changes only docs, the site, release notes or tests skips the images. Pushes to `dev` and `main` always run both, so a skip never lets a broken bundle reach a server unseen. **All checks** is the one check to require before merging. The nightly run builds the images from scratch, so a break in what nothing pins, such as Debian's packages, shows up even on a day no pull request touches them.
 
 ### Design system lint rules
 
