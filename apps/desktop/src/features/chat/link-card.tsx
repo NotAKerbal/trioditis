@@ -73,12 +73,9 @@ function PreviewCard({ card, network }: { card: Extract<Card, { kind: 'preview' 
   const wide = !!image && !!image.width && !!image.height && image.width / image.height >= 1.3 && image.width >= 300
   const words = (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5 px-3 py-2">
-      {/* Where the card goes is always shown, beside what the site calls itself. */}
-      <span className="truncate text-xs font-medium text-subtle-foreground">
-        {card.siteName && card.siteName.toLowerCase() !== card.host.toLowerCase()
-          ? `${card.siteName} · ${card.host}`
-          : card.host}
-      </span>
+      {/* Where the card goes, whole and on its own line: nothing the network sent (a long site
+        name, a title) can push it out of view, so a card never hides where it opens. */}
+      <span className="text-xs font-medium break-all text-subtle-foreground">{card.host}</span>
       {card.title ? <span className="line-clamp-2 text-sm leading-snug font-semibold">{card.title}</span> : null}
       {card.description ? (
         <span className="line-clamp-2 text-xs leading-snug text-muted-foreground">{card.description}</span>

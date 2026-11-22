@@ -1,5 +1,5 @@
 import type { Attachment, LinkPreview, MessagePlaintext } from '@trioditis/core'
-import { linkParts } from './message-text.ts'
+import { linkParts, trimLink } from './message-text.ts'
 
 // Which cards a message shows for its links. A network's own preview (made on the sender's
 // device, sealed in the message) is shown as it came. A link without one gets a card drawn from
@@ -154,8 +154,7 @@ export function fromAddress(url: URL): { service: Service; detail?: string } {
 
 // What may come before and after a link written without its scheme: a space, a bracket or
 // quote around it, or punctuation after it.
-const OPENERS = /^[("'[<]+/
-const CLOSERS_AFTER = /[.,:;!?'")\]}>]+$/
+const OPENERS = /^[("'[<{]+/
 
 /**
  * The web addresses the text links to, as the browser writes them: its http and https links,
@@ -170,7 +169,10 @@ export function writtenLinks(text: string): Set<string> {
     if (url) links.add(url.href)
   }
   for (const word of text.split(/\s+/)) {
-    const bare = word.replace(OPENERS, '').replace(CLOSERS_AFTER, '')
+    // Trimmed as a link with its scheme is (message-text.ts), so a closing bracket the link
+    // opened stays: "example.com/archive_(2026)" is the whole of it.
+    const opened = word.replace(OPENERS, '')
+    const bare = opened && trimLink(opened)
     if (!bare || /^[a-z][a-z0-9+.-]*:/i.test(bare) || bare.includes('@')) continue
     const host = bare.split(/[/?#]/)[0]!
     if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/i.test(host)) continue

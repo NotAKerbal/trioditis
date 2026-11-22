@@ -132,5 +132,10 @@ describe('links written in a message', () => {
       'https://www.c.test/',
     ])
     expect([...writtenLinks('mailto:a@b.test a@b.test javascript:x.y 1.5 word. localhost/x')]).toEqual([])
+    // A closing bracket the link opened is part of it, as for a link with its scheme.
+    expect([...writtenLinks('see example.com/archive_(2026) and (example.org/a_(b)).')]).toEqual([
+      'https://example.com/archive_(2026)',
+      'https://example.org/a_(b)',
+    ])
   })
 })

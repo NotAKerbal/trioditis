@@ -33,7 +33,7 @@ const CLOSERS: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
 
 const count = (s: string, c: string) => s.split(c).length - 1
 
-function trimLink(candidate: string): string {
+export function trimLink(candidate: string): string {
   let url = candidate
   for (;;) {
     const last = url.at(-1)!
