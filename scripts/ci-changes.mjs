@@ -22,8 +22,9 @@ const CI = ['.github/workflows/checks.yml', 'scripts/ci-changes.mjs']
 const DEPLOY = [/^deploy\//]
 
 // The images (deploy/docker) are built from nearly the whole checkout: web.Dockerfile copies
-// all of it and installs the whole workspace. These are the files no image reads, or that
-// can't change what one builds.
+// all of it, its install reads every package's package.json, and any file under a package can end up in a
+// build (Vite copies apps/desktop/public as it is, whatever the file's type). These are the
+// files no image's build reads.
 const NOT_IMAGES = [
   /^apps\/docs\/src\//,
   /^apps\/site\//,
@@ -31,7 +32,8 @@ const NOT_IMAGES = [
   /^deploy\/test\//,
   /^scripts\/test\//,
   /^\.github\/(?!workflows\/checks\.yml$)/,
-  /\.mdx?$/,
+  // The repository's own top-level docs (README.md, AGENTS.md).
+  /^[^/]+\.md$/,
 ]
 
 /** The slow jobs that a change to `files` needs. */

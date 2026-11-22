@@ -51,7 +51,7 @@ pnpm check
 7. The release notes' format
 8. `go vet ./...` and `go test ./...` inside `apps/bridge-host`, and the patched mautrix copies
 
-Astro, which the docs site's typecheck and build run, needs a CPU with AVX. On a machine without it, such as some virtual machines, `pnpm check` reports those two steps as **Blocked** and leaves them to CI.
+Astro, which the docs site's typecheck and build run, needs a CPU with AVX. On a machine without it, such as some virtual machines, `pnpm check` reports those two steps as **Blocked** and leaves them to CI. It still exits non-zero then, so read its summary: a Blocked docs step there isn't a failure of the branch.
 
 ### What CI runs
 
@@ -59,7 +59,7 @@ CI runs automatically on every pull request, on every push to `dev` and `main`, 
 
 | Job           | What it checks                                                                                                             | When                                                                          |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| TypeScript    | Everything in `pnpm check` above, and that the pull request adds a release note                                            | Always                                                                        |
+| TypeScript    | Steps 1–7 of `pnpm check` above, and that the pull request adds a release note                                             | Always                                                                        |
 | Bridge host   | `go vet`, `go vet -tags libsignal`, `go test`, and the patched mautrix copies                                              | Always                                                                        |
 | Deploy bundle | `deploy/test/run.sh` against throwaway Compose projects (about eight minutes). Run it locally with `pnpm check --deploy`   | When a pull request changes `deploy/`; always otherwise                       |
 | Image (×4)    | Builds the web, Node, sign-in browser and bridge host (with Signal) images every server builds when it installs or updates | When a pull request changes anything an image is built from; always otherwise |

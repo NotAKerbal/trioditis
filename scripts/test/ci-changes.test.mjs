@@ -20,9 +20,13 @@ void test('a change to the app builds the images but skips the bundle’s tests'
   for (const file of ['apps/desktop/src/main.tsx', 'packages/backend/convex/schema.ts', 'apps/bridge-host/go.mod']) {
     assert.deepEqual(areas([file, 'release-notes/x.md']), { deploy: false, images: true }, file)
   }
-  // The web image installs the whole workspace, so even the docs site's dependencies count.
+  // The web image's install reads every package's package.json, the docs site's too.
   assert.deepEqual(areas(['apps/docs/package.json']), { deploy: false, images: true })
   assert.deepEqual(areas(['pnpm-lock.yaml']), { deploy: false, images: true })
+  // Markdown inside a package can still be part of a build: Vite copies apps/desktop/public.
+  for (const file of ['apps/desktop/public/notes.md', 'apps/bridge-host/README.md', 'packages/ui/README.md']) {
+    assert.deepEqual(areas([file]), { deploy: false, images: true }, file)
+  }
 })
 
 void test('docs, the site, notes and other workflows run neither', () => {
@@ -31,7 +35,6 @@ void test('docs, the site, notes and other workflows run neither', () => {
     'apps/site/index.html',
     'release-notes/x.md',
     'README.md',
-    'apps/bridge-host/README.md',
     'scripts/test/release-notes.test.mjs',
     '.github/workflows/desktop-release.yml',
   ]
