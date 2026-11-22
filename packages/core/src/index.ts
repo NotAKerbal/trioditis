@@ -80,6 +80,12 @@ export interface ChatPlaintext {
    * rather than clearing it.
    */
   avatarUnchanged?: boolean
+  /**
+   * In a direct chat, the `ghostId` of the person on the other side: whose contact profile and
+   * People card the chat is with. Missing in a group, and in a direct chat the bridge host
+   * hasn't described since it began saying.
+   */
+  dmGhostId?: string
   [extra: string]: unknown
 }
 

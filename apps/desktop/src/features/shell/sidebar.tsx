@@ -34,6 +34,8 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react'
 import {
+  mergedChat,
+  membersOf,
   networkName,
   useChatCounts,
   useChat,
@@ -49,7 +51,9 @@ import {
   type ChatFilter,
   type LabelId,
 } from '~/data/chats.ts'
+import { cardIndex, mergeDms, setConversations, setDmChats } from '~/data/conversations.ts'
 import { useSendMutations } from '~/data/messages.ts'
+import { usePeople } from '~/data/people.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
@@ -136,11 +140,16 @@ export function Sidebar({
   const requestsList = useChats('requests', filter, focused)
   const archivedList = useChats('archived', filter, focused)
   const blockedList = useChats('blocked', filter, focused)
-  const inbox = main.chats
-  const snoozed = snoozedList.chats
-  const requests = requestsList.chats
-  const archived = archivedList.chats
-  const blocked = blockedList.chats
+  // A person's direct chats on several networks are one row, once their People card links them
+  // (conversations.ts). Each view puts its own together: a chat stays in the view it's in.
+  const people = usePeople()
+  const cards = useMemo(() => cardIndex(people), [people])
+  const merge = (list: Chat[] | undefined) => list && mergeDms(list, cards).map((g) => mergedChat(g.members, g.person))
+  const inbox = useMemo(() => merge(main.chats), [main.chats, cards])
+  const snoozed = useMemo(() => merge(snoozedList.chats), [snoozedList.chats, cards])
+  const requests = useMemo(() => merge(requestsList.chats), [requestsList.chats, cards])
+  const archived = useMemo(() => merge(archivedList.chats), [archivedList.chats, cards])
+  const blocked = useMemo(() => merge(blockedList.chats), [blockedList.chats, cards])
   // The server's badge counts cover every chat, not only the pages loaded, but not a filter.
   const serverCounts = useChatCounts()
   const counts = network || labelId ? undefined : serverCounts
@@ -159,6 +168,12 @@ export function Sidebar({
     for (const list of [inbox, snoozed, requests, archived, blocked]) for (const c of list ?? []) seen.set(c.id, c)
     return [...seen.values()]
   }, [inbox, snoozed, requests, archived, blocked])
+  // The open chat's pane shows every chat of its conversation, and acts on them all.
+  useEffect(() => {
+    setConversations(everything.map((c) => membersOf(c).map((m) => m.id)))
+    setDmChats(everything.flatMap(membersOf))
+  }, [everything])
+  const has = (c: Chat, id: string | undefined) => !!id && membersOf(c).some((m) => m.id === id)
   // Search looks through the chats loaded so far, of the views shown; these are the ones with more.
   const searched = focused ? [main, snoozedList, requestsList, archivedList, blockedList] : [main]
   const searchedAll = searched.every((l) => l.exhausted)
@@ -172,7 +187,7 @@ export function Sidebar({
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
 
-  const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || c.id === openedUnreadId
+  const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || has(c, openedUnreadId)
   const unread = (inbox ?? []).filter(isUnread)
   if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
   // Newest first. The server pages Focused that way already, except with a label, whose pages
@@ -190,7 +205,8 @@ export function Sidebar({
     inbox !== undefined &&
     unreadIncomplete({
       more: main.canLoadMore || main.loading,
-      loadedUnread: inbox.filter((c) => c.hasUnread && c.row.mutedUntil === null).length,
+      // Each chat of a merged conversation, as the server counts them apart.
+      loadedUnread: inbox.flatMap(membersOf).filter((c) => c.hasUnread && c.row.mutedUntil === null).length,
       count: counts?.inbox,
     })
   const loadInbox = useRef(main.loadMore)
@@ -205,7 +221,7 @@ export function Sidebar({
     () =>
       (scheduledMessages ?? []).map((s) => ({
         ...s,
-        chat: everything.find((c) => c.id === s.chatId),
+        chat: everything.find((c) => has(c, s.chatId)),
         body: scheduledTexts.get(s._id) ?? 'Scheduled message',
       })),
     [scheduledMessages, everything, scheduledTexts],
@@ -222,11 +238,12 @@ export function Sidebar({
       snooze: (until) => act({ type: 'snooze', chat: c, until }),
     }
   }
-  const row = (c: Chat, preview?: ReactNode) => (
+  // A scheduled message's row is keyed by it: a conversation can have several.
+  const row = (c: Chat, preview?: ReactNode, key?: string) => (
     <ChatRow
-      key={`${c.id}${preview ? ':s' : ''}`}
+      key={key ?? c.id}
       chat={c}
-      selected={c.id === selectedId}
+      selected={has(c, selectedId)}
       unread={isUnread(c)}
       preview={preview}
       onOpen={() => onOpen(c)}
@@ -271,6 +288,7 @@ export function Sidebar({
                 {formatWhen(s.sendAt)}
                 {prefs.previews ? ` · ${s.body}` : null}
               </>,
+              s._id,
             )
           ) : (
             // Its chat isn't in a loaded view (not scrolled to yet): it still opens it.
@@ -327,10 +345,10 @@ export function Sidebar({
   // hidden behind it.
   const sheetChats = sheetOpen ? sections.find((s) => s.key === sheet)?.chats : undefined
   const shown: Chat[] = searching ? results : focused ? (sheetChats ?? unread) : (inbox ?? [])
-  const shownIds = shown.map((c) => c.id as string)
+  const shownIds = shown.flatMap((c) => membersOf(c).map((m) => m.id as string))
   const loaded = inbox !== undefined && (!focused || (snoozed && requests && archived && blocked))
   shownRef.current = loaded ? shownIds : null
-  chatsRef.current = new Map(everything.map((c) => [c.id as string, c]))
+  chatsRef.current = new Map(everything.flatMap((c) => membersOf(c).map((m) => [m.id as string, c] as const)))
 
   // A view or filter change that hides the open chat closes it rather than opening another:
   // opening a chat marks it read, and nobody asked to read it. Judged from the open chat as the
