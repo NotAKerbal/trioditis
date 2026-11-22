@@ -59,7 +59,7 @@ const UNKNOWN_BOX = { width: 240, height: 180 }
 const NEAR_MARGIN = '1500px 0px'
 
 /** Whether an element is near the view of the scroller it's in (`data-scroll-root`). */
-function useNear() {
+export function useNear() {
   const [el, setEl] = useState<HTMLElement | null>(null)
   const [near, setNear] = useState(false)
   useEffect(() => {

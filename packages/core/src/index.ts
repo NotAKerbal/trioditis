@@ -58,6 +58,19 @@ export interface Attachment {
   failed?: boolean
 }
 
+/**
+ * What a network said about a link in a message, as the sender's app made it: the page's title,
+ * description and site, and a picture of it. The server never fetches a link itself.
+ */
+export interface LinkPreview {
+  url: string
+  title?: string
+  description?: string
+  siteName?: string
+  image?: Attachment
+  [extra: string]: unknown
+}
+
 /** A message's sealed content. See docs/architecture/sealing.md, Message plaintext. */
 export interface MessagePlaintext {
   type: MessageType
@@ -65,6 +78,8 @@ export interface MessagePlaintext {
   html?: string
   attachments?: Attachment[]
   mentions?: string[]
+  /** The network's own previews of links in the message, up to three. */
+  previews?: LinkPreview[]
   /** Cut short to fit the sealed size limit: `html` dropped, `body` possibly incomplete. */
   truncated?: boolean
   [extra: string]: unknown

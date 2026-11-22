@@ -492,9 +492,22 @@ type MessagePlaintext struct {
 	HTML        string       `json:"html,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Mentions    []string     `json:"mentions,omitempty"`
+	// Previews are the network's own previews of links in the message, as the sender's app
+	// made them. The bridge host never fetches a link itself.
+	Previews []LinkPreview `json:"previews,omitempty"`
 	// Truncated means the message was cut short to fit the sealed size limit: its
 	// formatted body was dropped, and its body may end early.
 	Truncated bool `json:"truncated,omitempty"`
+}
+
+// LinkPreview is what a network said about a link in a message: its page's title,
+// description and site, and a picture of it when there was one.
+type LinkPreview struct {
+	URL         string      `json:"url"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	SiteName    string      `json:"siteName,omitempty"`
+	Image       *Attachment `json:"image,omitempty"`
 }
 
 type Attachment struct {

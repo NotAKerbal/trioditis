@@ -1,5 +1,5 @@
 import { ConvexError, v } from 'convex/values'
-import type { Network } from '@trioditis/core'
+import type { MessagePlaintext, Network } from '@trioditis/core'
 import { internal } from './_generated/api'
 import { action, internalMutation, type MutationCtx } from './_generated/server'
 import { requireSessionIfGiven, requireUserId } from './auth'
@@ -32,7 +32,8 @@ type Fixture = {
   kind: 'dm' | 'group'
   name: string
   people: string[]
-  lines: string[]
+  /** What the chat's messages say, in turn: a line of text, or a whole message. */
+  lines: (string | MessagePlaintext)[]
   unread: number
   isRequest?: boolean
   snoozed?: boolean
@@ -87,7 +88,24 @@ const CHATS: Fixture[] = [
     kind: 'group',
     name: 'Weekend hike',
     people: ['g_demo_dan', 'g_demo_eve'],
-    lines: ['Trailhead at 8?', 'Bring layers, it gets cold up top', 'Forecast looks clear', 'I’ll drive'],
+    lines: [
+      'Trailhead at 8?',
+      'Bring layers, it gets cold up top',
+      // A link with a preview, as Signal sends one from the sender's phone.
+      {
+        type: 'text',
+        body: 'Here’s the route https://www.example.com/trails/eagle-peak-loop',
+        previews: [
+          {
+            url: 'https://www.example.com/trails/eagle-peak-loop',
+            title: 'Eagle Peak Loop',
+            description: 'A 7-mile loop with 2,100 ft of climbing and the whole valley in view from the top.',
+            siteName: 'Example Trails',
+          },
+        ],
+      },
+      'I’ll drive',
+    ],
     unread: 0,
   },
   {
@@ -105,7 +123,13 @@ const CHATS: Fixture[] = [
     kind: 'dm',
     name: 'Carol Singh',
     people: ['g_demo_carol'],
-    lines: ['Can you review my draft?', 'Sure, send it over', 'Thanks! No rush'],
+    lines: [
+      'Can you review my draft?',
+      'Sure, send it over',
+      // A link without a preview: the app draws its card from the address alone.
+      'Here it is https://docs.google.com/presentation/d/1demoDraftDeck/edit?usp=sharing',
+      'Thanks! No rush',
+    ],
     unread: 0,
   },
   {
@@ -407,11 +431,12 @@ export const seedForMe = action({
         const eventId = `e_demo_${chat.portalId}_${n}`
         const fromSelf = n % 3 === 2
         const ghostId = chat.people[n % chat.people.length]!
+        const line = chat.lines[n % chat.lines.length]!
         return {
           eventId,
           networkTs: newest - (MESSAGES_PER_CHAT - 1 - n) * 4 * 60 * 1000,
           sender: fromSelf ? ({ self: true } as const) : { ghostId },
-          sealed: seal({ type: 'text', body: chat.lines[n % chat.lines.length] }, 'message', eventId),
+          sealed: seal(typeof line === 'string' ? { type: 'text', body: line } : line, 'message', eventId),
         }
       })
       await ctx.runMutation(internal.demo.writeChat, {
