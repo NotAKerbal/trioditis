@@ -54,7 +54,7 @@ export function markdownReport(r) {
       Object.entries(r.client.actions)
         .map(([k, v]) => `${v} ${k}`)
         .join(', ') || 'no clicks'
-    }; up to ${r.client.peakSubscriptions} live queries each; ${r.client.failedOpens ?? 0} chats couldn't open. Backend CPU while measured: mean ${n(r.cpu.mean)}%, peak ${n(r.cpu.max)}% (of ${r.cpus * 100}%).`,
+    }; up to ${r.client.peakSubscriptions} live queries each; ${r.client.failedOpens ?? 0} chats couldn't open; ${r.client.retries ?? 0} failed queries asked again, as the app retries them. Backend CPU while measured: mean ${n(r.cpu.mean)}%, peak ${n(r.cpu.max)}% (of ${r.cpus * 100}%).`,
   )
   lines.push('')
   lines.push('## What people would notice')

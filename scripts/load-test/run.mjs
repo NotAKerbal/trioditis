@@ -381,6 +381,7 @@ async function main() {
         peakSubscriptions: seen.peakSubscriptions,
         opens: seen.opens,
         failedOpens: seen.failedOpens,
+        retries: seen.retries,
         visible: seen.visible,
         actionMs: seen.actionMs ?? [],
       },

@@ -16,7 +16,9 @@
 //   subscribed for five minutes, as the desktop's query cache keeps it (main.tsx).
 import { ConvexClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
+import { ConvexError } from 'convex/values'
 import { reactionGroups, reactionRequests } from '../../apps/desktop/src/data/reaction-requests.ts'
+import { failuresInARow, retryDelay } from '../../apps/desktop/src/features/shell/retry-delay.ts'
 import { unreadIncomplete } from '../../apps/desktop/src/features/shell/unread-fill.ts'
 import { random } from './inbox.mjs'
 
@@ -50,6 +52,8 @@ export function clientMetrics() {
     actions: {},
     opens: [],
     failedOpens: 0,
+    /** Queries asked again after they failed, as the desktop's RetryBoundary asks them. */
+    retries: 0,
     /** Clients whose start finished: fewer than asked for means the load wasn't all there. */
     started: 0,
     visible: [],
@@ -150,29 +154,42 @@ export class SimClient {
       resolveFirst(null)
     }, ANSWER_MS)
     deadline.unref?.()
-    sub.unsubscribe = this.client.onUpdate(
-      ref(name),
-      args,
-      (value) => {
-        sub.value = value
-        sub.readyAt ??= Date.now()
-        if (!answered) {
-          answered = true
-          clearTimeout(deadline)
-          ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
-          resolveFirst(value)
-        }
-        for (const listener of sub.listeners) listener(value, false)
-      },
-      (error) => {
-        this.error(name, error)
-        if (!answered) {
-          answered = true
-          clearTimeout(deadline)
-          resolveFirst(null)
-        }
-      },
-    )
+    const onValueFromServer = (value) => {
+      sub.value = value
+      sub.readyAt ??= Date.now()
+      if (!answered) {
+        answered = true
+        clearTimeout(deadline)
+        ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
+        resolveFirst(value)
+      }
+      for (const listener of sub.listeners) listener(value, false)
+    }
+    // A query that fails is dead. The desktop's RetryBoundary (features/shell/retry-boundary.tsx)
+    // mounts the part again after a wait that grows with errors in a row, though not after a
+    // ConvexError, the server saying why, which waits for the person; this does the same, under
+    // the same key.
+    sub.failures = 0
+    sub.lastErrorAt = 0
+    const onError = (error) => {
+      this.error(name, error)
+      if (!answered) {
+        answered = true
+        clearTimeout(deadline)
+        resolveFirst(null)
+      }
+      if (error instanceof ConvexError || this.closed) return
+      sub.failures = failuresInARow(sub.failures, sub.lastErrorAt, Date.now())
+      sub.lastErrorAt = Date.now()
+      sub.unsubscribe()
+      const retry = setTimeout(() => {
+        if (this.closed || this.subs.get(key) !== sub) return
+        this.metrics.retries = (this.metrics.retries ?? 0) + 1
+        sub.unsubscribe = this.client.onUpdate(ref(name), args, onValueFromServer, onError)
+      }, retryDelay(sub.failures))
+      retry.unref?.()
+    }
+    sub.unsubscribe = this.client.onUpdate(ref(name), args, onValueFromServer, onError)
     return sub.first
   }
 
