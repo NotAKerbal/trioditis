@@ -18,11 +18,20 @@ export const convex = app.client
 export const warmConvex = app.passive
 export const convexQueryClient = new ConvexQueryClient(warmConvex)
 
+const convexQueryFn = convexQueryClient.queryFn()
+const { warmQuery } = app
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       queryKeyHashFn: convexQueryClient.hashFn(),
-      queryFn: convexQueryClient.queryFn(),
+      // The adapter's, with TanStack's signal passed on: a first fetch that failed, and that
+      // nothing wants any more, is cancelled and lets its subscription go.
+      queryFn: (context) => {
+        const [kind, name, args] = context.queryKey as [unknown, string, Record<string, Value> | 'skip']
+        if (kind === 'convexQuery' && args !== 'skip') return warmQuery(name, args, context.signal)
+        return convexQueryFn(context)
+      },
     },
   },
 })

@@ -334,6 +334,35 @@ export function resilient(client: ConvexReactClient, resubscriber = new Resubscr
   client.mutation = countedMutation
   client.action = countedAction
   const passiveWatch = watch(true)
+  // As ConvexReactClient.query, through the passive watch, and given up when `signal` aborts.
+  const warmQuery = (
+    query: FunctionReference<'query'> | string,
+    args?: Record<string, Value>,
+    signal?: AbortSignal,
+  ): Promise<unknown> => {
+    const one = passiveWatch(query as FunctionReference<'query'>, args ?? {})
+    const existing = one.localQueryResult()
+    if (existing !== undefined) return Promise.resolve(existing)
+    return new Promise((resolve, reject) => {
+      // A fetch that failed waits to be asked again while it's wanted; once nothing wants it
+      // (TanStack cancels it), it lets its subscription go rather than hold it for good.
+      const abandon = () => {
+        stop()
+        reject(signal?.reason ?? new Error('Cancelled'))
+      }
+      const stop = one.onUpdate(() => {
+        stop()
+        signal?.removeEventListener('abort', abandon)
+        try {
+          resolve(one.localQueryResult())
+        } catch (error) {
+          reject(error)
+        }
+      })
+      if (signal?.aborted) abandon()
+      else signal?.addEventListener('abort', abandon, { once: true })
+    })
+  }
   /**
    * The same client for what only keeps queries warm (the query cache, TanStack's adapter): its
    * subscriptions are asked again after a failure only once something on screen wants them
@@ -344,24 +373,9 @@ export function resilient(client: ConvexReactClient, resubscriber = new Resubscr
     watchQuery: passiveWatch,
     action: countedAction,
     mutation: countedMutation,
-    // As ConvexReactClient.query, through the passive watch.
-    query: ((query: FunctionReference<'query'>, args?: Record<string, Value>) => {
-      const one = passiveWatch(query, args ?? {})
-      const existing = one.localQueryResult()
-      if (existing !== undefined) return Promise.resolve(existing)
-      return new Promise((resolve, reject) => {
-        const stop = one.onUpdate(() => {
-          stop()
-          try {
-            resolve(one.localQueryResult())
-          } catch (error) {
-            reject(error)
-          }
-        })
-      })
-    }) as typeof client.query,
+    query: warmQuery as unknown as typeof client.query,
   } as unknown as ConvexReactClient
-  return { client, passive, demand: (key: string, change: 1 | -1) => resubscriber.demand(key, change) }
+  return { client, passive, warmQuery, demand: (key: string, change: 1 | -1) => resubscriber.demand(key, change) }
 }
 
 /** A query's key, as Convex knows it: its name and arguments. */

@@ -1,7 +1,8 @@
 import type { Watch } from 'convex/react'
 import { ConvexError } from 'convex/values'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Resubscriber, isTransient } from '../src/lib/resilient-convex.ts'
+import type { ConvexReactClient } from 'convex/react'
+import { Resubscriber, isTransient, resilient } from '../src/lib/resilient-convex.ts'
 
 const timeout = () => new Error('[CONVEX Q(chats:get)] [Request ID: 1] Server Error')
 
@@ -220,5 +221,26 @@ describe('the server refusing', () => {
   it('tells a refusal from a failure', () => {
     expect(isTransient(new ConvexError('Only an admin can do that.'))).toBe(false)
     expect(isTransient(timeout())).toBe(true)
+  })
+})
+
+describe('a first fetch nothing wants any more', () => {
+  it('lets its subscription go when it’s cancelled, rather than wait for an answer for good', async () => {
+    const server = new FakeQuery()
+    const fake = {
+      url: 'http://convex.test',
+      watchQuery: () => server.watch(),
+      mutation: async () => null,
+      action: async () => null,
+    }
+    const { passive } = resilient(fake as unknown as ConvexReactClient, new Resubscriber(new Trouble() as never))
+    const cancel = new AbortController()
+    const query = passive.query as unknown as (q: string, a: object, s: AbortSignal) => Promise<unknown>
+    const answer = query('chats:get', {}, cancel.signal).catch((e: unknown) => e)
+    server.answer({ error: timeout() })
+    expect(server.subs.size).toBe(1)
+    cancel.abort(new Error('nothing wants it'))
+    expect(await answer).toEqual(new Error('nothing wants it'))
+    expect(server.subs.size).toBe(0)
   })
 })
