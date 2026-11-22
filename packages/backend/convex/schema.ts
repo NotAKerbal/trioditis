@@ -628,6 +628,30 @@ export default defineSchema({
   }).index('by_hostId', ['hostId']),
 
   /**
+   * How each bridge host's deliveries are going, as it last said, written at most every 30
+   * seconds (gateway.ingest), for Admin settings → Server health. Counts and times only.
+   */
+  bridgePressure: defineTable({
+    hostId: v.string(),
+    network: storedNetwork,
+    /** Journal events the host hadn't had acknowledged yet. */
+    backlog: v.number(),
+    /** How long its last delivery took to be answered (ms). */
+    pushMs: v.number(),
+    /** Its deliveries that failed in the five minutes before. */
+    failedPushes: v.number(),
+    at: v.number(),
+  }).index('by_hostId', ['hostId']),
+
+  /**
+   * The server timing its own answer to a small query, once a minute (health.probe): the last
+   * hour's, in one row, for Admin settings → Server health.
+   */
+  serverProbes: defineTable({
+    samples: v.array(v.object({ at: v.number(), ms: v.number(), ok: v.boolean() })),
+  }),
+
+  /**
    * Events that couldn't be applied, kept for the health page instead of blocking the feed.
    * Only codes and IDs: never the event's content.
    */

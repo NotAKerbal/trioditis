@@ -10,7 +10,7 @@ import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
 import { browserStepOpen } from './logins'
 import { sendScheduled } from './scheduled'
-import { bridgeEvent, commandPayload, envelope, errorCode, network } from './validators'
+import { bridgeEvent, bridgePressure, commandPayload, envelope, errorCode, network } from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
 // GATEWAY_SECRET, so only the gateway can call them. See docs/architecture/bridge-protocol.md.
@@ -91,6 +91,29 @@ async function registerHost(ctx: MutationCtx, hostId: string, hostNetwork: Doc<'
   return (await ctx.db.get(id))!
 }
 
+/** How often a host's pressure is written: often enough to see a backlog grow, no more. */
+export const PRESSURE_EVERY_MS = 30_000
+
+/**
+ * Keeps what the host said of its deliveries, for the health page. Written at most every 30
+ * seconds, in its own table, so the batches a busy host sends don't each write it too, and the
+ * pages watching the hosts' rows aren't woken by it.
+ */
+async function notePressure(
+  ctx: MutationCtx,
+  host: Doc<'bridgeHosts'>,
+  pressure: { backlog: number; pushMs: number; failedPushes: number },
+  now: number,
+) {
+  const kept = await ctx.db
+    .query('bridgePressure')
+    .withIndex('by_hostId', (q) => q.eq('hostId', host.hostId))
+    .unique()
+  const row = { hostId: host.hostId, network: host.network, ...pressure, at: now }
+  if (!kept) await ctx.db.insert('bridgePressure', row)
+  else if (now - kept.at >= PRESSURE_EVERY_MS) await ctx.db.replace(kept._id, row)
+}
+
 /**
  * Applies a bridge host's events in order. Events at or below the host's last applied
  * sequence are replays and are skipped; a gap answers with the sequence the host must resend
@@ -105,6 +128,8 @@ export const ingest = mutation({
     events: v.array(bridgeEvent),
     /** The host's last heartbeat before it shuts down: it is offline from now. */
     stopping: v.optional(v.boolean()),
+    /** How the host's deliveries are going (bridge-protocol.md, Pressure). */
+    pressure: v.optional(bridgePressure),
   },
   returns: v.union(v.object({ ackedThrough: v.number() }), v.object({ expectedSeq: v.number() })),
   handler: async (ctx, args) => {
@@ -153,6 +178,7 @@ export const ingest = mutation({
     // live goes), rather than once its heartbeats have gone stale.
     const stopping = args.stopping === true && args.events.length === 0
     await ctx.db.patch(host._id, { lastSeq, lastSeenAt: stopping ? 0 : now })
+    if (args.pressure) await notePressure(ctx, host, args.pressure, now)
     return gap === null ? { ackedThrough: lastSeq } : { expectedSeq: gap }
   },
 })

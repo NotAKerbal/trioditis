@@ -13,6 +13,7 @@ import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import { isTransient } from '~/lib/resilient-convex.ts'
 import type { ChatCollagePlaintext } from '@trioditis/core'
 import {
   openCached,
@@ -288,22 +289,30 @@ export function useOpenChat(chatId: ChatId | undefined): OpenChatState {
   })
   return useMemo(() => {
     if (!chatId) return { chat: null, confirmed: true }
-    // A ConvexError is the server saying the chat is gone or not the person's. Any other error
-    // is the server not answering in time, as when every query is asked again at once after the
-    // computer wakes: a chat already on screen stays open, with what it last showed, rather
-    // than closing under the person.
-    if (error && (error instanceof ConvexError || !data)) {
-      // Gone for good: its old row mustn't open it again, from history say, while asked anew.
-      if (error instanceof ConvexError) knownRows.delete(rowKey(session, chatId))
-      return { chat: null, confirmed: true }
-    }
-    if (data) {
-      remember(data as ChatRow, session)
-      return { chat: toChat(data as ChatRow, session), confirmed: true }
-    }
-    const known = knownRows.get(rowKey(session, chatId))
-    return { chat: known ? toChat(known, session) : undefined, confirmed: false }
+    const key = rowKey(session, chatId)
+    const shown = openChatRow(data as ChatRow | undefined, error, knownRows.get(key))
+    // Gone for good: its old row mustn't open it again, from history say, while asked anew.
+    if (shown.gone) knownRows.delete(key)
+    else if (shown.confirmed && shown.row) remember(shown.row, session)
+    return { chat: shown.row ? toChat(shown.row, session) : shown.gone ? null : undefined, confirmed: shown.confirmed }
   }, [chatId, data, error, session])
+}
+
+/**
+ * Which row an open chat shows. Only a ConvexError closes it: the server saying the chat is
+ * gone or not the person's. Any other error is the server not answering in time, as when a busy
+ * server times out every query at once or the computer wakes and everything is asked again: the
+ * chat stays open with what it last showed, or the sidebar's copy of its row (`known`), or as
+ * loading, and is asked again (lib/resilient-convex.ts), rather than closing under the person.
+ */
+export function openChatRow(
+  data: ChatRow | undefined,
+  error: unknown,
+  known: ChatRow | undefined,
+): { row: ChatRow | undefined; confirmed: boolean; gone: boolean } {
+  if (error instanceof ConvexError) return { row: undefined, confirmed: true, gone: true }
+  if (data && !error) return { row: data, confirmed: true, gone: false }
+  return { row: data ?? known, confirmed: false, gone: false }
 }
 
 export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
@@ -314,14 +323,18 @@ export function useChatCounts() {
   return useQuery(convexQuery(api.chats.counts, {})).data
 }
 
-/** Runs a mutation and shows its error, as a sentence, instead of throwing. */
-function guarded<A extends unknown[]>(fn: (...args: A) => Promise<unknown>, fallback: string) {
+/**
+ * Runs a mutation and shows its error, as a sentence, instead of throwing. One the app makes by
+ * itself (`quiet`) says nothing when the server failed to answer: the busy line already says so
+ * (ServerBusy), and the person didn't ask for it.
+ */
+function guarded<A extends unknown[]>(fn: (...args: A) => Promise<unknown>, fallback: string, quiet = false) {
   return async (...args: A) => {
     try {
       await fn(...args)
       return true
     } catch (e) {
-      toast(errorMessage(e, fallback))
+      if (!(quiet && isTransient(e))) toast(errorMessage(e, fallback))
       return false
     }
   }
@@ -340,7 +353,8 @@ export function useChatActions() {
   const setLabels = useMutation(api.chats.setLabels)
   return useMemo(
     () => ({
-      markRead: guarded((chatId: ChatId) => markRead({ chatId }), 'That chat couldn’t be marked read.'),
+      // Mostly the app's own doing, when an open chat's messages are shown (read-while-open.tsx).
+      markRead: guarded((chatId: ChatId) => markRead({ chatId }), 'That chat couldn’t be marked read.', true),
       markUnread: guarded((chatId: ChatId) => markUnread({ chatId }), 'That chat couldn’t be marked unread.'),
       setArchived: guarded(
         (chatId: ChatId, archived: boolean) => setArchived({ chatId, archived }),

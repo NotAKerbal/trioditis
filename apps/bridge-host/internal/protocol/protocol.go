@@ -405,6 +405,18 @@ type EventBatch struct {
 	// Stopping marks the last heartbeat of a host that is shutting down, so it shows offline at
 	// once rather than once two minutes of missed heartbeats have passed.
 	Stopping bool `json:"stopping,omitempty"`
+	// Pressure says how the host's deliveries are going, for the admins' server health page.
+	Pressure *Pressure `json:"pressure,omitempty"`
+}
+
+// Pressure is how a host's deliveries to the gateway are going: counts and times only.
+type Pressure struct {
+	// Backlog is the journal events not yet acknowledged when the batch was sent.
+	Backlog int64 `json:"backlog"`
+	// PushMs is how long the last delivery took to be answered.
+	PushMs int64 `json:"pushMs"`
+	// FailedPushes is the deliveries that failed in the last five minutes.
+	FailedPushes int `json:"failedPushes"`
 }
 
 type EventBatchResponse struct {

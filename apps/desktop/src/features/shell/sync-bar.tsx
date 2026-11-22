@@ -1,6 +1,7 @@
 import { cn } from '@trioditis/ui/lib/utils'
 import { useSyncExternalStore } from 'react'
 import { convex } from '~/lib/convex.ts'
+import { serverTrouble } from '~/lib/resilient-convex.ts'
 
 const subscribe = (onChange: () => void) => convex.subscribeToConnectionState(onChange)
 const connected = () => convex.connectionState().isWebSocketConnected
@@ -8,6 +9,31 @@ const connected = () => convex.connectionState().isWebSocketConnected
 /** Whether the app is connected to its server now; while it isn't, everything shown is the cache's. */
 export function useConnected() {
   return useSyncExternalStore(subscribe, connected)
+}
+
+/** Whether the server is failing to answer in time now (lib/resilient-convex.ts). */
+export function useServerBusy() {
+  return useSyncExternalStore(serverTrouble.subscribe, serverTrouble.isBusy)
+}
+
+/**
+ * The app's one word on a busy server: while calls time out, each pane keeps what it last showed
+ * and asks again by itself, and this line says why it may be behind. It waits a moment first, so
+ * a single slow call never shows it, and goes once calls are answered again. While the server
+ * can't be reached at all, the panes' own lines say so instead.
+ */
+export function ServerBusy() {
+  const busy = useServerBusy()
+  const connected = useConnected()
+  return (
+    <div role="status" className="pointer-events-none fixed inset-x-0 top-2 z-50 flex justify-center px-4">
+      {busy && connected ? (
+        <span className="animate-fade-in-late rounded-full bg-surface px-3 py-1 text-xs text-muted-foreground shadow-popover">
+          Server is busy, catching up…
+        </span>
+      ) : null}
+    </div>
+  )
 }
 
 /**

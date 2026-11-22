@@ -50,9 +50,18 @@ type Options struct {
 	SendTimeout time.Duration
 	// Signin, if set, runs cookie login steps in the sign-in browser.
 	Signin *signin.Launcher
+	// History, if set, holds back a batch of older history while the server is behind on this
+	// host's events (gateway.Pusher.WaitForRoom).
+	History HistoryGate
 	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
 	// before checking them; five seconds if zero.
 	DescribeSettle time.Duration
+}
+
+// HistoryGate waits, for a bounded time, until the server has room for more history, and says
+// how long it waited.
+type HistoryGate interface {
+	WaitForRoom(ctx context.Context) time.Duration
 }
 
 // Connector implements bridgev2.MatrixConnector.
@@ -439,6 +448,14 @@ func (c *Connector) BatchSend(ctx context.Context, roomID id.RoomID, req *mautri
 	owner, err := c.owner(ctx, roomID)
 	if err != nil {
 		return nil, err
+	}
+	// Older history (the backfill queue, or someone scrolling back) waits while the server is
+	// behind, so the people using it aren't the ones who lose. A forward batch doesn't: it runs
+	// as a chat's events are handled, and holding it would hold up the chat's live messages.
+	if !req.Forward && c.History != nil {
+		if waited := c.History.WaitForRoom(ctx); waited >= time.Second {
+			c.Log.Debug().Dur("waited", waited).Int("events", len(req.Events)).Msg("History waited for the server to catch up")
+		}
 	}
 	resp := &mautrix.RespBeeperBatchSend{EventIDs: make([]id.EventID, len(req.Events))}
 	// The recipients are fetched first: fetching can wait on the gateway, and nothing slow may
