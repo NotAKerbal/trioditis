@@ -219,6 +219,8 @@ export interface ChatList {
   chats: Chat[] | undefined
   /** More chats exist past what's loaded: show "50+" and load on scroll. */
   canLoadMore: boolean
+  /** The next page is on its way. */
+  loading: boolean
   /** Every chat in the view is loaded: not while a page is still on its way. */
   exhausted: boolean
   loadMore: () => void
@@ -248,6 +250,7 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
   return {
     chats,
     canLoadMore: status === 'CanLoadMore',
+    loading: status === 'LoadingMore',
     exhausted: enabled && status === 'Exhausted',
     loadMore: () => loadMore(50),
   }
