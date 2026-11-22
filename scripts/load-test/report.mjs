@@ -42,7 +42,7 @@ export function markdownReport(r) {
   lines.push('')
   const t = r.traffic
   lines.push(
-    `Writes while measured: ${r.rates.backfillPerMinute}/min backfill on ${r.rates.backfillNetwork}, ${r.rates.livePerMinute}/min live across every network. Sent: ${t.backfill} backfilled and ${t.live} live messages, ${t.typing} typing, ${t.reactions} reactions, ${t.receipts} receipts, ${t.edits} edits. Bridge pushes: ${r.bridges.pushes} (${r.bridges.failedPushes} failed), p95 ${ms(r.bridges.pushMs.p95)}; backlog left at the end ${r.bridges.backlogAtEnd}. Commands delivered: ${
+    `Writes while measured: ${r.rates.backfillPerMinute}/min backfill on ${r.rates.backfillNetwork}, ${r.rates.livePerMinute}/min live across every network. Sent: ${t.backfill} backfilled and ${t.live} live messages, ${t.typing} typing, ${t.reactions} reactions, ${t.receipts} receipts, ${t.edits} edits. Bridge pushes: ${r.bridges.pushes} (${r.bridges.failedPushes} failed), acknowledged p95 ${ms(r.bridges.pushMs.p95)}, ${n(r.bridges.batchSize?.p50)} events a push (p50; p95 ${n(r.bridges.batchSize?.p95)}); backlog left at the end ${r.bridges.backlogAtEnd}. Commands delivered: ${
       Object.entries(r.bridges.commands)
         .map(([k, v]) => `${k} ${v}`)
         .join(', ') || 'none'
@@ -54,7 +54,7 @@ export function markdownReport(r) {
       Object.entries(r.client.actions)
         .map(([k, v]) => `${v} ${k}`)
         .join(', ') || 'no clicks'
-    }; up to ${r.client.peakSubscriptions} live queries each. Backend CPU while measured: mean ${n(r.cpu.mean)}%, peak ${n(r.cpu.max)}% (of ${r.cpus * 100}%).`,
+    }; up to ${r.client.peakSubscriptions} live queries each; ${r.client.failedOpens ?? 0} chats couldn't open. Backend CPU while measured: mean ${n(r.cpu.mean)}%, peak ${n(r.cpu.max)}% (of ${r.cpus * 100}%).`,
   )
   lines.push('')
   lines.push('## What people would notice')
@@ -63,8 +63,11 @@ export function markdownReport(r) {
     table(
       ['What', 'Count', 'p50', 'p95', 'p99', 'Max'],
       [
-        ['Opening a chat, until its messages show', ...stat(r.client.opens)],
-        ['A live message, from its bridge host to an open or warm chat', ...stat(r.client.visible)],
+        [
+          'Opening a chat, until it shows (its messages and what goes with them, or 400 ms after the messages)',
+          ...stat(r.client.opens),
+        ],
+        ['A live message, from its bridge host to a chat already open or warm', ...stat(r.client.visible)],
         ['A bridge host push acknowledged', ...stat(r.bridges.pushMsAll)],
         ['A click, start to finish', ...stat(r.client.actionMs)],
       ],

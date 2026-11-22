@@ -68,6 +68,42 @@ async function waitFor(check, seconds, what) {
   throw new Error(`${what} didn't come up within ${seconds}s${last ? `: ${last.message}` : ''}`)
 }
 
+const stackContainers = (name) => ({ postgres: `${name}-postgres`, backend: `${name}-backend` })
+
+/** Removes a stack's containers, their volumes and its network, whatever of them exists. */
+export function stopStack(name) {
+  for (const c of Object.values(stackContainers(name))) docker(['rm', '-f', '-v', c], { allowFail: true })
+  docker(['network', 'rm', `${name}-net`], { allowFail: true })
+}
+
+/**
+ * Removes stacks left by runs that are gone (killed, so they couldn't clean up): each is named
+ * for its run's process ID, and one whose process isn't running is removed.
+ */
+export function removeAbandonedStacks(log = console.log) {
+  const names = docker(['ps', '-a', '--filter', 'label=trioditis.load-test=1', '--format', '{{.Names}}'], {
+    allowFail: true,
+  })
+  const stacks = new Set(
+    names.split('\n').flatMap((n) => {
+      const match = n.match(/^(trioditis-load-\d+)-(?:backend|postgres)$/)
+      return match ? [match[1]] : []
+    }),
+  )
+  for (const name of stacks) {
+    const pid = Number(name.split('-').pop())
+    let alive = true
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      alive = error.code === 'EPERM'
+    }
+    if (alive) continue
+    log(`Removing ${name}, left by a run that's gone`)
+    stopStack(name)
+  }
+}
+
 /**
  * Starts the stack and deploys the functions. `networks` are the ones the backend bridges
  * (TRIODITIS_NETWORKS). Returns what the rest of the test needs, and `stop()`.
@@ -83,11 +119,8 @@ export async function startStack({ name, networks, log = console.log }) {
   }
   const images = { postgres: composeImage('postgres'), backend: composeImage('backend') }
   const net = `${name}-net`
-  const containers = { postgres: `${name}-postgres`, backend: `${name}-backend` }
-  const stop = () => {
-    for (const c of Object.values(containers)) docker(['rm', '-f', '-v', c], { allowFail: true })
-    docker(['network', 'rm', net], { allowFail: true })
-  }
+  const containers = stackContainers(name)
+  const stop = () => stopStack(name)
   stop()
   const pgPassword = secret()
   const instanceSecret = randomBytes(32).toString('hex')

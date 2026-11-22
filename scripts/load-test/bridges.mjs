@@ -29,6 +29,8 @@ export class BridgeHost {
     this.person = person
     this.metrics = metrics
     this.journal = []
+    /** Commands taken, by ID, so a redelivered one isn't run again. */
+    this.accepted = new Set()
     this.seq = 0
     this.acked = 0
     this.stopped = false
@@ -69,6 +71,7 @@ export class BridgeHost {
       reply = { status: 503, body: { error: String(error?.message ?? error).slice(0, 200) } }
     }
     this.metrics.push({
+      at: Date.now(),
       host: this.hostId,
       events: events.length,
       ms: performance.now() - started,
@@ -255,8 +258,12 @@ export async function startBridges({ crypto, stack, inbox, person }) {
         response.writeHead(400, { 'content-type': 'application/json' }).end('{"error":"invalid_command"}')
         return
       }
-      metrics.commands[command.type] = (metrics.commands[command.type] ?? 0) + 1
+      // A bridge host runs a command once, whatever number of times it's delivered
+      // (store.go): a redelivery after a lost commandResult is taken and does nothing.
       response.writeHead(202).end()
+      if (host.accepted.has(command.commandId)) return
+      host.accepted.add(command.commandId)
+      metrics.commands[command.type] = (metrics.commands[command.type] ?? 0) + 1
       if (command.type === 'send') {
         const eventId = `$load_echo_${command.clientMessageId}`
         setTimeout(() => {
@@ -326,7 +333,11 @@ export function journalInbox(bridges, inbox) {
  * them, and reactions, receipts and edits in proportion). Returns `stop()`, and `sent`, the
  * live messages by event ID with when they were journaled, for the clients to time.
  */
-export function driveTraffic(bridges, inbox, { backfillNetwork, backfillPerMinute, livePerMinute, seed = 7 }) {
+export function driveTraffic(
+  bridges,
+  inbox,
+  { backfillNetwork, backfillPerMinute, backfillPage = 50, livePerMinute, seed = 7 },
+) {
   const rand = random(seed)
   const timers = []
   const sent = new Map()
@@ -352,23 +363,28 @@ export function driveTraffic(bridges, inbox, { backfillNetwork, backfillPerMinut
   // Backfill goes back through the backfilling network's chats, a page of older history at a time.
   const backfillChats = inbox.chats.filter((c) => c.network === backfillNetwork)
   let backfillIndex = 0
-  const backfillOne = () => {
+  // A page of one chat's history at a time, journaled together, as the connector's BatchSend
+  // journals a whole page in one transaction (connector.go), then backfillDone.
+  const backfillPageOf = () => {
     if (backfillChats.length === 0) return
     const chat = backfillChats[backfillIndex++ % backfillChats.length]
     const host = bridges.byNetwork.get(chat.network)
     const oldest = chat.messages[0]?.networkTs ?? Date.now()
-    chat.backfilled = (chat.backfilled ?? 0) + 1
-    const message = makeMessage(
-      rand,
-      shape,
-      chat,
-      -chat.backfilled,
-      oldest - chat.backfilled * 60_000,
-      rand.chance(0.35),
-      true,
-    )
-    host.message(chat, message)
-    counters.backfill++
+    for (let i = 0; i < backfillPage; i++) {
+      chat.backfilled = (chat.backfilled ?? 0) + 1
+      const message = makeMessage(
+        rand,
+        shape,
+        chat,
+        -chat.backfilled,
+        oldest - chat.backfilled * 60_000,
+        rand.chance(0.35),
+        true,
+      )
+      host.message(chat, message)
+      counters.backfill++
+    }
+    host.backfillDone(chat, true)
   }
 
   const liveOne = () => {
@@ -421,7 +437,7 @@ export function driveTraffic(bridges, inbox, { backfillNetwork, backfillPerMinut
       }, 100),
     )
   }
-  every(backfillPerMinute, backfillOne)
+  every(backfillPerMinute / Math.max(1, backfillPage), backfillPageOf)
   every(livePerMinute, liveOne)
   return {
     sent,

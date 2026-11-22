@@ -3,11 +3,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { inboxSummary, longTail, makeInbox, random } from '../load-test/inbox.mjs'
-import { functionName, record, TIMEOUT } from '../load-test/logs.mjs'
+import { coverage, functionName, record, TIMEOUT } from '../load-test/logs.mjs'
 import { byFunction, errorKind, evaluate, percentile, perMinute } from '../load-test/stats.mjs'
 import { markdownReport } from '../load-test/report.mjs'
 import { composeImage } from '../load-test/stack.mjs'
-import { estimateBytes, room, RESERVE_BYTES } from '../load-test/preflight.mjs'
+import { estimateBytes, reserveBytes, room, RESERVE_BYTES } from '../load-test/preflight.mjs'
 
 void test('the same seed makes the same inbox, of the size asked for', () => {
   const shape = { seed: 3, chats: 120, messages: 2000, people: 40 }
@@ -152,7 +152,7 @@ void test('the checks fail on a timeout, a function over budget, a client error 
   )
   const verdict = evaluate({ rows: slow, client: ok, bridges: pushes })
   assert.equal(verdict.passed, false)
-  assert.match(verdict.checks[1].detail, /a:slow p95 300 > 250 ms/)
+  assert.match(verdict.checks[2].detail, /a:slow p95 300 > 250 ms/)
   // A budget of its own lets it through; too few runs to judge are left alone.
   assert.equal(
     evaluate({ rows: slow, client: ok, bridges: pushes, budgets: { 'a:slow': { p95: 400, p99: 400 } } }).passed,
@@ -161,7 +161,7 @@ void test('the checks fail on a timeout, a function over budget, a client error 
   assert.equal(evaluate({ rows: slow, client: ok, bridges: pushes, minRuns: 31 }).passed, true)
 
   const timedOut = byFunction([rec('a:t', 1000, { error: 'timed out', timeout: true })], { minutes: 1 })
-  assert.equal(evaluate({ rows: timedOut, client: ok, bridges: pushes }).checks[0].passed, false)
+  assert.equal(evaluate({ rows: timedOut, client: ok, bridges: pushes }).checks[1].passed, false)
   assert.equal(evaluate({ rows: fast, client: { errors: 1, errorKinds: { x: 1 } }, bridges: pushes }).passed, false)
   assert.equal(evaluate({ rows: fast, client: ok, bridges: { pushes: 5, failedPushes: 1 } }).passed, false)
 })
@@ -211,7 +211,15 @@ void test('the report shows the verdict, the ranking and the errors', () => {
     databaseSize: '40 MB',
     rates: { backfillPerMinute: 150, backfillNetwork: 'signal', livePerMinute: 30 },
     traffic: { backfill: 1, live: 2, typing: 3, reactions: 4, receipts: 5, edits: 6 },
-    bridges: { pushes: 1, failedPushes: 0, pushMs: { p95: 10 }, pushMsAll: [10], backlogAtEnd: 0, commands: {} },
+    bridges: {
+      pushes: 1,
+      failedPushes: 0,
+      pushMs: { p95: 10 },
+      batchSize: { p50: 3, p95: 50 },
+      pushMsAll: [10],
+      backlogAtEnd: 0,
+      commands: {},
+    },
     client: {
       errors: 0,
       errorKinds: {},
@@ -230,7 +238,7 @@ void test('the report shows the verdict, the ranking and the errors', () => {
   assert.match(markdown, /^# Load test: FAILED/)
   assert.match(markdown, /\| 1 \| `chats:list` \|/)
   assert.match(markdown, /`media:access` \| 1 \| timed out/)
-  assert.match(markdown, /Opening a chat, until its messages show \| 2 \|/)
+  assert.match(markdown, /Opening a chat, until it shows .* \| 2 \|/)
 })
 
 void test("the stack uses deploy/compose's pinned images", () => {
@@ -247,4 +255,28 @@ void test('preflight wants 20 GiB free plus twice the run, and inodes', () => {
   assert.equal(room('/', need, fs(60)).ok, true)
   assert.equal(room('/', need, fs(21)).ok, false)
   assert.equal(room('/', need, fs(60, 0.05)).ok, false)
+})
+
+void test("the run can't pass on a function log it didn't read", () => {
+  const ok = { errors: 0, errorKinds: {} }
+  const pushes = { pushes: 5, failedPushes: 0 }
+  const missing = coverage([], 1000, 2000)
+  assert.equal(missing.ok, false)
+  // No executions at all, and so no timeouts or slow functions, still fails.
+  const verdict = evaluate({ rows: [], client: ok, bridges: pushes, logs: missing })
+  assert.equal(verdict.passed, false)
+  assert.equal(verdict.checks[0].passed, false)
+  assert.equal(coverage([900, 1500, 2100], 1000, 2000).ok, true)
+  assert.match(coverage([900, 1500], 1000, 2000).detail, /stopped answering/)
+  assert.match(coverage([900, 200_000, 400_000], 1000, 300_000).detail, /went 200 s without answering/)
+})
+
+void test("a CI runner can keep less disk free than the shared machine's 20 GiB", () => {
+  assert.equal(reserveBytes({}), 20 * 1024 ** 3)
+  assert.equal(reserveBytes({ LOAD_DISK_RESERVE_GIB: '2' }), 2 * 1024 ** 3)
+  assert.throws(() => reserveBytes({ LOAD_DISK_RESERVE_GIB: 'lots' }), /must be a number/)
+  // What's written while measured counts too.
+  assert.ok(
+    estimateBytes({ messages: 1, chats: 1, minutes: 10, perMinute: 200 }) > estimateBytes({ messages: 1, chats: 1 }),
+  )
 })

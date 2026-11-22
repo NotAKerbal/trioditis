@@ -5,7 +5,8 @@
 // - At start, Focused layout: the inbox by recency and the snoozed, requests, archived and
 //   blocked lists (50 a page), the badge counts, arrivals, labels, preferences, scheduled
 //   messages, the server's and networks' state, People (every page), and a media token per
-//   network for the sidebar's pictures. Unread loads inbox pages until the count is met.
+//   network for the sidebar's pictures. Unread loads inbox pages by the desktop's own rule
+//   (unread-fill.ts), again whenever the counts change.
 // - Fetch-ahead: up to six warm chats, each its first page of messages, their reactions, a
 //   group's senders' profiles, its scheduled and cancelled messages (data/chat-content.ts); the
 //   first three unread chats are warmed 1.5 s after the list settles.
@@ -15,13 +16,25 @@
 //   subscribed for five minutes, as the desktop's query cache keeps it (main.tsx).
 import { ConvexClient } from 'convex/browser'
 import { anyApi } from 'convex/server'
+import { reactionGroups, reactionRequests } from '../../apps/desktop/src/data/reaction-requests.ts'
+import { unreadIncomplete } from '../../apps/desktop/src/features/shell/unread-fill.ts'
 import { random } from './inbox.mjs'
 
 const PAGE = 50
 const WARM = 6
 const WARM_UNREAD = 3
+/** How long the desktop's query cache keeps what it was let go of (main.tsx). */
 const KEEP_MS = 5 * 60_000
-const MAX_UNREAD_PAGES = 40
+/** How long a replaced reactions request stays watched (data/messages.ts, REACTIONS_GC_MS). */
+const REACTIONS_GC_MS = 10_000
+/** A pane shows its messages once what goes with them is in, or this long after (chat-content.ts). */
+const SETTLE_MS = 400
+/** The most inbox pages the Unread fill loads; the nightly inbox has 60. */
+const MAX_INBOX_PAGES = 400
+/** A query that hasn't answered by then counts as failed (the app would show it loading). */
+const ANSWER_MS = 60_000
+/** A click that hasn't finished by then counts as failed, so a stuck one can't hold up the run. */
+const ACTION_MS = 120_000
 
 const ref = (name) => {
   const [module, fn] = name.split(':')
@@ -36,6 +49,7 @@ export function clientMetrics() {
     firstResult: {},
     actions: {},
     opens: [],
+    failedOpens: 0,
     visible: [],
     subscriptions: 0,
     peakSubscriptions: 0,
@@ -47,6 +61,14 @@ const shortError = (error) =>
     .split('\n')[0]
     .replace(/\[Request ID: [^\]]+\]\s*/g, '')
     .slice(0, 200)
+
+const sleep = (ms) =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+
+const unreadRow = (c) => (c.unreadCount > 0 || c.markedUnread) && c.mutedUntil === null
 
 export class SimClient {
   constructor({ id, convexUrl, person, crypto, metrics, sent, rand, bridgeKey, networks, keepMs = KEEP_MS }) {
@@ -62,12 +84,15 @@ export class SimClient {
     this.client = new ConvexClient(convexUrl, { skipConvexDeploymentUrlCheck: true, unsavedChangesWarning: false })
     this.client.setAuth(() => person.token().catch(() => null))
     this.subs = new Map()
-    this.lists = {}
+    /** Chats whose messages this client holds (warm or open), by ID. */
+    this.chats = new Map()
     this.warm = []
     this.open = null
     this.released = new Map()
     this.seenEvents = new Set()
     this.timers = []
+    this.inboxPages = 0
+    this.filling = false
   }
 
   error(where, error) {
@@ -78,39 +103,57 @@ export class SimClient {
 
   /**
    * Subscribes under `key` (once; a second ask shares it, as the app's cache does) and
-   * resolves with the first answer, or null if it failed.
+   * resolves with the first answer, or null if it failed or didn't come within ANSWER_MS.
    */
   watch(key, name, args, onValue = () => {}) {
     const held = this.subs.get(key)
     if (held) {
       this.released.delete(key)
-      held.listeners.push(onValue)
-      if (held.value !== undefined) onValue(held.value)
+      if (!held.listeners.has(onValue)) {
+        held.listeners.add(onValue)
+        if (held.value !== undefined) onValue(held.value)
+      }
       return held.first
     }
     const started = performance.now()
     let resolveFirst
-    const sub = { name, value: undefined, listeners: [onValue], first: new Promise((r) => (resolveFirst = r)) }
+    const sub = {
+      name,
+      value: undefined,
+      readyAt: null,
+      listeners: new Set([onValue]),
+      first: new Promise((r) => (resolveFirst = r)),
+    }
     this.subs.set(key, sub)
     this.metrics.subscriptions++
     this.metrics.peakSubscriptions = Math.max(this.metrics.peakSubscriptions, this.subs.size)
     let answered = false
+    const deadline = setTimeout(() => {
+      if (answered) return
+      answered = true
+      this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
+      resolveFirst(null)
+    }, ANSWER_MS)
+    deadline.unref?.()
     sub.unsubscribe = this.client.onUpdate(
       ref(name),
       args,
       (value) => {
+        sub.value = value
+        sub.readyAt ??= Date.now()
         if (!answered) {
           answered = true
+          clearTimeout(deadline)
           ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
           resolveFirst(value)
         }
-        sub.value = value
         for (const listener of sub.listeners) listener(value)
       },
       (error) => {
         this.error(name, error)
         if (!answered) {
           answered = true
+          clearTimeout(deadline)
           resolveFirst(null)
         }
       },
@@ -125,10 +168,10 @@ export class SimClient {
     this.subs.delete(key)
   }
 
-  /** Lets go of `key` after the cache's five minutes, unless it's asked for again first. */
-  release(key) {
+  /** Lets go of `key` after `ms` (the cache's five minutes), unless it's asked for again first. */
+  release(key, ms = this.keepMs) {
     if (!this.subs.has(key)) return
-    this.released.set(key, Date.now() + this.keepMs)
+    this.released.set(key, Date.now() + ms)
   }
 
   sweep() {
@@ -190,84 +233,165 @@ export class SimClient {
     ]) {
       p.push(this.watch(key, name, {}))
     }
-    const counts = this.watch('counts', 'chats:counts', {})
     for (const view of ['snoozed', 'requests', 'archived', 'blocked']) {
       p.push(this.pages(`list:${view}`, 'chats:list', { view }, PAGE, { maxPages: 1 }))
     }
     p.push(this.pages('people', 'people:list', {}, 100, { more: () => true }))
     for (const network of this.networks) p.push(this.mutate('media:access', { network }))
-    // Unread: inbox pages until every unread chat the count says there is has loaded.
-    const target = (await counts)?.inbox?.count ?? 0
-    const unreadOf = (rows) => rows.filter((c) => (c.unreadCount > 0 || c.markedUnread) && c.mutedUntil === null)
-    const inbox = await this.pages('list:inbox', 'chats:list', { view: 'inbox', order: 'recent' }, PAGE, {
-      more: (rows) => unreadOf(rows).length < target,
-      maxPages: MAX_UNREAD_PAGES,
-    })
-    this.lists.inbox = inbox
-    this.lists.unread = unreadOf(inbox)
+    // Unread fills itself whenever the counts or the pages change, as the sidebar's effect does.
+    p.push(this.watch('counts', 'chats:counts', {}, () => void this.fillInbox()))
+    p.push(this.fillInbox())
     await Promise.all(p)
+    await this.fillInbox()
+    const warmTimer = setTimeout(() => {
+      for (const chat of this.inbox().filter(unreadRow).slice(0, WARM_UNREAD).reverse()) this.warmChat(chat)
+    }, 1500)
     this.timers.push(
-      setTimeout(() => {
-        for (const chat of this.lists.unread.slice(0, WARM_UNREAD).reverse()) this.warmChat(chat)
-      }, 1500),
+      warmTimer,
+      setInterval(() => this.sweep(), 5000),
     )
-    this.timers.push(setInterval(() => this.sweep(), 5000))
   }
 
-  /** What data/chat-content.ts's useWarmChat asks for a chat. */
-  warmChat(chat) {
-    const keys = []
-    const pageKey = `messages:${chat._id}#0`
-    keys.push(pageKey)
-    const page = this.watch(
-      pageKey,
-      'messages:list',
-      { chatId: chat._id, paginationOpts: { numItems: PAGE, cursor: null, id: 0 } },
-      (value) => this.noticeMessages(value.page),
-    )
-    for (const [key, name, args] of [
-      [`scheduled:${chat._id}`, 'scheduled:list', { chatId: chat._id }],
-      [`cancelled:${chat._id}`, 'scheduled:cancelled', { chatId: chat._id }],
-    ]) {
-      keys.push(key)
-      void this.watch(key, name, args)
-    }
-    const extras = page.then((value) => {
-      if (!value) return
-      const ids = value.page.filter((m) => !m.redactedAt && !m.eventId.startsWith('pending:')).map((m) => m._id)
-      const waits = []
-      for (let i = 0; i < ids.length; i += 100) {
-        const key = `reactions:${chat._id}:${ids[i]}`
-        keys.push(key)
-        waits.push(this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: ids.slice(i, i + 100) }))
-      }
-      if (chat.kind === 'group') {
-        const ghosts = [...new Set(value.page.flatMap((m) => ('ghostId' in m.sender ? [m.sender.ghostId] : [])))].sort(
-          (a, b) => (a < b ? -1 : a > b ? 1 : 0),
-        )
-        for (let i = 0; i < ghosts.length; i += 100) {
-          const key = `contacts:${chat.network}:${ghosts.slice(i, i + 100).join()}`
-          keys.push(key)
-          waits.push(this.watch(key, 'contacts:get', { network: chat.network, ghostIds: ghosts.slice(i, i + 100) }))
+  /** The inbox pages loaded so far, newest first, as they are now. */
+  inbox() {
+    const rows = []
+    for (let i = 0; i < Math.max(1, this.inboxPages); i++)
+      rows.push(...(this.subs.get(`list:inbox#${i}`)?.value?.page ?? []))
+    return rows
+  }
+
+  /** Loads inbox pages while Unread may still be missing chats (features/shell/unread-fill.ts). */
+  async fillInbox() {
+    if (this.filling) return
+    this.filling = true
+    try {
+      for (;;) {
+        if (this.inboxPages === 0) {
+          const first = await this.watch('list:inbox#0', 'chats:list', {
+            view: 'inbox',
+            order: 'recent',
+            paginationOpts: { numItems: PAGE, cursor: null, id: 0 },
+          })
+          if (!first) return
+          this.inboxPages = 1
         }
+        const last = this.subs.get(`list:inbox#${this.inboxPages - 1}`)?.value
+        if (!last) return
+        const count = this.subs.get('counts')?.value?.inbox
+        const incomplete = unreadIncomplete({
+          more: !last.isDone,
+          loadedUnread: this.inbox().filter(unreadRow).length,
+          count,
+        })
+        if (!incomplete || this.inboxPages >= MAX_INBOX_PAGES) return
+        const n = this.inboxPages
+        const next = await this.watch(`list:inbox#${n}`, 'chats:list', {
+          view: 'inbox',
+          order: 'recent',
+          paginationOpts: { numItems: PAGE, cursor: last.continueCursor, id: n },
+        })
+        if (!next) return
+        this.inboxPages = n + 1
       }
-      return Promise.all(waits)
-    })
-    // At most six warm chats; the oldest is let go to the cache.
-    this.warm = [{ chat, keys }, ...this.warm.filter((w) => w.chat._id !== chat._id)]
-    for (const gone of this.warm.splice(WARM))
-      if (gone.chat._id !== this.open?.chat._id) for (const k of gone.keys) this.release(k)
-    return { page, extras, keys }
+    } finally {
+      this.filling = false
+    }
   }
 
-  /** Times a live message from when its bridge host journaled it to when this client has it. */
-  noticeMessages(rows) {
+  /**
+   * What data/chat-content.ts's useWarmChat asks for a chat, kept in step with its loaded pages
+   * as they change: reactions in the desktop's own groups and requests, and a group's senders.
+   */
+  warmChat(chat) {
+    let state = this.chats.get(chat._id)
+    if (!state) {
+      state = { chat, pages: [], reactionKeys: new Set(), contactKeys: new Set(), extras: Promise.resolve() }
+      // One listener per chat, so watching a request again never adds another.
+      state.onChange = () => this.chats.get(chat._id) === state && this.reconcile(state)
+      this.chats.set(chat._id, state)
+      state.fixed = [`scheduled:${chat._id}`, `cancelled:${chat._id}`]
+      void this.watch(state.fixed[0], 'scheduled:list', { chatId: chat._id })
+      void this.watch(state.fixed[1], 'scheduled:cancelled', { chatId: chat._id })
+      state.first = this.loadPage(state, null)
+    }
+    // At most six warm chats; the oldest is let go to the cache.
+    this.warm = [state, ...this.warm.filter((w) => w !== state)]
+    for (const gone of this.warm.splice(WARM)) if (gone !== this.open?.state) this.letGo(gone)
+    return state
+  }
+
+  /** Subscribes to the chat's next page of messages; resolves with its first answer. */
+  loadPage(state, cursor) {
+    const n = state.pages.length
+    const key = `messages:${state.chat._id}#${n}`
+    state.pages.push(key)
+    return this.watch(
+      key,
+      'messages:list',
+      { chatId: state.chat._id, paginationOpts: { numItems: PAGE, cursor, id: n } },
+      (value) => {
+        if (this.chats.get(state.chat._id) !== state) return
+        if (n === 0) this.noticeMessages(this.subs.get(key)?.readyAt ?? Date.now(), value.page)
+        this.reconcile(state)
+      },
+    )
+  }
+
+  /** Lets go of everything a chat held, to the cache. */
+  letGo(state) {
+    if (this.chats.get(state.chat._id) === state) this.chats.delete(state.chat._id)
+    for (const key of [...state.pages, ...state.fixed, ...state.reactionKeys, ...state.contactKeys]) this.release(key)
+  }
+
+  /** The reactions and senders' requests the chat's loaded messages call for now. */
+  reconcile(state) {
+    const { chat } = state
+    const messages = state.pages
+      .flatMap((key) => this.subs.get(key)?.value?.page ?? [])
+      .filter((m) => !m.redactedAt && !m.eventId.startsWith('pending:'))
+      .map((m) => ({ id: m._id, at: m.networkTs, sender: m.sender }))
+      .reverse()
+    const reactionKey = (asked) => `reactions:${chat._id}:${asked.join()}`
+    const wanted = new Set()
+    const waits = []
+    for (const group of reactionGroups(messages)) {
+      const requests = reactionRequests(group, (asked) => this.subs.get(reactionKey(asked))?.value)
+      for (const asked of requests) {
+        const key = reactionKey(asked)
+        wanted.add(key)
+        waits.push(this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: asked }, state.onChange))
+      }
+    }
+    for (const key of state.reactionKeys) if (!wanted.has(key)) this.release(key, REACTIONS_GC_MS)
+    state.reactionKeys = wanted
+    const contacts = new Set()
+    if (chat.kind === 'group') {
+      const ghosts = [...new Set(messages.flatMap((m) => ('ghostId' in m.sender ? [m.sender.ghostId] : [])))].sort(
+        (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+      )
+      for (let i = 0; i < ghosts.length; i += 100) {
+        const ids = ghosts.slice(i, i + 100)
+        const key = `contacts:${chat.network}:${ids.join()}`
+        contacts.add(key)
+        waits.push(this.watch(key, 'contacts:get', { network: chat.network, ghostIds: ids }))
+      }
+    }
+    for (const key of state.contactKeys) if (!contacts.has(key)) this.release(key)
+    state.contactKeys = contacts
+    state.extras = Promise.all([...waits, ...state.fixed.map((k) => this.subs.get(k)?.first)])
+  }
+
+  /**
+   * Times a live message from when its bridge host journaled it to when this client has it,
+   * only for a chat whose messages were already live then: a chat opened later just loads it.
+   */
+  noticeMessages(liveSince, rows) {
     const now = Date.now()
     for (const m of rows) {
       if (this.seenEvents.has(m.eventId)) continue
       this.seenEvents.add(m.eventId)
       const sent = this.sent.get(m.eventId)
-      if (sent) this.metrics.visible.push(now - sent.at)
+      if (sent && sent.at >= liveSince) this.metrics.visible.push(now - sent.at)
     }
   }
 
@@ -276,46 +400,40 @@ export class SimClient {
   }
 
   visibleChats() {
-    const inbox = this.subs.get('list:inbox#0')?.value?.page ?? this.lists.inbox ?? []
-    return inbox
+    return this.inbox()
   }
 
   async openChat(chat) {
     this.count('open chat')
     const started = performance.now()
-    if (this.open) for (const k of this.open.keys) this.release(k)
+    const previous = this.open
     const keys = [`chat:${chat._id}`, `typing:${chat._id}`]
     const got = this.watch(keys[0], 'chats:get', { chatId: chat._id })
     void this.watch(keys[1], 'messages:typing', { chatId: chat._id })
-    const warmed = this.warmChat(chat)
-    this.open = { chat, keys: [...keys, ...warmed.keys], pages: 1 }
-    const [row, page] = await Promise.all([got, warmed.page])
+    const state = this.warmChat(chat)
+    this.open = { chat, state, keys }
+    if (previous && previous.state !== state) {
+      for (const k of previous.keys) this.release(k)
+      if (!this.warm.includes(previous.state)) this.letGo(previous.state)
+    }
+    const [row, page] = await Promise.all([got, state.first])
+    if (!row || !page) {
+      this.metrics.failedOpens++
+      return
+    }
+    // Shown once its reactions, senders and scheduled messages are in, or SETTLE_MS after.
+    await Promise.race([state.extras, sleep(SETTLE_MS)])
     this.metrics.opens.push(performance.now() - started)
-    await warmed.extras
-    this.open.keys.push(...warmed.keys.filter((k) => !this.open.keys.includes(k)))
-    if (row && (row.unreadCount > 0 || row.markedUnread)) await this.mutate('chats:markRead', { chatId: chat._id })
-    this.open.cursor = page?.isDone ? null : page?.continueCursor
+    if (row.unreadCount > 0 || row.markedUnread) await this.mutate('chats:markRead', { chatId: chat._id })
   }
 
   async scrollBack() {
-    if (!this.open?.cursor) return this.openSomething()
+    const state = this.open?.state
+    const last = state && this.subs.get(state.pages.at(-1))?.value
+    if (!last || last.isDone) return this.openSomething()
     this.count('scroll back')
-    const { chat } = this.open
-    const n = this.open.pages++
-    const key = `messages:${chat._id}#${n}`
-    const value = await this.watch(key, 'messages:list', {
-      chatId: chat._id,
-      paginationOpts: { numItems: PAGE, cursor: this.open.cursor, id: n },
-    })
-    this.open.keys.push(key)
-    if (!value) return
-    this.open.cursor = value.isDone ? null : value.continueCursor
-    const ids = value.page.filter((m) => !m.redactedAt).map((m) => m._id)
-    for (let i = 0; i < ids.length; i += 100) {
-      const rkey = `reactions:${chat._id}:${ids[i]}`
-      this.open.keys.push(rkey)
-      await this.watch(rkey, 'messages:reactions', { chatId: chat._id, messageIds: ids.slice(i, i + 100) })
-    }
+    const value = await this.loadPage(state, last.continueCursor)
+    if (value) await state.extras
   }
 
   async openPeople() {
@@ -366,8 +484,7 @@ export class SimClient {
       const chats = this.visibleChats()
       if (chats.length) {
         this.count('hover')
-        const { page } = this.warmChat(chats[this.rand.int(Math.min(chats.length, 30))])
-        await page
+        await this.warmChat(chats[this.rand.int(Math.min(chats.length, 30))]).first
       }
       return
     }
@@ -384,20 +501,26 @@ export class SimClient {
     return this.send()
   }
 
-  /** Clicks every `everyMs` (± half) until stopped. */
+  /** Clicks every `everyMs` (± half) until stopped; a click that takes over ACTION_MS is a failure. */
   runClicks(everyMs) {
     let stopped = false
     const loop = (async () => {
       while (!stopped) {
-        await new Promise((r) => setTimeout(r, everyMs * (0.5 + this.rand.next())))
+        await sleep(everyMs * (0.5 + this.rand.next()))
         if (stopped) break
         const started = performance.now()
-        const action = this.act()
+        let timedOut = false
         try {
-          await action
+          await Promise.race([
+            this.act(),
+            sleep(ACTION_MS).then(() => {
+              timedOut = true
+            }),
+          ])
         } catch (error) {
           this.error('click', error)
         }
+        if (timedOut) this.error('click', `not finished within ${ACTION_MS / 1000} s`)
         ;(this.metrics.actionMs ??= []).push(performance.now() - started)
       }
     })()

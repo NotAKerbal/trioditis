@@ -14,11 +14,11 @@ import { setUpPerson } from './account.mjs'
 import { driveTraffic, journalInbox, startBridges } from './bridges.mjs'
 import { startClients } from './clients.mjs'
 import { inboxSummary, makeInbox } from './inbox.mjs'
-import { collectLogs } from './logs.mjs'
+import { collectLogs, coverage } from './logs.mjs'
 import { preflight } from './preflight.mjs'
 import { markdownReport } from './report.mjs'
 import { seedClientState } from './seed.mjs'
-import { docker, startStack } from './stack.mjs'
+import { docker, removeAbandonedStacks, startStack, stopStack } from './stack.mjs'
 import { byFunction, evaluate, perMinute, summarize } from './stats.mjs'
 
 /** Sizes and rates by profile. `quick` is for trying the harness; `nightly` is what CI runs. */
@@ -65,6 +65,7 @@ const OPTIONS = {
   cpus: { type: 'string', default: '2' },
   'backfill-rate': { type: 'string' },
   'backfill-network': { type: 'string', default: 'signal' },
+  'backfill-page': { type: 'string', default: '50' },
   'live-rate': { type: 'string' },
   'click-ms': { type: 'string' },
   'budget-p95': { type: 'string', default: '250' },
@@ -85,7 +86,8 @@ const HELP = `pnpm load-test [options]
   --minutes N                     how long the measured load runs
   --clients N                     simulated desktop clients
   --cpus N                        CPUs the backend is held to while measured (default 2, the live server's)
-  --backfill-rate N               backfilled messages a minute (--backfill-network, default signal)
+  --backfill-rate N               backfilled messages a minute (--backfill-network, default signal),
+                                  in pages of --backfill-page (default 50) journaled together
   --live-rate N                   live messages a minute, across every network
   --click-ms N                    how often each client clicks
   --budget-p95 MS --budget-p99 MS default per-function budget (250 / 500)
@@ -114,6 +116,7 @@ function settingsFrom(values) {
     cpus: num('cpus', 2),
     backfillRate: num('backfill-rate', profile.backfillRate),
     backfillNetwork: values['backfill-network'],
+    backfillPage: Math.max(1, num('backfill-page', 50)),
     liveRate: num('live-rate', profile.liveRate),
     clickMs: num('click-ms', profile.clickMs),
     budget: { p95: num('budget-p95', 250), p99: num('budget-p99', 500) },
@@ -169,7 +172,14 @@ async function main() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const outDir = resolve(values.out ?? resolve(dataDir, 'load-test', stamp))
   mkdirSync(outDir, { recursive: true })
-  preflight({ messages: settings.messages, chats: settings.chats, outDir, log })
+  preflight({
+    messages: settings.messages,
+    chats: settings.chats,
+    minutes: settings.minutes,
+    perMinute: settings.backfillRate + settings.liveRate,
+    outDir,
+    log,
+  })
 
   await crypto.ready()
   const inbox = makeInbox({
@@ -188,13 +198,25 @@ async function main() {
     `Inbox: ${summary.chats} chats, ${summary.messages} messages, ${summary.reactions} reactions, ${summary.people} People cards`,
   )
 
+  // Ctrl-C or a cancelled CI job still removes the containers, whatever stage the run is at.
+  const name = `trioditis-load-${process.pid}`
+  const onSignal = (signal) => {
+    log(`${signal}: stopping`)
+    if (values.keep) log(`Left running, as --keep asks: ${name}-*`)
+    else stopStack(name)
+    process.exit(130)
+  }
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+  removeAbandonedStacks(log)
   const stack = await startStack({
-    name: `trioditis-load-${process.pid}`,
+    name,
     networks: inbox.accounts.map((a) => a.network),
     log,
   })
   let bridges
   let clients = []
+  const timers = []
   try {
     const person = await setUpPerson(crypto, stack)
     log('Signed up the person and set up their key')
@@ -205,31 +227,32 @@ async function main() {
     journalInbox(bridges, inbox)
     log(`Journaled ${bridges.hosts.reduce((a, h) => a + h.backlog, 0)} events; pushing them through the gateway`)
     bridges.start()
-    const progress = setInterval(
-      () => log(`  ${bridges.hosts.reduce((a, h) => a + h.backlog, 0)} events left to push`),
-      15_000,
+    timers.push(
+      setInterval(() => log(`  ${bridges.hosts.reduce((a, h) => a + h.backlog, 0)} events left to push`), 15_000),
     )
     await bridges.drained()
-    clearInterval(progress)
+    clearInterval(timers.pop())
     await person.refresh()
     const seeded = await seedClientState(crypto, person, inbox, log)
     const seedSeconds = (Date.now() - seedStarted) / 1000
     log(`Seeded in ${seedSeconds.toFixed(0)} s (${seeded.chats} chats)`)
+
+    // Measured: held to the live server's CPUs, with the clients opening the app and the
+    // bridge hosts writing. Everything the verdict uses is from this window only.
+    await stack.capCpus(settings.cpus)
+    const logs = collectLogs({ convexUrl: stack.convexUrl, adminKey: stack.adminKey })
+    await logs.ready
     bridges.metrics.length = 0
     bridges.metrics.delivered.length = 0
     bridges.metrics.failures = 0
     for (const key of Object.keys(bridges.metrics.commands)) delete bridges.metrics.commands[key]
-
-    // Measured: held to the live server's CPUs, with the clients opening the app and the
-    // bridge hosts writing.
-    await stack.capCpus(settings.cpus)
     log(`Backend held to ${settings.cpus} CPUs; measuring for ${settings.minutes} min`)
-    const logs = collectLogs({ convexUrl: stack.convexUrl, adminKey: stack.adminKey })
     const cpu = cpuMeter(stack.containers.backend)
     const loadStarted = Date.now()
     const traffic = driveTraffic(bridges, inbox, {
       backfillNetwork: settings.backfillNetwork,
       backfillPerMinute: settings.backfillRate,
+      backfillPage: settings.backfillPage,
       livePerMinute: settings.liveRate,
       seed: settings.seed + 100,
     })
@@ -251,6 +274,7 @@ async function main() {
         `  ${((Date.now() - loadStarted) / 60_000).toFixed(1)} min: ${recent.length} executions in the last minute, ${recent.filter((r) => r.timeout).length} timeouts, CPU ${cpu.samples.at(-1)?.percent.toFixed(0) ?? '?'}%, backlog ${bridges.hosts.reduce((a, h) => a + h.backlog, 0)}`,
       )
     }, 30_000)
+    timers.push(tick)
     await new Promise((r) => setTimeout(r, settings.minutes * 60_000))
     clearInterval(tick)
     traffic.stop()
@@ -258,10 +282,10 @@ async function main() {
     const loadEnded = Date.now()
     const backlogAtEnd = bridges.hosts.reduce((a, h) => a + h.backlog, 0)
     cpu.stop()
-    await logs.stop()
+    await logs.stop({ after: loadEnded })
     for (const c of clients) await c.close()
     clients = []
-    const pushes = [...bridges.metrics]
+    const pushes = bridges.metrics.filter((m) => m.at >= loadStarted && m.at <= loadEnded)
     const commands = { ...bridges.metrics.commands }
     await bridges.stop()
     bridges = null
@@ -269,10 +293,13 @@ async function main() {
     const minutes = (loadEnded - loadStarted) / 60_000
     const measured = logs.records.filter((r) => r.at >= loadStarted && r.at <= loadEnded)
     const functions = byFunction(measured, { minutes })
-    const pushMs = pushes.filter((m) => m.events > 0).map((m) => m.ms)
+    // Acknowledgement times are of pushes that were acknowledged; failures are counted apart.
+    const pushMs = pushes.filter((m) => m.events > 0 && m.status === 200).map((m) => m.ms)
+    const batchSizes = pushes.filter((m) => m.events > 0).map((m) => m.events)
     const bridgeStats = {
       pushes: pushes.length,
       failedPushes: pushes.filter((m) => m.status !== 200).length,
+      batchSize: summarize(batchSizes),
       pushMs: summarize(pushMs),
       pushMsAll: pushMs,
       backlogAtEnd,
@@ -282,6 +309,7 @@ async function main() {
       rows: functions,
       client: started.metrics,
       bridges: bridgeStats,
+      logs: coverage(logs.answeredAt, loadStarted, loadEnded),
       budgets: settings.budgets,
       defaultBudget: settings.budget,
     })
@@ -307,6 +335,7 @@ async function main() {
       databaseSize: stack.databaseSize(),
       rates: {
         backfillPerMinute: settings.backfillRate,
+        backfillPage: settings.backfillPage,
         backfillNetwork: settings.backfillNetwork,
         livePerMinute: settings.liveRate,
       },
@@ -318,6 +347,7 @@ async function main() {
         actions: started.metrics.actions,
         peakSubscriptions: started.metrics.peakSubscriptions,
         opens: started.metrics.opens,
+        failedOpens: started.metrics.failedOpens,
         visible: started.metrics.visible,
         actionMs: started.metrics.actionMs ?? [],
       },
@@ -355,6 +385,7 @@ async function main() {
     log(`Report: ${resolve(outDir, 'report.md')}`)
     return verdict.passed || values['report-only'] ? 0 : 1
   } finally {
+    for (const t of timers) clearInterval(t)
     for (const c of clients) await c.close().catch(() => {})
     if (bridges) await bridges.stop().catch(() => {})
     if (values.keep)

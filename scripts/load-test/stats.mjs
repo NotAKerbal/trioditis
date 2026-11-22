@@ -117,8 +117,18 @@ export const DEFAULT_BUDGET = { p95: 250, p99: 500 }
  * judge kept its p95 and p99 inside its budget; the clients saw no errors; every push from a
  * bridge host was taken. Returns `{ passed, checks }`.
  */
-export function evaluate({ rows, client, bridges, budgets = {}, defaultBudget = DEFAULT_BUDGET, minRuns = 20 }) {
+export function evaluate({
+  rows,
+  client,
+  bridges,
+  logs = { ok: true, detail: 'not checked' },
+  budgets = {},
+  defaultBudget = DEFAULT_BUDGET,
+  minRuns = 20,
+}) {
   const checks = []
+  // First: without the whole log, the function checks below could pass on missing data.
+  checks.push({ name: 'The function log was read all through the run', passed: logs.ok, detail: logs.detail })
   const timeouts = rows.reduce((a, r) => a + r.timeouts, 0)
   checks.push({
     name: 'No function timeouts',

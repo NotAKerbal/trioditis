@@ -33,28 +33,63 @@ export function record(entry) {
   }
 }
 
+/** The longest a poll may take; the stream holds a poll open while it has nothing new. */
+const POLL_MS = 120_000
+
 /**
- * Collects completions until stopped. `onRecord` sees each one; `records` keeps them all.
- * The stream is polled, as the CLI polls it; a failed poll is tried again.
+ * Whether the stream was read all through `[from, to]`: a poll answered by `from`, one after
+ * `to`, and none of the gaps between answered polls longer than `maxGapMs`. Without that, the
+ * function numbers could be missing executions, so the run can't be judged.
+ */
+export function coverage(answeredAt, from, to, maxGapMs = POLL_MS + 10_000) {
+  const inside = answeredAt.filter((t) => t >= from && t <= to)
+  const before = answeredAt.filter((t) => t < from).at(-1)
+  const after = answeredAt.find((t) => t > to)
+  if (before === undefined)
+    return { ok: false, detail: 'the function log stream had not answered when measuring began' }
+  if (after === undefined)
+    return { ok: false, detail: 'the function log stream stopped answering before measuring ended' }
+  let gap = 0
+  const points = [before, ...inside, after]
+  for (let i = 1; i < points.length; i++) gap = Math.max(gap, points[i] - points[i - 1])
+  if (gap > maxGapMs)
+    return { ok: false, detail: `the function log stream went ${Math.round(gap / 1000)} s without answering` }
+  return { ok: true, detail: `read throughout (longest wait ${Math.round(gap / 1000)} s)` }
+}
+
+/**
+ * Collects completions until stopped. `onRecord` sees each one; `records` keeps them all, and
+ * `answeredAt` when each poll was answered, for `coverage`. The stream is polled, as the CLI
+ * polls it; a failed poll is tried again. `ready` resolves once a poll has been answered, and
+ * rejects if none is within a minute.
  */
 export function collectLogs({ convexUrl, adminKey, onRecord = () => {} }) {
   const records = []
+  const answeredAt = []
   let stopped = false
   let cursor = 0
   let failures = 0
+  let lastError = ''
   let controller = null
   const loop = (async () => {
     while (!stopped) {
       try {
         controller = new AbortController()
-        const response = await fetch(`${convexUrl}/api/stream_function_logs?cursor=${cursor}`, {
-          headers: { authorization: `Convex ${adminKey}` },
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`log stream answered ${response.status}`)
-        const { entries, newCursor } = await response.json()
-        cursor = newCursor
-        for (const entry of entries) {
+        const timer = setTimeout(() => controller.abort(), POLL_MS)
+        let body
+        try {
+          const response = await fetch(`${convexUrl}/api/stream_function_logs?cursor=${cursor}`, {
+            headers: { authorization: `Convex ${adminKey}` },
+            signal: controller.signal,
+          })
+          if (!response.ok) throw new Error(`log stream answered ${response.status}`)
+          body = await response.json()
+        } finally {
+          clearTimeout(timer)
+        }
+        answeredAt.push(Date.now())
+        cursor = body.newCursor
+        for (const entry of body.entries) {
           if (entry.kind !== 'Completion') continue
           const r = record(entry)
           records.push(r)
@@ -63,18 +98,35 @@ export function collectLogs({ convexUrl, adminKey, onRecord = () => {} }) {
       } catch (error) {
         if (stopped) break
         failures++
+        lastError = String(error?.message ?? error).slice(0, 200)
         await new Promise((r) => setTimeout(r, Math.min(5000, 250 * failures)))
       }
     }
   })()
+  const ready = (async () => {
+    const until = Date.now() + 60_000
+    while (answeredAt.length === 0) {
+      if (Date.now() > until)
+        throw new Error(`The function log stream never answered${lastError ? `: ${lastError}` : ''}.`)
+      await new Promise((r) => setTimeout(r, 200))
+    }
+  })()
   return {
     records,
+    answeredAt,
+    ready,
     get failures() {
       return failures
     },
-    /** Waits a moment for the stream to catch up, then stops. */
-    async stop(settleMs = 3000) {
-      await new Promise((r) => setTimeout(r, settleMs))
+    /**
+     * Stops once a poll has been answered after `after` (so everything up to it is in), or
+     * after POLL_MS of waiting for one.
+     */
+    async stop({ after = Date.now() } = {}) {
+      const until = Date.now() + POLL_MS
+      while (!answeredAt.some((t) => t > after + 1000) && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 200))
+      }
       stopped = true
       controller?.abort()
       await loop
