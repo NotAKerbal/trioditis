@@ -223,6 +223,7 @@ async function main() {
   let stopClicks = []
   const clients = []
   const timers = []
+  let cleaningUp = false
   try {
     const person = await setUpPerson(crypto, stack)
     log('Signed up the person and set up their key')
@@ -292,6 +293,7 @@ async function main() {
       sent: traffic.sent,
       networks: inbox.accounts.map((a) => a.network),
       seed: settings.seed + 200,
+      cancelled: () => cleaningUp,
     }).catch((error) => {
       startError = error
     })
@@ -337,7 +339,7 @@ async function main() {
     }
     const verdict = evaluate({
       rows: functions,
-      client: seen,
+      client: { ...seen, requested: settings.clients },
       bridges: bridgeStats,
       logs: coverage(logs.polls, loadStarted, loadEnded),
       budgets: settings.budgets,
@@ -415,6 +417,7 @@ async function main() {
     log(`Report: ${resolve(outDir, 'report.md')}`)
     return verdict.passed || values['report-only'] ? 0 : 1
   } finally {
+    cleaningUp = true
     for (const t of timers) clearInterval(t)
     traffic?.stop()
     cpu?.stop()

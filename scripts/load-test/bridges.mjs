@@ -64,7 +64,10 @@ export class BridgeHost {
 
   async post(events) {
     // When it was sent: a push belongs to the window it started in, however it ends.
-    const at = Date.now()
+    // Listed as it's sent, with no status until it's answered: one still unanswered when the
+    // run ends counts as a push that wasn't taken.
+    const push = { at: Date.now(), host: this.hostId, events: events.length, ms: null, status: null }
+    this.metrics.push(push)
     const started = performance.now()
     let reply
     try {
@@ -72,13 +75,8 @@ export class BridgeHost {
     } catch (error) {
       reply = { status: 503, body: { error: String(error?.message ?? error).slice(0, 200) } }
     }
-    this.metrics.push({
-      at,
-      host: this.hostId,
-      events: events.length,
-      ms: performance.now() - started,
-      status: reply.status,
-    })
+    push.ms = performance.now() - started
+    push.status = reply.status
     return reply
   }
 
@@ -311,7 +309,7 @@ export async function startBridges({ crypto, stack, inbox, person }) {
       // never answers can't hold up the clean-up past this.
       await Promise.race([Promise.allSettled(runs), new Promise((r) => setTimeout(r, 60_000).unref())])
       server.close()
-      await backend.close()
+      await Promise.race([backend.close(), new Promise((r) => setTimeout(r, 10_000).unref())])
     },
   }
 }

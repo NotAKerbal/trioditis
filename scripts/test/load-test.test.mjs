@@ -315,3 +315,35 @@ void test('a long run has too many samples to spread, and still sums up', () => 
   const values = Array.from({ length: 300_000 }, (_, i) => i)
   assert.equal(summarize(values).max, 299_999)
 })
+
+void test('a completion without a usable duration is a malformed answer', async () => {
+  const { createServer } = await import('node:http')
+  const answers = [
+    { entries: [{ kind: 'Completion', identifier: 'a:b', timestamp: 2, executionTime: 'bad' }], newCursor: 5000 },
+  ]
+  const server = createServer((request, response) => {
+    const answer = answers.shift()
+    if (!answer) return setTimeout(() => response.end(JSON.stringify({ entries: [], newCursor: 9000 })), 50)
+    response.end(JSON.stringify(answer))
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const logs = collectLogs({ convexUrl: `http://127.0.0.1:${server.address().port}`, adminKey: 'k', buffer: 100 })
+  await logs.ready
+  await logs.stop({ after: 8000 })
+  server.close()
+  assert.equal(logs.records.length, 0)
+  assert.equal(logs.failures, 1)
+})
+
+void test('a client that never finished opening the app fails the run', () => {
+  const rows = byFunction(
+    Array.from({ length: 30 }, () => rec('a:fast', 10)),
+    { minutes: 1 },
+  )
+  const bridges = { pushes: 1, failedPushes: 0 }
+  const client = (started) => ({ errors: 0, errorKinds: {}, started, requested: 2 })
+  assert.equal(evaluate({ rows, client: client(2), bridges }).passed, true)
+  const verdict = evaluate({ rows, client: client(1), bridges })
+  assert.equal(verdict.passed, false)
+  assert.match(verdict.checks.find((c) => !c.passed).detail, /1 of 2 finished starting/)
+})

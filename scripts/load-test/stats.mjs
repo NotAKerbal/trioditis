@@ -154,6 +154,14 @@ export function evaluate({
     passed: over.length === 0,
     detail: over.length === 0 ? 'all within budget' : over.join('; '),
   })
+  // A client that hadn't finished opening the app put only part of its load on the backend.
+  if (client.requested !== undefined) {
+    checks.push({
+      name: 'Every client opened the app',
+      passed: client.started >= client.requested,
+      detail: `${client.started} of ${client.requested} finished starting while measured`,
+    })
+  }
   checks.push({
     name: 'The clients saw no errors',
     passed: client.errors === 0,
@@ -170,7 +178,7 @@ export function evaluate({
     detail:
       bridges.failedPushes === 0
         ? `${bridges.pushes} pushes`
-        : `${bridges.failedPushes} of ${bridges.pushes} pushes failed and were resent`,
+        : `${bridges.failedPushes} of ${bridges.pushes} pushes failed or went unanswered`,
   })
   return { passed: checks.every((c) => c.passed), checks }
 }

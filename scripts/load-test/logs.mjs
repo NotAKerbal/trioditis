@@ -103,8 +103,14 @@ export function collectLogs({ convexUrl, adminKey, buffer, onRecord = () => {} }
         const batch = []
         for (const entry of body.entries) {
           if (entry.kind !== 'Completion') continue
-          if (typeof entry.identifier !== 'string' || !Number.isFinite(entry.timestamp)) {
-            throw new Error('log stream gave a completion without its function or time')
+          // Everything the verdict reads from it: a completion missing any is a malformed answer.
+          if (
+            typeof entry.identifier !== 'string' ||
+            !Number.isFinite(entry.timestamp) ||
+            !Number.isFinite(entry.executionTime) ||
+            entry.executionTime < 0
+          ) {
+            throw new Error('log stream gave a completion without its function, time or duration')
           }
           batch.push(record(entry))
         }

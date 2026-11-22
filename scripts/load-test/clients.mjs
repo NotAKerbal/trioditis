@@ -50,6 +50,8 @@ export function clientMetrics() {
     actions: {},
     opens: [],
     failedOpens: 0,
+    /** Clients whose start finished: fewer than asked for means the load wasn't all there. */
+    started: 0,
     visible: [],
     subscriptions: 0,
     peakSubscriptions: 0,
@@ -111,6 +113,7 @@ export class SimClient {
    * handed to a listener that just joined, not one the server sent now.
    */
   watch(key, name, args, onValue = NOOP) {
+    if (this.closed) return Promise.resolve(null)
     const held = this.subs.get(key)
     if (held) {
       this.released.delete(key)
@@ -133,6 +136,13 @@ export class SimClient {
     this.metrics.subscriptions++
     this.metrics.peakSubscriptions = Math.max(this.metrics.peakSubscriptions, this.subs.size)
     let answered = false
+    // Closing the client settles what's still waiting, so nothing waits on it afterwards.
+    sub.settle = () => {
+      if (answered) return
+      answered = true
+      clearTimeout(deadline)
+      resolveFirst(null)
+    }
     const deadline = setTimeout(() => {
       if (answered) return
       answered = true
@@ -195,6 +205,7 @@ export class SimClient {
   }
 
   async mutate(name, args) {
+    if (this.closed) return null
     const started = performance.now()
     try {
       let timer
@@ -260,6 +271,9 @@ export class SimClient {
     p.push(this.fillInbox())
     await Promise.all(p)
     await this.fillInbox()
+    // Closed while it started: nothing more is set up.
+    if (this.closed) return
+    this.metrics.started++
     const warmTimer = setTimeout(() => {
       for (const chat of this.inbox().filter(unreadRow).slice(0, WARM_UNREAD).reverse()) this.warmChat(chat)
     }, 1500)
@@ -581,6 +595,8 @@ export class SimClient {
   }
 
   async close() {
+    this.closed = true
+    for (const sub of this.subs.values()) sub.settle?.()
     for (const t of this.timers) {
       clearTimeout(t)
       clearInterval(t)
@@ -601,11 +617,14 @@ export async function startClients({
   sent,
   networks,
   seed = 11,
+  cancelled = () => false,
 }) {
   await person.refresh()
   const bridgeKeyText = (await person.http.query(anyApi.keys.bridge, {}))?.publicKey
   const bridgeKey = bridgeKeyText ? crypto.fromBase64Url(bridgeKeyText) : null
-  // Into the caller's list as each is made, so it can close them even if one fails to start.
+  // Nothing is made once the run is cleaning up; what is made goes into the caller's list at
+  // once, so it can close them even if one fails to start.
+  if (cancelled()) return { clients: into, metrics }
   for (let i = 0; i < count; i++) {
     into.push(
       new SimClient({ id: i, convexUrl, person, crypto, metrics, sent, rand: random(seed + i), bridgeKey, networks }),
