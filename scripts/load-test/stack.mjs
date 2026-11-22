@@ -337,6 +337,8 @@ function convexCli(args, { convexUrl, adminKey, input }) {
     child.stdout.on('data', (d) => (out += d))
     child.stderr.on('data', (d) => (out += d))
     child.on('error', reject)
+    // A CLI that exits before reading its input closes the pipe; its exit code says what failed.
+    child.stdin.on('error', () => {})
     child.on('close', (code) =>
       code === 0 ? resolvePromise(out) : reject(new Error(`convex ${args[0]} failed:\n${out}`)),
     )

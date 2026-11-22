@@ -63,6 +63,8 @@ export class BridgeHost {
   }
 
   async post(events) {
+    // When it was sent: a push belongs to the window it started in, however it ends.
+    const at = Date.now()
     const started = performance.now()
     let reply
     try {
@@ -71,7 +73,7 @@ export class BridgeHost {
       reply = { status: 503, body: { error: String(error?.message ?? error).slice(0, 200) } }
     }
     this.metrics.push({
-      at: Date.now(),
+      at,
       host: this.hostId,
       events: events.length,
       ms: performance.now() - started,
@@ -305,7 +307,9 @@ export async function startBridges({ crypto, stack, inbox, person }) {
     async stop() {
       dispatcher.stop()
       for (const host of hosts) host.stop()
-      await Promise.allSettled(runs)
+      // A push still waiting on the backend settles first, so its outcome is counted; one that
+      // never answers can't hold up the clean-up past this.
+      await Promise.race([Promise.allSettled(runs), new Promise((r) => setTimeout(r, 60_000).unref())])
       server.close()
       await backend.close()
     },

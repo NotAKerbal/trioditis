@@ -407,7 +407,11 @@ export class SimClient {
         waits.push(this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: asked }, state.onChange))
       }
     }
-    for (const key of state.reactionKeys) if (!wanted.has(key)) this.release(key, REACTIONS_GC_MS)
+    for (const key of state.reactionKeys) {
+      if (wanted.has(key)) continue
+      this.unlisten(key, state.onChange)
+      this.release(key, REACTIONS_GC_MS)
+    }
     state.reactionKeys = wanted
     const contacts = new Set()
     if (chat.kind === 'group') {
@@ -587,8 +591,17 @@ export class SimClient {
 }
 
 /** Starts `count` clients, each opening the app as the desktop does. */
-export async function startClients({ into = [], count, convexUrl, person, crypto, sent, networks, seed = 11 }) {
-  const metrics = clientMetrics()
+export async function startClients({
+  into = [],
+  metrics = clientMetrics(),
+  count,
+  convexUrl,
+  person,
+  crypto,
+  sent,
+  networks,
+  seed = 11,
+}) {
   await person.refresh()
   const bridgeKeyText = (await person.http.query(anyApi.keys.bridge, {}))?.publicKey
   const bridgeKey = bridgeKeyText ? crypto.fromBase64Url(bridgeKeyText) : null

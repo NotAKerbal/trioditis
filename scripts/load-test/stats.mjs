@@ -16,7 +16,8 @@ export function summarize(values) {
     p50: percentile(values, 50),
     p95: percentile(values, 95),
     p99: percentile(values, 99),
-    max: values.length ? Math.max(...values) : null,
+    // Not Math.max(...values): a long run's samples are too many to spread into a call.
+    max: values.length ? values.reduce((a, b) => (b > a ? b : a), -Infinity) : null,
   }
 }
 

@@ -91,15 +91,27 @@ export function collectLogs({ convexUrl, adminKey, buffer, onRecord = () => {} }
         } finally {
           clearTimeout(timer)
         }
-        if (!Array.isArray(body?.entries) || typeof body.newCursor !== 'number') {
+        // The whole answer is read before any of it is kept, so a malformed one is a failed
+        // poll, retried from the same cursor, never a gap that looks covered.
+        if (
+          !Array.isArray(body?.entries) ||
+          !Number.isFinite(body.newCursor) ||
+          !body.entries.every((e) => typeof e === 'object' && e !== null && typeof e.kind === 'string')
+        ) {
           throw new Error('log stream answered something else')
+        }
+        const batch = []
+        for (const entry of body.entries) {
+          if (entry.kind !== 'Completion') continue
+          if (typeof entry.identifier !== 'string' || !Number.isFinite(entry.timestamp)) {
+            throw new Error('log stream gave a completion without its function or time')
+          }
+          batch.push(record(entry))
         }
         // Past the first poll, which returns whatever the backend still holds from before.
         polls.push({ at: Date.now(), cursor: body.newCursor, lost: cursor > 0 && body.entries.length >= buffer })
         cursor = body.newCursor
-        for (const entry of body.entries) {
-          if (entry.kind !== 'Completion') continue
-          const r = record(entry)
+        for (const r of batch) {
           records.push(r)
           onRecord(r)
         }

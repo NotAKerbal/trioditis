@@ -3,8 +3,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { inboxSummary, longTail, makeInbox, random } from '../load-test/inbox.mjs'
-import { coverage, functionName, record, TIMEOUT } from '../load-test/logs.mjs'
-import { byFunction, errorKind, evaluate, percentile, perMinute } from '../load-test/stats.mjs'
+import { collectLogs, coverage, functionName, record, TIMEOUT } from '../load-test/logs.mjs'
+import { byFunction, errorKind, evaluate, percentile, perMinute, summarize } from '../load-test/stats.mjs'
 import { markdownReport } from '../load-test/report.mjs'
 import { composeImage } from '../load-test/stack.mjs'
 import { estimateBytes, reserveBytes, room, RESERVE_BYTES } from '../load-test/preflight.mjs'
@@ -286,4 +286,32 @@ void test("a CI runner can keep less disk free than the shared machine's 20 GiB"
   assert.ok(
     estimateBytes({ messages: 1, chats: 1, minutes: 10, perMinute: 200 }) > estimateBytes({ messages: 1, chats: 1 }),
   )
+})
+
+void test('a malformed log poll keeps nothing and is asked again from the same cursor', async () => {
+  const { createServer } = await import('node:http')
+  const cursors = []
+  const answers = [
+    { entries: [null, { kind: 'Completion', identifier: 'a:b', timestamp: 2 }], newCursor: 5000 },
+    { entries: [{ kind: 'Completion', identifier: 'a:b', timestamp: 2, executionTime: 0.01 }], newCursor: 5000 },
+  ]
+  const server = createServer((request, response) => {
+    cursors.push(new URL(request.url, 'http://x').searchParams.get('cursor'))
+    const answer = answers.shift()
+    if (!answer) return setTimeout(() => response.end(JSON.stringify({ entries: [], newCursor: 9000 })), 50)
+    response.end(JSON.stringify(answer))
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const logs = collectLogs({ convexUrl: `http://127.0.0.1:${server.address().port}`, adminKey: 'k', buffer: 100 })
+  await logs.ready
+  await logs.stop({ after: 8000 })
+  server.close()
+  assert.deepEqual(cursors.slice(0, 2), ['0', '0'])
+  assert.equal(logs.records.length, 1)
+  assert.equal(logs.polls[0].cursor, 5000)
+})
+
+void test('a long run has too many samples to spread, and still sums up', () => {
+  const values = Array.from({ length: 300_000 }, (_, i) => i)
+  assert.equal(summarize(values).max, 299_999)
 })

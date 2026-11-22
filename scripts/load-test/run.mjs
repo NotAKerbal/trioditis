@@ -12,7 +12,7 @@ import * as crypto from '@trioditis/crypto'
 import { dataDir, root } from '../lib.mjs'
 import { setUpPerson } from './account.mjs'
 import { driveTraffic, journalInbox, startBridges } from './bridges.mjs'
-import { startClients } from './clients.mjs'
+import { clientMetrics, startClients } from './clients.mjs'
 import { inboxSummary, makeInbox } from './inbox.mjs'
 import { collectLogs, coverage } from './logs.mjs'
 import { preflight } from './preflight.mjs'
@@ -263,8 +263,28 @@ async function main() {
       livePerMinute: settings.liveRate,
       seed: settings.seed + 100,
     })
-    const started = await startClients({
+    // The window closes on time, from when it opened, however long the clients take to start:
+    // then the writes and the CPU meter stop, and what the verdict uses is taken as it stands.
+    const metrics = clientMetrics()
+    let closed = null
+    const closing = new Promise((resolve) => {
+      timers.push(
+        setTimeout(() => {
+          closed = {
+            seen: structuredClone(metrics),
+            commands: { ...bridges.metrics.commands },
+            backlogAtEnd: bridges.hosts.reduce((a, h) => a + h.backlog, 0),
+          }
+          traffic.stop()
+          cpu.stop()
+          resolve()
+        }, settings.minutes * 60_000),
+      )
+    })
+    let startError = null
+    const starting = startClients({
       into: clients,
+      metrics,
       count: settings.clients,
       convexUrl: stack.convexUrl,
       person,
@@ -272,9 +292,15 @@ async function main() {
       sent: traffic.sent,
       networks: inbox.accounts.map((a) => a.network),
       seed: settings.seed + 200,
+    }).catch((error) => {
+      startError = error
     })
-    log(`${clients.length} client${clients.length === 1 ? '' : 's'} open`)
-    stopClicks = clients.map((c) => c.runClicks(settings.clickMs))
+    await Promise.race([starting, closing])
+    if (startError) throw startError
+    if (!closed) {
+      log(`${clients.length} client${clients.length === 1 ? '' : 's'} open`)
+      stopClicks = clients.map((c) => c.runClicks(settings.clickMs))
+    }
     const tick = setInterval(() => {
       const recent = logs.records.filter((r) => r.at > Date.now() - 60_000)
       log(
@@ -282,21 +308,16 @@ async function main() {
       )
     }, 30_000)
     timers.push(tick)
-    // The window closes on time, from when it opened, whatever the clients' start took; what
-    // the verdict uses is taken as it stands then, and what happens while stopping isn't.
-    await new Promise((r) => setTimeout(r, Math.max(0, loadEnded - Date.now())))
+    await closing
     clearInterval(tick)
-    const seen = structuredClone(started.metrics)
-    const commands = { ...bridges.metrics.commands }
-    const backlogAtEnd = bridges.hosts.reduce((a, h) => a + h.backlog, 0)
-    traffic.stop()
-    cpu.stop()
+    const { seen, commands, backlogAtEnd } = closed
     await Promise.all(stopClicks.map((stop) => stop()))
     stopClicks = []
     await logs.stop({ after: loadEnded })
     for (const c of clients.splice(0)) await c.close()
-    const pushes = bridges.metrics.filter((m) => m.at >= loadStarted && m.at <= loadEnded)
+    // After the hosts have stopped, so a push sent in the window and answered after it counts.
     await bridges.stop()
+    const pushes = bridges.metrics.filter((m) => m.at >= loadStarted && m.at <= loadEnded)
     bridges = null
 
     const minutes = (loadEnded - loadStarted) / 60_000
