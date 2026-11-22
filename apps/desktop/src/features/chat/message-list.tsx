@@ -374,7 +374,7 @@ export function MessageList(props: MessageListProps) {
                           <Attachments network={network} attachments={files} className={bare ? undefined : 'my-1'} />
                         ) : null}
                         {shownText ? <Linked text={shownText} /> : null}
-                        {cards.length ? <LinkCards cards={cards} network={props.network} self={m.self} /> : null}
+                        {cards.length ? <LinkCards cards={cards} network={network} self={m.self} /> : null}
                       </>
                     ) : (
                       'This message can’t be opened on this device.'
