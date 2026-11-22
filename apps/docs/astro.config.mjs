@@ -94,6 +94,7 @@ export default defineConfig({
             { label: 'Client API', slug: 'architecture/client-api' },
             { label: 'Sign-in Browser', slug: 'architecture/signin-browser' },
             { label: 'Bridge Host Internals', slug: 'architecture/bridge-host' },
+            { label: 'Server Load', slug: 'architecture/server-load' },
           ],
         },
         {

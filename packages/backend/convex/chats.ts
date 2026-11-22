@@ -88,15 +88,20 @@ export function clientLastMessage(last: Infer<typeof storedLastMessage>): Infer<
   }
 }
 
-export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+/** Looks up the account of a chat's login into `accounts`, unless it's there already. */
+async function lookUpAccount(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
   const accountKey = `${chat.network}:${chat.loginId}`
-  if (!accounts.has(accountKey)) {
-    const account = await ctx.db
-      .query('networkAccounts')
-      .withIndex('by_login', (q) => q.eq('network', chat.network).eq('loginId', chat.loginId))
-      .unique()
-    accounts.set(accountKey, account && account.userId === chat.userId ? account._id : null)
-  }
+  if (accounts.has(accountKey)) return accountKey
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', chat.network).eq('loginId', chat.loginId))
+    .unique()
+  accounts.set(accountKey, account && account.userId === chat.userId ? account._id : null)
+  return accountKey
+}
+
+export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+  const accountKey = await lookUpAccount(ctx, chat, accounts)
   const labels = await ctx.db
     .query('chatLabels')
     .withIndex('by_chat', (q) => q.eq('chatId', chat._id))
@@ -124,6 +129,17 @@ export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<st
     lastMessageAt: chat.lastMessageAt,
     lastMessage: lastMessageOf(chat),
   }
+}
+
+/**
+ * Rows for several chats, read all at once: one after another, each chat's reads wait for the
+ * last chat's. Each account is looked up once, before the chats' labels.
+ */
+export async function rowsFor(ctx: QueryCtx, chats: Doc<'chats'>[]) {
+  const accounts = new Map<string, Id<'networkAccounts'> | null>()
+  const firsts = new Map(chats.map((chat) => [`${chat.network}:${chat.loginId}`, chat]))
+  await Promise.all([...firsts.values()].map((chat) => lookUpAccount(ctx, chat, accounts)))
+  return await Promise.all(chats.map((chat) => rowFor(ctx, chat, accounts)))
 }
 
 /**
@@ -162,7 +178,6 @@ export const list = query({
     const userId = member.userId
     const view = args.view ?? 'inbox'
     const opts = pageOptions(args.paginationOpts)
-    const accounts = new Map<string, Id<'networkAccounts'> | null>()
 
     if (args.labelId) {
       const label = await ctx.db.get(args.labelId)
@@ -175,20 +190,16 @@ export const list = query({
         .query('chatLabels')
         .withIndex('by_label', (q) => q.eq('labelId', labelId))
         .paginate(opts)
-      const chats = []
-      for (const row of result.page) {
-        const chat = await ctx.db.get(row.chatId)
-        if (
-          chat &&
+      const found = await Promise.all(result.page.map((row) => ctx.db.get(row.chatId)))
+      const chats = found.filter(
+        (chat): chat is Doc<'chats'> =>
+          !!chat &&
           chat.userId === userId &&
           chat.view === view &&
           (!args.network || chat.network === args.network) &&
-          !retired(chat)
-        ) {
-          chats.push(await rowFor(ctx, chat, accounts))
-        }
-      }
-      return { ...result, page: chats }
+          !retired(chat),
+      )
+      return { ...result, page: await rowsFor(ctx, chats) }
     }
 
     // One range, newest first: `pinned: true` sorts after `false`, so descending gives every
@@ -209,9 +220,13 @@ export const list = query({
         ? chats.withIndex('by_user_view_last', (q) => q.eq('userId', userId).eq('view', view))
         : chats.withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
     const result = await range.order('desc').paginate(opts)
-    const page = []
-    for (const chat of result.page) if (!retired(chat)) page.push(await rowFor(ctx, chat, accounts))
-    return { ...result, page }
+    return {
+      ...result,
+      page: await rowsFor(
+        ctx,
+        result.page.filter((chat) => !retired(chat)),
+      ),
+    }
   },
 })
 

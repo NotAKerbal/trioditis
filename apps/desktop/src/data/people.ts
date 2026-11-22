@@ -73,10 +73,10 @@ const identifierCache = new Map<string, ContactIdentifiersPlaintext | null>()
 /**
  * Where a list's pages come from. `cached` keeps them for minutes after they're let go, so the
  * People window opens again full; but it keeps a failed page too, under the same key, so asking
- * again the same way fails again. Only the People window (inside its own RetryBoundary, which
- * asks `fresh` on a retry) and its fetch-ahead use it. Everything else asks `fresh`: Convex's
- * own hook, under a new pagination ID each time, as it always did, so a failure there never
- * comes back from the cache.
+ * again the same way fails again. Only the People window and the chat pane (each inside its own
+ * RetryBoundary, which asks `fresh` on a retry) and the fetch-ahead use it. Everything else asks
+ * `fresh`: Convex's own hook, under a new pagination ID each time, as it always did, so a
+ * failure there never comes back from the cache.
  */
 export type PagesFrom = 'cached' | 'fresh'
 

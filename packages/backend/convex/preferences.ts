@@ -1,7 +1,7 @@
 import { v } from 'convex/values'
 import { DEFAULT_PREFERENCES } from '@trioditis/core'
 import { mutation, query } from './_generated/server'
-import { requireSessionIfGiven } from './auth'
+import { requireSessionIfGiven } from './lib/session'
 import { requireMember } from './lib/access'
 
 // The person's own settings for the app. Missing settings take their defaults
