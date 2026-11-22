@@ -31,16 +31,25 @@ const CANDIDATE = /\bhttps?:\/\/[^\s<>"]+/gi
 const TRAILING = new Set(['.', ',', ':', ';', '!', '?', "'", '"'])
 const CLOSERS: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
 
-const count = (s: string, c: string) => s.split(c).length - 1
-
+/**
+ * The link without what ends it: punctuation after it, and closing brackets it didn't open.
+ * One pass to count the brackets, one back from the end, so a word with thousands of them
+ * costs no more than reading it.
+ */
 export function trimLink(candidate: string): string {
-  let url = candidate
-  for (;;) {
-    const last = url.at(-1)!
+  const counts: Record<string, number> = { '(': 0, ')': 0, '[': 0, ']': 0, '{': 0, '}': 0 }
+  for (const c of candidate) if (c in counts) counts[c]!++
+  let end = candidate.length
+  while (end > 0) {
+    const last = candidate[end - 1]!
     const opener = CLOSERS[last]
-    if (TRAILING.has(last) || (opener && count(url, last) > count(url, opener))) url = url.slice(0, -1)
-    else return url
+    if (TRAILING.has(last)) end--
+    else if (opener && counts[last]! > counts[opener]!) {
+      counts[last]!--
+      end--
+    } else break
   }
+  return candidate.slice(0, end)
 }
 
 /** A link only for an address the browser reads as http or https: nothing else gets an anchor. */

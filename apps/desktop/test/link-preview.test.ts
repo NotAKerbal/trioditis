@@ -81,7 +81,7 @@ describe('what an address says', () => {
   })
   it('names anywhere else by its site, with the page’s path made readable', () => {
     expect(said('https://www.example.com/blog/my-trip_notes')).toEqual({
-      service: { name: 'example.com', icon: 'web', tone: 'slate' },
+      service: { name: 'www.example.com', icon: 'web', tone: 'slate' },
       detail: 'my trip notes',
     })
     expect(said('https://example.com/').detail).toBeUndefined()
@@ -124,7 +124,25 @@ describe('a card standing in for the text', () => {
   })
 })
 
+describe('where a card says it goes', () => {
+  it('shows the whole host, www and all', () => {
+    const card = (href: string) => linkCards(message(href, [{ url: href, title: 'T' }]), href)[0]
+    expect(card('https://www.example.com/a')?.host).toBe('www.example.com')
+    expect(card('https://www./')?.host).toBe('www.')
+    const address = linkCards(message('https://www.example.com/'), 'https://www.example.com/')[0]
+    expect(address?.host).toBe('www.example.com')
+  })
+})
+
 describe('links written in a message', () => {
+  it('reads a word of thousands of brackets quickly', () => {
+    const word = `see x.test/a${')'.repeat(200_000)} and https://y.test/${')'.repeat(200_000)}`
+    const started = performance.now()
+    // The word too long to be an address isn't one; the link with its scheme is still read.
+    expect([...writtenLinks(word)]).toEqual(['https://y.test/'])
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
   it('reads web links and sites written without a scheme, and nothing else', () => {
     expect([...writtenLinks('see https://a.test/x, example.com/b and (www.c.test).')]).toEqual([
       'https://a.test/x',

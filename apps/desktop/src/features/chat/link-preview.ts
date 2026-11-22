@@ -49,9 +49,12 @@ export function webURL(href: unknown): URL | null {
   }
 }
 
-/** The host as people say it: without `www.`. */
+/**
+ * The host a card shows: the whole of it, as the browser reads it, never shortened, so a
+ * card always says exactly where it opens.
+ */
 export function shownHost(url: URL): string {
-  return url.hostname.replace(/^www\./i, '')
+  return url.hostname
 }
 
 const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined)
@@ -108,7 +111,8 @@ function readable(segment: string): string {
 
 /** What a link's address alone says: the service it's on and what it is there, when known. */
 export function fromAddress(url: URL): { service: Service; detail?: string } {
-  const host = shownHost(url).toLowerCase()
+  // Matched without `www.`, which the services answer to either way.
+  const host = url.hostname.toLowerCase().replace(/^www\./, '')
   const path = url.pathname.split('/').filter(Boolean)
   const web: Service = { name: shownHost(url), icon: 'web', tone: 'slate' }
 
@@ -169,6 +173,8 @@ export function writtenLinks(text: string): Set<string> {
     if (url) links.add(url.href)
   }
   for (const word of text.split(/\s+/)) {
+    // A word with no dot is no site, and one longer than any address isn't one either.
+    if (!word.includes('.') || word.length > 2048) continue
     // Trimmed as a link with its scheme is (message-text.ts), so a closing bracket the link
     // opened stays: "example.com/archive_(2026)" is the whole of it.
     const opened = word.replace(OPENERS, '')

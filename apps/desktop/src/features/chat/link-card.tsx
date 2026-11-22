@@ -138,7 +138,8 @@ function AddressCard({ card }: { card: Extract<Card, { kind: 'address' }> }) {
         <Icon className="size-5" />
       </span>
       <span className="flex min-w-0 flex-col">
-        <span className="truncate text-sm font-semibold">{card.service.name}</span>
+        {/* A site named by its host shows it whole, wrapping, never cut short. */}
+        <span className={cn('text-sm font-semibold', known ? 'truncate' : 'break-all')}>{card.service.name}</span>
         {detail ? <span className="truncate text-xs text-muted-foreground">{detail}</span> : null}
       </span>
     </span>
