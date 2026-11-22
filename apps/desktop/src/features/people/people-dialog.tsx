@@ -242,16 +242,18 @@ function People({
     if (!saved || !done) return undefined
     return {
       contacts: new Set(done.links.map(contactKey)),
-      undo: () =>
-        run((fresh) => {
+      undo: async () => {
+        let stale = false
+        const saved = await run((fresh) => {
           const now = fresh.find((p) => p.personKey === personKey)
-          if (!now) throw new Stale('This person was deleted on another device.')
-          const on = new Set((now.card.links ?? []).map(contactKey))
-          if (!done.links.every((l) => on.has(contactKey(l)))) {
-            throw new Stale('That account was unlinked or moved since, so there’s nothing to undo.')
-          }
-          return [{ personKey, card: withoutLinkChange(now.card, done) }]
-        }, 'That couldn’t be undone.'),
+          const on = new Set((now?.card.links ?? []).map(contactKey))
+          stale = !now || !done.links.every((l) => on.has(contactKey(l)))
+          return now && !stale ? [{ personKey, card: withoutLinkChange(now.card, done) }] : []
+        }, 'That couldn’t be undone.')
+        if (!saved) return 'failed'
+        if (stale) toast('That link was changed on another device, so it wasn’t undone.')
+        return stale ? 'stale' : 'done'
+      },
     }
   }
 
@@ -923,8 +925,11 @@ export function ChoosePerson({
   )
 }
 
-/** Takes a saved change back. True once that's saved too. */
-type Undo = () => Promise<boolean>
+/**
+ * Takes a saved change back: `stale` when it no longer can, as another device changed it since,
+ * and `failed` when it couldn't be saved and may be tried again.
+ */
+type Undo = () => Promise<'done' | 'stale' | 'failed'>
 
 /** What a save of suggested links linked, by `contactKey`, and what takes it back. */
 interface Linked {
@@ -932,15 +937,15 @@ interface Linked {
   undo: Undo
 }
 
-/** A suggestion acted on in the list, shown as it stands until the live list catches up. */
+/** A suggestion acted on in the list, shown as it stands until the cards catch up. */
 interface Kept {
   suggestion: LinkSuggestion
   /** `undone` shows it as a suggestion again, until the live list has it once more. */
   state: 'linking' | 'linked' | 'undoing' | 'undone'
   /** A row linked on its own takes itself back; linking all the matches has one Undo for them. */
   undo?: Undo
-  /** The live list has stopped suggesting it, as it does once it's linked. */
-  gone?: boolean
+  /** The cards have shown it linked. */
+  seen?: boolean
 }
 
 /** Rows linked in one save, and what takes them back. */
@@ -964,22 +969,31 @@ function Suggestions({
   const [kept, setKept] = useState<ReadonlyMap<string, Kept>>(new Map())
   // The saves "Link all" made, which its Undo takes back together.
   const [batch, setBatch] = useState<readonly Save[]>([])
-  // The rows' order from the first click on. A linked row leaves the live list, and without
-  // this the rows below would move up under the pointer, so the next click lands on another.
+  // The rows' order from the first click on, and every row seen since. A linked account leaves
+  // the live list, with its other suggestions, and without these the rows below would move up
+  // under the pointer, so the next click lands on another.
   const [order, setOrder] = useState<readonly string[] | null>(null)
-  const rows = useMemo(() => {
-    if (!order) return suggestions
-    const live = new Map(suggestions.map((s) => [suggestionKey(s), s]))
-    const out = order.flatMap((key) => kept.get(key)?.suggestion ?? live.get(key) ?? [])
-    const listed = new Set(order)
-    return [...out, ...suggestions.filter((s) => !listed.has(suggestionKey(s)))]
-  }, [suggestions, kept, order])
-  const page = usePage(rows)
-  const names = new Map(people.map((p) => [p.personKey, cardTitle(p.card)]))
-  // Accounts being linked or taken back, or linked here: other suggestions for them wait.
+  const [seen] = useState(() => new Map<string, LinkSuggestion>())
+  const owner = useMemo(() => linkIndex(people), [people])
+  // Accounts being linked or taken back, or linked here: their other suggestions wait.
   const held = new Set(
     [...kept.values()].filter((k) => k.state !== 'undone').map((k) => contactKey(k.suggestion.contact)),
   )
+  const rows = useMemo(() => {
+    for (const s of suggestions) seen.set(suggestionKey(s), s)
+    if (!order) return suggestions
+    // Accounts acted on here, whose other suggestions keep their place while the cards catch up.
+    const acted = new Set([...kept.values()].map((k) => contactKey(k.suggestion.contact)))
+    const live = new Map(suggestions.map((s) => [suggestionKey(s), s]))
+    const shown = (key: string) => {
+      const s = live.get(key) ?? kept.get(key)?.suggestion ?? seen.get(key)
+      return s && (live.has(key) || kept.has(key) || acted.has(contactKey(s.contact))) ? [s] : []
+    }
+    const listed = new Set(order)
+    return [...order.flatMap(shown), ...suggestions.filter((s) => !listed.has(suggestionKey(s)))]
+  }, [suggestions, kept, order, seen])
+  const page = usePage(rows)
+  const names = new Map(people.map((p) => [p.personKey, cardTitle(p.card)]))
   // A contact suggested for several cards is left for the person to choose; a shared number,
   // email or username for only one is safe to link in one go.
   const counts = new Map<string, number>()
@@ -987,20 +1001,33 @@ function Suggestions({
   const sure = suggestions.filter(
     (s) => s.reason !== 'name' && counts.get(contactKey(s.contact)) === 1 && !held.has(contactKey(s.contact)),
   )
-  const batchCount = batch.reduce((n, save) => n + save.keys.length, 0)
+  // A save still has its Undo while a row of it shows linked.
+  const linkedHere = (key: string) => ['linked', 'undoing'].includes(kept.get(key)?.state ?? '')
+  const undoable = batch.filter((save) => save.keys.some(linkedHere))
+  const undoCount = undoable.reduce((n, save) => n + save.keys.filter(linkedHere).length, 0)
 
-  // Kept rows follow the live list: an undone row is let go once it's suggested again, and a
-  // linked one once it's suggested again after leaving, as when it's unlinked somewhere else.
+  // New suggestions join the order where they first show, at the end.
+  useEffect(() => {
+    if (!order) return
+    const listed = new Set(order)
+    const added = suggestions.map(suggestionKey).filter((key) => !listed.has(key))
+    if (added.length) setOrder([...order, ...added])
+  }, [suggestions, order])
+
+  // Kept rows follow the cards: an undone row is let go once it's suggested again, and a linked
+  // one, with its Undo, once the cards show it linked and then not, as when another device
+  // unlinks or moves it.
   useEffect(() => {
     const live = new Set(suggestions.map(suggestionKey))
     const next = new Map(kept)
     for (const [key, k] of kept) {
+      const on = owner.get(contactKey(k.suggestion.contact)) === k.suggestion.personKey
       if (k.state === 'undone' && live.has(key)) next.delete(key)
-      else if (k.state === 'linked' && !k.gone && !live.has(key)) next.set(key, { ...k, gone: true })
-      else if (k.state === 'linked' && k.gone && live.has(key)) next.delete(key)
+      else if (k.state === 'linked' && !k.seen && on) next.set(key, { ...k, seen: true })
+      else if (k.state === 'linked' && k.seen && !on) next.delete(key)
     }
-    if ([...next].some(([key, k]) => kept.get(key) !== k) || next.size !== kept.size) setKept(next)
-  }, [suggestions, kept])
+    if (next.size !== kept.size || [...next].some(([key, k]) => kept.get(key) !== k)) setKept(next)
+  }, [suggestions, kept, owner])
 
   /** Changes kept rows; `undefined` lets one go. */
   const update = (keys: readonly string[], to: (k: Kept | undefined) => Kept | undefined) =>
@@ -1035,12 +1062,15 @@ function Suggestions({
     return saved && { keys: linked, undo: saved.undo }
   }
 
-  /** Takes a save back, showing its rows as suggestions again. True once that's saved. */
+  /** Takes a save back, showing its rows as suggestions again; a stale one lets them go. */
   async function undo(save: Save) {
-    update(save.keys, (k) => k && { ...k, state: 'undoing' })
-    const done = await save.undo()
-    update(save.keys, (k) => k && { ...k, state: done ? 'undone' : 'linked' })
-    return done
+    const keys = save.keys.filter(linkedHere)
+    update(keys, (k) => k && { ...k, state: 'undoing' })
+    const result = await save.undo()
+    update(keys, (k) =>
+      k && result !== 'stale' ? { ...k, state: result === 'done' ? 'undone' : 'linked' } : undefined,
+    )
+    return result
   }
 
   async function linkAll() {
@@ -1055,22 +1085,23 @@ function Suggestions({
     setBusy(null)
   }
 
+  /** Takes back every save "Link all" made that still can, stopping at one that couldn't be saved. */
   async function undoAll() {
     setBusy('undoing')
-    for (const save of batch) {
-      if (!(await undo(save))) break
+    for (const save of undoable) {
+      if ((await undo(save)) === 'failed') break
       setBatch((now) => now.filter((s) => s !== save))
     }
     setBusy(null)
   }
 
-  if (!rows.length && !batch.length) return <p className="text-sm text-muted-foreground">Nothing to link.</p>
+  if (!rows.length) return <p className="text-sm text-muted-foreground">Nothing to link.</p>
   return (
     <Group
       title="Suggested links"
       action={
         <>
-          {batch.length ? (
+          {undoable.length ? (
             <Button
               size="sm"
               variant="ghost"
@@ -1078,7 +1109,7 @@ function Suggestions({
               disabled={!!busy}
               onClick={() => void undoAll()}
             >
-              Undo {batchCount.toLocaleString()} {batchCount === 1 ? 'link' : 'links'}
+              Undo {undoCount.toLocaleString()} {undoCount === 1 ? 'link' : 'links'}
             </Button>
           ) : null}
           {sure.length ? (
