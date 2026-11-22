@@ -68,6 +68,9 @@ const sleep = (ms) =>
     timer.unref?.()
   })
 
+/** The listener for a query nothing reacts to: one function, so a held query never gains copies. */
+const NOOP = () => {}
+
 const unreadRow = (c) => (c.unreadCount > 0 || c.markedUnread) && c.mutedUntil === null
 
 export class SimClient {
@@ -104,14 +107,16 @@ export class SimClient {
   /**
    * Subscribes under `key` (once; a second ask shares it, as the app's cache does) and
    * resolves with the first answer, or null if it failed or didn't come within ANSWER_MS.
+   * `onValue(value, replay)` sees every answer; `replay` is true when it's the cached answer
+   * handed to a listener that just joined, not one the server sent now.
    */
-  watch(key, name, args, onValue = () => {}) {
+  watch(key, name, args, onValue = NOOP) {
     const held = this.subs.get(key)
     if (held) {
       this.released.delete(key)
       if (!held.listeners.has(onValue)) {
         held.listeners.add(onValue)
-        if (held.value !== undefined) onValue(held.value)
+        if (held.value !== undefined) onValue(held.value, true)
       }
       return held.first
     }
@@ -147,7 +152,7 @@ export class SimClient {
           ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
           resolveFirst(value)
         }
-        for (const listener of sub.listeners) listener(value)
+        for (const listener of sub.listeners) listener(value, false)
       },
       (error) => {
         this.error(name, error)
@@ -159,6 +164,11 @@ export class SimClient {
       },
     )
     return sub.first
+  }
+
+  /** Stops `listener` hearing about `key`, keeping the query itself. */
+  unlisten(key, listener) {
+    this.subs.get(key)?.listeners.delete(listener)
   }
 
   drop(key) {
@@ -187,7 +197,14 @@ export class SimClient {
   async mutate(name, args) {
     const started = performance.now()
     try {
-      const value = await this.client.mutation(ref(name), args)
+      let timer
+      const value = await Promise.race([
+        this.client.mutation(ref(name), args),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer within ${ANSWER_MS / 1000} s`)), ANSWER_MS)
+          timer.unref?.()
+        }),
+      ]).finally(() => clearTimeout(timer))
       ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
       return value
     } catch (error) {
@@ -262,39 +279,53 @@ export class SimClient {
 
   /** Loads inbox pages while Unread may still be missing chats (features/shell/unread-fill.ts). */
   async fillInbox() {
-    if (this.filling) return
+    // A change while a fill runs is looked at once it's done, as the sidebar's effect runs again.
+    if (this.filling) {
+      this.fillAgain = true
+      return
+    }
     this.filling = true
     try {
-      for (;;) {
-        if (this.inboxPages === 0) {
-          const first = await this.watch('list:inbox#0', 'chats:list', {
-            view: 'inbox',
-            order: 'recent',
-            paginationOpts: { numItems: PAGE, cursor: null, id: 0 },
-          })
-          if (!first) return
-          this.inboxPages = 1
-        }
-        const last = this.subs.get(`list:inbox#${this.inboxPages - 1}`)?.value
-        if (!last) return
-        const count = this.subs.get('counts')?.value?.inbox
-        const incomplete = unreadIncomplete({
-          more: !last.isDone,
-          loadedUnread: this.inbox().filter(unreadRow).length,
-          count,
-        })
-        if (!incomplete || this.inboxPages >= MAX_INBOX_PAGES) return
-        const n = this.inboxPages
-        const next = await this.watch(`list:inbox#${n}`, 'chats:list', {
-          view: 'inbox',
-          order: 'recent',
-          paginationOpts: { numItems: PAGE, cursor: last.continueCursor, id: n },
-        })
-        if (!next) return
-        this.inboxPages = n + 1
-      }
+      do {
+        this.fillAgain = false
+        await this.fillOnce()
+      } while (this.fillAgain)
     } finally {
       this.filling = false
+    }
+  }
+
+  async fillOnce() {
+    // Each page's changes count too: a chat read elsewhere can leave Unread short of the count.
+    const onPage = (this.onInboxPage ??= () => void this.fillInbox())
+    const page = async (n, cursor) => {
+      const key = `list:inbox#${n}`
+      await this.watch(
+        key,
+        'chats:list',
+        { view: 'inbox', order: 'recent', paginationOpts: { numItems: PAGE, cursor, id: n } },
+        onPage,
+      )
+      // What it holds now: a page that answered after its first wait ran out has answered since.
+      return this.subs.get(key)?.value
+    }
+    for (;;) {
+      if (this.inboxPages === 0) {
+        if (!(await page(0, null))) return
+        this.inboxPages = 1
+      }
+      const last = this.subs.get(`list:inbox#${this.inboxPages - 1}`)?.value
+      if (!last) return
+      const count = this.subs.get('counts')?.value?.inbox
+      const incomplete = unreadIncomplete({
+        more: !last.isDone,
+        loadedUnread: this.inbox().filter(unreadRow).length,
+        count,
+      })
+      if (!incomplete || this.inboxPages >= MAX_INBOX_PAGES) return
+      const n = this.inboxPages
+      if (!(await page(n, last.continueCursor))) return
+      this.inboxPages = n + 1
     }
   }
 
@@ -305,7 +336,15 @@ export class SimClient {
   warmChat(chat) {
     let state = this.chats.get(chat._id)
     if (!state) {
-      state = { chat, pages: [], reactionKeys: new Set(), contactKeys: new Set(), extras: Promise.resolve() }
+      state = {
+        chat,
+        pages: [],
+        listeners: new Map(),
+        reactionKeys: new Set(),
+        contactKeys: new Set(),
+        extras: Promise.resolve(),
+        liveSince: null,
+      }
       // One listener per chat, so watching a request again never adds another.
       state.onChange = () => this.chats.get(chat._id) === state && this.reconcile(state)
       this.chats.set(chat._id, state)
@@ -325,21 +364,27 @@ export class SimClient {
     const n = state.pages.length
     const key = `messages:${state.chat._id}#${n}`
     state.pages.push(key)
+    const listener = (value, replay) => {
+      if (this.chats.get(state.chat._id) !== state) return
+      state.liveSince ??= Date.now()
+      if (n === 0) this.noticeMessages(state, value.page, replay)
+      this.reconcile(state)
+    }
+    state.listeners.set(key, listener)
     return this.watch(
       key,
       'messages:list',
       { chatId: state.chat._id, paginationOpts: { numItems: PAGE, cursor, id: n } },
-      (value) => {
-        if (this.chats.get(state.chat._id) !== state) return
-        if (n === 0) this.noticeMessages(this.subs.get(key)?.readyAt ?? Date.now(), value.page)
-        this.reconcile(state)
-      },
+      listener,
     )
   }
 
   /** Lets go of everything a chat held, to the cache. */
   letGo(state) {
     if (this.chats.get(state.chat._id) === state) this.chats.delete(state.chat._id)
+    // Its queries stay in the cache, but nothing of this chat listens to them any more.
+    for (const [key, listener] of state.listeners) this.unlisten(key, listener)
+    for (const key of state.reactionKeys) this.unlisten(key, state.onChange)
     for (const key of [...state.pages, ...state.fixed, ...state.reactionKeys, ...state.contactKeys]) this.release(key)
   }
 
@@ -382,16 +427,17 @@ export class SimClient {
   }
 
   /**
-   * Times a live message from when its bridge host journaled it to when this client has it,
-   * only for a chat whose messages were already live then: a chat opened later just loads it.
+   * Times a live message from when its bridge host journaled it to when the server sent it to
+   * this chat, only while the chat was live and only for a message sent after it became live:
+   * a cached answer handed back when a chat is warmed again (`replay`) just says what's there.
    */
-  noticeMessages(liveSince, rows) {
+  noticeMessages(state, rows, replay) {
     const now = Date.now()
     for (const m of rows) {
       if (this.seenEvents.has(m.eventId)) continue
       this.seenEvents.add(m.eventId)
       const sent = this.sent.get(m.eventId)
-      if (sent && sent.at >= liveSince) this.metrics.visible.push(now - sent.at)
+      if (sent && !replay && sent.at >= state.liveSince) this.metrics.visible.push(now - sent.at)
     }
   }
 
@@ -541,15 +587,18 @@ export class SimClient {
 }
 
 /** Starts `count` clients, each opening the app as the desktop does. */
-export async function startClients({ count, convexUrl, person, crypto, sent, networks, seed = 11 }) {
+export async function startClients({ into = [], count, convexUrl, person, crypto, sent, networks, seed = 11 }) {
   const metrics = clientMetrics()
+  await person.refresh()
   const bridgeKeyText = (await person.http.query(anyApi.keys.bridge, {}))?.publicKey
   const bridgeKey = bridgeKeyText ? crypto.fromBase64Url(bridgeKeyText) : null
-  const clients = Array.from(
-    { length: count },
-    (_, i) =>
+  // Into the caller's list as each is made, so it can close them even if one fails to start.
+  for (let i = 0; i < count; i++) {
+    into.push(
       new SimClient({ id: i, convexUrl, person, crypto, metrics, sent, rand: random(seed + i), bridgeKey, networks }),
-  )
-  await Promise.all(clients.map((c) => c.start()))
-  return { clients, metrics }
+    )
+  }
+  // Each start waits on queries and mutations that give up after a minute, so this ends.
+  await Promise.all(into.map((c) => c.start()))
+  return { clients: into, metrics }
 }

@@ -2,7 +2,7 @@
 // pinned images as deploy/compose/compose.yml, each in its own container on a private network,
 // with the functions of this checkout deployed to it. The backend can be held to a number of
 // CPUs (`docker update --cpus`), as the live server's two vCPUs hold it.
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
@@ -23,10 +23,12 @@ export function composeImage(service, text = readFileSync(resolve(root, 'deploy/
  */
 let viaSg = process.env.LOAD_DOCKER === 'sg'
 export function docker(args, { input, allowFail = false } = {}) {
+  // Bounded, so a daemon that stops answering can't hold the run (or its clean-up) for good.
+  const options = { input, encoding: 'utf8', timeout: 180_000 }
   const run = () =>
     viaSg
-      ? spawnSync('sg', ['docker', '-c', ['docker', ...args].map(shellQuote).join(' ')], { input, encoding: 'utf8' })
-      : spawnSync('docker', args, { input, encoding: 'utf8' })
+      ? spawnSync('sg', ['docker', '-c', ['docker', ...args].map(shellQuote).join(' ')], options)
+      : spawnSync('docker', args, options)
   let result = run()
   if (!viaSg && result.status !== 0 && /permission denied.*docker/i.test(result.stderr ?? '')) {
     viaSg = true
@@ -68,6 +70,9 @@ async function waitFor(check, seconds, what) {
   throw new Error(`${what} didn't come up within ${seconds}s${last ? `: ${last.message}` : ''}`)
 }
 
+/** How many executions the backend's function log keeps (MAX_UDF_EXECUTION). */
+export const LOG_BUFFER = 200_000
+
 const stackContainers = (name) => ({ postgres: `${name}-postgres`, backend: `${name}-backend` })
 
 /** Removes a stack's containers, their volumes and its network, whatever of them exists. */
@@ -77,19 +82,52 @@ export function stopStack(name) {
 }
 
 /**
- * Removes stacks left by runs that are gone (killed, so they couldn't clean up): each is named
- * for its run's process ID, and one whose process isn't running is removed.
+ * The labels on a stack's network and containers: every one is the load test's, and one left
+ * running on purpose (`--keep`) says so, so a later run leaves it alone.
+ */
+const labels = (keep) => [
+  '--label',
+  'trioditis.load-test=1',
+  ...(keep ? ['--label', 'trioditis.load-test.keep=1'] : []),
+]
+
+/**
+ * Removes stacks left by runs that are gone (killed, so they couldn't clean up), found by their
+ * containers' and networks' labels: each is named for its run's process ID, and one whose
+ * process isn't running is removed, unless it was kept on purpose.
  */
 export function removeAbandonedStacks(log = console.log) {
-  const names = docker(['ps', '-a', '--filter', 'label=trioditis.load-test=1', '--format', '{{.Names}}'], {
-    allowFail: true,
-  })
-  const stacks = new Set(
-    names.split('\n').flatMap((n) => {
-      const match = n.match(/^(trioditis-load-\d+)-(?:backend|postgres)$/)
-      return match ? [match[1]] : []
-    }),
-  )
+  const list = (kind, filter) =>
+    docker(
+      [
+        kind,
+        'ls',
+        ...(kind === 'container' ? ['-a'] : []),
+        '--filter',
+        filter,
+        '--format',
+        kind === 'container' ? '{{.Names}}' : '{{.Name}}',
+      ],
+      {
+        allowFail: true,
+      },
+    )
+      .split('\n')
+      .filter(Boolean)
+  const kept = new Set([
+    ...list('container', 'label=trioditis.load-test.keep=1'),
+    ...list('network', 'label=trioditis.load-test.keep=1'),
+  ])
+  const stackOf = (n) => n.match(/^(trioditis-load-\d+)-(?:backend|postgres|net)$/)?.[1]
+  const stacks = new Set()
+  for (const n of [
+    ...list('container', 'label=trioditis.load-test=1'),
+    ...list('network', 'label=trioditis.load-test=1'),
+  ]) {
+    const name = stackOf(n)
+    if (name && !kept.has(n)) stacks.add(name)
+  }
+  for (const n of kept) stacks.delete(stackOf(n))
   for (const name of stacks) {
     const pid = Number(name.split('-').pop())
     let alive = true
@@ -108,7 +146,7 @@ export function removeAbandonedStacks(log = console.log) {
  * Starts the stack and deploys the functions. `networks` are the ones the backend bridges
  * (TRIODITIS_NETWORKS). Returns what the rest of the test needs, and `stop()`.
  */
-export async function startStack({ name, networks, log = console.log }) {
+export async function startStack({ name, networks, keep = false, log = console.log }) {
   for (const file of ['.env', '.env.local']) {
     // The Convex CLI would read it and could deploy somewhere else (deploy-functions.sh refuses too).
     if (existsSync(resolve(backendDir, file))) {
@@ -125,7 +163,7 @@ export async function startStack({ name, networks, log = console.log }) {
   const pgPassword = secret()
   const instanceSecret = randomBytes(32).toString('hex')
   try {
-    docker(['network', 'create', net])
+    docker(['network', 'create', ...labels(keep), net])
     log(`Starting Postgres (${images.postgres.split('@')[0]})`)
     docker([
       'run',
@@ -142,8 +180,7 @@ export async function startStack({ name, networks, log = console.log }) {
       `POSTGRES_PASSWORD=${pgPassword}`,
       '-e',
       'POSTGRES_DB=trioditis',
-      '--label',
-      'trioditis.load-test=1',
+      ...labels(keep),
       images.postgres,
     ])
     await waitFor(
@@ -210,8 +247,11 @@ export async function startStack({ name, networks, log = console.log }) {
       'DISABLE_METRICS_ENDPOINT=true',
       '-e',
       'DOCUMENT_RETENTION_DELAY=172800',
-      '--label',
-      'trioditis.load-test=1',
+      // The function log the report is made from keeps only the last 1,000 executions by
+      // default; more, so none is dropped between two polls (logs.mjs checks it wasn't).
+      '-e',
+      `MAX_UDF_EXECUTION=${LOG_BUFFER}`,
+      ...labels(keep),
       images.backend,
     ])
     const convexUrl = `http://127.0.0.1:${ports.cloud}`
@@ -233,7 +273,7 @@ export async function startStack({ name, networks, log = console.log }) {
       AGENT_ACCESS_PUBLIC_KEY: agent.publicKey,
       TRIODITIS_VERSION: 'load-test',
     }
-    deployFunctions({ convexUrl, adminKey, env, log })
+    await deployFunctions({ convexUrl, adminKey, env, log })
     return {
       convexUrl,
       siteUrl,
@@ -252,14 +292,6 @@ export async function startStack({ name, networks, log = console.log }) {
         docker(['update', '--cpus', String(cpus), containers.backend])
         docker(['restart', containers.backend])
         await waitFor(async () => (await fetch(`${convexUrl}/version`)).ok, 120, 'The restarted backend')
-      },
-      /** The backend container's CPU and memory, as `docker stats` sees them now. */
-      stats: () => {
-        const line = docker(['stats', '--no-stream', '--format', '{{.CPUPerc}}|{{.MemUsage}}', containers.backend], {
-          allowFail: true,
-        })
-        const [cpu, mem] = line.split('|')
-        return { cpuPercent: Number.parseFloat(cpu) || 0, memory: (mem ?? '').split('/')[0].trim() }
       },
       databaseSize: () =>
         docker(
@@ -281,7 +313,7 @@ export async function startStack({ name, networks, log = console.log }) {
       stop,
     }
   } catch (error) {
-    if (!process.env.LOAD_KEEP) stop()
+    if (!keep) stop()
     throw error
   }
 }
@@ -294,24 +326,32 @@ function convexCli(args, { convexUrl, adminKey, input }) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith('CONVEX_') && k !== 'DOTENV_KEY'),
   )
-  const result = spawnSync('pnpm', ['exec', 'convex', ...args], {
-    cwd: backendDir,
-    env: { ...env, CONVEX_SELF_HOSTED_URL: convexUrl, CONVEX_SELF_HOSTED_ADMIN_KEY: adminKey },
-    input,
-    encoding: 'utf8',
+  // Not spawnSync: a deploy takes a while, and Ctrl-C must still be able to clean up meanwhile.
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('pnpm', ['exec', 'convex', ...args], {
+      cwd: backendDir,
+      env: { ...env, CONVEX_SELF_HOSTED_URL: convexUrl, CONVEX_SELF_HOSTED_ADMIN_KEY: adminKey },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let out = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (out += d))
+    child.on('error', reject)
+    child.on('close', (code) =>
+      code === 0 ? resolvePromise(out) : reject(new Error(`convex ${args[0]} failed:\n${out}`)),
+    )
+    child.stdin.end(input ?? '')
   })
-  if (result.status !== 0) throw new Error(`convex ${args[0]} failed:\n${result.stderr || result.stdout}`)
-  return result.stdout
 }
 
 /** What deploy/scripts/deploy-functions.sh does: the environment, the functions, then the migrations. */
-function deployFunctions({ convexUrl, adminKey, env, log }) {
+async function deployFunctions({ convexUrl, adminKey, env, log }) {
   log('Deploying the functions')
   const input =
     Object.entries(env)
       .map(([k, v]) => `${k}=${v}`)
       .join('\n') + '\n'
-  convexCli(['env', 'set', '--force'], { convexUrl, adminKey, input })
-  convexCli(['deploy', '--typecheck', 'disable', '--codegen', 'disable', '--yes'], { convexUrl, adminKey })
-  convexCli(['run', 'migrations:runAll'], { convexUrl, adminKey })
+  await convexCli(['env', 'set', '--force'], { convexUrl, adminKey, input })
+  await convexCli(['deploy', '--typecheck', 'disable', '--codegen', 'disable', '--yes'], { convexUrl, adminKey })
+  await convexCli(['run', 'migrations:runAll'], { convexUrl, adminKey })
 }

@@ -19,7 +19,9 @@ export function record(entry) {
     fn: functionName(entry),
     type: entry.udfType,
     caller: entry.caller ?? null,
-    at: (entry.executionTimestamp ?? entry.timestamp) * 1000,
+    // When it completed: a cached answer's executionTimestamp is when it first ran, maybe long
+    // before it was served.
+    at: entry.timestamp * 1000,
     ms: (entry.executionTime ?? 0) * 1000,
     userMs: (entry.userExecutionTime ?? 0) * 1000,
     cached: entry.cachedResult === true,
@@ -37,21 +39,22 @@ export function record(entry) {
 const POLL_MS = 120_000
 
 /**
- * Whether the stream was read all through `[from, to]`: a poll answered by `from`, one after
- * `to`, and none of the gaps between answered polls longer than `maxGapMs`. Without that, the
- * function numbers could be missing executions, so the run can't be judged.
+ * Whether the stream was read all through `[from, to]`, from its polls (`{ at, cursor, lost }`:
+ * when each was answered, the backend's cursor after it, and whether it may have dropped
+ * executions): a poll answered by `from`; the backend's cursor past `to` in a later one; no
+ * poll that may have lost executions; and no gap between answered polls longer than `maxGapMs`.
+ * Without that, the function numbers could be missing executions, so the run can't be judged.
  */
-export function coverage(answeredAt, from, to, maxGapMs = POLL_MS + 10_000) {
-  const inside = answeredAt.filter((t) => t >= from && t <= to)
-  const before = answeredAt.filter((t) => t < from).at(-1)
-  const after = answeredAt.find((t) => t > to)
-  if (before === undefined)
-    return { ok: false, detail: 'the function log stream had not answered when measuring began' }
-  if (after === undefined)
-    return { ok: false, detail: 'the function log stream stopped answering before measuring ended' }
+export function coverage(polls, from, to, maxGapMs = POLL_MS + 10_000) {
+  const before = polls.filter((p) => p.at < from).at(-1)
+  const after = polls.find((p) => p.cursor > to)
+  if (!before) return { ok: false, detail: 'the function log stream had not answered when measuring began' }
+  if (!after) return { ok: false, detail: "the function log stream didn't get past the end of measuring" }
+  const window = polls.filter((p) => p.at >= before.at && p.at <= after.at)
+  if (window.some((p) => p.lost))
+    return { ok: false, detail: 'the function log may have dropped executions between two polls' }
   let gap = 0
-  const points = [before, ...inside, after]
-  for (let i = 1; i < points.length; i++) gap = Math.max(gap, points[i] - points[i - 1])
+  for (let i = 1; i < window.length; i++) gap = Math.max(gap, window[i].at - window[i - 1].at)
   if (gap > maxGapMs)
     return { ok: false, detail: `the function log stream went ${Math.round(gap / 1000)} s without answering` }
   return { ok: true, detail: `read throughout (longest wait ${Math.round(gap / 1000)} s)` }
@@ -59,13 +62,14 @@ export function coverage(answeredAt, from, to, maxGapMs = POLL_MS + 10_000) {
 
 /**
  * Collects completions until stopped. `onRecord` sees each one; `records` keeps them all, and
- * `answeredAt` when each poll was answered, for `coverage`. The stream is polled, as the CLI
- * polls it; a failed poll is tried again. `ready` resolves once a poll has been answered, and
- * rejects if none is within a minute.
+ * `polls` each answered poll, for `coverage`. The stream is polled, as the CLI polls it; a failed
+ * poll is tried again. `ready` resolves once a poll has been answered, and rejects if none is
+ * within a minute. A poll that returns as many entries as the backend keeps (`buffer`) may have
+ * missed some, since the backend serves only what it still has.
  */
-export function collectLogs({ convexUrl, adminKey, onRecord = () => {} }) {
+export function collectLogs({ convexUrl, adminKey, buffer, onRecord = () => {} }) {
   const records = []
-  const answeredAt = []
+  const polls = []
   let stopped = false
   let cursor = 0
   let failures = 0
@@ -87,7 +91,11 @@ export function collectLogs({ convexUrl, adminKey, onRecord = () => {} }) {
         } finally {
           clearTimeout(timer)
         }
-        answeredAt.push(Date.now())
+        if (!Array.isArray(body?.entries) || typeof body.newCursor !== 'number') {
+          throw new Error('log stream answered something else')
+        }
+        // Past the first poll, which returns whatever the backend still holds from before.
+        polls.push({ at: Date.now(), cursor: body.newCursor, lost: cursor > 0 && body.entries.length >= buffer })
         cursor = body.newCursor
         for (const entry of body.entries) {
           if (entry.kind !== 'Completion') continue
@@ -105,31 +113,36 @@ export function collectLogs({ convexUrl, adminKey, onRecord = () => {} }) {
   })()
   const ready = (async () => {
     const until = Date.now() + 60_000
-    while (answeredAt.length === 0) {
+    while (polls.length === 0 && !stopped) {
       if (Date.now() > until)
         throw new Error(`The function log stream never answered${lastError ? `: ${lastError}` : ''}.`)
       await new Promise((r) => setTimeout(r, 200))
     }
   })()
+  const cancel = async () => {
+    stopped = true
+    controller?.abort()
+    await loop
+  }
   return {
     records,
-    answeredAt,
+    polls,
     ready,
     get failures() {
       return failures
     },
     /**
-     * Stops once a poll has been answered after `after` (so everything up to it is in), or
-     * after POLL_MS of waiting for one.
+     * Stops once the backend's cursor is past `after` (everything up to it is in), or after
+     * POLL_MS of waiting for that.
      */
     async stop({ after = Date.now() } = {}) {
       const until = Date.now() + POLL_MS
-      while (!answeredAt.some((t) => t > after + 1000) && Date.now() < until) {
+      while (!polls.some((p) => p.cursor > after) && Date.now() < until && !stopped) {
         await new Promise((r) => setTimeout(r, 200))
       }
-      stopped = true
-      controller?.abort()
-      await loop
+      await cancel()
     },
+    /** Stops at once. */
+    cancel,
   }
 }

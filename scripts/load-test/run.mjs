@@ -18,7 +18,7 @@ import { collectLogs, coverage } from './logs.mjs'
 import { preflight } from './preflight.mjs'
 import { markdownReport } from './report.mjs'
 import { seedClientState } from './seed.mjs'
-import { docker, removeAbandonedStacks, startStack, stopStack } from './stack.mjs'
+import { docker, LOG_BUFFER, removeAbandonedStacks, startStack, stopStack } from './stack.mjs'
 import { byFunction, evaluate, perMinute, summarize } from './stats.mjs'
 
 /** Sizes and rates by profile. `quick` is for trying the harness; `nightly` is what CI runs. */
@@ -212,10 +212,16 @@ async function main() {
   const stack = await startStack({
     name,
     networks: inbox.accounts.map((a) => a.network),
+    keep: values.keep,
     log,
   })
+  // Everything the run starts, so the one `finally` below stops all of it however it ends.
   let bridges
-  let clients = []
+  let logs
+  let cpu
+  let traffic
+  let stopClicks = []
+  const clients = []
   const timers = []
   try {
     const person = await setUpPerson(crypto, stack)
@@ -240,16 +246,17 @@ async function main() {
     // Measured: held to the live server's CPUs, with the clients opening the app and the
     // bridge hosts writing. Everything the verdict uses is from this window only.
     await stack.capCpus(settings.cpus)
-    const logs = collectLogs({ convexUrl: stack.convexUrl, adminKey: stack.adminKey })
+    logs = collectLogs({ convexUrl: stack.convexUrl, adminKey: stack.adminKey, buffer: LOG_BUFFER })
     await logs.ready
     bridges.metrics.length = 0
     bridges.metrics.delivered.length = 0
     bridges.metrics.failures = 0
     for (const key of Object.keys(bridges.metrics.commands)) delete bridges.metrics.commands[key]
     log(`Backend held to ${settings.cpus} CPUs; measuring for ${settings.minutes} min`)
-    const cpu = cpuMeter(stack.containers.backend)
+    cpu = cpuMeter(stack.containers.backend)
     const loadStarted = Date.now()
-    const traffic = driveTraffic(bridges, inbox, {
+    const loadEnded = loadStarted + settings.minutes * 60_000
+    traffic = driveTraffic(bridges, inbox, {
       backfillNetwork: settings.backfillNetwork,
       backfillPerMinute: settings.backfillRate,
       backfillPage: settings.backfillPage,
@@ -257,6 +264,7 @@ async function main() {
       seed: settings.seed + 100,
     })
     const started = await startClients({
+      into: clients,
       count: settings.clients,
       convexUrl: stack.convexUrl,
       person,
@@ -265,9 +273,8 @@ async function main() {
       networks: inbox.accounts.map((a) => a.network),
       seed: settings.seed + 200,
     })
-    clients = started.clients
     log(`${clients.length} client${clients.length === 1 ? '' : 's'} open`)
-    const stopClicks = clients.map((c) => c.runClicks(settings.clickMs))
+    stopClicks = clients.map((c) => c.runClicks(settings.clickMs))
     const tick = setInterval(() => {
       const recent = logs.records.filter((r) => r.at > Date.now() - 60_000)
       log(
@@ -275,18 +282,20 @@ async function main() {
       )
     }, 30_000)
     timers.push(tick)
-    await new Promise((r) => setTimeout(r, settings.minutes * 60_000))
+    // The window closes on time, from when it opened, whatever the clients' start took; what
+    // the verdict uses is taken as it stands then, and what happens while stopping isn't.
+    await new Promise((r) => setTimeout(r, Math.max(0, loadEnded - Date.now())))
     clearInterval(tick)
-    traffic.stop()
-    await Promise.all(stopClicks.map((stop) => stop()))
-    const loadEnded = Date.now()
-    const backlogAtEnd = bridges.hosts.reduce((a, h) => a + h.backlog, 0)
-    cpu.stop()
-    await logs.stop({ after: loadEnded })
-    for (const c of clients) await c.close()
-    clients = []
-    const pushes = bridges.metrics.filter((m) => m.at >= loadStarted && m.at <= loadEnded)
+    const seen = structuredClone(started.metrics)
     const commands = { ...bridges.metrics.commands }
+    const backlogAtEnd = bridges.hosts.reduce((a, h) => a + h.backlog, 0)
+    traffic.stop()
+    cpu.stop()
+    await Promise.all(stopClicks.map((stop) => stop()))
+    stopClicks = []
+    await logs.stop({ after: loadEnded })
+    for (const c of clients.splice(0)) await c.close()
+    const pushes = bridges.metrics.filter((m) => m.at >= loadStarted && m.at <= loadEnded)
     await bridges.stop()
     bridges = null
 
@@ -307,9 +316,9 @@ async function main() {
     }
     const verdict = evaluate({
       rows: functions,
-      client: started.metrics,
+      client: seen,
       bridges: bridgeStats,
-      logs: coverage(logs.answeredAt, loadStarted, loadEnded),
+      logs: coverage(logs.polls, loadStarted, loadEnded),
       budgets: settings.budgets,
       defaultBudget: settings.budget,
     })
@@ -342,14 +351,14 @@ async function main() {
       traffic: traffic.counters,
       bridges: bridgeStats,
       client: {
-        errors: started.metrics.errors,
-        errorKinds: started.metrics.errorKinds,
-        actions: started.metrics.actions,
-        peakSubscriptions: started.metrics.peakSubscriptions,
-        opens: started.metrics.opens,
-        failedOpens: started.metrics.failedOpens,
-        visible: started.metrics.visible,
-        actionMs: started.metrics.actionMs ?? [],
+        errors: seen.errors,
+        errorKinds: seen.errorKinds,
+        actions: seen.actions,
+        peakSubscriptions: seen.peakSubscriptions,
+        opens: seen.opens,
+        failedOpens: seen.failedOpens,
+        visible: seen.visible,
+        actionMs: seen.actionMs ?? [],
       },
       cpu: {
         mean: cpuPercents.length ? cpuPercents.reduce((a, b) => a + b, 0) / cpuPercents.length : null,
@@ -386,11 +395,15 @@ async function main() {
     return verdict.passed || values['report-only'] ? 0 : 1
   } finally {
     for (const t of timers) clearInterval(t)
+    traffic?.stop()
+    cpu?.stop()
+    await logs?.cancel()
+    await Promise.allSettled(stopClicks.map((stop) => stop()))
     for (const c of clients) await c.close().catch(() => {})
     if (bridges) await bridges.stop().catch(() => {})
     if (values.keep)
       log(
-        `Left running: ${stack.convexUrl} (admin key in the containers' ./generate_admin_key.sh); remove with docker rm -f -v ${Object.values(stack.containers).join(' ')}`,
+        `Left running: ${stack.convexUrl} (admin key in the containers' ./generate_admin_key.sh); remove with docker rm -f -v ${Object.values(stack.containers).join(' ')} && docker network rm ${name}-net`,
       )
     else stack.stop()
   }

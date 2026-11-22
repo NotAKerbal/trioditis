@@ -80,7 +80,8 @@ void test('a log entry becomes a record of numbers, naming a component function 
   }
   const r = record(entry)
   assert.equal(r.fn, 'betterAuth/adapter:findOne')
-  assert.equal(r.at, 1_800_000_000_250)
+  // When it completed, not when a cached answer first ran (executionTimestamp).
+  assert.equal(r.at, 1_800_000_000_500)
   assert.equal(r.ms, 42.5)
   assert.equal(r.readDocs, 12)
   assert.equal(r.timeout, false)
@@ -266,9 +267,15 @@ void test("the run can't pass on a function log it didn't read", () => {
   const verdict = evaluate({ rows: [], client: ok, bridges: pushes, logs: missing })
   assert.equal(verdict.passed, false)
   assert.equal(verdict.checks[0].passed, false)
-  assert.equal(coverage([900, 1500, 2100], 1000, 2000).ok, true)
-  assert.match(coverage([900, 1500], 1000, 2000).detail, /stopped answering/)
-  assert.match(coverage([900, 200_000, 400_000], 1000, 300_000).detail, /went 200 s without answering/)
+  const poll = (at, cursor = at, lost = false) => ({ at, cursor, lost })
+  assert.equal(coverage([poll(900), poll(1500), poll(2100)], 1000, 2000).ok, true)
+  // The backend's cursor has to get past the end, however late the answer came.
+  assert.match(coverage([poll(900), poll(2500, 1900)], 1000, 2000).detail, /didn't get past the end/)
+  assert.match(coverage([poll(900), poll(1500, 1500, true), poll(2100)], 1000, 2000).detail, /may have dropped/)
+  assert.match(
+    coverage([poll(900), poll(200_000), poll(400_000)], 1000, 300_000).detail,
+    /went 200 s without answering/,
+  )
 })
 
 void test("a CI runner can keep less disk free than the shared machine's 20 GiB", () => {
