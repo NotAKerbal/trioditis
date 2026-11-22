@@ -156,6 +156,9 @@ describe('grouping and linking', () => {
     })
     // A note written since the link stays when it's undone.
     expect(withoutLinkChange({ ...after, note: 'met at work' }, change)).toEqual({ ...before, note: 'met at work' })
+    // So does an email labelled since: it's the person's own now.
+    const labelled = { ...after, emails: [{ value: 'ann@example.com', label: 'work' }] }
+    expect(withoutLinkChange(labelled, change).emails).toEqual([{ value: 'ann@example.com', label: 'work' }])
   })
 
   it('never groups two different full numbers through one saved without its country code', () => {

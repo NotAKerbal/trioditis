@@ -480,14 +480,14 @@ export function linkChange(before: PersonPlaintext, after: PersonPlaintext): Lin
 }
 
 /**
- * A card without what a link added to it. Only what the link itself added goes: a number the
- * card already had stays, and so does anything else changed on it since.
+ * A card without what a link added to it. Only what the link itself added goes, as it added it:
+ * a number the card already had stays, and so does one labelled since, or anything else changed.
  */
 export function withoutLinkChange(card: PersonPlaintext, change: LinkChange): PersonPlaintext {
   const out = withoutLinks(card, change.links)
   for (const key of ['phones', 'emails', 'handles'] as const) {
     const drop = new Set(change[key])
-    const kept = (out[key] ?? []).filter((f) => !drop.has(f.value))
+    const kept = (out[key] ?? []).filter((f) => !(drop.has(f.value) && !f.label))
     if (kept.length) out[key] = kept
     else delete out[key]
   }
