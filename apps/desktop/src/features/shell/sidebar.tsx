@@ -339,9 +339,21 @@ export function Sidebar({
   const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
+  // The chat open when the filter changed, still to be judged once the server answers; a chat
+  // opened after the change was opened under the new filter, and isn't judged.
+  const toJudge = useRef<string | undefined>(undefined)
   useEffect(() => {
-    if (lastFilterKey.current === filterKey || openChat === undefined) return
-    lastFilterKey.current = filterKey
+    if (lastFilterKey.current !== filterKey) {
+      lastFilterKey.current = filterKey
+      toJudge.current = selectedId
+    }
+    if (!toJudge.current) return
+    if (toJudge.current !== selectedId) {
+      toJudge.current = undefined
+      return
+    }
+    if (openChat === undefined) return
+    toJudge.current = undefined
     if (openChat && !inFilter(openChat, { network, labelId, view: focused ? null : simpleShow })) onClose()
   })
 

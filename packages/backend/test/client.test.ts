@@ -158,6 +158,15 @@ describe('chat views', () => {
     expect(await a.query(api.chats.get, { chatId })).toMatchObject({ woke: true, archived: false })
   })
 
+  it('counts a chat as muted while its mute is stored, past its time until its end is written', async () => {
+    // So the count agrees with what clients load, whatever their clocks say (chats.muteEnded).
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await aChat(t, 'user_a', 'mute-ending', { unreadCount: 1, mutedUntil: Date.now() - 1 })
+    await aChat(t, 'user_a', 'unmuted', { unreadCount: 1 })
+    expect((await a.query(api.chats.counts, {})).inbox).toEqual({ count: 1, more: false })
+  })
+
   it('counts badges from bounded ranges, capped at 99', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
