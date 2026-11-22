@@ -1,0 +1,55 @@
+# The load test (apps/docs/src/content/docs/contributing/load-test.md): a realistic inbox, bridge
+# hosts writing and desktop clients reading, against the self-hosted Convex backend held to the
+# live server's two CPUs. It takes about half an hour, so it runs nightly on dev and on demand,
+# never on pull requests; `pnpm test:scripts` covers its logic there.
+#
+# Jobs run only on GitHub's hosted runners, as checks.yml explains. A scheduled run tests dev,
+# the Nightly channel's branch; a manual one tests the branch it is started from.
+name: Load test
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: quick, nightly or heavy
+        default: nightly
+      minutes:
+        description: Minutes under load (blank for the profile's)
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  load-test:
+    name: Load test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref }}
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run the load test
+        env:
+          PROFILE: ${{ inputs.profile || 'nightly' }}
+          MINUTES: ${{ inputs.minutes }}
+        run: pnpm load-test --profile "$PROFILE" ${MINUTES:+--minutes "$MINUTES"} --out load-test-report
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: load-test-report
+          path: load-test-report
+          if-no-files-found: ignore
