@@ -45,7 +45,7 @@ With every subscription live, ingesting five single-event batches a second (abou
 
 - **Check sign-in through `lib/session.ts`.** It asks `components.betterAuth.sessions.live`, which reads one row. Never call `components.betterAuth.adapter.*` on a path every query takes, and don't import `auth.ts` into a module with queries the app subscribes to: only modules that need Better Auth itself (`account.ts`, `http.ts`, the component) import it.
 - **Keep often-written fields off rows that every query reads.** The `members` row is read by every signed-in query: write it only when membership or keys change. The address book's count and revision live in `addressBooks`.
-- **Don't read a row a query doesn't need.** A row in a query's read set runs it again whenever any field of that row changes. A chat row changes with every message, so a query that only needs to know the chat is the person's can often show the person's own rows instead (`messages.reactions`).
+- **Don't read a row a query doesn't need.** A row in a query's read set runs it again whenever any field of that row changes. A chat row changes with every message, so a query that only needs to know the chat is the person's can often read only the person's own rows instead, through an index that starts with `userId`, so nothing of anyone else's can change the answer (`messages.reactions`).
 - **Read independent rows together.** Start lookups that don't depend on each other at once (`Promise.all`), in batches that keep the read bounds the query already had.
 - **Share subscriptions on the client.** Two components asking the same thing with `convexQuery`, or the cached paginated hook, share one subscription. Convex's own `usePaginatedQuery` makes a new set of pages for each component that mounts it.
 
@@ -53,7 +53,7 @@ With every subscription live, ingesting five single-event batches a second (abou
 
 Most of what still costs CPU is live queries running again because something they read changed: a message arrives, its chat row changes, and every client's chat list page, unread counts and arrivals feed run again, each reading tens of rows to send back mostly what the client already has. The cost grows with writes × subscriptions × rows per query.
 
-A per-person sync log would make it grow with writes alone. Every mutation that changes what a person sees appends to one table in the same transaction:
+A per-person sync log would make it grow with writes and devices, not with the rows each query shows. Every mutation that changes what a person sees appends to one table in the same transaction:
 
 ```ts
 syncLog: defineTable({
