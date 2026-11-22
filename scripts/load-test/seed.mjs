@@ -22,12 +22,25 @@ export async function chatIds(http) {
 export async function seedClientState(crypto, person, inbox, convexUrl, log = console.log) {
   // Over a websocket, signed in once, as the app is: each call over HTTP has the backend check
   // its token afresh, fetching Better Auth's keys each time, which makes seeding crawl.
-  const socket = new ConvexClient(convexUrl, { skipConvexDeploymentUrlCheck: true, unsavedChangesWarning: false })
-  socket.setAuth(() => person.token())
+  const raw = new ConvexClient(convexUrl, { skipConvexDeploymentUrlCheck: true, unsavedChangesWarning: false })
+  // A token that can't be had means signed out, so the calls below fail where they're awaited,
+  // rather than as a rejection the client never catches.
+  raw.setAuth(() => person.token().catch(() => null))
+  // Each call gives up after a minute, so a socket that keeps reconnecting can't stall seeding.
+  const bounded = (call) => (ref, args) => {
+    let timer
+    return Promise.race([
+      call(ref, args),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('A seeding call got no answer within 60 s.')), 60_000)
+      }),
+    ]).finally(() => clearTimeout(timer))
+  }
+  const socket = { query: bounded((r, a) => raw.query(r, a)), mutation: bounded((r, a) => raw.mutation(r, a)) }
   try {
     return await seedWith(socket, crypto, person, inbox, log)
   } finally {
-    await socket.close()
+    await raw.close()
   }
 }
 

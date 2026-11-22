@@ -293,7 +293,8 @@ async function main() {
       sent: traffic.sent,
       networks: inbox.accounts.map((a) => a.network),
       seed: settings.seed + 200,
-      cancelled: () => cleaningUp,
+      // Once the window has closed, no client starts adding load while the rest settles.
+      cancelled: () => cleaningUp || closed !== null,
     }).catch((error) => {
       startError = error
     })
