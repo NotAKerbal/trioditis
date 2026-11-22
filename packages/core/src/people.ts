@@ -456,6 +456,44 @@ export function withoutLinks(card: PersonPlaintext, links: readonly PersonLink[]
   return { ...card, links: (card.links ?? []).filter((l) => !drop.has(contactKey(l))) }
 }
 
+/** What linking added to a card: the links, and the numbers, emails and usernames copied with them. */
+export interface LinkChange {
+  links: PersonLink[]
+  phones: string[]
+  emails: string[]
+  handles: string[]
+}
+
+/** What a card gained from `before` to `after`, so a link can be undone (`withoutLinkChange`). */
+export function linkChange(before: PersonPlaintext, after: PersonPlaintext): LinkChange {
+  const gained = (was: readonly PersonField[] = [], now: readonly PersonField[] = []) => {
+    const had = new Set(was.map((f) => f.value))
+    return now.map((f) => f.value).filter((v) => !had.has(v))
+  }
+  const linked = new Set((before.links ?? []).map(contactKey))
+  return {
+    links: (after.links ?? []).filter((l) => !linked.has(contactKey(l))),
+    phones: gained(before.phones, after.phones),
+    emails: gained(before.emails, after.emails),
+    handles: gained(before.handles, after.handles),
+  }
+}
+
+/**
+ * A card without what a link added to it. Only what the link itself added goes: a number the
+ * card already had stays, and so does anything else changed on it since.
+ */
+export function withoutLinkChange(card: PersonPlaintext, change: LinkChange): PersonPlaintext {
+  const out = withoutLinks(card, change.links)
+  for (const key of ['phones', 'emails', 'handles'] as const) {
+    const drop = new Set(change[key])
+    const kept = (out[key] ?? []).filter((f) => !drop.has(f.value))
+    if (kept.length) out[key] = kept
+    else delete out[key]
+  }
+  return out
+}
+
 /**
  * The cards that change when contacts are linked to `personKey`: that card with them, and any
  * other card they were on, without them. A contact is only ever on one card.

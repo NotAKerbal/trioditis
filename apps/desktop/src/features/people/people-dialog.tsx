@@ -3,13 +3,16 @@ import {
   cardTitle,
   contactKey,
   groupUnlinked,
+  linkChange,
   linkIndex,
   moveLinks,
   parseContactsFile,
   parseIdentifier,
   suggestLinks,
   toVCards,
+  withoutLinkChange,
   withoutLinks,
+  type LinkChange,
   type LinkSuggestion,
   type MatchReason,
   type NetworkContact,
@@ -28,6 +31,7 @@ import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import {
   ArrowLeft,
+  Check,
   Contact,
   Download,
   Link2,
@@ -208,8 +212,25 @@ function People({
     }
   }
   const run = (change: Change, failure: string) => attempt(() => actions.apply(change), failure)
-  const link = (personKey: string, linked: NetworkContact[]) =>
-    run((fresh) => moveLinks(fresh, personKey, linked), 'That couldn’t be linked.')
+  /** Links contacts to a card. Once saved, gives back what takes them off it again. */
+  async function linkUndoably(personKey: string, linked: NetworkContact[]): Promise<Undo | undefined> {
+    let change: LinkChange | undefined
+    const saved = await run((fresh) => {
+      const before = fresh.find((p) => p.personKey === personKey)
+      const out = moveLinks(fresh, personKey, linked)
+      // Worked out each time the change is, so it matches what was finally saved.
+      change = before && out[0] ? linkChange(before.card, out[0].card) : undefined
+      return out
+    }, 'That couldn’t be linked.')
+    const undo = change
+    if (!saved || !undo) return undefined
+    return () =>
+      run((fresh) => {
+        const now = fresh.find((p) => p.personKey === personKey)
+        return now ? [{ personKey, card: withoutLinkChange(now.card, undo) }] : []
+      }, 'That couldn’t be undone.')
+  }
+  const link = async (personKey: string, linked: NetworkContact[]) => !!(await linkUndoably(personKey, linked))
 
   async function sync() {
     const asked = await attempt(async () => {
@@ -455,7 +476,7 @@ function People({
             }}
           />
         ) : view === 'suggested' ? (
-          <Suggestions suggestions={suggestions} people={people ?? []} onLink={link} />
+          <Suggestions suggestions={suggestions} people={people ?? []} onLink={linkUndoably} />
         ) : view === 'unsorted' ? (
           <Unsorted
             groups={unsorted}
@@ -567,6 +588,8 @@ function PersonDetail({
   // The card as it was when editing began: saving checks nothing has changed it since.
   const [editing, setEditing] = useState<StoredPerson | null>(null)
   const [choosing, setChoosing] = useState(false)
+  // The suggestions being linked: each moves up into the card's accounts once saved.
+  const [linking, setLinking] = useState<ReadonlySet<string>>(new Set())
   const { card, personKey } = person
   if (editing) {
     return (
@@ -648,7 +671,15 @@ function PersonDetail({
         {suggestions.map((s) => (
           <ContactLine key={contactKey(s.contact)} contact={s.contact}>
             <span className="text-sm text-subtle-foreground">{REASON[s.reason]}</span>
-            <Button size="sm" onClick={() => void onLink([s.contact])}>
+            <Button
+              size="sm"
+              loading={linking.has(contactKey(s.contact))}
+              onClick={() => {
+                const key = contactKey(s.contact)
+                setLinking((now) => new Set(now).add(key))
+                void onLink([s.contact]).finally(() => setLinking((now) => new Set([...now].filter((k) => k !== key))))
+              }}
+            >
               Link
             </Button>
           </ContactLine>
@@ -869,6 +900,26 @@ export function ChoosePerson({
   )
 }
 
+/** Takes a saved change back. True once that's saved too. */
+type Undo = () => Promise<boolean>
+
+/**
+ * A suggestion linked from the list. It keeps its place from the click on, showing it's linked,
+ * so the rows below don't move up under the pointer and the next click lands where it was meant to.
+ */
+interface Kept {
+  suggestion: LinkSuggestion
+  /** Where it was in the list. */
+  at: number
+  /** The rows linked in the same save, which undoing it takes back together. */
+  group: string[]
+  /** `undone` shows it as a suggestion again, until the list has it once more. */
+  state: 'linking' | 'linked' | 'undoing' | 'undone'
+  undo?: Undo
+}
+
+const suggestionKey = (s: LinkSuggestion) => `${contactKey(s.contact)}>${s.personKey}`
+
 function Suggestions({
   suggestions,
   people,
@@ -876,26 +927,98 @@ function Suggestions({
 }: {
   suggestions: LinkSuggestion[]
   people: readonly Person[]
-  onLink: (personKey: string, contacts: NetworkContact[]) => Promise<boolean>
+  onLink: (personKey: string, contacts: NetworkContact[]) => Promise<Undo | undefined>
 }) {
   const [busy, setBusy] = useState(false)
-  const page = usePage(suggestions)
+  const [kept, setKept] = useState<ReadonlyMap<string, Kept>>(new Map())
+  const rows = useMemo(() => {
+    const out = suggestions.filter((s) => !kept.has(suggestionKey(s)))
+    for (const k of [...kept.values()].sort((a, b) => a.at - b.at))
+      out.splice(Math.min(k.at, out.length), 0, k.suggestion)
+    return out
+  }, [suggestions, kept])
+  const page = usePage(rows)
   const names = new Map(people.map((p) => [p.personKey, cardTitle(p.card)]))
+  const open = (s: LinkSuggestion) => (kept.get(suggestionKey(s))?.state ?? 'undone') === 'undone'
   // A contact suggested for several cards is left for the person to choose; a shared number,
   // email or username for only one is safe to link in one go.
   const counts = new Map<string, number>()
   for (const s of suggestions) counts.set(contactKey(s.contact), (counts.get(contactKey(s.contact)) ?? 0) + 1)
-  const sure = suggestions.filter((s) => s.reason !== 'name' && counts.get(contactKey(s.contact)) === 1)
+  const sure = suggestions.filter((s) => s.reason !== 'name' && counts.get(contactKey(s.contact)) === 1 && open(s))
+
+  // A row taken back is let go once the list suggests it again, in its own place.
+  useEffect(() => {
+    const back = new Set(suggestions.map(suggestionKey))
+    if (![...kept].some(([key, k]) => k.state === 'undone' && back.has(key))) return
+    setKept((now) => new Map([...now].filter(([key, k]) => !(k.state === 'undone' && back.has(key)))))
+  }, [suggestions, kept])
+
+  /** Changes the rows of a group that are kept; `undefined` lets them go. */
+  const update = (keys: readonly string[], to: (k: Kept | undefined, key: string) => Kept | undefined) =>
+    setKept((now) => {
+      const next = new Map(now)
+      for (const key of keys) {
+        const k = to(next.get(key), key)
+        if (k) next.set(key, k)
+        else next.delete(key)
+      }
+      return next
+    })
+
+  /** Links a card's suggestions in one save. Gives back the undo once it's saved. */
+  async function link(personKey: string, group: LinkSuggestion[]) {
+    const keys = group.map(suggestionKey)
+    const at = new Map(rows.map((r, i) => [suggestionKey(r), i]))
+    const bySuggestion = new Map(group.map((s) => [suggestionKey(s), s]))
+    update(keys, (_, key) => ({
+      suggestion: bySuggestion.get(key)!,
+      at: at.get(key) ?? rows.length,
+      group: keys,
+      state: 'linking',
+    }))
+    const undo = await onLink(
+      personKey,
+      group.map((s) => s.contact),
+    )
+    update(keys, (k) => (k && undo ? { ...k, state: 'linked', undo } : undefined))
+    return undo
+  }
+
+  /** Takes a save back, showing its rows as suggestions again. True once that's saved. */
+  async function undo(k: Kept) {
+    if (!k.undo) return false
+    update(k.group, (was) => was && { ...was, state: 'undoing' })
+    const done = await k.undo()
+    update(k.group, (was) => was && { ...was, state: done ? 'undone' : 'linked' })
+    return done
+  }
 
   async function linkAll() {
     setBusy(true)
-    const byPerson = new Map<string, NetworkContact[]>()
-    for (const s of sure) byPerson.set(s.personKey, [...(byPerson.get(s.personKey) ?? []), s.contact])
-    for (const [personKey, contacts] of byPerson) if (!(await onLink(personKey, contacts))) break
+    const byPerson = new Map<string, LinkSuggestion[]>()
+    for (const s of sure) byPerson.set(s.personKey, [...(byPerson.get(s.personKey) ?? []), s])
+    const saved: Kept[] = []
+    let count = 0
+    for (const [personKey, group] of byPerson) {
+      const undo = await link(personKey, group)
+      if (!undo) break
+      saved.push({ suggestion: group[0]!, at: 0, group: group.map(suggestionKey), state: 'linked', undo })
+      count += group.length
+    }
     setBusy(false)
+    // The rows say which were linked; this says how many, rows further down too, and takes them all back.
+    if (count) {
+      toast(`Linked ${count.toLocaleString()} ${count === 1 ? 'account' : 'accounts'}`, {
+        label: 'Undo',
+        onClick: () =>
+          void (async () => {
+            for (const k of saved) if (!(await undo(k))) break
+          })(),
+      })
+    }
   }
 
-  if (!suggestions.length) return <p className="text-sm text-muted-foreground">Nothing to link.</p>
+  if (!rows.length) return <p className="text-sm text-muted-foreground">Nothing to link.</p>
   return (
     <Group
       title="Suggested links"
@@ -907,17 +1030,46 @@ function Suggestions({
         ) : undefined
       }
     >
-      {page.shown.map((s) => (
-        <ContactLine key={`${contactKey(s.contact)}>${s.personKey}`} contact={s.contact}>
-          <div className="min-w-0 text-right">
-            <div className="truncate font-medium">{names.get(s.personKey)}</div>
-            <div className="text-sm text-subtle-foreground">{REASON[s.reason]}</div>
-          </div>
-          <Button size="sm" disabled={busy} onClick={() => void onLink(s.personKey, [s.contact])}>
-            Link
-          </Button>
-        </ContactLine>
-      ))}
+      {page.shown.map((s) => {
+        const key = suggestionKey(s)
+        const k = kept.get(key)
+        const who = names.get(s.personKey) ?? 'this person'
+        return (
+          <ContactLine key={key} contact={s.contact}>
+            <div className="min-w-0 text-right">
+              <div className="truncate font-medium">{names.get(s.personKey)}</div>
+              <div className="text-sm text-subtle-foreground">{REASON[s.reason]}</div>
+            </div>
+            {k && (k.state === 'linked' || k.state === 'undoing') ? (
+              <>
+                <span className="flex items-center gap-1 text-sm text-success">
+                  <Check className="size-3.5" /> Linked
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={k.state === 'undoing'}
+                  disabled={busy}
+                  aria-label={`Undo linking to ${who}`}
+                  onClick={() => void undo(k)}
+                >
+                  Undo
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                loading={k?.state === 'linking'}
+                disabled={busy}
+                aria-label={`Link to ${who}`}
+                onClick={() => void link(s.personKey, [s])}
+              >
+                Link
+              </Button>
+            )}
+          </ContactLine>
+        )
+      })}
       <ShowMore more={page.more} onClick={page.showMore} className="mx-4 mb-2" />
     </Group>
   )

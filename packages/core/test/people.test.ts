@@ -4,6 +4,7 @@ import { START_TARGETS, type Network } from '../src/index.ts'
 import {
   cardFromContacts,
   groupUnlinked,
+  linkChange,
   moveLinks,
   normalPhone,
   parseIdentifier,
@@ -11,6 +12,8 @@ import {
   samePhone,
   startIdentifier,
   suggestLinks,
+  withLinks,
+  withoutLinkChange,
   type NetworkContact,
   type Person,
 } from '../src/index.ts'
@@ -135,6 +138,24 @@ describe('grouping and linking', () => {
       [two.personKey, [{ network: 'signal', ghostId: 'g2' }]],
       [one.personKey, []],
     ])
+  })
+
+  it('undoes a link, taking off only what it added', () => {
+    const before = {
+      name: 'Ann',
+      links: [{ network: 'signal' as const, ghostId: 'g1' }],
+      phones: [{ value: '+15550001111', label: 'mobile' }],
+    }
+    const after = withLinks(before, [contact('whatsapp', 'g2', 'Ann', ['tel:+15550001111', 'mailto:ann@example.com'])])
+    const change = linkChange(before, after)
+    expect(change).toEqual({
+      links: [{ network: 'whatsapp', ghostId: 'g2' }],
+      phones: [],
+      emails: ['ann@example.com'],
+      handles: [],
+    })
+    // A note written since the link stays when it's undone.
+    expect(withoutLinkChange({ ...after, note: 'met at work' }, change)).toEqual({ ...before, note: 'met at work' })
   })
 
   it('never groups two different full numbers through one saved without its country code', () => {
