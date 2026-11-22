@@ -60,7 +60,7 @@ import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
 import { inFilter } from './filter-match.ts'
 import { searchScope } from './search-scope.ts'
-import { unreadIncomplete, type Count } from './unread-fill.ts'
+import { countsAsUnread, unreadIncomplete, type Count } from './unread-fill.ts'
 import { usePrefs } from '~/lib/prefs.ts'
 import { useSession } from '~/lib/session.tsx'
 
@@ -84,6 +84,8 @@ interface SidebarProps {
    * while the list is still loading, when there's nothing to compare against.
    */
   shownRef: { current: string[] | null }
+  /** Kept up to date with what the list is showing (search, open sheet, filters). */
+  contextRef: { current: string }
   chatsRef: { current: Map<string, Chat> }
 }
 
@@ -105,6 +107,7 @@ export function Sidebar({
   onPeople,
   onNewChat,
   shownRef,
+  contextRef,
   chatsRef,
 }: SidebarProps) {
   const [layout] = useSidebarLayout()
@@ -187,7 +190,8 @@ export function Sidebar({
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
 
-  const isUnread = (c: Chat) => (c.hasUnread && !c.muted) || has(c, openedUnreadId)
+  // Judged chat by chat, by the same rule the fill below and the server's count use.
+  const isUnread = (c: Chat) => membersOf(c).some(countsAsUnread) || has(c, openedUnreadId)
   const unread = (inbox ?? []).filter(isUnread)
   if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
   // Newest first. The server pages Focused that way already, except with a label, whose pages
@@ -206,7 +210,7 @@ export function Sidebar({
     unreadIncomplete({
       more: main.canLoadMore || main.loading,
       // Each chat of a merged conversation, as the server counts them apart.
-      loadedUnread: inbox.flatMap(membersOf).filter((c) => c.hasUnread && c.row.mutedUntil === null).length,
+      loadedUnread: inbox.flatMap(membersOf).filter(countsAsUnread).length,
       count: counts?.inbox,
     })
   const loadInbox = useRef(main.loadMore)
@@ -351,28 +355,41 @@ export function Sidebar({
   chatsRef.current = new Map(everything.flatMap((c) => membersOf(c).map((m) => [m.id as string, c] as const)))
 
   // A view or filter change that hides the open chat closes it rather than opening another:
-  // opening a chat marks it read, and nobody asked to read it. Judged from the open chat as the
-  // server has it now (the same subscription the chat pane uses), not from the lists: its page
-  // may be one still to come, and a row a list kept may be out of date.
+  // opening a chat marks it read, and nobody asked to read it. Judged from the chats themselves,
+  // not from what the lists show, as the chat's page may be one still to come: the open chat as
+  // the server has it now (the same subscription the chat pane uses), and the other chats of
+  // its conversation as the lists last had them. It stays open while any of them still matches.
   const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
+  contextRef.current = `${q}|${sheetOpen ? sheet : ''}|${filterKey}`
+  // The open conversation's chats as of the last render, before a filter change empties the lists.
+  const openMembers = useRef<Chat[]>([])
   // The chat open when the filter changed, still to be judged once the server answers; a chat
   // opened after the change was opened under the new filter, and isn't judged.
-  const toJudge = useRef<string | undefined>(undefined)
+  const toJudge = useRef<{ id: string; others: Chat[] } | undefined>(undefined)
   useEffect(() => {
     if (lastFilterKey.current !== filterKey) {
       lastFilterKey.current = filterKey
       toJudge.current = selectedId
+        ? { id: selectedId, others: openMembers.current.filter((m) => m.id !== selectedId) }
+        : undefined
     }
-    if (!toJudge.current) return
-    if (toJudge.current !== selectedId) {
+    const judging = toJudge.current
+    if (!judging) return
+    if (judging.id !== selectedId) {
       toJudge.current = undefined
       return
     }
     if (openChat === undefined) return
     toJudge.current = undefined
-    if (openChat && !inFilter(openChat, { network, labelId, view: focused ? null : simpleShow })) onClose()
+    const shows = (c: Chat) => inFilter(c, { network, labelId, view: focused ? null : simpleShow })
+    if (openChat && !shows(openChat) && !judging.others.some(shows)) onClose()
+  })
+  useEffect(() => {
+    const open = selectedId ? everything.find((c) => has(c, selectedId)) : undefined
+    if (open) openMembers.current = membersOf(open)
+    else if (!openMembers.current.some((m) => m.id === selectedId)) openMembers.current = []
   })
 
   const currentLabel = labels?.find((l) => l.id === labelId)

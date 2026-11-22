@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { unreadIncomplete } from '../src/features/shell/unread-fill.ts'
+import { countsAsUnread, unreadIncomplete } from '../src/features/shell/unread-fill.ts'
 
 describe('unreadIncomplete', () => {
   it('is done once the inbox has no more pages', () => {
@@ -19,5 +19,13 @@ describe('unreadIncomplete', () => {
   it('loads to the end without a count, or with one that stops short', () => {
     expect(unreadIncomplete({ more: true, loadedUnread: 40, count: undefined })).toBe(true)
     expect(unreadIncomplete({ more: true, loadedUnread: 120, count: { count: 99, more: true } })).toBe(true)
+  })
+})
+
+describe('countsAsUnread', () => {
+  it('counts unread chats with no mute stored', () => {
+    expect(countsAsUnread({ hasUnread: true, row: { mutedUntil: null } })).toBe(true)
+    expect(countsAsUnread({ hasUnread: true, row: { mutedUntil: 5 } })).toBe(false)
+    expect(countsAsUnread({ hasUnread: false, row: { mutedUntil: null } })).toBe(false)
   })
 })

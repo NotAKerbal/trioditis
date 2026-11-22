@@ -1,3 +1,12 @@
+/**
+ * Whether one chat counts as unread, as the server's count has it: unread messages or marked
+ * unread, and no mute stored. A merged conversation is unread when one of its chats is, so a
+ * muted chat's messages never make it unread through another chat's lack of a mute.
+ */
+export function countsAsUnread(chat: { hasUnread: boolean; row: { mutedUntil: number | null } }): boolean {
+  return chat.hasUnread && chat.row.mutedUntil === null
+}
+
 /** A badge count from chats.counts: it stops at 99, and `more` says there may be others. */
 export interface Count {
   count: number
