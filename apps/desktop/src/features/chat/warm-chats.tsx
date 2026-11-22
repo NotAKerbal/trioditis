@@ -1,6 +1,3 @@
-import { api } from '@trioditis/backend/api'
-import { convexQuery } from '@convex-dev/react-query'
-import { useQuery } from '@tanstack/react-query'
 import { Component, type ReactNode } from 'react'
 import { useWarmChat, useWarmChats } from '~/data/chat-content.ts'
 import type { Chat } from '~/data/chats.ts'
@@ -37,8 +34,9 @@ function WarmAddressBook() {
   return null
 }
 
+// Not the chat itself (chats.get): the pane opens with the sidebar's row while it asks, and a
+// failed answer kept in the cache would close the chat as it opened.
 function WarmChat({ chat }: { chat: Chat }) {
-  useQuery({ ...convexQuery(api.chats.get, { chatId: chat.id }), retry: false })
   useWarmChat(chat)
   return null
 }

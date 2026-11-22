@@ -13,13 +13,14 @@ vi.mock('convex-helpers/react/cache/hooks', () => ({ usePaginatedQuery: page('ca
 vi.mock('convex/react', () => ({ usePaginatedQuery: page('fresh'), useMutation: () => () => {} }))
 vi.mock('~/lib/session.tsx', () => ({ useSession: () => ({ userId: 'u1' }) }))
 const { useMessages } = await import('../src/data/messages.ts')
+const { fetchAheadFailed } = await import('../src/data/fetched-ahead.ts')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-async function render(attempt: number) {
+async function render(attempt: number, chatId = 'chat1') {
   asked.length = 0
   const root = createRoot(document.createElement('div'))
-  const Pane = () => (useMessages('chat1' as never, attempt), null)
+  const Pane = () => (useMessages(chatId as never, attempt), null)
   await act(async () => root.render(createElement(Pane)))
   await act(async () => root.unmount())
   // Which hooks were given the chat: a conversation's empty page slots skip both.
@@ -36,5 +37,12 @@ describe('a chat’s messages', () => {
   it('are asked for outside the cache after a page couldn’t load', async () => {
     expect(await render(1)).toEqual(new Set(['fresh']))
     expect(await render(4)).toEqual(new Set(['fresh']))
+  })
+
+  // Fetching it ahead failed, and the cache keeps that failure under the same key.
+  it('are asked for outside the cache when fetching them ahead failed', async () => {
+    fetchAheadFailed('chat:chat2')
+    expect(await render(0, 'chat2')).toEqual(new Set(['fresh']))
+    expect(await render(0)).toEqual(new Set(['cached']))
   })
 })
