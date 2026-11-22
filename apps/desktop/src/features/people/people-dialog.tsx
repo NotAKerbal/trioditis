@@ -242,13 +242,18 @@ function People({
     if (!saved || !done) return undefined
     return {
       contacts: new Set(done.links.map(contactKey)),
-      undo: async () => {
+      undo: async (only) => {
+        // Only the contacts the save still answers for: one linked again since belongs to a
+        // newer save. Taking back only some leaves the copied fields, as any of them may have
+        // come with a contact that stays.
+        const links = done.links.filter((l) => only.has(contactKey(l)))
+        const scoped = links.length === done.links.length ? done : { links, phones: [], emails: [], handles: [] }
         let stale = false
         const saved = await run((fresh) => {
           const now = fresh.find((p) => p.personKey === personKey)
           const on = new Set((now?.card.links ?? []).map(contactKey))
-          stale = !now || !done.links.every((l) => on.has(contactKey(l)))
-          return now && !stale ? [{ personKey, card: withoutLinkChange(now.card, done) }] : []
+          stale = !now || !links.length || !links.every((l) => on.has(contactKey(l)))
+          return now && !stale ? [{ personKey, card: withoutLinkChange(now.card, scoped) }] : []
         }, 'That couldn’t be undone.')
         if (!saved) return 'failed'
         if (stale) toast('That link was changed on another device, so it wasn’t undone.')
@@ -926,10 +931,11 @@ export function ChoosePerson({
 }
 
 /**
- * Takes a saved change back: `stale` when it no longer can, as another device changed it since,
- * and `failed` when it couldn't be saved and may be tried again.
+ * Takes a saved change back for the given contacts (`contactKey`): `stale` when it no longer
+ * can, as another device changed it since, and `failed` when it couldn't be saved and may be
+ * tried again.
  */
-type Undo = () => Promise<'done' | 'stale' | 'failed'>
+type Undo = (only: ReadonlySet<string>) => Promise<'done' | 'stale' | 'failed'>
 
 /** What a save of suggested links linked, by `contactKey`, and what takes it back. */
 interface Linked {
@@ -1081,7 +1087,7 @@ function Suggestions({
   async function undo(save: Save) {
     const keys = ownRows(save)
     update(keys, (k) => k && { ...k, state: 'undoing' })
-    const result = await save.undo()
+    const result = await save.undo(new Set(keys.map((key) => contactKey(kept.get(key)!.suggestion.contact))))
     update(keys, (k) =>
       k && result !== 'stale' ? { ...k, state: result === 'done' ? 'undone' : 'linked' } : undefined,
     )
@@ -1129,7 +1135,7 @@ function Suggestions({
           ) : null}
           {sure.length ? (
             <Button size="sm" loading={busy === 'linking'} disabled={!!busy} onClick={() => void linkAll()}>
-              Link {sure.length.toLocaleString()} matches
+              Link {sure.length.toLocaleString()} {sure.length === 1 ? 'match' : 'matches'}
             </Button>
           ) : null}
         </>
