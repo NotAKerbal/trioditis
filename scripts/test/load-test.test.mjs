@@ -416,3 +416,37 @@ void test("a failed query that was let go isn't asked again until something need
   assert.equal(subscriptions, 2)
   await sim.close()
 })
+
+void test('everyone waiting on one answer shares its wait, and a dropped query fails no one', async () => {
+  const { SimClient, clientMetrics } = await import('../load-test/clients.mjs')
+  const { random: seeded } = await import('../load-test/inbox.mjs')
+  const metrics = clientMetrics()
+  const sim = new SimClient({
+    id: 0,
+    convexUrl: 'http://127.0.0.1:9',
+    person: { token: async () => 'token' },
+    metrics,
+    sent: new Map(),
+    rand: seeded(1),
+    networks: [],
+  })
+  await sim.client.close()
+  const answers = []
+  sim.client = {
+    onUpdate(_ref, _args, onValue) {
+      answers.push(onValue)
+      return () => {}
+    },
+    close: async () => {},
+  }
+  const a = sim.watch('k', 'people:list', {})
+  const b = sim.watch('k', 'people:list', {})
+  answers[0]('answer')
+  assert.deepEqual(await Promise.all([a, b]), ['answer', 'answer'])
+  assert.equal(metrics.firstResult['people:list'].length, 1)
+  const waiting = sim.watch('gone', 'people:list', { other: true })
+  sim.drop('gone')
+  assert.equal(await waiting, null)
+  assert.equal(metrics.errors, 0)
+  await sim.close()
+})

@@ -147,37 +147,43 @@ export class SimClient {
       if (held.retryWhenAsked) held.retryNow()
       return held.next()
     }
-    const sub = { name, value: undefined, readyAt: null, listeners: new Set([onValue]), waiters: new Set() }
+    const sub = { name, value: undefined, readyAt: null, listeners: new Set([onValue]), round: null }
     this.subs.set(key, sub)
     this.metrics.subscriptions++
     this.metrics.peakSubscriptions = Math.max(this.metrics.peakSubscriptions, this.subs.size)
-    /** The next answer, or null on the next failure or after ANSWER_MS. */
-    sub.next = () =>
-      new Promise((resolve) => {
-        const started = performance.now()
-        const waiter = (value) => {
-          clearTimeout(deadline)
-          sub.waiters.delete(waiter)
-          if (value !== null) (this.metrics.firstResult[name] ??= []).push(performance.now() - started)
-          resolve(value)
-        }
-        const deadline = setTimeout(() => {
-          if (!sub.waiters.has(waiter)) return
-          this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
-          waiter(null)
-        }, ANSWER_MS)
-        deadline.unref?.()
-        sub.waiters.add(waiter)
-      })
-    const settleWaiters = (value) => {
-      for (const waiter of sub.waiters) waiter(value)
+    /**
+     * The next answer, or null on the next failure or after ANSWER_MS: one wait shared by
+     * everyone asking meanwhile, so it is timed, and times out, once.
+     */
+    sub.next = () => {
+      if (sub.round) return sub.round.promise
+      const round = { started: performance.now() }
+      round.promise = new Promise((resolve) => (round.resolve = resolve))
+      round.deadline = setTimeout(() => {
+        if (sub.round !== round) return
+        this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
+        settle(null)
+      }, ANSWER_MS)
+      round.deadline.unref?.()
+      sub.round = round
+      return round.promise
     }
-    // Closing the client settles what's still waiting, so nothing waits on it afterwards.
-    sub.settle = () => settleWaiters(null)
+    /** Ends the wait: with an answer (timed), or null for a failure or the query going away (not). */
+    const settle = (value, answered = false) => {
+      const round = sub.round
+      if (!round) return
+      sub.round = null
+      clearTimeout(round.deadline)
+      if (answered) (this.metrics.firstResult[name] ??= []).push(performance.now() - round.started)
+      round.resolve(value)
+    }
+    // Closing the client or dropping the query settles what's still waiting, without counting
+    // it as a failure, so nothing waits on it afterwards.
+    sub.settle = () => settle(null)
     const onValueFromServer = (value) => {
       sub.value = value
       sub.readyAt ??= Date.now()
-      settleWaiters(value)
+      settle(value, true)
       for (const listener of sub.listeners) listener(value, false)
     }
     // A query that fails is dead. The desktop's RetryBoundary (features/shell/retry-boundary.tsx)
@@ -199,7 +205,7 @@ export class SimClient {
     const onError = (error) => {
       this.error(name, error)
       sub.value = undefined
-      settleWaiters(null)
+      settle(null)
       if (error instanceof ConvexError || this.closed) return
       sub.failures = failuresInARow(sub.failures, sub.lastErrorAt, Date.now())
       sub.lastErrorAt = Date.now()
@@ -233,6 +239,7 @@ export class SimClient {
   drop(key) {
     const sub = this.subs.get(key)
     if (!sub) return
+    sub.settle()
     sub.unsubscribe()
     this.subs.delete(key)
   }
@@ -405,7 +412,6 @@ export class SimClient {
         listeners: new Map(),
         reactionKeys: new Set(),
         contactKeys: new Set(),
-        extras: Promise.resolve(),
         liveSince: null,
       }
       // One listener per chat, so watching a request again never adds another.
@@ -451,6 +457,11 @@ export class SimClient {
     for (const key of [...state.pages, ...state.fixed, ...state.reactionKeys, ...state.contactKeys]) this.release(key)
   }
 
+  /** What goes with a chat's messages, as it stands now: its reactions, senders and scheduled messages. */
+  extrasOf(state) {
+    return Promise.all([...state.fixed, ...state.reactionKeys, ...state.contactKeys].map((k) => this.answerOf(k)))
+  }
+
   /** The reactions and senders' requests the chat's loaded messages call for now. */
   reconcile(state) {
     const { chat } = state
@@ -461,13 +472,12 @@ export class SimClient {
       .reverse()
     const reactionKey = (asked) => `reactions:${chat._id}:${asked.join()}`
     const wanted = new Set()
-    const waits = []
     for (const group of reactionGroups(messages)) {
       const requests = reactionRequests(group, (asked) => this.subs.get(reactionKey(asked))?.value)
       for (const asked of requests) {
         const key = reactionKey(asked)
         wanted.add(key)
-        waits.push(this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: asked }, state.onChange))
+        void this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: asked }, state.onChange)
       }
     }
     for (const key of state.reactionKeys) {
@@ -485,12 +495,11 @@ export class SimClient {
         const ids = ghosts.slice(i, i + 100)
         const key = `contacts:${chat.network}:${ids.join()}`
         contacts.add(key)
-        waits.push(this.watch(key, 'contacts:get', { network: chat.network, ghostIds: ids }))
+        void this.watch(key, 'contacts:get', { network: chat.network, ghostIds: ids })
       }
     }
     for (const key of state.contactKeys) if (!contacts.has(key)) this.release(key)
     state.contactKeys = contacts
-    state.extras = Promise.all([...waits, ...state.fixed.map((k) => this.answerOf(k))])
   }
 
   /**
@@ -535,7 +544,7 @@ export class SimClient {
       return
     }
     // Shown once its reactions, senders and scheduled messages are in, or SETTLE_MS after.
-    await Promise.race([state.extras, sleep(SETTLE_MS)])
+    await Promise.race([this.extrasOf(state), sleep(SETTLE_MS)])
     this.metrics.opens.push(performance.now() - started)
     if (row.unreadCount > 0 || row.markedUnread) await this.mutate('chats:markRead', { chatId: chat._id })
   }
@@ -546,7 +555,7 @@ export class SimClient {
     if (!last || last.isDone) return this.openSomething()
     this.count('scroll back')
     const value = await this.loadPage(state, last.continueCursor)
-    if (value) await state.extras
+    if (value) await this.extrasOf(state)
   }
 
   async openPeople() {
