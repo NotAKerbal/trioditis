@@ -123,9 +123,8 @@ function PreviewImage({ network, image, className }: { network: Network; image: 
 
 function AddressCard({ card }: { card: Extract<Card, { kind: 'address' }> }) {
   const Icon = ICONS[card.service.icon]
+  // A known service is named by it; anywhere else, by the host itself, which is then the name.
   const known = card.service.icon !== 'web'
-  // A known service is named by it; anywhere else, by the site, with the page's path under it.
-  const detail = known ? [card.detail, card.host].filter(Boolean).join(' · ') : card.detail
   return (
     <span className="flex items-center gap-3 px-3 py-2.5">
       <span
@@ -138,9 +137,11 @@ function AddressCard({ card }: { card: Extract<Card, { kind: 'address' }> }) {
         <Icon className="size-5" />
       </span>
       <span className="flex min-w-0 flex-col">
-        {/* A site named by its host shows it whole, wrapping, never cut short. */}
         <span className={cn('text-sm font-semibold', known ? 'truncate' : 'break-all')}>{card.service.name}</span>
-        {detail ? <span className="truncate text-xs text-muted-foreground">{detail}</span> : null}
+        {card.detail ? <span className="truncate text-xs text-muted-foreground">{card.detail}</span> : null}
+        {/* Where the card goes, whole and on its own line, as on a preview's card: nothing in
+          the address (a long repository name, say) can push it out of view. */}
+        {known ? <span className="text-xs break-all text-subtle-foreground">{card.host}</span> : null}
       </span>
     </span>
   )
