@@ -44,6 +44,7 @@ import {
 import { accountLabels } from '~/data/account-label.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useSettled } from '~/data/chat-content.ts'
+import { failedAhead } from '~/data/fetched-ahead.ts'
 import { useContactProfiles, useContactsAcross } from '~/data/contacts.ts'
 import {
   cardIndex,
@@ -215,6 +216,10 @@ function OpenChat({
 }) {
   const session = useSession()
   const actions = useChatActions()
+  // A chat that couldn't be fetched ahead opens asking afresh, past the failure the cache keeps
+  // (data/fetched-ahead.ts), as a retry does. Decided once, as it opens.
+  const [startFresh] = useState(() => [chat.id, ...chatIds].some((id) => failedAhead(`chat:${id}`)))
+  const pages = attempt > 0 ? attempt : startFresh ? 1 : 0
   // The person's direct chats on other networks, shown with this one as one conversation.
   const together = chatIds.length > 1 && chatIds.includes(chat.id)
   const looked = useChatsById(together ? chatIds : [])
@@ -250,7 +255,7 @@ function OpenChat({
   slotsRef.current = stableSlots(slotsRef.current, memberIds)
   const { messages, hidden, loading, canLoadMore, loadingMore, loadMore } = useMessages(
     slotsRef.current as (ChatId | undefined)[],
-    attempt,
+    pages,
   )
   // A conversation's chats and their first pages are still on their way: until they're in, what
   // it shows of each (and so what it marks read) isn't known.

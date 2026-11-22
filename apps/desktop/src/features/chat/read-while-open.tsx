@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { useOpenChat, type ChatId } from '~/data/chats.ts'
 import { NOTHING_READ, readOnOpen, type ReadOnOpen } from '~/data/read-on-open.ts'
+import { useConnected } from '~/features/shell/sync-bar.tsx'
 
 /** Whether the window is shown and focused, as it changes: when the person can see the open chat. */
 function subscribeSeen(onChange: () => void) {
@@ -36,7 +37,11 @@ export function ReadWhileOpen({
   states: Map<string, ReadOnOpen>
   markRead: (chatId: ChatId) => Promise<unknown>
 }) {
-  useReadWhileOpen(chatId, paused, states, markRead)
+  // Not while the server can't be reached either: what's on screen is then the cache's, and a
+  // mark sent when it's back would count messages that came meanwhile, never shown, as read.
+  // Back online, the chat on screen is caught up and marked as any open chat is.
+  const connected = useConnected()
+  useReadWhileOpen(chatId, paused || !connected, states, markRead)
   return null
 }
 

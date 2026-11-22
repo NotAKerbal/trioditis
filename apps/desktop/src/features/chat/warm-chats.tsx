@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Component, type ReactNode } from 'react'
 import { useWarmChat, useWarmChats } from '~/data/chat-content.ts'
 import type { Chat } from '~/data/chats.ts'
+import { fetchAheadFailed } from '~/data/fetched-ahead.ts'
 import { useNetworkContacts, usePeople, usePeopleWarm } from '~/data/people.ts'
 
 /**
@@ -13,7 +14,7 @@ import { useNetworkContacts, usePeople, usePeopleWarm } from '~/data/people.ts'
 export function WarmChats() {
   const chats = useWarmChats()
   return chats.map((chat) => (
-    <Quiet key={chat.id}>
+    <Quiet key={chat.id} onFailed={() => fetchAheadFailed(`chat:${chat.id}`)}>
       <WarmChat chat={chat} />
     </Quiet>
   ))
@@ -23,7 +24,7 @@ export function WarmChats() {
 export function WarmPeople() {
   const warm = usePeopleWarm()
   return warm ? (
-    <Quiet>
+    <Quiet onFailed={() => fetchAheadFailed('people')}>
       <WarmAddressBook />
     </Quiet>
   ) : null
@@ -43,13 +44,17 @@ function WarmChat({ chat }: { chat: Chat }) {
 }
 
 /**
- * A chat that couldn't be fetched ahead just isn't: opening it asks again, and its pane says
- * what went wrong if it still can't load.
+ * A chat that couldn't be fetched ahead just isn't: it's noted (data/fetched-ahead.ts), so opening
+ * it asks afresh rather than from the failed cache, and its pane says what went wrong if it
+ * still can't load.
  */
-class Quiet extends Component<{ children: ReactNode }, { failed: boolean }> {
+class Quiet extends Component<{ children: ReactNode; onFailed: () => void }, { failed: boolean }> {
   override state = { failed: false }
   static getDerivedStateFromError() {
     return { failed: true }
+  }
+  override componentDidCatch() {
+    this.props.onFailed()
   }
   override render() {
     return this.state.failed ? null : this.props.children

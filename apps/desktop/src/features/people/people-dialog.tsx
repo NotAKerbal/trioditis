@@ -69,6 +69,7 @@ import { fetchGooglePhotos, GoogleRefused, readGoogleContacts, useGoogleClientId
 import { canSignInToGoogle, GoogleSignInError, googleSignInProblem, signInToGoogle } from '~/lib/google-sign-in.ts'
 import { rowMatches, shownIdentifier, unsortedRow } from '~/features/people/unsorted.ts'
 import { Group } from '~/features/settings/layout.tsx'
+import { failedAhead } from '~/data/fetched-ahead.ts'
 import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { useSession } from '~/lib/session.tsx'
@@ -151,8 +152,10 @@ function People({
   onViewChange: (view: PeopleView | undefined) => void
   onOpenChat: (chatId: Id<'chats'>) => void
 }) {
-  // From the cache, so the window opens full; afresh on a retry, past a failed cached page.
-  const from = retries > 0 ? 'fresh' : 'cached'
+  // From the cache, so the window opens full; afresh on a retry, or when fetching ahead failed
+  // (data/fetched-ahead.ts), past the failed page the cache keeps.
+  const [failedBefore] = useState(() => failedAhead('people'))
+  const from = retries > 0 || failedBefore ? 'fresh' : 'cached'
   const people = usePeople(from)
   const contacts = useNetworkContacts(from)
   const actions = usePeopleActions(people)
