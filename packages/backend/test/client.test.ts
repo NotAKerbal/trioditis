@@ -594,6 +594,41 @@ describe('reads that large messages could push past the read limit', () => {
     })
     expect(await ask()).toEqual(none)
   })
+
+  it('says nothing to anyone else of a marker from before markers named their chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const c = await signIn(t, 'user_c')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const mine = await aChat(t, 'user_c', 'q')
+    const [deleted, kept] = await bigMessages(t, chatId, 2)
+    await t.run(async (ctx) => {
+      for (const messageId of [deleted!, kept!]) {
+        await ctx.db.insert('reactions', {
+          userId: 'user_a',
+          chatId,
+          messageId,
+          senderKey: 'self',
+          key: '👍',
+          eventId: `r${messageId}`,
+          addedAt: 1,
+          networkTs: 1,
+        })
+      }
+    })
+    const ask = () => c.query(api.messages.reactions, { chatId: mine, messageIds: [deleted!, kept!] })
+    const before = await ask()
+    expect(before).toEqual({ [deleted!]: [], [kept!]: [] })
+    await t.run(async (ctx) => {
+      await ctx.db.insert('reactionCleanups', { messageId: deleted! })
+    })
+    expect(await ask()).toEqual(before)
+    // Its person still has it left out of its own chat, and empty from their others.
+    const own = await a.query(api.messages.reactions, { chatId, messageIds: [deleted!, kept!] })
+    expect(own).toEqual({ [kept!]: [{ key: '👍', senderKey: 'self' }] })
+    const other = await aChat(t, 'user_a', 'other')
+    expect(await a.query(api.messages.reactions, { chatId: other, messageIds: [deleted!] })).toEqual({ [deleted!]: [] })
+  })
 })
 
 describe('reads that many large rows could push past the read limit', () => {

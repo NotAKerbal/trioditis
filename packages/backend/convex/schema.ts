@@ -513,8 +513,6 @@ export default defineSchema({
     .index('by_message', ['messageId', 'senderKey', 'key'])
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
     .index('by_message_active', ['messageId', 'removedAt'])
-    // The same, only the person's: what `messages.reactions` reads, so another's rows never count.
-    .index('by_user_message_active', ['userId', 'messageId', 'removedAt'])
     // The person's own active reactions on a message, past the first 100 (`messages.reactions`).
     .index('by_message_sender_active', ['messageId', 'senderKey', 'removedAt']),
 

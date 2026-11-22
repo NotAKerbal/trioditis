@@ -315,30 +315,42 @@ export const reactions = query({
     const member = await requireMember(ctx)
     if (messageIds.length > 100) throw new ConvexError('Ask for at most 100 messages’ reactions at once.')
     // The chat row isn't read unless a message is being cleaned up: it changes with every
-    // message, and reading it ran every open chat's reactions again on each one. Only the
-    // person's own rows are read, so another's chat gets empty lists, whatever is in it.
+    // message, and reading it ran every open chat's reactions again on each one. Nothing of
+    // another person's is counted or shown, so their chat gets empty lists, whatever is in it.
     const out: Record<string, { key: string; senderKey: string }[]> = {}
-    let own: Promise<boolean> | undefined
-    const isOwnChat = () => (own ??= ctx.db.get(chatId).then((chat) => chat !== null && chat.userId === member.userId))
+    let ownChecked: Promise<boolean> | undefined
+    const isOwnChat = () =>
+      (ownChecked ??= ctx.db.get(chatId).then((chat) => chat !== null && chat.userId === member.userId))
+    const active = (messageId: Id<'messages'>) =>
+      ctx.db
+        .query('reactions')
+        .withIndex('by_message_active', (q) => q.eq('messageId', messageId).eq('removedAt', undefined))
     // A message's rows and the bytes read for them, or null for one left out: deleted in this chat.
     const one = async (messageId: Id<'messages'>) => {
-      const deleted = await ctx.db
-        .query('reactionCleanups')
-        .withIndex('by_message', (q) => q.eq('messageId', messageId))
-        .first()
-      // A marker says nothing unless the chat is the person's: which messages of a chat are
-      // being deleted is its owner's to know, so for anyone else it's as if there were none.
-      if (deleted && (await isOwnChat())) {
-        // A deleted message in this chat is left out; one in another chat isn't this chat's,
-        // so it gets an empty list like any other ID that isn't a message here.
-        return deleted.chatId !== undefined && deleted.chatId !== chatId ? { rows: [], read: 0 } : null
+      const [deleted, first] = await Promise.all([
+        ctx.db
+          .query('reactionCleanups')
+          .withIndex('by_message', (q) => q.eq('messageId', messageId))
+          .first(),
+        active(messageId).first(),
+      ])
+      // Every reaction on a message is filed under the message's person (ingest), so the first
+      // says whose the message is.
+      const mine = first !== null && first.userId === member.userId
+      // Which messages are being deleted is their person's to know: for anyone else a marker is
+      // as if there were none. A deleted message in this chat is left out; one in another chat
+      // isn't this chat's, so it gets an empty list like any other ID that isn't a message here.
+      if (deleted?.chatId !== undefined) {
+        if (deleted.chatId !== chatId) return { rows: [], read: 0 }
+        if (await isOwnChat()) return null
+      } else if (deleted && mine) {
+        // A marker from before they named their chat: the message's reactions do.
+        return first.chatId === chatId ? null : { rows: [], read: 0 }
       }
-      const rows = await ctx.db
-        .query('reactions')
-        .withIndex('by_user_message_active', (q) =>
-          q.eq('userId', member.userId).eq('messageId', messageId).eq('removedAt', undefined),
-        )
-        .take(MAX_REACTIONS_PER_MESSAGE)
+      // Another person's message gets an empty list, and nothing read for it counts toward the
+      // budget, so how many reactions it has can't change which messages are answered.
+      if (!mine) return { rows: [], read: 0 }
+      const rows = await active(messageId).take(MAX_REACTIONS_PER_MESSAGE)
       let read = byteSize(rows)
       if (rows.length === MAX_REACTIONS_PER_MESSAGE) {
         const seen = new Set(rows.map((row) => row._id))
