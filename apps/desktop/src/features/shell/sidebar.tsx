@@ -358,9 +358,9 @@ export function Sidebar({
   // opening a chat marks it read, and nobody asked to read it. Judged from the chats themselves,
   // not from what the lists show, as the chat's page may be one still to come: the open chat as
   // the server has it now (the same subscription the chat pane uses), and the other chats of
-  // its conversation as the lists last had them. While another of them still matches, that one
-  // becomes the open chat: the pane then shows the conversation as the filtered list has it, and
-  // its row stays selected. Only selected, not opened afresh: it was on screen already.
+  // its conversation as the lists last had them. It stays open, as it is, while any of them still
+  // matches. It isn't moved to the chat that matches: the pane would start reading that chat
+  // afresh and could mark messages read that were never on screen.
   const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
@@ -392,10 +392,7 @@ export function Sidebar({
     if (openChat === undefined) return
     toJudge.current = undefined
     const shows = (c: Chat) => inFilter(c, { network, labelId, view: focused ? null : simpleShow })
-    if (!openChat || shows(openChat)) return
-    const other = judging.others.find(shows)
-    if (other) onOpenId(other.id)
-    else onClose()
+    if (openChat && !shows(openChat) && !judging.others.some(shows)) onClose()
   })
   useEffect(() => {
     const open = selectedId ? everything.find((c) => has(c, selectedId)) : undefined
