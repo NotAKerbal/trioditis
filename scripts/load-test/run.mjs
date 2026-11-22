@@ -208,6 +208,14 @@ async function main() {
   }
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
+  // An error nothing caught skips every `finally`, so it cleans up here too.
+  const onCrash = (error) => {
+    console.error(`load test: ${error?.stack ?? error}`)
+    if (!values.keep) stopStack(name)
+    process.exit(2)
+  }
+  process.once('uncaughtException', onCrash)
+  process.once('unhandledRejection', onCrash)
   removeAbandonedStacks(log)
   const stack = await startStack({
     name,

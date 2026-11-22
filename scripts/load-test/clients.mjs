@@ -74,6 +74,23 @@ const sleep = (ms) =>
     timer.unref?.()
   })
 
+/**
+ * An unsubscribe that can be called again: the Convex client throws on a second call, and a
+ * failed query is let go both when it fails and when the cache lets it go.
+ */
+function once(unsubscribe) {
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    try {
+      unsubscribe()
+    } catch {
+      // Already gone on the client's side, as a query that failed can be.
+    }
+  }
+}
+
 /** The listener for a query nothing reacts to: one function, so a held query never gains copies. */
 const NOOP = () => {}
 
@@ -185,11 +202,11 @@ export class SimClient {
       const retry = setTimeout(() => {
         if (this.closed || this.subs.get(key) !== sub) return
         this.metrics.retries = (this.metrics.retries ?? 0) + 1
-        sub.unsubscribe = this.client.onUpdate(ref(name), args, onValueFromServer, onError)
+        sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
       }, retryDelay(sub.failures))
       retry.unref?.()
     }
-    sub.unsubscribe = this.client.onUpdate(ref(name), args, onValueFromServer, onError)
+    sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
     return sub.first
   }
 
