@@ -314,13 +314,10 @@ export const reactions = query({
   handler: async (ctx, { chatId, messageIds }) => {
     const member = await requireMember(ctx)
     if (messageIds.length > 100) throw new ConvexError('Ask for at most 100 messages’ reactions at once.')
-    // The chat row isn't read unless a message is being cleaned up: it changes with every
-    // message, and reading it ran every open chat's reactions again on each one. Nothing of
-    // another person's is counted or shown, so their chat gets empty lists, whatever is in it.
+    // The chat row isn't read: it changes with every message, and reading it ran every open
+    // chat's reactions again on each one. Nothing of another person's is counted or shown, so
+    // their chat gets empty lists, whatever is in it.
     const out: Record<string, { key: string; senderKey: string }[]> = {}
-    let ownChecked: Promise<boolean> | undefined
-    const isOwnChat = () =>
-      (ownChecked ??= ctx.db.get(chatId).then((chat) => chat !== null && chat.userId === member.userId))
     const active = (messageId: Id<'messages'>) =>
       ctx.db
         .query('reactions')
@@ -338,14 +335,12 @@ export const reactions = query({
       // says whose the message is.
       const mine = first !== null && first.userId === member.userId
       // Which messages are being deleted is their person's to know: for anyone else a marker is
-      // as if there were none. A deleted message in this chat is left out; one in another chat
-      // isn't this chat's, so it gets an empty list like any other ID that isn't a message here.
-      if (deleted?.chatId !== undefined) {
-        if (deleted.chatId !== chatId) return { rows: [], read: 0 }
-        if (await isOwnChat()) return null
-      } else if (deleted && mine) {
-        // A marker from before they named their chat: the message's reactions do.
-        return first.chatId === chatId ? null : { rows: [], read: 0 }
+      // as if there were none, and whose the message is comes from its reactions, not from the
+      // chat row. A deleted message in this chat is left out; one in another chat isn't this
+      // chat's, so it gets an empty list like any other ID that isn't a message here.
+      if (deleted && mine) {
+        // A marker from before markers named their chat goes by where its reactions are.
+        return (deleted.chatId ?? first.chatId) === chatId ? null : { rows: [], read: 0 }
       }
       // Another person's message gets an empty list, and nothing read for it counts toward the
       // budget, so how many reactions it has can't change which messages are answered.
