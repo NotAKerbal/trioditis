@@ -9,6 +9,7 @@ import { useMutation, usePaginatedQuery } from 'convex/react'
 // loading. Earlier pages it had loaded aren't put back: the list starts from the newest again.
 import { usePaginatedQuery as useCachedPaginatedQuery } from 'convex-helpers/react/cache/hooks'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { failedAhead } from '~/data/fetched-ahead.ts'
 import { openCached, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
 import type { ChatId } from './chats.ts'
@@ -71,7 +72,14 @@ const PAGE = 50
  * couldn't load) uses Convex's own hook instead, which asks under a new pagination ID each time
  * it mounts and lets its pages go as soon as it unmounts.
  */
-function usePage(chatId: ChatId | undefined, retrying: boolean) {
+function usePage(chatId: ChatId | undefined, retry: boolean) {
+  // A chat that couldn't be fetched ahead (data/fetched-ahead.ts) asks afresh too, past the
+  // failure the cache keeps. Decided when the slot gets the chat, and kept for as long as it has
+  // it: switching hooks midway would load its pages again from the start.
+  const chosen = useRef<{ chatId: ChatId | undefined; fresh: boolean } | null>(null)
+  if (!chosen.current || chosen.current.chatId !== chatId)
+    chosen.current = { chatId, fresh: !!chatId && failedAhead(`chat:${chatId}`) }
+  const retrying = retry || chosen.current.fresh
   const cached = useCachedPaginatedQuery(api.messages.list, chatId && !retrying ? { chatId } : 'skip', {
     initialNumItems: PAGE,
   })
@@ -223,7 +231,9 @@ export function useReactions(messages: { id: Id<'messages'>; at: number; chatId:
     return () => clearTimeout(timer)
   }, [shown, expires])
   const data = useMemo(() => Object.fromEntries([...shown].map(([id, s]) => [id, s.list])) as ReactionAnswer, [shown])
-  return useMemo(() => {
+  // Some of these messages have had no answer yet.
+  const pending = results.some((r) => r.pending)
+  const reactions = useMemo(() => {
     const out = new Map<string, Reaction[]>()
     for (const [messageId, list] of Object.entries(data)) {
       // The server gives a message's first 100 reactions at most: at that, any count may be more.
@@ -239,6 +249,7 @@ export function useReactions(messages: { id: Id<'messages'>; at: number; chatId:
     }
     return out
   }, [data])
+  return { reactions, pending }
 }
 
 /**

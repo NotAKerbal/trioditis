@@ -52,8 +52,9 @@ import {
   type LabelId,
 } from '~/data/chats.ts'
 import { cardIndex, mergeDms, setConversations, setDmChats } from '~/data/conversations.ts'
+import { warmChat } from '~/data/chat-content.ts'
 import { useSendMutations } from '~/data/messages.ts'
-import { usePeople } from '~/data/people.ts'
+import { usePeople, warmPeople } from '~/data/people.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
@@ -199,6 +200,28 @@ export function Sidebar({
   const read = (inbox ?? []).filter((c) => !isUnread(c))
   if (focused && labelId) read.sort((a, b) => b.row.lastMessageAt - a.row.lastMessageAt)
 
+  // The first few unread chats are the likeliest to be opened next: fetched ahead once the list
+  // has settled, so going through them is instant (data/chat-content.ts).
+  const nextUp = unread
+    .filter((c) => c.id !== selectedId)
+    .slice(0, WARM_UNREAD)
+    .map((c) => c.id)
+    .join()
+  const unreadRef = useRef(unread)
+  unreadRef.current = unread
+  useEffect(() => {
+    if (!nextUp) return
+    const ids = nextUp.split(',')
+    const timer = setTimeout(() => {
+      // Most likely last, so it's the one kept longest.
+      for (const id of [...ids].reverse()) {
+        const chat = unreadRef.current.find((c) => c.id === id)
+        if (chat) warmChat(chat)
+      }
+    }, WARM_UNREAD_AFTER_MS)
+    return () => clearTimeout(timer)
+  }, [nextUp])
+
   // Unread lists every unread chat with nothing to click: the inbox loads page after page until
   // the server's count of them is met (unread-fill.ts). Counted as the server counts, from what
   // is stored rather than this device's clock (a timed mute is cleared by a write when it ends),
@@ -265,6 +288,7 @@ export function Sidebar({
       chats: read,
       more: main,
       content: () => read.map((c) => row(c)),
+      ready: true,
     },
     {
       key: 'snoozed',
@@ -429,7 +453,16 @@ export function Sidebar({
         <Button variant="ghost" size="icon" aria-label="New chat" onClick={onNewChat}>
           <SquarePen className="size-[17px]" />
         </Button>
-        <Button variant="ghost" size="icon" aria-label="People" onClick={onPeople}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="People"
+          // The address book is fetched ahead as the person reaches for it, so it opens full.
+          onPointerEnter={warmPeople}
+          onFocus={warmPeople}
+          onPointerDown={warmPeople}
+          onClick={onPeople}
+        >
           <Users className="size-[17px]" />
         </Button>
         <DropdownMenu>
@@ -646,6 +679,11 @@ interface Section {
   more?: ChatList
   /** Its rows, rendered only while it's on the sheet. */
   content: () => ReactNode
+  /**
+   * Its rows drawn ahead, out of sight, once the browser is idle: for the section opened most,
+   * so its sheet slides up with the rows and their pictures already there.
+   */
+  ready?: boolean
 }
 
 /**
@@ -660,6 +698,10 @@ function tally(count: number, more?: ChatList, total?: Count): string | null {
 }
 
 const SHEET_MS = 300
+
+/** How many of the first unread chats are fetched ahead, and how long after the list settles. */
+const WARM_UNREAD = 3
+const WARM_UNREAD_AFTER_MS = 1_500
 
 /**
  * Focused's other sections, as rows at the foot of the list, so Unread has the room. A row
@@ -705,8 +747,18 @@ function Drawer({
 
   const rows = sections.filter((s) => s.count !== null)
   const current = sections.find((s) => s.key === onSheet)
+  const idle = useIdle(sections.some((s) => s.ready))
   return (
     <>
+      {idle
+        ? sections
+            .filter((s) => s.ready && s.key !== onSheet && s.count !== null)
+            .map((s) => (
+              <div key={s.key} hidden>
+                {s.content()}
+              </div>
+            ))
+        : null}
       {rows.length ? (
         // At most half the column, scrolling past that, so Unread keeps room in a short window.
         <div className="max-h-[50%] shrink-0 overflow-y-auto border-t border-border px-2 py-1" inert={open !== null}>
@@ -862,4 +914,20 @@ function ListSkeleton({ rows = 6 }: { rows?: number }) {
       ))}
     </div>
   )
+}
+
+/** True once the browser has had a moment free, after `wanted` turns true: work that can wait. */
+function useIdle(wanted: boolean) {
+  const [idle, setIdle] = useState(false)
+  useEffect(() => {
+    if (!wanted || idle) return
+    // Safari has no requestIdleCallback; a short wait does as well there.
+    if ('requestIdleCallback' in window) {
+      const handle = window.requestIdleCallback(() => setIdle(true), { timeout: 2_000 })
+      return () => window.cancelIdleCallback(handle)
+    }
+    const timer = setTimeout(() => setIdle(true), 500)
+    return () => clearTimeout(timer)
+  }, [wanted, idle])
+  return idle
 }

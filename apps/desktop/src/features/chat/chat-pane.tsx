@@ -31,7 +31,7 @@ import {
   mergedChat,
   networkName,
   onEach,
-  useChat,
+  useOpenChat,
   useCancelledIn,
   useChatActions,
   useAccounts,
@@ -43,7 +43,8 @@ import {
 } from '~/data/chats.ts'
 import { accountLabels } from '~/data/account-label.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
-import { useContacts, useContactsAcross } from '~/data/contacts.ts'
+import { useSettled } from '~/data/chat-content.ts'
+import { useContactProfiles, useContactsAcross } from '~/data/contacts.ts'
 import {
   cardIndex,
   cardOfChat,
@@ -76,13 +77,14 @@ import {
 } from '~/data/drafts.ts'
 import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
+import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { errorMessage } from '~/lib/errors.ts'
 import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { DetailsPanel, type PanelView } from './details-panel.tsx'
 import { ChatAvatar } from './chat-avatar.tsx'
-import { MessageList } from './message-list.tsx'
+import { MessageList, MessagesSkeleton } from './message-list.tsx'
 import { ReadWhileOpen } from './read-while-open.tsx'
 import type { ReadOnOpen } from '~/data/read-on-open.ts'
 import { draftSendId } from '~/data/saved-drafts.ts'
@@ -111,7 +113,9 @@ interface ChatPaneProps {
 
 export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, onOpenChat }: ChatPaneProps) {
   const session = useSession()
-  const chat = useChat(chatId)
+  // A chat the sidebar has shown opens at once with its row from there; the server's own answer
+  // takes its place when it comes (useOpenChat).
+  const { chat, confirmed } = useOpenChat(chatId)
   // What each read tracker has done, kept above the retry boundary: a retry isn't a new opening,
   // which would clear the person's own "marked unread". Opening another chat starts again.
   const readStates = useMemo(() => new Map<string, ReadOnOpen>(), [chatId])
@@ -120,6 +124,7 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
   useEffect(() => {
     if (chatId && chat === null) onGone()
   }, [chatId, chat, onGone])
+  if (chatId && chat === undefined) return <OpeningChat onBack={onBack} />
   if (!chatId || !chat) {
     return (
       // On a narrow screen the list has the whole width until a chat opens.
@@ -129,7 +134,7 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
           !chatId && 'max-md:hidden',
         )}
       >
-        {chatId && chat === undefined ? '' : 'No chat open'}
+        No chat open
       </main>
     )
   }
@@ -152,6 +157,7 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
       {(attempt) => (
         <OpenChat
           chat={chat}
+          confirmed={confirmed}
           chatIds={chatIds}
           attempt={attempt}
           readStates={readStates}
@@ -166,8 +172,31 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
   )
 }
 
+/**
+ * A chat opened before anything is known of it (a link, or one the sidebar hasn't loaded): its
+ * header's and composer's shapes while it loads, so the chat fills them in rather than pushing in.
+ */
+function OpeningChat({ onBack }: { onBack: () => void }) {
+  return (
+    <main className="flex min-w-0 flex-1 flex-col bg-surface-2" aria-busy="true" aria-label="Opening chat">
+      <header className="relative flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
+        <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
+          <ChevronLeft className="size-5" />
+        </Button>
+        <span className="size-[38px] shrink-0 rounded-full bg-muted" />
+        <span className="h-3.5 w-40 rounded bg-muted" />
+        <SyncBar active />
+      </header>
+      <MessagesSkeleton />
+      {/* The composer's one line (50px), so it doesn't push the list up when it comes. */}
+      <div className="mx-3.5 mb-3.5 h-[50px] shrink-0 rounded-[14px] bg-surface shadow-[0_0_0_1px_var(--border)]" />
+    </main>
+  )
+}
+
 function OpenChat({
   chat,
+  confirmed,
   chatIds,
   attempt,
   readStates,
@@ -178,6 +207,8 @@ function OpenChat({
   onOpenChat,
 }: Pick<ChatPaneProps, 'chatIds' | 'act' | 'onBack' | 'onOpenPerson' | 'onOpenChat'> & {
   chat: Chat
+  /** False while the header shows the sidebar's copy of the chat, not yet the server's. */
+  confirmed: boolean
   attempt: number
   readStates: Map<string, ReadOnOpen>
   chosen: { current: ChatId | null }
@@ -230,7 +261,9 @@ function OpenChat({
   const opener = useRef<HTMLElement | null>(null)
   // Deleted messages and pending copies have no reactions: leaving them out saves requests for
   // nothing, and keeps the reaction groups steady (a pending copy's place can still move).
-  const serverReactions = useReactions(messages.filter((m) => !m.deleted && !m.pending))
+  const { reactions: serverReactions, pending: reactionsPending } = useReactions(
+    messages.filter((m) => !m.deleted && !m.pending),
+  )
   const network = merged ? 'The network' : networkName(chat.network)
   const chatOfMessage = (id: Message['id']) => messages.find((m) => m.id === id)?.chatId
   const { reactions, toggle: toggleReaction } = useReactionToggle(
@@ -241,7 +274,7 @@ function OpenChat({
   )
   const group = chat.row.kind === 'group'
   // Only a group's senders are shown, so only a group asks who they are.
-  const senders = useContacts(
+  const { profiles: senders, pending: sendersPending } = useContactProfiles(
     chat.network,
     group ? messages.flatMap((m) => (m.ghostId && !m.self ? [m.ghostId] : [])) : [],
   )
@@ -343,7 +376,21 @@ function OpenChat({
   )
   const cancelledHere = useMemo(() => (cancelledRows ?? []).filter(inHere), [cancelledRows, memberIds.join()])
   const chatOfScheduled = new Map<string, ChatId>([...pending, ...cancelledHere].map((s) => [s._id, s.chatId]))
-  const scheduledTexts = useScheduledTexts([...pending, ...cancelledHere].map((s) => s._id))
+  const scheduledIds = [...pending, ...cancelledHere].map((s) => s._id)
+  const scheduledTexts = useScheduledTexts(scheduledIds)
+  // The messages show once what goes with them has come too (or SETTLE_MS after them), so
+  // nothing pops in to move the list. Until then the list holds a skeleton, and nothing is marked
+  // read: the person hasn't seen the messages yet.
+  const held = !useSettled(
+    !loading && !waiting,
+    reactionsPending ||
+      sendersPending ||
+      scheduledRows === undefined ||
+      cancelledRows === undefined ||
+      // A copy that can't be opened or fetched is there too, as null; only one on its way is missing.
+      scheduledIds.some((id) => !scheduledTexts.has(id)),
+  )
+  const connected = useConnected()
   const scheduled = useMemo(
     () =>
       pending.map((s) => ({
@@ -518,7 +565,7 @@ function OpenChat({
   return (
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
-        <header className="flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
+        <header className="relative flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
           <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
             <ChevronLeft className="size-5" />
           </Button>
@@ -685,12 +732,15 @@ function OpenChat({
               <Info className="size-[18px]" />
             </Button>
           </div>
+          {/* What's shown is the cache's until the server has answered, or while it can't be
+              reached: a line along the header's edge says so, without moving anything. */}
+          <SyncBar active={!confirmed || held || !connected} offline={!connected} />
         </header>
         <MessageList
           network={chat.network}
           networkOf={merged ? (m) => networkOfChat.get(m.chatId) ?? chat.network : undefined}
           messages={messages}
-          loading={loading}
+          loading={held}
           reactions={reactions}
           group={group}
           canReact={(m) => NETWORK_INFO[networkOfChat.get(m.chatId) ?? chat.network]?.reactions === true}
@@ -824,7 +874,7 @@ function OpenChat({
         <ReadWhileOpen
           key={m.id}
           chatId={m.id}
-          paused={waiting || hidden.includes(m.id)}
+          paused={held || waiting || hidden.includes(m.id)}
           states={readStates}
           markRead={actions.markRead}
         />

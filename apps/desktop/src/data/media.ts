@@ -94,6 +94,8 @@ function base64(bytes: Uint8Array): string {
 
 interface Kept {
   url: Promise<string>
+  /** The URL once it's ready, so a picture shown before is drawn at once, not after a frame of initials. */
+  ready?: string
   size: number
 }
 // Oldest first, by insertion; a file used again moves to the end. A data: URL let go here stays
@@ -124,10 +126,13 @@ export function mediaUrl(userId: string, network: Network, attachment: Attachmen
     kept.set(key, held)
     return held.url
   }
-  const url = decrypted(userId, network, attachment).then(
-    (bytes) => `data:${attachment.mime.toLowerCase()};base64,${base64(bytes)}`,
-  )
-  const entry = { url, size: attachment.size || 0 }
+  const entry: Kept = { url: Promise.resolve(''), size: attachment.size || 0 }
+  const url = decrypted(userId, network, attachment).then((bytes) => {
+    const ready = `data:${attachment.mime.toLowerCase()};base64,${base64(bytes)}`
+    entry.ready = ready
+    return ready
+  })
+  entry.url = url
   keep(key, entry)
   // A failure isn't kept, so the file is tried again the next time it's shown.
   url.catch(() => {
@@ -136,6 +141,11 @@ export function mediaUrl(userId: string, network: Network, attachment: Attachmen
     keptBytes -= entry.size
   })
   return url
+}
+
+/** A file's data: URL if it's decrypted and kept already, without waiting; else undefined. */
+export function readyMediaUrl(userId: string, attachment: Attachment | undefined): string | undefined {
+  return attachment ? kept.get(`${userId}/${attachment.mediaId}`)?.ready : undefined
 }
 
 /**
@@ -201,7 +211,13 @@ export function useMedia(
     }
     // The attachment is the same file for as long as its media ID is.
   }, [session.userId, network, mediaId, wanted, asked])
-  // Until the effect catches up with another file, nothing of the last one is shown.
-  const shown: MediaState = state.mediaId === mediaId ? state : { state: wanted ? 'loading' : 'idle' }
+  // A file decrypted already shows at once, before the effect has run; until the effect catches
+  // up with another file, nothing of the last one is shown.
+  const ready = wanted ? readyMediaUrl(session.userId, attachment) : undefined
+  const shown: MediaState = ready
+    ? { state: 'ready', url: ready }
+    : state.mediaId === mediaId
+      ? state
+      : { state: wanted ? 'loading' : 'idle' }
   return { ...shown, load: () => setAsked((n) => n + 1) } as MediaState & { load: () => void }
 }
