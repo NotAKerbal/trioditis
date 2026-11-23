@@ -191,9 +191,22 @@ export function Sidebar({
     ? everything.filter((c) => c.name.toLowerCase().includes(q) || c.topic?.toLowerCase().includes(q))
     : []
 
+  // The open chat as the server has it, for when no loaded page has it: archived from its row
+  // into a section whose page with it hasn't loaded yet, say, or opened from a scheduled message.
+  // Focused still lists it, under the section it's in.
+  const openChat = useChat(selectedId as ChatId | undefined)
+  const unlisted =
+    focused &&
+    openChat &&
+    !everything.some((c) => has(c, selectedId)) &&
+    inFilter(openChat, { network, labelId, view: null })
+      ? openChat
+      : undefined
+
   // Judged chat by chat, by the same rule the fill below and the server's count use.
   const isUnread = (c: Chat) => membersOf(c).some(countsAsUnread) || has(c, openedUnreadId)
   const unread = (inbox ?? []).filter(isUnread)
+  if (unlisted && viewOf(unlisted.row) === 'inbox' && isUnread(unlisted)) unread.push(unlisted)
   if (focused) unread.sort((a, b) => Number(b.row.pinned) - Number(a.row.pinned))
   // Newest first. The server pages Focused that way already, except with a label, whose pages
   // come in the order chats were labelled: then the loaded chats are sorted, by the same key.
@@ -278,22 +291,12 @@ export function Sidebar({
     />
   )
 
-  // The open chat as the server has it, for when no loaded page has it: archived from its row
-  // into a section whose page with it hasn't loaded yet, say, or opened from a scheduled message.
-  const openChat = useChat(selectedId as ChatId | undefined)
-  const unlisted =
-    openChat && !everything.some((c) => has(c, selectedId)) && inFilter(openChat, { network, labelId, view: null })
-      ? openChat
-      : undefined
-  // The open chat, when it's in this section, so the section still shows it while folded. Read
-  // doesn't take an unlisted chat that's unread: Unread loads every one of those.
+  // The open chat, when it's in this section, so the section still shows it while folded.
   const keep = (chats: Chat[] | undefined, view: ChatView) => {
     const open =
       chats?.find((c) => has(c, selectedId)) ??
-      (unlisted && viewOf(unlisted.row) === view && !(view === 'inbox' && countsAsUnread(unlisted))
-        ? unlisted
-        : undefined)
-    return open ? row(open) : undefined
+      (unlisted && viewOf(unlisted.row) === view && !(view === 'inbox' && isUnread(unlisted)) ? unlisted : undefined)
+    return open ? { id: open.id, row: row(open) } : undefined
   }
 
   // Focused's other sections, at the foot of the list; each opens as a sheet over Unread.
@@ -705,7 +708,7 @@ interface Section {
    * The open chat's row, when the chat is in this section: shown under the section's row while
    * the section is folded, so opening a chat from the sheet and closing the sheet doesn't hide it.
    */
-  kept?: ReactNode
+  kept?: { id: string; row: ReactNode }
   /**
    * Its rows drawn ahead, out of sight, once the browser is idle: for the section opened most,
    * so its sheet slides up with the rows and their pictures already there.
@@ -769,19 +772,23 @@ function Drawer({
       const row = rowRefs.current.get(wasOpen.current) ?? rowRefs.current.values().next().value
       if (row) row.focus({ preventScroll: true })
       else onFocusLost()
-      // The chat opened from the sheet sits under its section's row, which may be at the edge
-      // of a short footer: scrolled into the footer's view, so closing the sheet doesn't hide it.
-      const foot = footRef.current
-      const kept = foot?.querySelector('[data-kept]')
-      if (foot && kept) {
-        const f = foot.getBoundingClientRect()
-        const k = kept.getBoundingClientRect()
-        if (k.bottom > f.bottom) foot.scrollTop += k.bottom - f.bottom
-        else if (k.top < f.top) foot.scrollTop -= f.top - k.top
-      }
     }
     wasOpen.current = open
   }, [open])
+
+  // The open chat's row sits under its section's row, which may be at the edge of a short
+  // footer: scrolled into the footer's view as the sheet closes, and when the row comes or
+  // changes while it's closed (the chat's own copy arriving late, say), so nothing hides it.
+  const keptKey = sections.map((s) => s.kept?.id ?? '').join()
+  useEffect(() => {
+    const foot = footRef.current
+    const kept = foot?.querySelector('[data-kept]')
+    if (open || !foot || !kept) return
+    const f = foot.getBoundingClientRect()
+    const k = kept.getBoundingClientRect()
+    if (k.bottom > f.bottom) foot.scrollTop += k.bottom - f.bottom
+    else if (k.top < f.top) foot.scrollTop -= f.top - k.top
+  }, [open, keptKey])
 
   const rows = sections.filter((s) => s.count !== null)
   const current = sections.find((s) => s.key === onSheet)
@@ -814,7 +821,7 @@ function Drawer({
                 section={s}
                 onClick={() => onOpen(s.key)}
               />
-              {s.kept ? <div data-kept>{s.kept}</div> : null}
+              {s.kept ? <div data-kept>{s.kept.row}</div> : null}
             </Fragment>
           ))}
         </div>
