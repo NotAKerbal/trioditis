@@ -115,7 +115,8 @@ type Pusher struct {
 	BatchSize   int
 	Log         zerolog.Logger
 
-	wake chan struct{}
+	wake     chan struct{}
+	pressure pressure
 }
 
 func NewPusher(client *Client, st *store.Store, hostID, network, commandAddr string, log zerolog.Logger) *Pusher {
@@ -199,6 +200,7 @@ func (p *Pusher) Run(ctx context.Context) {
 			}
 			continue
 		case err != nil:
+			p.pressure.failed(time.Now())
 			p.Log.Warn().Err(err).Dur("retry_in", backoff).Msg("Failed to push events to the gateway")
 			p.sleep(ctx, backoff)
 			backoff = min(backoff*2, maxBackoff)
@@ -208,6 +210,10 @@ func (p *Pusher) Run(ctx context.Context) {
 		lastConflict, conflictBackoff = 0, time.Second
 		if sent {
 			lastContact = time.Now()
+			// A slow answer is the server struggling: give it as long again before the next.
+			if wait := pace(p.pressure.lastTook()); wait > 0 {
+				p.sleepFull(ctx, wait)
+			}
 		} else {
 			p.sleep(ctx, min(idleWait, HeartbeatInterval-time.Since(lastContact)))
 		}
@@ -263,8 +269,8 @@ func (p *Pusher) rewind(ctx context.Context, seq int64) error {
 
 // reconcile adopts the gateway's acknowledgement. Behind ours means the gateway lost
 // events (for example a restore) and they are resent; ahead of the journal can't be
-// fixed here and is reported.
-func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
+// fixed here and is reported. It also notes how the delivery went (took, and what's left).
+func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64, took time.Duration) error {
 	acked, err := p.Store.AckedThrough(ctx)
 	if err != nil {
 		return err
@@ -273,6 +279,7 @@ func (p *Pusher) reconcile(ctx context.Context, ackedThrough int64) error {
 	if err != nil {
 		return err
 	}
+	p.pressure.pushed(took, last-ackedThrough)
 	switch {
 	case ackedThrough > last:
 		return fmt.Errorf("gateway has acknowledged seq %d but the journal ends at %d; the journal was reset or restored", ackedThrough, last)
@@ -292,16 +299,26 @@ func (p *Pusher) batch(events []*protocol.Event) *protocol.EventBatch {
 	if events == nil {
 		events = []*protocol.Event{}
 	}
-	return &protocol.EventBatch{HostID: p.HostID, Network: p.Network, CommandAddr: p.CommandAddr, Events: events}
+	return &protocol.EventBatch{
+		HostID: p.HostID, Network: p.Network, CommandAddr: p.CommandAddr, Events: events,
+		Pressure: p.pressure.snapshot(time.Now()),
+	}
+}
+
+// post sends a batch, and says how long it took to be answered.
+func (p *Pusher) post(ctx context.Context, batch *protocol.EventBatch) (int64, time.Duration, error) {
+	start := time.Now()
+	ackedThrough, err := p.Client.PostEvents(ctx, batch)
+	return ackedThrough, time.Since(start), err
 }
 
 // heartbeat sends an empty batch and adopts the gateway's acknowledgement.
 func (p *Pusher) heartbeat(ctx context.Context) error {
-	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(nil))
+	ackedThrough, took, err := p.post(ctx, p.batch(nil))
 	if err != nil {
 		return err
 	}
-	return p.reconcile(ctx, ackedThrough)
+	return p.reconcile(ctx, ackedThrough, took)
 }
 
 // ErrNoProgress is a batch the gateway took without acknowledging any of it.
@@ -321,11 +338,11 @@ func (p *Pusher) pushOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	events = p.capBytes(events, MaxBatchBytes)
-	ackedThrough, err := p.Client.PostEvents(ctx, p.batch(events))
+	ackedThrough, took, err := p.post(ctx, p.batch(events))
 	if err != nil {
 		return false, err
 	}
-	if err = p.reconcile(ctx, ackedThrough); err != nil {
+	if err = p.reconcile(ctx, ackedThrough, took); err != nil {
 		return true, err
 	}
 	if ackedThrough <= acked {

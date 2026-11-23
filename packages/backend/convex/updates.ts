@@ -1,6 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
-import { requireSessionIfGiven } from './auth'
+import { requireSessionIfGiven } from './lib/session'
 import { requireAdmin } from './lib/access'
 import { audit } from './lib/audit'
 import { constantTimeEqual, randomToken } from './lib/hash'

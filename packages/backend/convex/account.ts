@@ -1,19 +1,12 @@
 import { ConvexError, v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { Doc } from './_generated/dataModel'
-import {
-  action,
-  internalMutation,
-  internalQuery,
-  mutation,
-  query,
-  type MutationCtx,
-  type QueryCtx,
-} from './_generated/server'
-import { authComponent, createAuth, requireSessionIfGiven, requireUserId } from './auth'
+import { action, internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server'
+import { authComponent, createAuth } from './auth'
+import { requireSessionIfGiven, requireUserId } from './lib/session'
 import { audit } from './lib/audit'
 import { deleteAllAuthRows } from './lib/authRows'
-import { randomToken, sha256Hex } from './lib/hash'
+import { sha256Hex } from './lib/hash'
 import {
   backupsOf,
   checkReplacement,
@@ -96,26 +89,6 @@ export const changePassword = action({
 // recovery key, which opens their key on the reset page so the password backup is wrapped again
 // with the new password in the same transaction. Sign-in and unlocking keep taking the same
 // password. See docs/architecture/client-api.md, Resetting a forgotten password.
-
-/** How long a reset link works. */
-const RESET_TTL_MS = 24 * 60 * 60 * 1000
-
-/**
- * Issues a reset link's token for a member, replacing any earlier one. Only the token's hash is
- * stored; the token is returned once.
- */
-export async function issueReset(ctx: MutationCtx, userId: string, issuedBy: string) {
-  const old = await ctx.db
-    .query('passwordResets')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .take(20)
-  for (const row of old) await ctx.db.delete(row._id)
-  const token = randomToken()
-  const expiresAt = Date.now() + RESET_TTL_MS
-  await ctx.db.insert('passwordResets', { userId, tokenHash: await sha256Hex(token), issuedBy, expiresAt })
-  await audit(ctx, { kind: 'user', id: issuedBy }, 'password.reset.issue', userId)
-  return { token, expiresAt }
-}
 
 /** The reset `token` names, if it can still be used. */
 async function openReset(ctx: QueryCtx, token: string) {

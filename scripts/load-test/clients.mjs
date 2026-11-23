@@ -1,0 +1,694 @@
+// Simulated desktop clients: each a Convex websocket client signed in as the person, holding
+// the live queries the desktop app holds (apps/desktop/src/data, features/shell/sidebar.tsx,
+// features/chat/warm-chats.tsx) with the same arguments, and clicking around as a person does.
+//
+// - At start, Focused layout: the inbox by recency and the snoozed, requests, archived and
+//   blocked lists (50 a page), the badge counts, arrivals, labels, preferences, scheduled
+//   messages, the server's and networks' state, People (every page), and a media token per
+//   network for the sidebar's pictures. Unread loads inbox pages by the desktop's own rule
+//   (unread-fill.ts), again whenever the counts change.
+// - Fetch-ahead: up to six warm chats, each its first page of messages, their reactions, a
+//   group's senders' profiles, its scheduled and cancelled messages (data/chat-content.ts); the
+//   first three unread chats are warmed 1.5 s after the list settles.
+// - Clicks: open a chat (chats.get, typing, the warm queries, markRead when unread), scroll
+//   back through it, open People (people, contacts and identifiers, every page), hover a chat
+//   (warm it), mute or pin one, and now and then send a message. A chat let go stays
+//   subscribed for five minutes, as the desktop's query cache keeps it (main.tsx).
+import { ConvexClient } from 'convex/browser'
+import { anyApi } from 'convex/server'
+import { ConvexError } from 'convex/values'
+import { reactionGroups, reactionRequests } from '../../apps/desktop/src/data/reaction-requests.ts'
+import { failuresInARow, retryDelay } from '../../apps/desktop/src/features/shell/retry-delay.ts'
+import { unreadIncomplete } from '../../apps/desktop/src/features/shell/unread-fill.ts'
+import { random } from './inbox.mjs'
+
+const PAGE = 50
+const WARM = 6
+const WARM_UNREAD = 3
+/** How long the desktop's query cache keeps what it was let go of (main.tsx). */
+const KEEP_MS = 5 * 60_000
+/** How long a replaced reactions request stays watched (data/messages.ts, REACTIONS_GC_MS). */
+const REACTIONS_GC_MS = 10_000
+/** A pane shows its messages once what goes with them is in, or this long after (chat-content.ts). */
+const SETTLE_MS = 400
+/** The most inbox pages the Unread fill loads; the nightly inbox has 60. */
+const MAX_INBOX_PAGES = 400
+/** A query that hasn't answered by then counts as failed (the app would show it loading). */
+const ANSWER_MS = 60_000
+/** A click that hasn't finished by then counts as failed, so a stuck one can't hold up the run. */
+const ACTION_MS = 120_000
+
+const ref = (name) => {
+  const [module, fn] = name.split(':')
+  return anyApi[module][fn]
+}
+
+/** What every client saw, together: errors, how long things took to show. */
+export function clientMetrics() {
+  return {
+    errors: 0,
+    errorKinds: {},
+    firstResult: {},
+    actions: {},
+    opens: [],
+    failedOpens: 0,
+    /** Queries asked again after they failed, as the desktop's RetryBoundary asks them. */
+    retries: 0,
+    /** Clients whose start finished: fewer than asked for means the load wasn't all there. */
+    started: 0,
+    visible: [],
+    subscriptions: 0,
+    peakSubscriptions: 0,
+  }
+}
+
+const shortError = (error) =>
+  String(error?.message ?? error)
+    .split('\n')[0]
+    .replace(/\[Request ID: [^\]]+\]\s*/g, '')
+    .slice(0, 200)
+
+const sleep = (ms) =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+
+/**
+ * An unsubscribe that can be called again: the Convex client throws on a second call, and a
+ * failed query is let go both when it fails and when the cache lets it go.
+ */
+function once(unsubscribe) {
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    try {
+      unsubscribe()
+    } catch {
+      // Already gone on the client's side, as a query that failed can be.
+    }
+  }
+}
+
+/** The listener for a query nothing reacts to: one function, so a held query never gains copies. */
+const NOOP = () => {}
+
+const unreadRow = (c) => (c.unreadCount > 0 || c.markedUnread) && c.mutedUntil === null
+
+export class SimClient {
+  constructor({ id, convexUrl, person, crypto, metrics, sent, rand, bridgeKey, networks, keepMs = KEEP_MS }) {
+    this.id = id
+    this.person = person
+    this.crypto = crypto
+    this.metrics = metrics
+    this.sent = sent
+    this.rand = rand
+    this.bridgeKey = bridgeKey
+    this.networks = networks
+    this.keepMs = keepMs
+    this.client = new ConvexClient(convexUrl, { skipConvexDeploymentUrlCheck: true, unsavedChangesWarning: false })
+    this.client.setAuth(() => person.token().catch(() => null))
+    this.subs = new Map()
+    /** Chats whose messages this client holds (warm or open), by ID. */
+    this.chats = new Map()
+    this.warm = []
+    this.open = null
+    this.released = new Map()
+    this.seenEvents = new Set()
+    this.timers = []
+    this.inboxPages = 0
+    this.filling = false
+  }
+
+  error(where, error) {
+    const kind = `${where}: ${shortError(error)}`
+    this.metrics.errors++
+    this.metrics.errorKinds[kind] = (this.metrics.errorKinds[kind] ?? 0) + 1
+  }
+
+  /**
+   * Subscribes under `key` (once; a second ask shares it, as the app's cache does) and
+   * resolves with its answer: the one it has, or the next to come, or null if that fails or
+   * doesn't come within ANSWER_MS. `onValue(value, replay)` sees every answer; `replay` is true
+   * when it's the cached answer handed to a listener that just joined, not one the server sent now.
+   */
+  watch(key, name, args, onValue = NOOP) {
+    if (this.closed) return Promise.resolve(null)
+    const held = this.subs.get(key)
+    if (held) {
+      this.released.delete(key)
+      if (!held.listeners.has(onValue)) {
+        held.listeners.add(onValue)
+        if (held.value !== undefined) onValue(held.value, true)
+      }
+      if (held.value !== undefined) return Promise.resolve(held.value)
+      // Failed and let go meanwhile: asked afresh now that something needs it again.
+      if (held.retryWhenAsked) held.retryNow()
+      return held.next()
+    }
+    const sub = { name, value: undefined, readyAt: null, listeners: new Set([onValue]), round: null }
+    this.subs.set(key, sub)
+    this.metrics.subscriptions++
+    this.metrics.peakSubscriptions = Math.max(this.metrics.peakSubscriptions, this.subs.size)
+    /**
+     * The next answer, or null on the next failure or after ANSWER_MS: one wait shared by
+     * everyone asking meanwhile, so it is timed, and times out, once.
+     */
+    sub.next = () => {
+      if (sub.round) return sub.round.promise
+      const round = { started: performance.now() }
+      round.promise = new Promise((resolve) => (round.resolve = resolve))
+      round.deadline = setTimeout(() => {
+        if (sub.round !== round) return
+        this.error(name, `no answer within ${ANSWER_MS / 1000} s`)
+        settle(null)
+      }, ANSWER_MS)
+      round.deadline.unref?.()
+      sub.round = round
+      return round.promise
+    }
+    /** Ends the wait: with an answer (timed), or null for a failure or the query going away (not). */
+    const settle = (value, answered = false) => {
+      const round = sub.round
+      if (!round) return
+      sub.round = null
+      clearTimeout(round.deadline)
+      if (answered) (this.metrics.firstResult[name] ??= []).push(performance.now() - round.started)
+      round.resolve(value)
+    }
+    // Closing the client or dropping the query settles what's still waiting, without counting
+    // it as a failure, so nothing waits on it afterwards.
+    sub.settle = () => settle(null)
+    const onValueFromServer = (value) => {
+      sub.value = value
+      sub.readyAt ??= Date.now()
+      settle(value, true)
+      for (const listener of sub.listeners) listener(value, false)
+    }
+    // A query that fails is dead. The desktop's RetryBoundary (features/shell/retry-boundary.tsx)
+    // mounts the part again after a wait that grows with errors in a row, though not after a
+    // ConvexError, the server saying why, which waits for the person; this does the same, under
+    // the same key. One let go meanwhile isn't on screen, so it waits to be asked for again, as
+    // the desktop's cache keeps a failure until a view needs the page.
+    sub.failures = 0
+    sub.lastErrorAt = 0
+    sub.retryWhenAsked = false
+    const subscribe = () => {
+      sub.unsubscribe = once(this.client.onUpdate(ref(name), args, onValueFromServer, onError))
+    }
+    sub.retryNow = () => {
+      sub.retryWhenAsked = false
+      this.metrics.retries = (this.metrics.retries ?? 0) + 1
+      subscribe()
+    }
+    const onError = (error) => {
+      this.error(name, error)
+      sub.value = undefined
+      settle(null)
+      if (error instanceof ConvexError || this.closed) return
+      sub.failures = failuresInARow(sub.failures, sub.lastErrorAt, Date.now())
+      sub.lastErrorAt = Date.now()
+      sub.unsubscribe()
+      const retry = setTimeout(() => {
+        if (this.closed || this.subs.get(key) !== sub) return
+        if (this.released.has(key)) sub.retryWhenAsked = true
+        else sub.retryNow()
+      }, retryDelay(sub.failures))
+      retry.unref?.()
+    }
+    const first = sub.next()
+    subscribe()
+    return first
+  }
+
+  /** A held query's answer: the one it has, or the next (null if it fails), asking afresh if it's waiting to. */
+  answerOf(key) {
+    const sub = this.subs.get(key)
+    if (!sub) return Promise.resolve(null)
+    if (sub.value !== undefined) return Promise.resolve(sub.value)
+    if (sub.retryWhenAsked) sub.retryNow()
+    return sub.next()
+  }
+
+  /** Stops `listener` hearing about `key`, keeping the query itself. */
+  unlisten(key, listener) {
+    this.subs.get(key)?.listeners.delete(listener)
+  }
+
+  drop(key) {
+    const sub = this.subs.get(key)
+    if (!sub) return
+    sub.settle()
+    sub.unsubscribe()
+    this.subs.delete(key)
+  }
+
+  /** Lets go of `key` after `ms` (the cache's five minutes), unless it's asked for again first. */
+  release(key, ms = this.keepMs) {
+    if (!this.subs.has(key)) return
+    this.released.set(key, Date.now() + ms)
+  }
+
+  sweep() {
+    const now = Date.now()
+    for (const [key, until] of this.released) {
+      if (until <= now) {
+        this.released.delete(key)
+        this.drop(key)
+      }
+    }
+  }
+
+  async mutate(name, args) {
+    if (this.closed) return null
+    const started = performance.now()
+    try {
+      let timer
+      const value = await Promise.race([
+        this.client.mutation(ref(name), args),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer within ${ANSWER_MS / 1000} s`)), ANSWER_MS)
+          timer.unref?.()
+        }),
+      ]).finally(() => clearTimeout(timer))
+      ;(this.metrics.firstResult[name] ??= []).push(performance.now() - started)
+      return value
+    } catch (error) {
+      this.error(name, error)
+      return null
+    }
+  }
+
+  /** A paginated list's pages, each a subscription, as usePaginatedQuery holds them. */
+  async pages(key, name, args, numItems, { more = () => false, maxPages = 100 } = {}) {
+    const loaded = []
+    let cursor = null
+    for (let page = 0; page < maxPages; page++) {
+      const value = await this.watch(`${key}#${page}`, name, {
+        ...args,
+        paginationOpts: { numItems, cursor, id: page },
+      })
+      if (!value) break
+      loaded.push(...value.page)
+      if (value.isDone || !more(loaded)) break
+      cursor = value.continueCursor
+    }
+    return loaded
+  }
+
+  async start() {
+    const p = []
+    for (const [key, name] of [
+      ['me', 'members:me'],
+      ['identity', 'keys:identity'],
+      ['bridgeKey', 'keys:bridge'],
+      ['server', 'server:info'],
+      ['preferences', 'preferences:get'],
+      ['labels', 'labels:list'],
+      ['networks', 'networks:list'],
+      ['health', 'networks:health'],
+      ['accounts', 'logins:accounts'],
+      ['updates', 'updates:status'],
+      ['arrivals', 'messages:arrivals'],
+      ['scheduled', 'scheduled:list'],
+      ['cancelled', 'scheduled:cancelled'],
+      ['peopleRevision', 'people:revision'],
+    ]) {
+      p.push(this.watch(key, name, {}))
+    }
+    for (const view of ['snoozed', 'requests', 'archived', 'blocked']) {
+      p.push(this.pages(`list:${view}`, 'chats:list', { view }, PAGE, { maxPages: 1 }))
+    }
+    p.push(this.pages('people', 'people:list', {}, 100, { more: () => true }))
+    for (const network of this.networks) p.push(this.mutate('media:access', { network }))
+    // Unread fills itself whenever the counts or the pages change, as the sidebar's effect does.
+    p.push(this.watch('counts', 'chats:counts', {}, () => void this.fillInbox()))
+    p.push(this.fillInbox())
+    await Promise.all(p)
+    await this.fillInbox()
+    // Closed while it started: nothing more is set up.
+    if (this.closed) return
+    this.metrics.started++
+    const warmTimer = setTimeout(() => {
+      for (const chat of this.inbox().filter(unreadRow).slice(0, WARM_UNREAD).reverse()) this.warmChat(chat)
+    }, 1500)
+    this.timers.push(
+      warmTimer,
+      setInterval(() => this.sweep(), 5000),
+    )
+  }
+
+  /** The inbox pages loaded so far, newest first, as they are now. */
+  inbox() {
+    const rows = []
+    for (let i = 0; i < Math.max(1, this.inboxPages); i++)
+      rows.push(...(this.subs.get(`list:inbox#${i}`)?.value?.page ?? []))
+    return rows
+  }
+
+  /** Loads inbox pages while Unread may still be missing chats (features/shell/unread-fill.ts). */
+  async fillInbox() {
+    // A change while a fill runs is looked at once it's done, as the sidebar's effect runs again.
+    if (this.filling) {
+      this.fillAgain = true
+      return
+    }
+    this.filling = true
+    try {
+      do {
+        this.fillAgain = false
+        await this.fillOnce()
+      } while (this.fillAgain)
+    } finally {
+      this.filling = false
+    }
+  }
+
+  async fillOnce() {
+    // Each page's changes count too: a chat read elsewhere can leave Unread short of the count.
+    const onPage = (this.onInboxPage ??= () => void this.fillInbox())
+    const page = async (n, cursor) => {
+      const key = `list:inbox#${n}`
+      await this.watch(
+        key,
+        'chats:list',
+        { view: 'inbox', order: 'recent', paginationOpts: { numItems: PAGE, cursor, id: n } },
+        onPage,
+      )
+      // What it holds now: a page that answered after its first wait ran out has answered since.
+      return this.subs.get(key)?.value
+    }
+    for (;;) {
+      if (this.inboxPages === 0) {
+        if (!(await page(0, null))) return
+        this.inboxPages = 1
+      }
+      const last = this.subs.get(`list:inbox#${this.inboxPages - 1}`)?.value
+      if (!last) return
+      const count = this.subs.get('counts')?.value?.inbox
+      const incomplete = unreadIncomplete({
+        more: !last.isDone,
+        loadedUnread: this.inbox().filter(unreadRow).length,
+        count,
+      })
+      if (!incomplete || this.inboxPages >= MAX_INBOX_PAGES) return
+      const n = this.inboxPages
+      if (!(await page(n, last.continueCursor))) return
+      this.inboxPages = n + 1
+    }
+  }
+
+  /**
+   * What data/chat-content.ts's useWarmChat asks for a chat, kept in step with its loaded pages
+   * as they change: reactions in the desktop's own groups and requests, and a group's senders.
+   */
+  warmChat(chat) {
+    let state = this.chats.get(chat._id)
+    if (!state) {
+      state = {
+        chat,
+        pages: [],
+        listeners: new Map(),
+        reactionKeys: new Set(),
+        contactKeys: new Set(),
+        liveSince: null,
+      }
+      // One listener per chat, so watching a request again never adds another.
+      state.onChange = () => this.chats.get(chat._id) === state && this.reconcile(state)
+      this.chats.set(chat._id, state)
+      state.fixed = [`scheduled:${chat._id}`, `cancelled:${chat._id}`]
+      void this.watch(state.fixed[0], 'scheduled:list', { chatId: chat._id })
+      void this.watch(state.fixed[1], 'scheduled:cancelled', { chatId: chat._id })
+      void this.loadPage(state, null)
+    }
+    // At most six warm chats; the oldest is let go to the cache.
+    this.warm = [state, ...this.warm.filter((w) => w !== state)]
+    for (const gone of this.warm.splice(WARM)) if (gone !== this.open?.state) this.letGo(gone)
+    return state
+  }
+
+  /** Subscribes to the chat's next page of messages; resolves with its first answer. */
+  loadPage(state, cursor) {
+    const n = state.pages.length
+    const key = `messages:${state.chat._id}#${n}`
+    state.pages.push(key)
+    const listener = (value, replay) => {
+      if (this.chats.get(state.chat._id) !== state) return
+      state.liveSince ??= Date.now()
+      if (n === 0) this.noticeMessages(state, value.page, replay)
+      this.reconcile(state)
+    }
+    state.listeners.set(key, listener)
+    return this.watch(
+      key,
+      'messages:list',
+      { chatId: state.chat._id, paginationOpts: { numItems: PAGE, cursor, id: n } },
+      listener,
+    )
+  }
+
+  /** Lets go of everything a chat held, to the cache. */
+  letGo(state) {
+    if (this.chats.get(state.chat._id) === state) this.chats.delete(state.chat._id)
+    // Its queries stay in the cache, but nothing of this chat listens to them any more.
+    for (const [key, listener] of state.listeners) this.unlisten(key, listener)
+    for (const key of state.reactionKeys) this.unlisten(key, state.onChange)
+    for (const key of [...state.pages, ...state.fixed, ...state.reactionKeys, ...state.contactKeys]) this.release(key)
+  }
+
+  /** What goes with a chat's messages, as it stands now: its reactions, senders and scheduled messages. */
+  extrasOf(state) {
+    return Promise.all([...state.fixed, ...state.reactionKeys, ...state.contactKeys].map((k) => this.answerOf(k)))
+  }
+
+  /** The reactions and senders' requests the chat's loaded messages call for now. */
+  reconcile(state) {
+    const { chat } = state
+    const messages = state.pages
+      .flatMap((key) => this.subs.get(key)?.value?.page ?? [])
+      .filter((m) => !m.redactedAt && !m.eventId.startsWith('pending:'))
+      .map((m) => ({ id: m._id, at: m.networkTs, sender: m.sender }))
+      .reverse()
+    const reactionKey = (asked) => `reactions:${chat._id}:${asked.join()}`
+    const wanted = new Set()
+    for (const group of reactionGroups(messages)) {
+      const requests = reactionRequests(group, (asked) => this.subs.get(reactionKey(asked))?.value)
+      for (const asked of requests) {
+        const key = reactionKey(asked)
+        wanted.add(key)
+        void this.watch(key, 'messages:reactions', { chatId: chat._id, messageIds: asked }, state.onChange)
+      }
+    }
+    for (const key of state.reactionKeys) {
+      if (wanted.has(key)) continue
+      this.unlisten(key, state.onChange)
+      this.release(key, REACTIONS_GC_MS)
+    }
+    state.reactionKeys = wanted
+    const contacts = new Set()
+    if (chat.kind === 'group') {
+      const ghosts = [...new Set(messages.flatMap((m) => ('ghostId' in m.sender ? [m.sender.ghostId] : [])))].sort(
+        (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+      )
+      for (let i = 0; i < ghosts.length; i += 100) {
+        const ids = ghosts.slice(i, i + 100)
+        const key = `contacts:${chat.network}:${ids.join()}`
+        contacts.add(key)
+        void this.watch(key, 'contacts:get', { network: chat.network, ghostIds: ids })
+      }
+    }
+    for (const key of state.contactKeys) if (!contacts.has(key)) this.release(key)
+    state.contactKeys = contacts
+  }
+
+  /**
+   * Times a live message from when its bridge host journaled it to when the server sent it to
+   * this chat, only while the chat was live and only for a message sent after it became live:
+   * a cached answer handed back when a chat is warmed again (`replay`) just says what's there.
+   */
+  noticeMessages(state, rows, replay) {
+    const now = Date.now()
+    for (const m of rows) {
+      if (this.seenEvents.has(m.eventId)) continue
+      this.seenEvents.add(m.eventId)
+      const sent = this.sent.get(m.eventId)
+      if (sent && !replay && sent.at >= state.liveSince) this.metrics.visible.push(now - sent.at)
+    }
+  }
+
+  count(action) {
+    this.metrics.actions[action] = (this.metrics.actions[action] ?? 0) + 1
+  }
+
+  visibleChats() {
+    return this.inbox()
+  }
+
+  async openChat(chat) {
+    this.count('open chat')
+    const started = performance.now()
+    const previous = this.open
+    const keys = [`chat:${chat._id}`, `typing:${chat._id}`]
+    const got = this.watch(keys[0], 'chats:get', { chatId: chat._id })
+    void this.watch(keys[1], 'messages:typing', { chatId: chat._id })
+    const state = this.warmChat(chat)
+    this.open = { chat, state, keys }
+    if (previous && previous.state !== state) {
+      for (const k of previous.keys) this.release(k)
+      if (!this.warm.includes(previous.state)) this.letGo(previous.state)
+    }
+    const [row, page] = await Promise.all([got, this.answerOf(state.pages[0])])
+    if (!row || !page) {
+      this.metrics.failedOpens++
+      return
+    }
+    // Shown once its reactions, senders and scheduled messages are in, or SETTLE_MS after.
+    await Promise.race([this.extrasOf(state), sleep(SETTLE_MS)])
+    this.metrics.opens.push(performance.now() - started)
+    if (row.unreadCount > 0 || row.markedUnread) await this.mutate('chats:markRead', { chatId: chat._id })
+  }
+
+  async scrollBack() {
+    const state = this.open?.state
+    const last = state && this.subs.get(state.pages.at(-1))?.value
+    if (!last || last.isDone) return this.openSomething()
+    this.count('scroll back')
+    const value = await this.loadPage(state, last.continueCursor)
+    if (value) await this.extrasOf(state)
+  }
+
+  async openPeople() {
+    this.count('open People')
+    await Promise.all([
+      this.pages('people', 'people:list', {}, 100, { more: () => true }),
+      this.pages('contacts', 'contacts:list', {}, 500, { more: () => true }),
+      this.pages('identifiers', 'contacts:identifiers', {}, 500, { more: () => true }),
+    ])
+    // Closed again; its lists stay in the cache.
+    for (const key of this.subs.keys())
+      if (key.startsWith('contacts#') || key.startsWith('identifiers#')) this.release(key)
+  }
+
+  async openSomething() {
+    const chats = this.visibleChats()
+    if (chats.length === 0) return
+    // Mostly the unread ones near the top, as a person goes through them.
+    const unread = chats.filter((c) => c.unreadCount > 0)
+    const chat = unread.length && this.rand.chance(0.6) ? unread[0] : chats[this.rand.int(Math.min(chats.length, 30))]
+    await this.openChat(chat)
+  }
+
+  async send() {
+    if (!this.open || !this.bridgeKey) return
+    this.count('send')
+    const clientMessageId = `load-${this.id}-${Date.now()}-${this.rand.int(1e9)}`
+    const plaintext = { type: 'text', body: 'Sent from the load test' }
+    const copy = this.crypto.sealJson(plaintext, [{ publicKey: this.person.publicKey }], {
+      kind: 'message',
+      ownerUserId: this.person.userId,
+      objectId: clientMessageId,
+    })
+    const forBridge = this.crypto.sealJson(plaintext, [{ publicKey: this.bridgeKey }], {
+      kind: 'outbound',
+      ownerUserId: this.person.userId,
+      objectId: clientMessageId,
+    })
+    await this.mutate('messages:send', { chatId: this.open.chat._id, clientMessageId, forBridge, copy })
+  }
+
+  /** One click, chosen as a person's would be. */
+  async act() {
+    const r = this.rand.next()
+    if (r < 0.4) return this.openSomething()
+    if (r < 0.6) return this.scrollBack()
+    if (r < 0.75) {
+      const chats = this.visibleChats()
+      if (chats.length) {
+        this.count('hover')
+        await this.answerOf(this.warmChat(chats[this.rand.int(Math.min(chats.length, 30))]).pages[0])
+      }
+      return
+    }
+    if (r < 0.82) return this.openPeople()
+    if (r < 0.9) {
+      const chats = this.visibleChats()
+      const chat = chats[this.rand.int(Math.max(1, Math.min(chats.length, 30)))]
+      if (!chat) return
+      this.count('mute or pin')
+      return this.rand.chance(0.5)
+        ? this.mutate('chats:setMuted', { chatId: chat._id, muted: chat.mutedUntil === null })
+        : this.mutate('chats:setPinned', { chatId: chat._id, pinned: !chat.pinned })
+    }
+    return this.send()
+  }
+
+  /** Clicks every `everyMs` (± half) until stopped; a click that takes over ACTION_MS is a failure. */
+  runClicks(everyMs) {
+    let stopped = false
+    const loop = (async () => {
+      while (!stopped) {
+        await sleep(everyMs * (0.5 + this.rand.next()))
+        if (stopped) break
+        const started = performance.now()
+        let timedOut = false
+        try {
+          await Promise.race([
+            this.act(),
+            sleep(ACTION_MS).then(() => {
+              timedOut = true
+            }),
+          ])
+        } catch (error) {
+          this.error('click', error)
+        }
+        if (timedOut) this.error('click', `not finished within ${ACTION_MS / 1000} s`)
+        ;(this.metrics.actionMs ??= []).push(performance.now() - started)
+      }
+    })()
+    return async () => {
+      stopped = true
+      await loop
+    }
+  }
+
+  async close() {
+    this.closed = true
+    for (const sub of this.subs.values()) sub.settle?.()
+    for (const t of this.timers) {
+      clearTimeout(t)
+      clearInterval(t)
+    }
+    for (const key of this.subs.keys()) this.drop(key)
+    await this.client.close()
+  }
+}
+
+/** Starts `count` clients, each opening the app as the desktop does. */
+export async function startClients({
+  into = [],
+  metrics = clientMetrics(),
+  count,
+  convexUrl,
+  person,
+  crypto,
+  sent,
+  networks,
+  seed = 11,
+  cancelled = () => false,
+}) {
+  await person.refresh()
+  const bridgeKeyText = (await person.http.query(anyApi.keys.bridge, {}))?.publicKey
+  const bridgeKey = bridgeKeyText ? crypto.fromBase64Url(bridgeKeyText) : null
+  // Nothing is made once the run is cleaning up; what is made goes into the caller's list at
+  // once, so it can close them even if one fails to start.
+  if (cancelled()) return { clients: into, metrics }
+  for (let i = 0; i < count; i++) {
+    into.push(
+      new SimClient({ id: i, convexUrl, person, crypto, metrics, sent, rand: random(seed + i), bridgeKey, networks }),
+    )
+  }
+  // Each start waits on queries and mutations that give up after a minute, so this ends.
+  await Promise.all(into.map((c) => c.start()))
+  return { clients: into, metrics }
+}

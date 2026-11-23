@@ -2,12 +2,12 @@ import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
 import { components } from './_generated/api'
 import { internalMutation, internalQuery, mutation, query, type QueryCtx } from './_generated/server'
-import { authComponent, currentSession, requireSessionIfGiven } from './auth'
+import { anyUserById, currentSession, requireSessionIfGiven } from './lib/session'
 import { requireAdmin } from './lib/access'
 import { constantTimeEqual, randomToken, sha256Hex } from './lib/hash'
 import { audit } from './lib/audit'
 import { queueLoginCancel, queueLogout } from './lib/outbox'
-import { issueReset } from './account'
+import { issueReset } from './lib/passwordReset'
 import { deleteAllAuthRows } from './lib/authRows'
 import { leftSignedIn, noteCleanup, settleCleanup } from './lib/formerMembers'
 
@@ -215,7 +215,7 @@ export const list = query({
     const result = await ctx.db.query('members').paginate(paginationOpts)
     const page = await Promise.all(
       result.page.map(async (member) => {
-        const user = await authComponent.getAnyUserById(ctx, member.userId)
+        const user = await anyUserById(ctx, member.userId)
         return {
           userId: member.userId,
           role: member.role,
@@ -314,7 +314,7 @@ export const removeMember = mutation({
       if (admins.length <= 1) throw new ConvexError('The server’s last admin can’t be removed.')
     }
     const userId = member.userId
-    const user = await authComponent.getAnyUserById(ctx, userId)
+    const user = await anyUserById(ctx, userId)
     await ctx.db.delete(member._id)
     for (const table of ['keyBackups', 'keyChallenges', 'passwordResets'] as const) {
       const rows = await ctx.db

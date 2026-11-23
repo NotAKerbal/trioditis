@@ -19,7 +19,8 @@
     "lint": "oxlint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:scripts": "node --test scripts/test/*.test.mjs"
+    "test:scripts": "node --test scripts/test/*.test.mjs",
+    "load-test": "node scripts/load-test/run.mjs"
   },
   "devDependencies": {
     "@convex-dev/eslint-plugin": "5.0.1",

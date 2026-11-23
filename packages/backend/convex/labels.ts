@@ -1,7 +1,7 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { removeAssignments } from './cleanup'
-import { requireSessionIfGiven } from './auth'
+import { requireSessionIfGiven } from './lib/session'
 import { requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
 import { envelope } from './validators'

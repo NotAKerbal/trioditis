@@ -26,15 +26,20 @@ export const get = query({
   handler: async (ctx, { network, ghostIds }) => {
     const member = await requireMember(ctx)
     if (ghostIds.length > MAX_GHOST_IDS) throw new ConvexError('Ask for at most 100 contacts at once.')
-    const out: { ghostId: string; sealedProfile: typeof envelope.type }[] = []
-    for (const ghostId of new Set(ghostIds)) {
-      const contact = await ctx.db
-        .query('contacts')
-        .withIndex('by_ghost', (q) => q.eq('userId', member.userId).eq('network', network).eq('ghostId', ghostId))
-        .unique()
-      if (contact) out.push({ ghostId, sealedProfile: contact.sealedProfile })
-    }
-    return out
+    // All at once: one after another, each lookup waits for the last.
+    const unique = [...new Set(ghostIds)]
+    const contacts = await Promise.all(
+      unique.map((ghostId) =>
+        ctx.db
+          .query('contacts')
+          .withIndex('by_ghost', (q) => q.eq('userId', member.userId).eq('network', network).eq('ghostId', ghostId))
+          .unique(),
+      ),
+    )
+    return unique.flatMap((ghostId, i) => {
+      const contact = contacts[i]
+      return contact ? [{ ghostId, sealedProfile: contact.sealedProfile }] : []
+    })
   },
 })
 

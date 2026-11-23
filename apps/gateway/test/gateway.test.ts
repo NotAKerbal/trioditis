@@ -251,6 +251,16 @@ describe('events', () => {
     expect(backend.ingest).toHaveBeenLastCalledWith(expect.not.objectContaining({ stopping: true }))
   })
 
+  it('passes on the host’s pressure counts, and only counts', async () => {
+    const backend = fakeBackend()
+    const base = await serve(backend)
+    const pressure = { backlog: 12, pushMs: 1500, failedPushes: 1 }
+    await post(base, { ...batch([event(1)]), pressure })
+    expect(backend.ingest).toHaveBeenLastCalledWith(expect.objectContaining({ pressure }))
+    await post(base, { ...batch([]), pressure: { backlog: 'many', pushMs: 1, failedPushes: 0 } })
+    expect(backend.ingest).toHaveBeenLastCalledWith(expect.not.objectContaining({ pressure: expect.anything() }))
+  })
+
   it('passes a gap back as 409 with the sequence to resend from', async () => {
     const backend = fakeBackend({ ingest: vi.fn(async () => ({ expectedSeq: 7 })) })
     expect(await post(await serve(backend), batch([event(9)]))).toEqual({ status: 409, body: { expectedSeq: 7 } })
