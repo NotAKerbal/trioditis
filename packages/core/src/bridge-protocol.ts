@@ -251,6 +251,18 @@ export interface EventBatch {
   events: BridgeEvent[]
   /** The last heartbeat of a host that is shutting down: it is offline from now. */
   stopping?: boolean
+  /** How the host's deliveries are going, for Admin settings → Server health. Counts only. */
+  pressure?: BridgePressure
+}
+
+/** How a bridge host's deliveries to the server are going (bridge-protocol.md, Pressure). */
+export interface BridgePressure {
+  /** Journal events not yet acknowledged when the batch was sent. */
+  backlog: number
+  /** How long the host's last delivery took to be answered (ms). */
+  pushMs: number
+  /** Deliveries that failed in the last five minutes. */
+  failedPushes: number
 }
 
 export type EventBatchResponse = { ackedThrough: number }

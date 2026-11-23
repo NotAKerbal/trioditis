@@ -48,7 +48,10 @@ assumed success, while handling carries on. WhatsApp and Signal acknowledge an i
 on that success, so a message the process then stops before saving in full is lost, and one
 whose handling then fails part way is dropped as a duplicate when redelivered. The patch adds
 `bridgev2.RemoteEventDone`, called with each remote event's real outcome when its handler
-returns, which the host waits on (`internal/handled`). Every change is marked `Trioditis:`.
+returns, which the host waits on (`internal/handled`). It also adds `bridgev2.BeforeBackfillTask`,
+called before each backfill queue task and before any portal lock, where the host holds older
+history back while its server is behind (`internal/gateway/pressure.go`). Every change is marked
+`Trioditis:`.
 
 **Updating mautrix:** change its version in `../go.mod`, `node scripts/signal-fork.mjs update
 mautrix`, check that `handleSingleEventWithDelayLogging` (`bridgev2/portal.go`) still hands

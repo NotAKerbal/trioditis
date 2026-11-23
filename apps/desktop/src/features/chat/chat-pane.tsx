@@ -53,6 +53,7 @@ import {
   uniqueLabels,
   useSendRequest,
 } from '~/data/conversations.ts'
+import { failedAhead, fetchAheadFailed } from '~/data/fetched-ahead.ts'
 import { usePeople } from '~/data/people.ts'
 import {
   useBridge,
@@ -145,6 +146,8 @@ export function ChatPane({ chatId, chatIds, onGone, onBack, act, onOpenPerson, o
     <RetryBoundary
       key={chat.id}
       offline={session.offline}
+      // The failure may be a cached page of the address book: the next chats opened ask afresh.
+      onError={() => fetchAheadFailed('people')}
       fallback={(say, retry) => (
         <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
           <Button variant="ghost" size="icon" aria-label="Back to chats" className="m-1.5 md:hidden" onClick={onBack}>
@@ -225,7 +228,11 @@ function OpenChat({
   const live = together ? (looked ?? lastLive.current?.filter((m) => chatIds.includes(m.id))) : undefined
   // Only chats the person's cards link to the same person as the opened one, as they are now:
   // a chat moved to another card on another device is out at once, whatever the sidebar said.
-  const people = usePeople()
+  // From the cache, so every chat opened shares one copy of the address book: asked afresh, each
+  // opening loaded all of it again. Afresh on a retry, or when a cached page failed lately
+  // (data/fetched-ahead.ts), past the failed page the cache keeps.
+  const [failedBefore] = useState(() => failedAhead('people'))
+  const people = usePeople(attempt > 0 || failedBefore ? 'fresh' : 'cached')
   const cards = useMemo(() => cardIndex(people), [people])
   const opened = cardOfChat(chat, cards)
   const members = useMemo(() => {

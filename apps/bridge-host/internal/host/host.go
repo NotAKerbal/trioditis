@@ -171,13 +171,16 @@ func New(cfg Config) (*Host, error) {
 		h.Pusher = gateway.NewPusher(client, h.Store, cfg.HostID, cfg.Network, cfg.CommandAddr, cfg.Log.With().Str("component", "pusher").Logger())
 	}
 	notify := func() {}
+	var history connector.HistoryGate
 	if h.Pusher != nil {
 		notify = h.Pusher.Wake
+		history = h.Pusher
 	}
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
 		BridgeKey: cfg.BridgeKey,
 		Notify:    notify, SendTimeout: cfg.SendTimeout, Signin: cfg.Signin,
+		History: history,
 	})
 	bridgeCfg := BridgeConfig()
 	if cfg.AdjustBridgeConfig != nil {

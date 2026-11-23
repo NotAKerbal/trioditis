@@ -112,6 +112,9 @@ export const loginStep = v.object({
 
 const base = { seq: v.number(), userId: v.string(), loginId: v.string(), at: v.number() }
 
+/** How a bridge host's deliveries are going (bridge-protocol.md, Pressure): counts only. */
+export const bridgePressure = v.object({ backlog: v.number(), pushMs: v.number(), failedPushes: v.number() })
+
 export const bridgeEvent = v.union(
   v.object({
     ...base,

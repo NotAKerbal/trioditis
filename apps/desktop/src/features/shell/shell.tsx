@@ -17,6 +17,7 @@ import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
 import { LoadError, RetryBoundary } from './retry-boundary.tsx'
+import { ServerBusy } from './sync-bar.tsx'
 import { countsAsUnread } from './unread-fill.ts'
 import { UpdateNotice } from './update-notice.tsx'
 
@@ -189,6 +190,7 @@ export function Shell() {
       <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />
       <NewChatDialog open={newChat} onOpenChange={setNewChat} onStarted={openStarted} />
       <UpdateNotice />
+      <ServerBusy />
       <WarmChats />
       <WarmPeople />
     </div>

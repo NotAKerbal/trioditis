@@ -1,7 +1,8 @@
 import { paginationOptsValidator, paginationResultValidator } from 'convex/server'
 import { ConvexError, v } from 'convex/values'
-import { mutation, query } from './_generated/server'
-import { requireSessionIfGiven } from './auth'
+import type { Doc } from './_generated/dataModel'
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server'
+import { requireSessionIfGiven } from './lib/session'
 import { requireMember } from './lib/access'
 import { isEnvelope } from './lib/envelope'
 import { envelope } from './validators'
@@ -31,11 +32,38 @@ const personRow = v.object({ personKey: v.string(), sealed: envelope, updatedAt:
  */
 const CHANGED = { code: 'people_changed', message: 'Your people changed on another device. Try again.' }
 
+/**
+ * The address book's count and revision (schema.ts, `addressBooks`). A person whose address
+ * book hasn't changed since they moved there still has them on their `members` row.
+ */
+async function bookOf(ctx: QueryCtx, member: Doc<'members'>) {
+  const book = await ctx.db
+    .query('addressBooks')
+    .withIndex('by_user', (q) => q.eq('userId', member.userId))
+    .unique()
+  return {
+    book,
+    count: book?.count ?? member.peopleCount ?? 0,
+    revision: book?.revision ?? member.peopleRevision ?? 0,
+  }
+}
+
+async function saveBook(
+  ctx: MutationCtx,
+  member: Doc<'members'>,
+  book: Doc<'addressBooks'> | null,
+  count: number,
+  revision: number,
+) {
+  if (book) await ctx.db.patch(book._id, { count, revision })
+  else await ctx.db.insert('addressBooks', { userId: member.userId, count, revision })
+}
+
 /** The address book's revision: every write names it, and gets the next one back. */
 export const revision = query({
   args: {},
   returns: v.number(),
-  handler: async (ctx) => (await requireMember(ctx)).peopleRevision ?? 0,
+  handler: async (ctx) => (await bookOf(ctx, await requireMember(ctx))).revision,
 })
 
 /** The person's cards, a page at a time, in `personKey` order (which says nothing about who's on them). */
@@ -77,7 +105,8 @@ export const put = mutation({
     // other account, which can't open it.
     await requireSessionIfGiven(ctx, sessionId)
     const member = await requireMember(ctx)
-    if ((member.peopleRevision ?? 0) !== revision) throw new ConvexError(CHANGED)
+    const book = await bookOf(ctx, member)
+    if (book.revision !== revision) throw new ConvexError(CHANGED)
     if (people.length > MAX_PEOPLE_PER_CALL)
       throw new ConvexError(`Save at most ${MAX_PEOPLE_PER_CALL} people at once.`)
     if (new Set(people.map((p) => p.personKey)).size !== people.length) {
@@ -101,9 +130,9 @@ export const put = mutation({
         added++
       }
     }
-    const count = (member.peopleCount ?? 0) + added
+    const count = book.count + added
     if (count > MAX_PEOPLE) throw new ConvexError(`You can have at most ${MAX_PEOPLE.toLocaleString('en')} people.`)
-    await ctx.db.patch(member._id, { peopleCount: count, peopleRevision: revision + 1 })
+    await saveBook(ctx, member, book.book, count, revision + 1)
     return revision + 1
   },
 })
@@ -117,7 +146,8 @@ export const remove = mutation({
   returns: v.number(),
   handler: async (ctx, { personKeys, revision }) => {
     const member = await requireMember(ctx)
-    if ((member.peopleRevision ?? 0) !== revision) throw new ConvexError(CHANGED)
+    const book = await bookOf(ctx, member)
+    if (book.revision !== revision) throw new ConvexError(CHANGED)
     if (personKeys.length > MAX_PEOPLE_PER_CALL) {
       throw new ConvexError(`Delete at most ${MAX_PEOPLE_PER_CALL} people at once.`)
     }
@@ -132,10 +162,7 @@ export const remove = mutation({
         removed++
       }
     }
-    await ctx.db.patch(member._id, {
-      peopleCount: Math.max(0, (member.peopleCount ?? 0) - removed),
-      peopleRevision: revision + 1,
-    })
+    await saveBook(ctx, member, book.book, Math.max(0, book.count - removed), revision + 1)
     return revision + 1
   },
 })

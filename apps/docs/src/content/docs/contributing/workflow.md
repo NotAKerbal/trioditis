@@ -67,6 +67,8 @@ CI runs automatically on every pull request, on every push to `dev` and `main`, 
 
 `scripts/ci-changes.mjs` decides which of the two slow jobs a pull request needs. A pull request that changes only docs, the site, release notes or tests skips the images. Pushes to `dev` and `main` always run both, so a skip never lets a broken bundle reach a server unseen. **All checks** is the one check to require before merging. The nightly run builds the images from scratch, so a break in what nothing pins, such as Debian's packages, shows up even on a day no pull request touches them.
 
+The [load test](/contributing/load-test/) (`pnpm load-test`) isn't part of `pnpm check`. It takes about half an hour and runs nightly. Run it for a change to backend queries, ingestion or what the desktop subscribes to.
+
 ### Design system lint rules
 
 `pnpm lint` enforces three custom rules (`scripts/lint/design-system.mjs`) in `apps/desktop` and `packages/ui`:
