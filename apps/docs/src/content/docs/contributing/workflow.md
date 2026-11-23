@@ -48,6 +48,8 @@ pnpm check
 4. `pnpm test:scripts` (Node test runner for `scripts/`)
 5. `go vet ./...` and `go test ./...` inside `apps/bridge-host`
 
+The [load test](/contributing/load-test/) (`pnpm load-test`) isn't part of `pnpm check`. It takes about half an hour and runs nightly. Run it for a change to backend queries, ingestion or what the desktop subscribes to.
+
 ### Design system lint rules
 
 `pnpm lint` enforces three custom rules (`scripts/lint/design-system.mjs`) in `apps/desktop` and `packages/ui`:

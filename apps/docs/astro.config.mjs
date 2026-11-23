@@ -102,6 +102,7 @@ export default defineConfig({
           items: [
             { label: 'Local Development', slug: 'contributing/local-development' },
             { label: 'Workflow & Checks', slug: 'contributing/workflow' },
+            { label: 'Load Test', slug: 'contributing/load-test' },
             { label: 'Brand Guide', slug: 'contributing/brand' },
             { label: 'Roadmap & Decisions', slug: 'contributing/roadmap' },
           ],
