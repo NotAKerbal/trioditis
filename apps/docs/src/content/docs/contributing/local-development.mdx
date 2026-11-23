@@ -49,20 +49,20 @@ You can run the complete Trioditis stack locally—Convex backend, gateway, brid
 
 Run all commands from the repository root:
 
-| Command                     | Description                                                                                           |
-| --------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                  | Starts local backend, gateway, WhatsApp bridge host, sign-in browser, and web app                     |
-| `pnpm dev --network signal` | Runs with another network's bridge host (comma-separated, e.g. `whatsapp,signal`)                     |
-| `pnpm dev --demo`           | Runs in demo-only mode with sealed sample chats and no bridge host                                    |
-| `pnpm dev --setup`          | Prepares the checkout's backend, bridge host, and test account, then exits                            |
-| `pnpm dev --setup --reset`  | Wipes this checkout's local backend and bridge logins, then re-initializes cleanly                    |
-| `pnpm docs:dev`             | Runs the documentation site locally (`apps/docs`)                                                     |
-| `pnpm docs:build`           | Builds the static documentation site (`apps/docs/dist`)                                               |
-| `pnpm check`                | Runs the full CI check suite locally (`typecheck`, `lint`, `test`, `test:scripts`, Go `vet` & `test`) |
-| `pnpm typecheck`            | Type-checks all TypeScript workspaces                                                                 |
-| `pnpm lint`                 | Runs `oxlint` (including Convex and design system rules)                                              |
-| `pnpm test`                 | Runs TypeScript unit and Convex tests (no external services needed)                                   |
-| `pnpm build`                | Builds every package and app                                                                          |
+| Command                     | Description                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                  | Starts local backend, gateway, WhatsApp bridge host, sign-in browser, and web app                                                                             |
+| `pnpm dev --network signal` | Runs with another network's bridge host (comma-separated, e.g. `whatsapp,signal`)                                                                             |
+| `pnpm dev --demo`           | Runs in demo-only mode with sealed sample chats and no bridge host                                                                                            |
+| `pnpm dev --setup`          | Prepares the checkout's backend, bridge host, and test account, then exits                                                                                    |
+| `pnpm dev --setup --reset`  | Wipes this checkout's local backend and bridge logins, then re-initializes cleanly                                                                            |
+| `pnpm docs:dev`             | Runs the documentation site locally (`apps/docs`)                                                                                                             |
+| `pnpm docs:build`           | Builds the static documentation site (`apps/docs/dist`)                                                                                                       |
+| `pnpm check`                | Runs CI's checks locally (`typecheck`, `lint`, `format:check`, `test`, `test:scripts`, `build`, Go `vet` & `test`); `--deploy` adds the deploy bundle's tests |
+| `pnpm typecheck`            | Type-checks all TypeScript workspaces                                                                                                                         |
+| `pnpm lint`                 | Runs `oxlint` (including Convex and design system rules)                                                                                                      |
+| `pnpm test`                 | Runs TypeScript unit and Convex tests (no external services needed)                                                                                           |
+| `pnpm build`                | Builds every package and app                                                                                                                                  |
 
 :::note[First run with Signal]
 Signal's bridge host links `libsignal` built from Rust source, so the first run with `--network signal` takes several minutes to compile.
