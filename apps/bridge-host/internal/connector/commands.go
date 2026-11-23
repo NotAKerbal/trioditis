@@ -346,6 +346,16 @@ func pastDeadline(notAfter int64) bool {
 	return notAfter > 0 && time.Now().Add(HandoffMargin).UnixMilli() > notAfter
 }
 
+// reactionPastDeadline is the deadline check for a reaction or its removal. The backend gives
+// a reaction ten minutes (messages.react), less than HandoffMargin, which is sized for a send
+// that may wait behind the chat's lock: with that margin every reaction was refused as soon as
+// it arrived. So a reaction is refused only once its deadline has passed. One handed to bridgev2
+// just before can still wait on the chat's lock and go out after it; its echo then updates the
+// chat, and a late reaction does far less harm than a late message.
+func reactionPastDeadline(notAfter int64) bool {
+	return notAfter > 0 && time.Now().UnixMilli() > notAfter
+}
+
 // errTransmitDeadline is an attachment read refused because its send is past its deadline.
 var errTransmitDeadline = errors.New("the send is past its deadline")
 
@@ -489,7 +499,7 @@ func (c *Connector) handleReact(ctx context.Context, cmd *protocol.Command, chec
 	}
 	// A reaction that waited past its deadline (behind a send in the chat, say) isn't sent:
 	// it would turn up long after the person chose it.
-	if pastDeadline(cmd.NotAfter) {
+	if reactionPastDeadline(cmd.NotAfter) {
 		return conflict(protocol.ErrExpired, "the reaction is past its deadline")
 	} else if check {
 		return nil
@@ -531,7 +541,7 @@ func (c *Connector) handleRedact(ctx context.Context, cmd *protocol.Command, che
 		}
 		pending.key = reactionKey(cmd.Key)
 	}
-	if cmd.Type == protocol.CommandUnreact && pastDeadline(cmd.NotAfter) {
+	if cmd.Type == protocol.CommandUnreact && reactionPastDeadline(cmd.NotAfter) {
 		return conflict(protocol.ErrExpired, "the reaction is past its deadline")
 	} else if check {
 		return nil
