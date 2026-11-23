@@ -113,7 +113,7 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 ### Send delivery rules
 
 - `submitted` is emitted on connector handoff, `sent` on network confirmation, `failed` only when the network definitively refuses, and `unknown` whenever an outcome is ambiguous (including restarts mid-send). **The bridge host never retries a send automatically.**
-- `notAfter` is enforced before handoff (with an 11-minute safety margin) and again when reading media attachments (2-minute margin). Past handoff to `bridgev2`, `notAfter` is best-effort—for example, a stalled WhatsApp `whatsmeow` send lock can delay transmission past `notAfter`, in which case the actual outcome (`sent` or `unknown`) is always reported truthfully. A reaction's shorter `notAfter` is checked as it stands, without the 11-minute margin, which would otherwise refuse every reaction on arrival; a reaction that goes out a little late is harmless.
+- `notAfter` is enforced before handoff (with an 11-minute safety margin) and again when reading media attachments (2-minute margin). Past handoff to `bridgev2`, `notAfter` is best-effort—for example, a stalled WhatsApp `whatsmeow` send lock can delay transmission past `notAfter`, in which case the actual outcome (`sent` or `unknown`) is always reported truthfully. A reaction's shorter `notAfter` is checked as it stands, without the 11-minute margin, which would otherwise refuse every reaction on arrival: the host refuses a reaction or its removal that is past `notAfter` before handoff, but one handed off just before can wait on the chat's lock and reach the network after it. Its echo then updates the chat as usual.
 
 ## Error and quarantine codes
 

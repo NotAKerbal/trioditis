@@ -349,8 +349,9 @@ func pastDeadline(notAfter int64) bool {
 // reactionPastDeadline is the deadline check for a reaction or its removal. The backend gives
 // a reaction ten minutes (messages.react), less than HandoffMargin, which is sized for a send
 // that may wait behind the chat's lock: with that margin every reaction was refused as soon as
-// it arrived. A reaction that goes out a little after its deadline is harmless, unlike a late
-// message, so it is refused only once the deadline has passed.
+// it arrived. So a reaction is refused only once its deadline has passed. One handed to bridgev2
+// just before can still wait on the chat's lock and go out after it; its echo then updates the
+// chat, and a late reaction does far less harm than a late message.
 func reactionPastDeadline(notAfter int64) bool {
 	return notAfter > 0 && time.Now().UnixMilli() > notAfter
 }
