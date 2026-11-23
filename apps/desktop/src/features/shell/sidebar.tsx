@@ -32,7 +32,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react'
 import {
   mergedChat,
   membersOf,
@@ -278,6 +278,12 @@ export function Sidebar({
     />
   )
 
+  // The open chat, when it's one of these, so its folded section still shows it.
+  const keep = (chats: Chat[] | undefined) => {
+    const open = chats?.find((c) => has(c, selectedId))
+    return open ? row(open) : undefined
+  }
+
   // Focused's other sections, at the foot of the list; each opens as a sheet over Unread.
   const sections: Section[] = [
     {
@@ -288,6 +294,7 @@ export function Sidebar({
       chats: read,
       more: main,
       content: () => read.map((c) => row(c)),
+      kept: keep(read),
       ready: true,
     },
     {
@@ -298,6 +305,7 @@ export function Sidebar({
       chats: snoozed ?? [],
       more: snoozedList,
       content: () => snoozed?.map((c) => row(c)),
+      kept: keep(snoozed),
     },
     {
       key: 'scheduled',
@@ -345,6 +353,7 @@ export function Sidebar({
       chats: requests ?? [],
       more: requestsList,
       content: () => requests?.map((c) => row(c)),
+      kept: keep(requests),
     },
     {
       key: 'archived',
@@ -354,6 +363,7 @@ export function Sidebar({
       chats: archived ?? [],
       more: archivedList,
       content: () => archived?.map((c) => row(c)),
+      kept: keep(archived),
     },
     {
       key: 'blocked',
@@ -363,6 +373,7 @@ export function Sidebar({
       chats: blocked ?? [],
       more: blockedList,
       content: () => blocked?.map((c) => row(c)),
+      kept: keep(blocked),
     },
   ]
   const drawer = focused && !searching && inbox !== undefined
@@ -680,6 +691,11 @@ interface Section {
   /** Its rows, rendered only while it's on the sheet. */
   content: () => ReactNode
   /**
+   * The open chat's row, when the chat is in this section: shown under the section's row while
+   * the section is folded, so opening a chat from the sheet and closing the sheet doesn't hide it.
+   */
+  kept?: ReactNode
+  /**
    * Its rows drawn ahead, out of sight, once the browser is idle: for the section opened most,
    * so its sheet slides up with the rows and their pictures already there.
    */
@@ -763,15 +779,17 @@ function Drawer({
         // At most half the column, scrolling past that, so Unread keeps room in a short window.
         <div className="max-h-[50%] shrink-0 overflow-y-auto border-t border-border px-2 py-1" inert={open !== null}>
           {rows.map((s) => (
-            <SectionRow
-              key={s.key}
-              ref={(el) => {
-                if (el) rowRefs.current.set(s.key, el)
-                else rowRefs.current.delete(s.key)
-              }}
-              section={s}
-              onClick={() => onOpen(s.key)}
-            />
+            <Fragment key={s.key}>
+              <SectionRow
+                ref={(el) => {
+                  if (el) rowRefs.current.set(s.key, el)
+                  else rowRefs.current.delete(s.key)
+                }}
+                section={s}
+                onClick={() => onOpen(s.key)}
+              />
+              {s.kept}
+            </Fragment>
           ))}
         </div>
       ) : null}
