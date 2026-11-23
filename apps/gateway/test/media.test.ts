@@ -13,10 +13,15 @@ const MEDIA_ID = 'AAAAAAAAAAAAAAAAAAAAAA'
 function token(
   claims: { u: string; h: string[]; e: number } = { u: 'user_a', h: ['meta-1'], e: Date.now() + 60_000 },
   secret = SECRET,
+  purpose = 'media-access',
 ) {
   const payload = Buffer.from(JSON.stringify(claims)).toString('base64url')
-  return `${payload}.${createHmac('sha256', secret).update(`media-access\n${payload}`).digest('base64url')}`
+  return `${payload}.${createHmac('sha256', secret).update(`${purpose}\n${payload}`).digest('base64url')}`
 }
+
+/** An upload token for one host (packages/backend/convex/media.ts, upload). */
+const uploadToken = (claims = { u: 'user_a', h: ['meta-1'], e: Date.now() + 60_000 }) =>
+  token(claims, SECRET, 'media-upload')
 
 const servers: Server[] = []
 afterEach(() => {
@@ -45,7 +50,10 @@ async function fakeHost(files: Record<string, string> = { [`${MEDIA_ID}/user_a`]
   return { url, seen }
 }
 
-async function gateway(hosts: Record<string, string>, limits: { maxInFlightPerPerson?: number } = {}) {
+async function gateway(
+  hosts: Record<string, string>,
+  limits: { maxInFlightPerPerson?: number; maxUploadBytes?: number } = {},
+) {
   const bridgeHosts = new Map(Object.entries(hosts))
   const media = createMediaHandler({
     internalToken: TOKEN,
@@ -128,5 +136,70 @@ describe('GET /media/:id', () => {
     const host = await fakeHost({}, 500)
     const base = await gateway({ 'meta-1': host.url })
     expect((await get(base, `/media/${MEDIA_ID}`, token())).status).toBe(502)
+  })
+})
+
+/** A bridge host that keeps what it's given, once per ID and person. */
+async function keepingHost(status?: number) {
+  const kept = new Map<string, string>()
+  const seen: { url: string; headers: IncomingHttpHeaders }[] = []
+  const url = await listen(
+    createServer((request, response) => {
+      seen.push({ url: request.url!, headers: request.headers })
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer) => chunks.push(chunk))
+      request.on('end', () => {
+        const key = `${request.url}/${String(request.headers['x-trioditis-user-id'])}`
+        if (status) return response.writeHead(status).end()
+        if (request.method !== 'PUT' || request.headers.authorization !== `Bearer ${TOKEN}`) {
+          return response.writeHead(401).end()
+        }
+        if (kept.has(key)) return response.writeHead(409).end()
+        kept.set(key, Buffer.concat(chunks).toString())
+        response.writeHead(201).end()
+      })
+    }),
+  )
+  return { url, kept, seen }
+}
+
+const putFile = (base: string, path: string, body: string, auth?: string) =>
+  fetch(base + path, { method: 'PUT', body, ...(auth ? { headers: { authorization: `Bearer ${auth}` } } : {}) })
+
+describe('PUT /media/:id', () => {
+  it('gives the file to the one host the upload token names, for its person', async () => {
+    const host = await keepingHost()
+    const base = await gateway({ 'meta-1': host.url })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'ciphertext', uploadToken())).status).toBe(201)
+    expect(host.kept.get(`/v1/media/${MEDIA_ID}/user_a`)).toBe('ciphertext')
+    expect(host.seen[0]!.headers['content-length']).toBe('10')
+    // The same ID again is the host's to refuse.
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'other', uploadToken())).status).toBe(409)
+  })
+
+  it('refuses a fetch token, a forged one, or one naming several hosts', async () => {
+    const host = await keepingHost()
+    const base = await gateway({ 'meta-1': host.url, 'meta-2': host.url })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'x')).status).toBe(401)
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'x', token())).status).toBe(401)
+    const several = uploadToken({ u: 'user_a', h: ['meta-1', 'meta-2'], e: Date.now() + 60_000 })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'x', several)).status).toBe(503)
+    const unknown = uploadToken({ u: 'user_a', h: ['meta-9'], e: Date.now() + 60_000 })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'x', unknown)).status).toBe(503)
+    expect((await putFile(base, '/media/short', 'x', uploadToken())).status).toBe(404)
+    expect(host.seen).toHaveLength(0)
+  })
+
+  it('turns away a file too large before any of it goes on', async () => {
+    const host = await keepingHost()
+    const base = await gateway({ 'meta-1': host.url }, { maxUploadBytes: 4 })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'too large', uploadToken())).status).toBe(413)
+    expect(host.seen).toHaveLength(0)
+  })
+
+  it('says a host that fails is unavailable', async () => {
+    const host = await keepingHost(500)
+    const base = await gateway({ 'meta-1': host.url })
+    expect((await putFile(base, `/media/${MEDIA_ID}`, 'x', uploadToken())).status).toBe(502)
   })
 })

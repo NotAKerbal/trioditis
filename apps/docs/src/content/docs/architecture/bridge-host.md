@@ -31,6 +31,7 @@ apps/bridge-host/
 - **Durable commands & per-chat lanes:** `POST /v1/commands` persists each command in `trioditis_command` before answering `202`. Each chat executes commands serially on its own goroutine so a slow connector call in one chat never blocks others.
 - **Synchronous `bridgev2` delivery:** `PortalEventBuffer: 0` eliminates hidden intermediary queues and keeps `whatsmeow`'s decrypted-event buffer active so crashes mid-message never drop single-decryption WhatsApp messages.
 - **Safe media staging:** Incoming attachments remain in memory (up to 10 minutes) until referenced, then write encrypted to disk. Connectors requiring a file path (WhatsApp for media > 5 MiB) only stage on `tmpfs` (`/dev/shm`) and delete immediately; if `tmpfs` is absent, the transfer is refused rather than touching persistent disk.
+- **Files people send:** The client encrypts each file and the gateway passes its ciphertext to `PUT /v1/media/{id}`, which writes it under its owner (up to 100 MiB and its tag, never replacing a file). A send whose sealed plaintext carries the file's key reads and decrypts it in memory, only for that owner.
 
 ## Running standalone
 

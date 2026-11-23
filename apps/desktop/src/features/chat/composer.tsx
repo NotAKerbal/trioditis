@@ -11,11 +11,13 @@ import {
 } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
-import { CircleHelp, Clock, Reply, SendHorizontal, X } from 'lucide-react'
+import { CircleHelp, Clock, FileIcon, Loader2, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { networkName } from '~/data/chats.ts'
 import type { Message } from '~/data/messages.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
+import { fileSize } from './attachments.tsx'
+import { pastedFiles, type OutgoingFile } from './outgoing-files.ts'
 
 /** One of a conversation's chats a message can go by: its network, and which account if several. */
 export interface ViaOption {
@@ -32,6 +34,10 @@ interface ComposerProps {
   via?: { options: ViaOption[]; current: string; onChange: (id: string) => void } | undefined
   draft: string
   onDraft: (text: string) => void
+  /** Files to send with it, each as a message of its own; the text goes with the first. */
+  files: OutgoingFile[]
+  onAddFiles: (files: File[]) => void
+  onRemoveFile: (id: string) => void
   replyTo: Message | null
   onCancelReply: () => void
   onSend: () => void
@@ -45,6 +51,9 @@ export function Composer({
   via,
   draft,
   onDraft,
+  files,
+  onAddFiles,
+  onRemoveFile,
   replyTo,
   onCancelReply,
   onSend,
@@ -63,7 +72,8 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
   }, [draft])
 
-  const empty = !draft.trim()
+  const empty = !draft.trim() && files.length === 0
+  const sending = files.some((f) => f.sending)
   return (
     <div className="mx-3.5 mb-3.5 shrink-0 rounded-[14px] bg-surface shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] focus-within:shadow-[0_0_0_1px_var(--accent-ring),0_0_0_4px_var(--accent-soft)]">
       {replyTo ? (
@@ -77,6 +87,43 @@ export function Composer({
             <X className="size-3.5" />
           </Button>
         </div>
+      ) : null}
+      {files.length ? (
+        <ul aria-label="Files to send" className="mx-2 mt-2 flex gap-2 overflow-x-auto pb-1">
+          {files.map((f) => (
+            <li
+              key={f.id}
+              className="relative flex h-16 shrink-0 items-center overflow-hidden rounded-[9px] bg-surface-2"
+            >
+              {f.preview ? (
+                <img src={f.preview} alt={f.file.name || 'Picture'} className="size-16 object-cover" />
+              ) : (
+                <span className="flex max-w-52 items-center gap-2 pr-8 pl-3 text-sm">
+                  <FileIcon className="size-5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="block truncate">{f.file.name || 'File'}</span>
+                    <span className="block text-xs text-subtle-foreground">{fileSize(f.file.size)}</span>
+                  </span>
+                </span>
+              )}
+              {f.sending ? (
+                <span className="absolute inset-0 flex items-center justify-center bg-surface/60">
+                  <Loader2 className="size-5 animate-spin" aria-label="Sending" />
+                </span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Remove ${f.file.name || 'file'}`}
+                  className="absolute top-0.5 right-0.5 bg-surface/80"
+                  onClick={() => onRemoveFile(f.id)}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
       ) : null}
       {/* The placeholder says why too, but it's gone once there's text. */}
       {disabled && draft.length > 0 ? <p className="mx-3 mt-2 text-sm text-subtle-foreground">{disabled}</p> : null}
@@ -117,10 +164,16 @@ export function Composer({
           placeholder={disabled ?? `Message on ${networkName(network)}`}
           aria-label="Message"
           onChange={(e) => onDraft(e.target.value)}
+          onPaste={(e) => {
+            const pasted = pastedFiles(e.clipboardData)
+            if (!pasted.length) return
+            e.preventDefault()
+            onAddFiles(pasted)
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
-              if (!empty) onSend()
+              if (!empty && !sending) onSend()
             }
             if (e.key === 'Escape' && replyTo) onCancelReply()
           }}
@@ -132,8 +185,8 @@ export function Composer({
               variant="ghost"
               size="icon"
               aria-label="Schedule for later"
-              title="Schedule for later"
-              disabled={empty || !!disabled}
+              title={files.length ? 'Files can’t be scheduled yet' : 'Schedule for later'}
+              disabled={empty || files.length > 0 || !!disabled}
             >
               <Clock className="size-[18px]" />
             </Button>
@@ -153,7 +206,7 @@ export function Composer({
           size="icon"
           aria-label="Send"
           title="Send (Enter)"
-          disabled={empty || !!disabled}
+          disabled={empty || sending || !!disabled}
           onClick={onSend}
         >
           <SendHorizontal className="size-[17px]" />

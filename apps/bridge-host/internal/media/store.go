@@ -178,6 +178,58 @@ func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*pro
 	return &att, nil
 }
 
+// MaxClientFile is the largest ciphertext a client may put here to send: a 100 MiB file and its
+// 16-byte tag. That's about what the networks take as a document, and still small enough to
+// hold in memory while it's sent.
+const MaxClientFile = 100<<20 + 16
+
+// ErrExists is a put under a media ID already in use. Nothing is replaced.
+var ErrExists = errors.New("media: a file with that ID exists")
+
+// ErrTooLarge is a put of more than MaxClientFile bytes.
+var ErrTooLarge = errors.New("media: file is too large")
+
+// Put writes the ciphertext of a file a client encrypted for its owner, to send. It goes in
+// the owner's directory, so only they can fetch it (Open) or have it read for their send
+// (Register). It is written in full under another name first, so a send never reads half of
+// one, and a media ID already used is refused rather than replaced.
+func (s *Store) Put(mediaID, ownerUserID string, r io.Reader) error {
+	if !validID(mediaID) || ownerUserID == "" {
+		return ErrUnavailable
+	}
+	dir := s.ownerDir(ownerUserID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("media: failed to make the owner's directory: %w", err)
+	}
+	final := filepath.Join(dir, mediaID)
+	if _, err := os.Lstat(final); err == nil {
+		return ErrExists
+	}
+	tmp, err := os.OpenFile(filepath.Join(dir, ".put-"+randomID()), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("media: failed to make the file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	n, err := io.Copy(tmp, io.LimitReader(r, MaxClientFile+1))
+	if err == nil && n > MaxClientFile {
+		err = ErrTooLarge
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// A link never replaces what's there, so two puts of one ID can't both land.
+	if err = os.Link(tmp.Name(), final); errors.Is(err, os.ErrExist) {
+		return ErrExists
+	}
+	return err
+}
+
 // Register makes a client-encrypted file readable for a while, for an outbound send whose
 // sealed plaintext carried its key. It returns the content URI to give the connector.
 func (s *Store) Register(att protocol.Attachment, ownerUserID string, ttl time.Duration) (id.ContentURIString, error) {
@@ -222,7 +274,15 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 	} else if !isRegistered {
 		return nil, ErrUnavailable
 	}
-	ct, err := readNoFollow(s.path(mediaID))
+	// A file the client put is in its owner's directory (Put); one from before that, in the
+	// store's own. Either way it opens only with the owner's key and associated data.
+	if !validID(mediaID) {
+		return nil, ErrUnavailable
+	}
+	ct, err := readNoFollow(filepath.Join(s.ownerDir(owner), mediaID))
+	if errors.Is(err, os.ErrNotExist) {
+		ct, err = readNoFollow(s.path(mediaID))
+	}
 	if err != nil {
 		return nil, ErrUnavailable
 	}

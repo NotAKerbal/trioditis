@@ -55,9 +55,30 @@ export function openCached<T>(
 }
 
 /**
- * Seals a text message twice, as messages.send and scheduled.create take it: for the bridge
- * host (kind `outbound`) and as the person's own stored copy (kind `message`).
+ * Seals a message twice, as messages.send and scheduled.create take it: for the bridge host
+ * (kind `outbound`) and as the person's own stored copy (kind `message`).
  */
+export function sealMessage(
+  message: MessagePlaintext,
+  clientMessageId: string,
+  ownerUserId: string,
+  identityPublicKey: Uint8Array,
+  bridgePublicKey: string,
+) {
+  const forBridge = sealJson(message, [{ publicKey: fromBase64Url(bridgePublicKey) }], {
+    kind: 'outbound',
+    ownerUserId,
+    objectId: clientMessageId,
+  })
+  const copy = sealJson(message, [{ publicKey: identityPublicKey }], {
+    kind: 'message',
+    ownerUserId,
+    objectId: clientMessageId,
+  })
+  return { forBridge, copy }
+}
+
+/** `sealMessage` for plain text. */
 export function sealText(
   text: string,
   clientMessageId: string,
@@ -65,18 +86,7 @@ export function sealText(
   identityPublicKey: Uint8Array,
   bridgePublicKey: string,
 ) {
-  const body: MessagePlaintext = { type: 'text', body: text }
-  const forBridge = sealJson(body, [{ publicKey: fromBase64Url(bridgePublicKey) }], {
-    kind: 'outbound',
-    ownerUserId,
-    objectId: clientMessageId,
-  })
-  const copy = sealJson(body, [{ publicKey: identityPublicKey }], {
-    kind: 'message',
-    ownerUserId,
-    objectId: clientMessageId,
-  })
-  return { forBridge, copy }
+  return sealMessage({ type: 'text', body: text }, clientMessageId, ownerUserId, identityPublicKey, bridgePublicKey)
 }
 
 /** Seals what the person typed into a login step, to the bridge key only: it's a credential. */

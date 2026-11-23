@@ -80,9 +80,19 @@ import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { errorMessage } from '~/lib/errors.ts'
-import { newClientId, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
+import { newClientId, sealMessage, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
+import {
+  addFiles,
+  draggingFiles,
+  filesOf,
+  removeFile,
+  setSending,
+  useOutgoingFiles,
+  type OutgoingFile,
+} from './outgoing-files.ts'
+import { messageTypeOf, uploadFile } from '~/data/media.ts'
 import { DetailsPanel, type PanelView } from './details-panel.tsx'
 import { ChatAvatar } from './chat-avatar.tsx'
 import { MessageList, MessagesSkeleton } from './message-list.tsx'
@@ -359,6 +369,17 @@ function OpenChat({
   // The chat whose draft is on screen, which every change to it goes to.
   const draftId = lost ? sendId! : sendChat.id
   const { text: draft, reply: replyTo } = useDraft<Message>(draftId)
+  // Files dropped or pasted in wait beside the draft, for the same chat (outgoing-files.ts).
+  const files = useOutgoingFiles(draftId)
+  const attach = (picked: File[]) => {
+    if (lost || !picked.length) return
+    const left = addFiles(draftId, picked)
+    if (left) toast(left)
+  }
+  // Files dragged over the chat can be dropped anywhere on it. Entering and leaving each child
+  // fires too, so the drop target shows while more have entered than left.
+  const [dragDepth, setDragDepth] = useState(0)
+  const dropOpen = !lost && !composerBlocked(sendChat.row, bridge.status)
   // Cancelled messages restored to the composer from this pane, to say so. Restore stays.
   const [restored, setRestored] = useState<ReadonlySet<string>>(new Set())
   const setDraft = (text: string) => setDraftText(draftId, text)
@@ -435,10 +456,11 @@ function OpenChat({
   }
 
   async function onSend() {
-    if (!draft.trim() || lost) return
+    if ((!draft.trim() && !files.length) || lost) return
     // Nothing leaves the composer until it can be sent.
     if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
     const to = sendChat.id
+    if (files.length) return sendFiles(to, files, bridgeKey)
     // The draft's own send ID: the same draft sent again, from another tab or after a reload,
     // is the same send. Noted as under way, and saved so, before the composer is cleared (I2).
     const taken = takeForSend<Message>(to, sendIdOfTaken)
@@ -453,6 +475,65 @@ function OpenChat({
         },
       ),
     )
+  }
+
+  /**
+   * Sends the composer's files, each as a message of its own (a network takes one file a
+   * message), in order, the text as the first one's caption and the reply on it. Each file is
+   * encrypted and given to the bridge host that will send it before its message is sealed with
+   * its key. A file leaves the composer once its message is queued; at the first that can't be,
+   * the rest stay, and the text comes back if it hadn't gone.
+   */
+  async function sendFiles(to: ChatId, outgoing: OutgoingFile[], bridgePublicKey: string) {
+    const ids = outgoing.map((f) => f.id)
+    if (outgoing.some((f) => f.sending)) return
+    setSending(to, ids, true)
+    // The text, when there is any, is taken as a send of its own would be; a reply alone is
+    // taken too, so it goes with the first file and nothing else.
+    const taken = takeForSend<Message>(to, sendIdOfTaken)
+    const reply = taken ? taken.reply : getDraft<Message>(to).reply
+    if (!taken && reply) setDraftReply(to, null)
+    let first = true
+    await whileSending(async () => {
+      for (const f of outgoing) {
+        const caption = first ? taken?.text : undefined
+        const clientMessageId = first && taken ? taken.clientMessageId : newClientId()
+        const replyTo = first ? replyIn(reply, to) : undefined
+        let outcome: Awaited<ReturnType<typeof send>>
+        try {
+          const attachment = await uploadFile(session.userId, to, f.file)
+          // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
+          const message: MessagePlaintext = {
+            type: messageTypeOf(attachment.mime),
+            body: caption || attachment.name || 'File',
+            attachments: [attachment],
+          }
+          const sealed = sealMessage(
+            message,
+            clientMessageId,
+            session.userId,
+            session.keyPair.publicKey,
+            bridgePublicKey,
+          )
+          outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
+        } catch (e) {
+          if (first && taken) {
+            restoreDraft(to, taken.text, taken.reply, taken.id)
+            endSend(taken.clientMessageId, false)
+          } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
+          setSending(
+            to,
+            ids.filter((id) => filesOf(to).some((left) => left.id === id)),
+            false,
+          )
+          toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
+          return
+        }
+        removeFile(to, f.id)
+        if (first && taken) settle(to, taken, outcome === 'queued' ? null : outcome)
+        first = false
+      }
+    })
   }
 
   /**
@@ -571,7 +652,33 @@ function OpenChat({
   const togglePinned = () => void act(chat.id, () => each((c) => actions.setPinned(c, !pinned)))
   return (
     <>
-      <main className="flex min-w-0 flex-1 flex-col bg-surface-2">
+      <main
+        className="relative flex min-w-0 flex-1 flex-col bg-surface-2"
+        onDragEnter={(e) => {
+          if (!draggingFiles(e.dataTransfer)) return
+          e.preventDefault()
+          setDragDepth((n) => n + 1)
+        }}
+        onDragOver={(e) => {
+          if (!draggingFiles(e.dataTransfer)) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = dropOpen ? 'copy' : 'none'
+        }}
+        onDragLeave={(e) => {
+          if (draggingFiles(e.dataTransfer)) setDragDepth((n) => Math.max(0, n - 1))
+        }}
+        onDrop={(e) => {
+          if (!draggingFiles(e.dataTransfer)) return
+          e.preventDefault()
+          setDragDepth(0)
+          if (dropOpen) attach([...e.dataTransfer.files])
+        }}
+      >
+        {dragDepth > 0 && dropOpen ? (
+          <div className="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-[14px] border-2 border-dashed border-primary bg-surface/85 text-md font-semibold">
+            Drop to attach
+          </div>
+        ) : null}
         <header className="relative flex h-(--bar-h) shrink-0 items-center gap-3 border-b border-border bg-surface pr-3.5 pl-5 max-md:gap-2 max-md:pr-1.5 max-md:pl-1.5">
           <Button variant="ghost" size="icon" aria-label="Back to chats" className="md:hidden" onClick={onBack}>
             <ChevronLeft className="size-5" />
@@ -780,8 +887,18 @@ function OpenChat({
                     ? 'The server’s bridge key couldn’t be loaded, so nothing can be sent. Reload to try again.'
                     : 'This server has no bridge key yet, so nothing can be sent.',
               )
+            // A file goes again as it was: the bridge host still has it, and its key is in the copy.
+            const files = m.body?.attachments?.filter((a) => !a.failed && a.mediaId)
             void sendAgain(state, (nextId) => {
-              const sealed = sealText(text, nextId, session.userId, session.keyPair.publicKey, bridgeKey)
+              const sealed = files?.length
+                ? sealMessage(
+                    { type: m.body!.type, body: text, attachments: files },
+                    nextId,
+                    session.userId,
+                    session.keyPair.publicKey,
+                    bridgeKey,
+                  )
+                : sealText(text, nextId, session.userId, session.keyPair.publicKey, bridgeKey)
               return sendAgainMutation({
                 clientMessageId: m.clientMessageId!,
                 nextId,
@@ -866,6 +983,9 @@ function OpenChat({
           }
           draft={draft}
           onDraft={setDraft}
+          files={files}
+          onAddFiles={attach}
+          onRemoveFile={(id) => removeFile(draftId, id)}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
           onSend={() => void onSend()}

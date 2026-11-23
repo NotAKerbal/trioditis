@@ -1,6 +1,6 @@
 import { ConvexError, v } from 'convex/values'
 import { mutation } from './_generated/server'
-import { requireMember } from './lib/access'
+import { ownChat, requireMember } from './lib/access'
 import { hmacBase64url } from './lib/hash'
 import { network } from './validators'
 
@@ -32,10 +32,43 @@ export const access = mutation({
       .slice(0, MAX_HOSTS)
       .map((host) => host.hostId)
     const expiresAt = Date.now() + MEDIA_TOKEN_TTL_MS
-    const payload = btoa(JSON.stringify({ u: member.userId, h: hosts, e: expiresAt }))
-      .replaceAll('+', '-')
-      .replaceAll('/', '_')
-      .replace(/=+$/, '')
-    return { token: `${payload}.${await hmacBase64url(secret, `media-access\n${payload}`)}`, expiresAt }
+    return { token: await sign(secret, 'media-access', { u: member.userId, h: hosts, e: expiresAt }), expiresAt }
   },
 })
+
+/** How long an upload token lasts: long enough to send a few large files on a slow link. */
+export const UPLOAD_TOKEN_TTL_MS = 15 * 60_000
+
+/**
+ * A token for giving the gateway files to send on a chat (`PUT /media/<mediaId>`,
+ * docs/architecture/client-api.md, Media): the same shape as `access`, signed for
+ * `media-upload` instead, and naming only the bridge host that runs the chat's account, which
+ * its send will go to. The file is ciphertext; its key goes only in the sealed send.
+ */
+export const upload = mutation({
+  args: { chatId: v.id('chats') },
+  returns: v.object({ token: v.string(), expiresAt: v.number() }),
+  handler: async (ctx, { chatId }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    const secret = process.env.GATEWAY_SECRET
+    if (!secret) throw new ConvexError('This server can’t send pictures and files.')
+    const account = await ctx.db
+      .query('networkAccounts')
+      .withIndex('by_login', (q) => q.eq('network', chat.network).eq('loginId', chat.loginId))
+      .unique()
+    if (!account?.hostId || account.userId !== member.userId) {
+      throw new ConvexError('This chat’s account isn’t connected, so files can’t be sent on it now.')
+    }
+    const expiresAt = Date.now() + UPLOAD_TOKEN_TTL_MS
+    return {
+      token: await sign(secret, 'media-upload', { u: member.userId, h: [account.hostId], e: expiresAt }),
+      expiresAt,
+    }
+  },
+})
+
+async function sign(secret: string, purpose: string, claims: { u: string; h: string[]; e: number }) {
+  const payload = btoa(JSON.stringify(claims)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+  return `${payload}.${await hmacBase64url(secret, `${purpose}\n${payload}`)}`
+}

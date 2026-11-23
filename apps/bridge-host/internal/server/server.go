@@ -1,6 +1,6 @@
 // Package server is the bridge host's internal API: its command endpoint, POST /v1/commands,
 // the sign-in browser's viewer, GET /v1/logins/{id}/browser, and encrypted media,
-// GET /v1/media/{id}.
+// GET /v1/media/{id} and PUT /v1/media/{id}.
 package server
 
 import (
@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/connector"
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/media"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/signin"
 )
@@ -35,9 +36,10 @@ type Browsers interface {
 	OpenBrowser(ctx context.Context, loginSessionID, userID, stepID string) (*signin.Browser, error)
 }
 
-// Media opens a person's encrypted files (media.Store).
+// Media opens a person's encrypted files, and keeps ones they encrypted to send (media.Store).
 type Media interface {
 	Open(mediaID, ownerUserID string) (*os.File, error)
+	Put(mediaID, ownerUserID string, r io.Reader) error
 }
 
 // Server serves the internal command API.
@@ -59,6 +61,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/commands", s.handleCommand)
 	mux.HandleFunc("GET /v1/logins/{id}/browser", s.handleBrowser)
 	mux.HandleFunc("GET /v1/media/{id}", s.handleMedia)
+	mux.HandleFunc("PUT /v1/media/{id}", s.handlePutMedia)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -185,4 +188,40 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, f)
+}
+
+// handlePutMedia keeps the ciphertext of a file a person's client encrypted, for a send that
+// will carry its key (docs/architecture/client-api.md, Media). The gateway names the person
+// once it has checked their upload token. 201 means it's kept; 409, that the ID is in use.
+func (s *Server) handlePutMedia(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeError(w, http.StatusUnauthorized, protocol.ErrInvalidCommand)
+		return
+	} else if s.Media == nil {
+		writeError(w, http.StatusConflict, protocol.ErrUnsupported)
+		return
+	}
+	userID := r.Header.Get("X-Trioditis-User-Id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidCommand)
+		return
+	}
+	if r.ContentLength > media.MaxClientFile {
+		writeError(w, http.StatusRequestEntityTooLarge, protocol.ErrInvalidCommand)
+		return
+	}
+	err := s.Media.Put(r.PathValue("id"), userID, r.Body)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusCreated)
+	case errors.Is(err, media.ErrExists):
+		writeError(w, http.StatusConflict, protocol.ErrInvalidCommand)
+	case errors.Is(err, media.ErrTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, protocol.ErrInvalidCommand)
+	case errors.Is(err, media.ErrUnavailable):
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidCommand)
+	default:
+		s.Log.Err(err).Msg("Keeping a file to send failed")
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal)
+	}
 }

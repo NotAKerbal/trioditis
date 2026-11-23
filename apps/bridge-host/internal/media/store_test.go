@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
 )
 
@@ -91,4 +94,63 @@ func TestOpenRefusesPathsAndLinks(t *testing.T) {
 			t.Errorf("Open(%q): %v, want ErrUnavailable", id, err)
 		}
 	}
+}
+
+func TestPutFileIsReadForItsOwnersSendOnly(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mediaID = "clientMediaId_0123456789"
+	enc, err := seal.EncryptMedia([]byte("a photo"), "alice", mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put(mediaID, "alice", bytes.NewReader(enc.Ciphertext)); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put(mediaID, "alice", strings.NewReader("other")); !errors.Is(err, ErrExists) {
+		t.Fatalf("second put: %v, want ErrExists", err)
+	}
+	att := protocol.Attachment{MediaID: mediaID, Key: enc.Key, Nonce: enc.Nonce}
+	uri, err := store.Register(att, "alice", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Read(uri); err != nil || string(got) != "a photo" {
+		t.Fatalf("alice's send reads %q, %v", got, err)
+	}
+	// Bob naming alice's file, even with its key, finds nothing in his own directory.
+	if _, err = store.Register(att, "bob", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Read(uri); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("bob's send read alice's file: %v", err)
+	}
+}
+
+func TestPutRefusesBadIDsAndLargeFiles(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"short", "../../escapeMediaId_01234", ".put-0123456789abcdef"} {
+		if err = store.Put(id, "alice", strings.NewReader("x")); !errors.Is(err, ErrUnavailable) {
+			t.Errorf("put %q: %v, want ErrUnavailable", id, err)
+		}
+	}
+	big := io.LimitReader(zeros{}, MaxClientFile+1)
+	if err = store.Put("bigMediaId_0123456789", "alice", big); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("big put: %v, want ErrTooLarge", err)
+	}
+	if _, err = store.Open("bigMediaId_0123456789", "alice"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("a refused put was kept: %v", err)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
