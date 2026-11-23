@@ -781,7 +781,7 @@ function Drawer({
   // footer: scrolled into the footer's view as the sheet closes, and when the row comes or
   // changes while it's closed (the chat's own copy, or its section's first page, arriving late),
   // so nothing hides it. Keyed by the rows the footer draws, not the sections it may draw.
-  const keptKey = rows.map((s) => (s.kept ? `${s.key}:${s.kept.id}` : '')).join()
+  const keptKey = rows.flatMap((s) => (s.kept ? [`${s.key}:${s.kept.id}`] : [])).join()
   useEffect(() => {
     const foot = footRef.current
     const kept = foot?.querySelector('[data-kept]')
