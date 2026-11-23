@@ -59,7 +59,7 @@ import { formatWhen } from '~/data/snooze.ts'
 import { errorMessage } from '~/lib/errors.ts'
 import { ChatRow, type RowActions } from './chat-row.tsx'
 import { LabelDot } from './label-dot.tsx'
-import { inFilter } from './filter-match.ts'
+import { inFilter, viewOf } from './filter-match.ts'
 import { searchScope } from './search-scope.ts'
 import { countsAsUnread, unreadIncomplete, type Count } from './unread-fill.ts'
 import { usePrefs } from '~/lib/prefs.ts'
@@ -278,9 +278,21 @@ export function Sidebar({
     />
   )
 
-  // The open chat, when it's one of these, so its folded section still shows it.
-  const keep = (chats: Chat[] | undefined) => {
-    const open = chats?.find((c) => has(c, selectedId))
+  // The open chat as the server has it, for when no loaded page has it: archived from its row
+  // into a section whose page with it hasn't loaded yet, say, or opened from a scheduled message.
+  const openChat = useChat(selectedId as ChatId | undefined)
+  const unlisted =
+    openChat && !everything.some((c) => has(c, selectedId)) && inFilter(openChat, { network, labelId, view: null })
+      ? openChat
+      : undefined
+  // The open chat, when it's in this section, so the section still shows it while folded. Read
+  // doesn't take an unlisted chat that's unread: Unread loads every one of those.
+  const keep = (chats: Chat[] | undefined, view: ChatView) => {
+    const open =
+      chats?.find((c) => has(c, selectedId)) ??
+      (unlisted && viewOf(unlisted.row) === view && !(view === 'inbox' && countsAsUnread(unlisted))
+        ? unlisted
+        : undefined)
     return open ? row(open) : undefined
   }
 
@@ -294,7 +306,7 @@ export function Sidebar({
       chats: read,
       more: main,
       content: () => read.map((c) => row(c)),
-      kept: keep(read),
+      kept: keep(read, 'inbox'),
       ready: true,
     },
     {
@@ -305,7 +317,7 @@ export function Sidebar({
       chats: snoozed ?? [],
       more: snoozedList,
       content: () => snoozed?.map((c) => row(c)),
-      kept: keep(snoozed),
+      kept: keep(snoozed, 'snoozed'),
     },
     {
       key: 'scheduled',
@@ -353,7 +365,7 @@ export function Sidebar({
       chats: requests ?? [],
       more: requestsList,
       content: () => requests?.map((c) => row(c)),
-      kept: keep(requests),
+      kept: keep(requests, 'requests'),
     },
     {
       key: 'archived',
@@ -363,7 +375,7 @@ export function Sidebar({
       chats: archived ?? [],
       more: archivedList,
       content: () => archived?.map((c) => row(c)),
-      kept: keep(archived),
+      kept: keep(archived, 'archived'),
     },
     {
       key: 'blocked',
@@ -373,7 +385,7 @@ export function Sidebar({
       chats: blocked ?? [],
       more: blockedList,
       content: () => blocked?.map((c) => row(c)),
-      kept: keep(blocked),
+      kept: keep(blocked, 'blocked'),
     },
   ]
   const drawer = focused && !searching && inbox !== undefined
@@ -396,7 +408,6 @@ export function Sidebar({
   // its conversation as the lists last had them. It stays open, as it is, while any of them still
   // matches. It isn't moved to the chat that matches: the pane would start reading that chat
   // afresh and could mark messages read that were never on screen.
-  const openChat = useChat(selectedId as ChatId | undefined)
   const filterKey = `${network}|${labelId}|${simpleShow}|${layout}`
   const lastFilterKey = useRef(filterKey)
   // A new revision for each change of what the list shows, so leaving and coming back is a change.
@@ -749,6 +760,7 @@ function Drawer({
   // Focus goes with the sheet: to its header when it opens, back to its row when it closes.
   const headRef = useRef<HTMLButtonElement>(null)
   const rowRefs = useRef(new Map<SectionKey, HTMLButtonElement>())
+  const footRef = useRef<HTMLDivElement>(null)
   const wasOpen = useRef(open)
   useEffect(() => {
     if (open) headRef.current?.focus({ preventScroll: true })
@@ -757,6 +769,16 @@ function Drawer({
       const row = rowRefs.current.get(wasOpen.current) ?? rowRefs.current.values().next().value
       if (row) row.focus({ preventScroll: true })
       else onFocusLost()
+      // The chat opened from the sheet sits under its section's row, which may be at the edge
+      // of a short footer: scrolled into the footer's view, so closing the sheet doesn't hide it.
+      const foot = footRef.current
+      const kept = foot?.querySelector('[data-kept]')
+      if (foot && kept) {
+        const f = foot.getBoundingClientRect()
+        const k = kept.getBoundingClientRect()
+        if (k.bottom > f.bottom) foot.scrollTop += k.bottom - f.bottom
+        else if (k.top < f.top) foot.scrollTop -= f.top - k.top
+      }
     }
     wasOpen.current = open
   }, [open])
@@ -777,7 +799,11 @@ function Drawer({
         : null}
       {rows.length ? (
         // At most half the column, scrolling past that, so Unread keeps room in a short window.
-        <div className="max-h-[50%] shrink-0 overflow-y-auto border-t border-border px-2 py-1" inert={open !== null}>
+        <div
+          ref={footRef}
+          className="max-h-[50%] shrink-0 overflow-y-auto border-t border-border px-2 py-1"
+          inert={open !== null}
+        >
           {rows.map((s) => (
             <Fragment key={s.key}>
               <SectionRow
@@ -788,7 +814,7 @@ function Drawer({
                 section={s}
                 onClick={() => onOpen(s.key)}
               />
-              {s.kept}
+              {s.kept ? <div data-kept>{s.kept}</div> : null}
             </Fragment>
           ))}
         </div>
