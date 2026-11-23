@@ -94,13 +94,13 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 - Responds `202` once durably queued in `trioditis_command`, or `4xx` with `{"error": "<code>"}`.
 - `commandId` is idempotent: duplicate submissions return `202` without re-executing.
 - **Size caps:** Sealed messages/edits in events max 256 KiB (auto-truncated with `truncated: true`); chat/contact metadata and collages max 8 KiB; client outbound sends and login input max 64 KiB; login steps max 64 KiB; `hostId` max 64 chars.
-- **Deadlines:** Sends carry `notAfter` (24 hours); login commands expire after 10 minutes (`expired`). Payloads are deleted from the host as soon as execution finishes.
+- **Deadlines:** Sends carry `notAfter` (24 hours); reactions and their removals carry `notAfter` (10 minutes); login commands expire after 10 minutes (`expired`). Payloads are deleted from the host as soon as execution finishes.
 
 | Type                | Fields                                                                             | Outcome event                                    |
 | ------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
 | `send`              | `portalId`, `clientMessageId`, `sealed` (`outbound`), `notAfter`, `replyTo?`       | `sendStatus`, then echoed `message`              |
 | `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed` (`outbound`), `notAfter?` | `sendStatus`, then `edit`                        |
-| `react` / `unreact` | `portalId`, `targetEventId`, `key`                                                 | `reaction` / `reactionRemove`                    |
+| `react` / `unreact` | `portalId`, `targetEventId`, `key`, `notAfter?`                                    | `reaction` / `reactionRemove`                    |
 | `redact`            | `portalId`, `targetEventId`                                                        | `redaction`                                      |
 | `markRead`          | `portalId`, `upToEventId`                                                          | none                                             |
 | `typing`            | `portalId`, `typing`                                                               | none                                             |
@@ -113,7 +113,7 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 ### Send delivery rules
 
 - `submitted` is emitted on connector handoff, `sent` on network confirmation, `failed` only when the network definitively refuses, and `unknown` whenever an outcome is ambiguous (including restarts mid-send). **The bridge host never retries a send automatically.**
-- `notAfter` is enforced before handoff (with an 11-minute safety margin) and again when reading media attachments (2-minute margin). Past handoff to `bridgev2`, `notAfter` is best-effort—for example, a stalled WhatsApp `whatsmeow` send lock can delay transmission past `notAfter`, in which case the actual outcome (`sent` or `unknown`) is always reported truthfully.
+- `notAfter` is enforced before handoff (with an 11-minute safety margin) and again when reading media attachments (2-minute margin). Past handoff to `bridgev2`, `notAfter` is best-effort—for example, a stalled WhatsApp `whatsmeow` send lock can delay transmission past `notAfter`, in which case the actual outcome (`sent` or `unknown`) is always reported truthfully. A reaction's shorter `notAfter` is checked as it stands, without the 11-minute margin, which would otherwise refuse every reaction on arrival; a reaction that goes out a little late is harmless.
 
 ## Error and quarantine codes
 

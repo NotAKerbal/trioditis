@@ -834,6 +834,9 @@ func TestConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		target := gw.waitFor(t, "a message to react to", isMessage("react to me", h, "alice")).EventID
+		// The deadline the backend gives a reaction (messages.react, REACTION_TTL_MS): shorter
+		// than a send's hand-off margin, which once refused every reaction on arrival.
+		inTime := func() time.Time { return time.Now().Add(10 * time.Minute) }
 		react := func(key string, notAfter time.Time) protocol.Command {
 			return protocol.Command{
 				CommandID: nextCommandID(), Type: protocol.CommandReact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
@@ -849,9 +852,9 @@ func TestConformance(t *testing.T) {
 		// removal is reported as the person's, so their reactions don't show both.
 		h.net.SetMaxReactions(1)
 		defer h.net.SetMaxReactions(0)
-		h.mustCommand(react("👍", time.Now().Add(time.Hour)))
+		h.mustCommand(react("👍", inTime()))
 		gw.waitFor(t, "the first reaction", isOwn(protocol.EventReaction, "👍"))
-		h.mustCommand(react("🎉", time.Now().Add(time.Hour)))
+		h.mustCommand(react("🎉", inTime()))
 		gw.waitFor(t, "the second reaction", isOwn(protocol.EventReaction, "🎉"))
 		gw.waitFor(t, "the first one taken away", isOwn(protocol.EventReactionRemove, "👍"))
 		// A reaction indexed before the index kept senders gets its sender from bridgev2's
@@ -863,13 +866,13 @@ func TestConformance(t *testing.T) {
 		if err := h.host.Store.BackfillReactionSenders(ctx); err != nil {
 			t.Fatal(err)
 		}
-		h.mustCommand(react("😂", time.Now().Add(time.Hour)))
+		h.mustCommand(react("😂", inTime()))
 		gw.waitFor(t, "the third reaction", isOwn(protocol.EventReaction, "😂"))
 		gw.waitFor(t, "the upgraded one taken away", isOwn(protocol.EventReactionRemove, "🎉"))
 		// And the one that replaced it can still be taken away.
 		h.mustCommand(protocol.Command{
 			CommandID: nextCommandID(), Type: protocol.CommandUnreact, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
-			TargetEventID: target, Key: "😂", NotAfter: time.Now().Add(time.Hour).UnixMilli(),
+			TargetEventID: target, Key: "😂", NotAfter: inTime().UnixMilli(),
 		})
 		gw.waitFor(t, "the last one taken away", isOwn(protocol.EventReactionRemove, "😂"))
 
