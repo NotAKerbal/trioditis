@@ -776,10 +776,12 @@ function Drawer({
     wasOpen.current = open
   }, [open])
 
+  const rows = sections.filter((s) => s.count !== null)
   // The open chat's row sits under its section's row, which may be at the edge of a short
   // footer: scrolled into the footer's view as the sheet closes, and when the row comes or
-  // changes while it's closed (the chat's own copy arriving late, say), so nothing hides it.
-  const keptKey = sections.map((s) => s.kept?.id ?? '').join()
+  // changes while it's closed (the chat's own copy, or its section's first page, arriving late),
+  // so nothing hides it. Keyed by the rows the footer draws, not the sections it may draw.
+  const keptKey = rows.map((s) => (s.kept ? `${s.key}:${s.kept.id}` : '')).join()
   useEffect(() => {
     const foot = footRef.current
     const kept = foot?.querySelector('[data-kept]')
@@ -790,7 +792,6 @@ function Drawer({
     else if (k.top < f.top) foot.scrollTop -= f.top - k.top
   }, [open, keptKey])
 
-  const rows = sections.filter((s) => s.count !== null)
   const current = sections.find((s) => s.key === onSheet)
   const idle = useIdle(sections.some((s) => s.ready))
   return (
