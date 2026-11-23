@@ -11,14 +11,18 @@ import {
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { AlarmClock, Archive, ArchiveRestore, Bell, BellOff, Check, Pin } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { networkName, type Chat } from '~/data/chats.ts'
-import { useDraft } from '~/data/drafts.ts'
+import { useRef, type ReactNode } from 'react'
+import { warmChat } from '~/data/chat-content.ts'
+import { membersOf, networkName, type Chat } from '~/data/chats.ts'
+import { useFirstDraft } from '~/data/drafts.ts'
 import { listTime } from '~/data/format.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { ChatAvatar } from '~/features/chat/chat-avatar.tsx'
 import { usePrefs } from '~/lib/prefs.ts'
 import { rowPreview } from './row-preview.ts'
+
+/** How long the pointer rests on a row before its chat is fetched ahead: a pass over the list doesn't. */
+const WARM_AFTER_MS = 80
 
 /** What a row's hover actions do. The sidebar decides; the row only offers them. */
 export interface RowActions {
@@ -45,7 +49,8 @@ export function ChatRow({
   actions: RowActions
 }) {
   const prefs = usePrefs()
-  const draft = useDraft(chat.id).text
+  const members = membersOf(chat)
+  const draft = useFirstDraft(members.map((m) => m.id)).text
   const line = rowPreview({
     previews: prefs.previews,
     draft,
@@ -55,11 +60,22 @@ export function ChatRow({
     network: networkName(chat.network),
   })
   const snoozed = chat.row.snoozedUntil !== null && !chat.row.woke
+  // Its chat is fetched ahead once the person shows they may open it, so a click opens it at once
+  // (data/chat-content.ts): the pointer resting on it, a key moving to it, or a press starting.
+  const resting = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const warm = () => warmChat(chat)
   return (
     <div className="group relative">
       <Button
         variant="bare"
         type="button"
+        onPointerEnter={() => {
+          clearTimeout(resting.current)
+          resting.current = setTimeout(warm, WARM_AFTER_MS)
+        }}
+        onPointerLeave={() => clearTimeout(resting.current)}
+        onPointerDown={warm}
+        onFocus={warm}
         onClick={onOpen}
         aria-current={selected ? 'true' : undefined}
         className={cn(
@@ -80,6 +96,12 @@ export function ChatRow({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span className={cn('truncate', unread ? 'font-semibold' : 'font-medium')}>{chat.name}</span>
+            {/* A conversation's other networks; the avatar's badge is the first's. */}
+            {prefs.networkBadges && members.length > 1
+              ? members
+                  .slice(1)
+                  .map((m) => <NetworkBadge key={m.id} network={m.network} label={networkName(m.network)} size={13} />)
+              : null}
             {chat.row.pinned ? <Pin aria-label="Pinned" className="size-3 shrink-0 text-subtle-foreground" /> : null}
             {chat.muted ? <BellOff aria-label="Muted" className="size-3 shrink-0 text-subtle-foreground" /> : null}
             {chat.row.woke ? (

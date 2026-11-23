@@ -1,6 +1,7 @@
 import { ConvexBetterAuthProvider } from '@convex-dev/better-auth/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { ConvexQueryCacheProvider } from 'convex-helpers/react/cache/provider'
+import { ConvexProvider } from 'convex/react'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -8,7 +9,7 @@ import { createRoot } from 'react-dom/client'
 import './lib/account-tabs.ts'
 import { authClient } from './lib/auth-client.ts'
 import { useAuthEpoch } from './lib/auth-epoch.ts'
-import { convex, queryClient } from './lib/convex.ts'
+import { convex, queryClient, warmConvex } from './lib/convex.ts'
 import { applyTheme } from './lib/prefs.ts'
 import { routeTree } from './routeTree.gen.ts'
 import './styles/app.css'
@@ -46,11 +47,18 @@ createRoot(document.getElementById('root')!).render(
           library drops the query that has just gone idle, not the oldest, so it's set well
           above a working session's worth: the 5 minutes are what bound it in practice. Signing
           out loads a new page, so none outlives the account. */}
-      <ConvexQueryCacheProvider expiration={5 * 60_000} maxIdleEntries={100}>
-        <QueryClientProvider client={queryClient}>
-          <RouterProvider router={router} />
-        </QueryClientProvider>
-      </ConvexQueryCacheProvider>
+      {/* The cache holds its subscriptions through the warm client, so one a failure left waiting
+          is asked again only once a page that shows it watches it too (lib/resilient-convex.ts);
+          everything inside uses the app's own client. */}
+      <ConvexProvider client={warmConvex}>
+        <ConvexQueryCacheProvider expiration={5 * 60_000} maxIdleEntries={100}>
+          <ConvexProvider client={convex}>
+            <QueryClientProvider client={queryClient}>
+              <RouterProvider router={router} />
+            </QueryClientProvider>
+          </ConvexProvider>
+        </ConvexQueryCacheProvider>
+      </ConvexProvider>
     </AuthProvider>
   </StrictMode>,
 )

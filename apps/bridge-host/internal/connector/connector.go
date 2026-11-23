@@ -50,6 +50,18 @@ type Options struct {
 	SendTimeout time.Duration
 	// Signin, if set, runs cookie login steps in the sign-in browser.
 	Signin *signin.Launcher
+	// History, if set, holds back the backfill queue's next task while the server is behind on
+	// this host's events (gateway.Pusher.WaitForRoom).
+	History HistoryGate
+	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
+	// before checking them; five seconds if zero.
+	DescribeSettle time.Duration
+}
+
+// HistoryGate waits, for a bounded time, until the server has room for more history, and says
+// how long it waited.
+type HistoryGate interface {
+	WaitForRoom(ctx context.Context) time.Duration
 }
 
 // Connector implements bridgev2.MatrixConnector.
@@ -138,6 +150,17 @@ func (c *Connector) Init(br *bridgev2.Bridge) {
 	// handling really ended (third_party/mautrix.patch).
 	bridgev2.RemoteEventDone = c.remoteEventDone
 	bridgev2.RemoteEventStart = c.remoteEventStart
+	// Older history waits while the server is behind, so the people using it aren't the ones
+	// who lose. The queue waits before it takes a chat's backfill lock, which a chat's forward
+	// catch-up also takes as its live events are handled, so live messages never wait on it.
+	if c.History != nil {
+		log := c.Log
+		bridgev2.BeforeBackfillTask = func(ctx context.Context) {
+			if waited := c.History.WaitForRoom(ctx); waited >= time.Second {
+				log.Debug().Dur("waited", waited).Msg("History waited for the server to catch up")
+			}
+		}
+	}
 }
 
 // Start runs after bridgev2 has upgraded its database and before any login connects, so a

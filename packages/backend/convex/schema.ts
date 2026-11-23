@@ -36,12 +36,11 @@ export default defineSchema({
      * removed and made again.
      */
     backupRevision: v.optional(v.number()),
-    /** How many cards the person's address book has (`people`), kept by people.ts for its cap. */
-    peopleCount: v.optional(v.number()),
     /**
-     * Goes up with every change to the address book. Each write names the one it was made
-     * from, so two devices can't both link one contact to different cards.
+     * The address book's count and revision from before they moved to `addressBooks`: still
+     * read for a person whose address book hasn't changed since, never written.
      */
+    peopleCount: v.optional(v.number()),
     peopleRevision: v.optional(v.number()),
     /**
      * Goes up whenever the sign-in password changes (a change or a reset). A password sign-in
@@ -326,6 +325,19 @@ export default defineSchema({
     .index('by_user_createdAt', ['userId', 'createdAt'])
     .index('by_createdAt', ['createdAt']),
 
+  /**
+   * The person's address book (`people`): how many cards it has, kept by people.ts for its cap,
+   * and its revision, which goes up with every change. Each write names the revision it was
+   * made from, so two devices can't both link one contact to different cards. Apart from the
+   * person's `members` row, which every query reads to check membership: kept there, each card
+   * saved ran all of the person's queries again.
+   */
+  addressBooks: defineTable({
+    userId: v.string(),
+    count: v.number(),
+    revision: v.number(),
+  }).index('by_user', ['userId']),
+
   people: defineTable({
     userId: v.string(),
     personKey: v.string(),
@@ -501,6 +513,10 @@ export default defineSchema({
     .index('by_message', ['messageId', 'senderKey', 'key'])
     // Active reactions are the ones without `removedAt`: the hot path never reads tombstones.
     .index('by_message_active', ['messageId', 'removedAt'])
+    // The same, only the person's own, for `messages.reactions` to read so that nothing of
+    // anyone else's is in its read set. Staged: built in the background on an upgrade rather
+    // than holding up the deploy on a large table. A later release switches to it.
+    .index('by_user_message_active', { fields: ['userId', 'messageId', 'removedAt'], staged: true })
     // The person's own active reactions on a message, past the first 100 (`messages.reactions`).
     .index('by_message_sender_active', ['messageId', 'senderKey', 'removedAt']),
 
@@ -625,7 +641,38 @@ export default defineSchema({
     lastSeq: v.number(),
     /** The last batch or heartbeat. Commands only go to hosts heard from recently. */
     lastSeenAt: v.number(),
+    /**
+     * When its `bridgePressure` row was last written (0 once it stopped), so ingest knows when
+     * the next is due without reading that row on every batch.
+     */
+    pressureAt: v.optional(v.number()),
   }).index('by_hostId', ['hostId']),
+
+  /**
+   * How each bridge host's deliveries are going, as it last said, written at most every 30
+   * seconds (gateway.ingest), for Admin settings → Server health. Counts and times only.
+   */
+  bridgePressure: defineTable({
+    hostId: v.string(),
+    network: storedNetwork,
+    /** Journal events the host hadn't had acknowledged yet. */
+    backlog: v.number(),
+    /** How long its last delivery took to be answered (ms). */
+    pushMs: v.number(),
+    /** Its deliveries that failed in the five minutes before. */
+    failedPushes: v.number(),
+    at: v.number(),
+    /** The host said it was stopping: offline from `at`, not once it goes quiet. */
+    stopped: v.optional(v.boolean()),
+  }).index('by_hostId', ['hostId']),
+
+  /**
+   * The server timing its own answer to a small query, once a minute (health.probe): the last
+   * hour's, in one row, for Admin settings → Server health.
+   */
+  serverProbes: defineTable({
+    samples: v.array(v.object({ at: v.number(), ms: v.number(), ok: v.boolean() })),
+  }),
 
   /**
    * Events that couldn't be applied, kept for the health page instead of blocking the feed.

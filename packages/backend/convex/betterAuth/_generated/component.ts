@@ -1746,4 +1746,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    sessions: {
+      live: FunctionReference<
+        "query",
+        "internal",
+        { sessionId: string; userId: string },
+        boolean,
+        Name
+      >;
+    };
   };

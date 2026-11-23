@@ -405,6 +405,18 @@ type EventBatch struct {
 	// Stopping marks the last heartbeat of a host that is shutting down, so it shows offline at
 	// once rather than once two minutes of missed heartbeats have passed.
 	Stopping bool `json:"stopping,omitempty"`
+	// Pressure says how the host's deliveries are going, for the admins' server health page.
+	Pressure *Pressure `json:"pressure,omitempty"`
+}
+
+// Pressure is how a host's deliveries to the gateway are going: counts and times only.
+type Pressure struct {
+	// Backlog is the journal events not yet acknowledged when the batch was sent.
+	Backlog int64 `json:"backlog"`
+	// PushMs is how long the last delivery took to be answered.
+	PushMs int64 `json:"pushMs"`
+	// FailedPushes is the deliveries that failed in the last five minutes.
+	FailedPushes int `json:"failedPushes"`
 }
 
 type EventBatchResponse struct {
@@ -492,9 +504,22 @@ type MessagePlaintext struct {
 	HTML        string       `json:"html,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Mentions    []string     `json:"mentions,omitempty"`
+	// Previews are the network's own previews of links in the message, as the sender's app
+	// made them. The bridge host never fetches a link itself.
+	Previews []LinkPreview `json:"previews,omitempty"`
 	// Truncated means the message was cut short to fit the sealed size limit: its
 	// formatted body was dropped, and its body may end early.
 	Truncated bool `json:"truncated,omitempty"`
+}
+
+// LinkPreview is what a network said about a link in a message: its page's title,
+// description and site, and a picture of it when there was one.
+type LinkPreview struct {
+	URL         string      `json:"url"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	SiteName    string      `json:"siteName,omitempty"`
+	Image       *Attachment `json:"image,omitempty"`
 }
 
 type Attachment struct {
@@ -521,6 +546,10 @@ type ChatPlaintext struct {
 	// AvatarUnchanged means the chat (or contact) has an avatar that couldn't be attached
 	// this time (its upload expired). Clients keep the avatar they have.
 	AvatarUnchanged bool `json:"avatarUnchanged,omitempty"`
+	// DMGhostID is, in a direct chat, the ghostId of the person on the other side: the contact
+	// whose profile and People card the chat is with. Sealed, so the server never learns who a
+	// chat is with.
+	DMGhostID string `json:"dmGhostId,omitempty"`
 }
 
 // ChatCollagePlaintext is a chatCollage event's sealed content (kind chat, object ID

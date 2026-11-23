@@ -24,6 +24,11 @@ const BackfillMinBackoffAfterRoomCreate = 1 * time.Minute
 const BackfillQueueErrorBackoff = 1 * time.Minute
 const BackfillQueueMaxEmptyBackoff = 10 * time.Minute
 
+// Trioditis: BeforeBackfillTask, if set, is called by the backfill queue before each task it
+// runs (queued or manual), before any portal lock is taken, and may block: the host holds older
+// history back there while its server is behind, without holding up a chat's live events.
+var BeforeBackfillTask func(ctx context.Context)
+
 func (br *Bridge) WakeupBackfillQueue(manualTask ...*ManualBackfill) {
 	if br.IsStopping() {
 		for _, task := range manualTask {
@@ -105,6 +110,10 @@ func (br *Bridge) RunBackfillQueue() {
 			br.flushManualBackfillQueue()
 			return
 		case <-time.After(nextDelay):
+		}
+		// Trioditis: see BeforeBackfillTask.
+		if BeforeBackfillTask != nil {
+			BeforeBackfillTask(ctx)
 		}
 		select {
 		case manualTask := <-br.manualBackfills:

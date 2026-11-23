@@ -5,7 +5,7 @@ import { ConvexError, v } from 'convex/values'
 import { components, internal } from './_generated/api'
 import type { DataModel } from './_generated/dataModel'
 import { action, internalQuery, type ActionCtx, type QueryCtx } from './_generated/server'
-import { currentUserId, requireSessionIfGiven } from './auth'
+import { currentUserId, requireSessionIfGiven } from './lib/session'
 import { retired } from './lib/networks'
 
 // The Trioditis MCP server, at <site>/mcp, for the person's own agents (Dots, Grokbot, any

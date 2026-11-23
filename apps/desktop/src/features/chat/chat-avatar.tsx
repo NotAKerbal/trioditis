@@ -1,5 +1,5 @@
 import type { Attachment, Network } from '@trioditis/core'
-import { AvatarCollage, AvatarTile } from '@trioditis/ui/avatar'
+import { Avatar, AvatarCollage, AvatarTile } from '@trioditis/ui/avatar'
 import type { ReactNode } from 'react'
 import type { Chat } from '~/data/chats.ts'
 import { useContacts } from '~/data/contacts.ts'
@@ -7,8 +7,9 @@ import { isImage, useMedia } from '~/data/media.ts'
 import { MediaAvatar } from './attachments.tsx'
 
 /**
- * A chat's picture: its own, or for a group with none, a collage of the members its metadata
- * names (Chat.collage), each with their contact's picture or initials. One member it knows shows
+ * A chat's picture: for a direct chat whose person's People card has a picture, that one; else
+ * its own, or for a group with none, a collage of the members its metadata names
+ * (Chat.collage), each with their contact's picture or initials. One member it knows shows
  * alone; with none, the group's initials stand in, as before.
  */
 export function ChatAvatar({
@@ -30,6 +31,9 @@ export function ChatAvatar({
     const profile = contacts.get(ghostId)
     return profile ? [{ ghostId, name: profile.name || profile.handle || '', avatar: profile.avatar }] : []
   })
+  if (chat.person?.photo) {
+    return <Avatar name={name} src={chat.person.photo} size={size} badge={badge} className={className} />
+  }
   if (members.length > 0) {
     return (
       <AvatarCollage size={size} badge={badge} className={className}>
@@ -48,7 +52,8 @@ export function ChatAvatar({
   }
   return (
     <MediaAvatar
-      network={chat.network}
+      // A conversation's picture can be another of its chats', fetched through that one's network.
+      network={chat.avatarNetwork ?? chat.network}
       picture={chat.avatar}
       name={name}
       size={size}

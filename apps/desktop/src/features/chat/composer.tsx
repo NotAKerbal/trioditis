@@ -1,21 +1,35 @@
 import { Button } from '@trioditis/ui/button'
+import type { Network } from '@trioditis/core'
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrail,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
+import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
-import { Clock, Reply, SendHorizontal, X } from 'lucide-react'
+import { CircleHelp, Clock, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { networkName } from '~/data/chats.ts'
 import type { Message } from '~/data/messages.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 
+/** One of a conversation's chats a message can go by: its network, and which account if several. */
+export interface ViaOption {
+  id: string
+  network: Network
+  label: string
+}
+
 interface ComposerProps {
-  network: string
+  network: Network
+  /** The chat it sends on: a menu open when that changes closes, so it can't act on another. */
+  destination?: string | undefined
+  /** In a conversation of a person's chats on several networks, the ones to choose from. */
+  via?: { options: ViaOption[]; current: string; onChange: (id: string) => void } | undefined
   draft: string
   onDraft: (text: string) => void
   replyTo: Message | null
@@ -27,6 +41,8 @@ interface ComposerProps {
 
 export function Composer({
   network,
+  destination,
+  via,
   draft,
   onDraft,
   replyTo,
@@ -65,6 +81,33 @@ export function Composer({
       {/* The placeholder says why too, but it's gone once there's text. */}
       {disabled && draft.length > 0 ? <p className="mx-3 mt-2 text-sm text-subtle-foreground">{disabled}</p> : null}
       <div className="flex items-end gap-1 p-1.5">
+        {via ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={via.current ? `Sending on ${networkName(network)}. Change` : 'Choose where to send'}
+                title={via.current ? 'Send on another network' : 'Choose where to send'}
+              >
+                {via.current ? (
+                  <NetworkBadge network={network} label={networkName(network)} size={18} />
+                ) : (
+                  <CircleHelp className="size-[18px]" />
+                )}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top">
+              <DropdownMenuLabel>Send on</DropdownMenuLabel>
+              {via.options.map((o) => (
+                <DropdownMenuCheckboxItem key={o.id} checked={o.id === via.current} onSelect={() => via.onChange(o.id)}>
+                  <NetworkBadge network={o.network} label={networkName(o.network)} />
+                  {o.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
         <Textarea
           variant="bare"
           ref={input}
@@ -83,7 +126,7 @@ export function Composer({
           }}
           className="max-h-40 min-h-[38px] flex-1 px-2 py-2"
         />
-        <DropdownMenu>
+        <DropdownMenu key={destination}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"

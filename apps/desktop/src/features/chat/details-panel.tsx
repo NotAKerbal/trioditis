@@ -8,8 +8,10 @@ import { cn } from '@trioditis/ui/lib/utils'
 import { useMutation } from 'convex/react'
 import { Ban, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState, useSyncExternalStore, type RefObject } from 'react'
+import type { Id } from '@trioditis/backend/dataModel'
 import {
   networkName,
+  onEach,
   useChatActions,
   useLabels,
   type Chat,
@@ -18,23 +20,37 @@ import {
   type LabelId,
 } from '~/data/chats.ts'
 import { LabelDot } from '~/features/shell/label-dot.tsx'
+import { PersonProfile, type ContactRef } from '~/features/people/profile.tsx'
 import { ChatAvatar } from './chat-avatar.tsx'
 import { labelName, MAX_LABEL_NAME, renamedLabel } from './labels.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { LABEL_COLORS, newClientId, sealLabel, type LabelColor } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 
+/** What the side panel shows: the open chat's details, or the profile of someone in it. */
+export type PanelView = { kind: 'chat' } | { kind: 'person'; contact: ContactRef; name: string }
+
 export function DetailsPanel({
   chat,
+  members,
+  view,
   act,
   onClose,
   returnFocus,
+  onOpenChat,
+  onOpenPerson,
 }: {
+  /** The open chat, or the conversation it's in (conversations.ts). */
   chat: Chat
+  /** The chats it stands for, which its labels and blocking change together. */
+  members: readonly Chat[]
+  view: PanelView
   act: (chatId: ChatId, run: () => Promise<boolean>) => Promise<void>
   onClose: () => void
-  /** The button that opened it, where focus goes back when the sheet closes. */
-  returnFocus: RefObject<HTMLButtonElement | null>
+  /** What opened it, where focus goes back when the sheet closes. */
+  returnFocus: RefObject<HTMLElement | null>
+  onOpenChat: (chatId: Id<'chats'>) => void
+  onOpenPerson: (personKey: string) => void
 }) {
   const actions = useChatActions()
   const labels = useLabels()
@@ -50,88 +66,127 @@ export function DetailsPanel({
       })
     }
   }, [wide, returnFocus])
+  // A label is on a conversation when it's on any of its chats; choosing it puts it on all.
   const on = new Set(chat.row.labelIds)
   const toggleLabel = (id: LabelId) => {
-    const next = on.has(id) ? chat.row.labelIds.filter((l) => l !== id) : [...chat.row.labelIds, id]
-    void act(chat.id, () => actions.setLabels(chat.id, next as LabelId[]))
+    const adding = !on.has(id)
+    void act(chat.id, () =>
+      onEach(members, (chatId) => {
+        const now = members.find((m) => m.id === chatId)!.row.labelIds as LabelId[]
+        return actions.setLabels(chatId, adding ? [...new Set([...now, id])] : now.filter((l) => l !== id))
+      }),
+    )
   }
+  const here = new Set<string>(members.map((m) => m.id))
+  // Who a direct chat is with: any of the conversation's chats can say.
+  const dm = chat.row.kind === 'dm' ? (members.find((m) => m.dmGhostId) ?? chat) : undefined
+  const dmContact = dm?.dmGhostId ? { network: dm.network, ghostId: dm.dmGhostId } : undefined
+  const label = view.kind === 'person' ? 'Profile' : 'Chat details'
 
-  const body = (
-    <>
-      <div className="px-5 pt-6 pb-2 text-center">
-        <ChatAvatar chat={chat} size={68} className="mx-auto" />
-        <h2 className="mt-2.5 text-lg font-bold">{chat.name}</h2>
-        <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-subtle-foreground">
-          <NetworkBadge network={chat.network} label={networkName(chat.network)} size={14} />{' '}
-          {chat.row.kind === 'dm' ? networkName(chat.network) : `Group on ${networkName(chat.network)}`}
-        </p>
-        {chat.topic ? <p className="mt-2 text-sm text-muted-foreground">{chat.topic}</p> : null}
-      </div>
-
-      <section className="px-5 py-4" aria-labelledby="details-labels">
-        <div className="mb-2.5 flex items-center">
-          <h3 id="details-labels" className="flex-1 text-sm font-semibold text-muted-foreground">
-            Labels
-          </h3>
-          {labels?.length ? (
-            <Button variant="link" size="sm" className="h-auto" onClick={() => setManaging(!managing)}>
-              {managing ? 'Done' : 'Edit'}
-            </Button>
-          ) : null}
-        </div>
-        {managing && labels?.length ? (
-          <ul className="space-y-1.5">
-            {labels.map((l) => (
-              <li key={l.id}>
-                <EditLabel label={l} />
-              </li>
-            ))}
-          </ul>
+  const body =
+    view.kind === 'person' ? (
+      <PersonProfile
+        key={`${view.contact.network}/${view.contact.ghostId}`}
+        contact={view.contact}
+        fallbackName={view.name}
+        here={here}
+        onOpenChat={onOpenChat}
+        onOpenPerson={onOpenPerson}
+      />
+    ) : (
+      <>
+        {dm ? (
+          <PersonProfile
+            contact={dmContact}
+            fallbackName={chat.name}
+            fallbackAvatar={<ChatAvatar chat={chat} size={68} className="mx-auto" />}
+            here={here}
+            onOpenChat={onOpenChat}
+            onOpenPerson={onOpenPerson}
+          />
         ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {labels?.map((l) => (
-              <Button
-                variant="bare"
-                key={l.id}
-                type="button"
-                aria-pressed={on.has(l.id)}
-                onClick={() => toggleLabel(l.id)}
-                className={cn(
-                  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-dashed border-border-strong px-2.5 text-sm font-medium text-subtle-foreground',
-                  on.has(l.id) && 'border-solid text-foreground',
-                )}
-              >
-                <LabelDot color={l.color} /> {l.name}
-              </Button>
-            ))}
-            <NewLabel
-              onCreated={(id) =>
-                void act(chat.id, () => actions.setLabels(chat.id, [...(chat.row.labelIds as LabelId[]), id]))
-              }
-            />
+          <div className="px-5 pt-6 pb-2 text-center">
+            <ChatAvatar chat={chat} size={68} className="mx-auto" />
+            <h2 className="mt-2.5 text-lg font-bold">{chat.name}</h2>
+            <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm text-subtle-foreground">
+              <NetworkBadge network={chat.network} label={networkName(chat.network)} size={14} />{' '}
+              {`Group on ${networkName(chat.network)}`}
+            </p>
+            {chat.topic ? <p className="mt-2 text-sm text-muted-foreground">{chat.topic}</p> : null}
           </div>
         )}
-      </section>
 
-      <section className="px-5 py-4">
-        <Button
-          variant="danger"
-          size="sm"
-          block
-          onClick={() => void act(chat.id, () => actions.setBlocked(chat.id, !chat.row.blocked))}
-        >
-          <Ban className="size-3.5" /> {chat.row.blocked ? 'Unblock' : 'Block'}
-        </Button>
-        {chat.row.blocked ? null : (
-          <p className="mt-2 text-sm text-subtle-foreground">Hides it here only. Its messages still arrive.</p>
-        )}
-      </section>
-    </>
-  )
+        <section className="px-5 py-4" aria-labelledby="details-labels">
+          <div className="mb-2.5 flex items-center">
+            <h3 id="details-labels" className="flex-1 text-sm font-semibold text-muted-foreground">
+              Labels
+            </h3>
+            {labels?.length ? (
+              <Button variant="link" size="sm" className="h-auto" onClick={() => setManaging(!managing)}>
+                {managing ? 'Done' : 'Edit'}
+              </Button>
+            ) : null}
+          </div>
+          {managing && labels?.length ? (
+            <ul className="space-y-1.5">
+              {labels.map((l) => (
+                <li key={l.id}>
+                  <EditLabel label={l} />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {labels?.map((l) => (
+                <Button
+                  variant="bare"
+                  key={l.id}
+                  type="button"
+                  aria-pressed={on.has(l.id)}
+                  onClick={() => toggleLabel(l.id)}
+                  className={cn(
+                    'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-dashed border-border-strong px-2.5 text-sm font-medium text-subtle-foreground',
+                    on.has(l.id) && 'border-solid text-foreground',
+                  )}
+                >
+                  <LabelDot color={l.color} /> {l.name}
+                </Button>
+              ))}
+              <NewLabel
+                onCreated={(id) =>
+                  void act(chat.id, () =>
+                    onEach(members, (chatId) => {
+                      const now = members.find((m) => m.id === chatId)!.row.labelIds as LabelId[]
+                      return actions.setLabels(chatId, [...now, id])
+                    }),
+                  )
+                }
+              />
+            </div>
+          )}
+        </section>
+
+        <section className="px-5 py-4">
+          <Button
+            variant="danger"
+            size="sm"
+            block
+            onClick={() =>
+              void act(chat.id, () => onEach(members, (chatId) => actions.setBlocked(chatId, !chat.row.blocked)))
+            }
+          >
+            <Ban className="size-3.5" /> {chat.row.blocked ? 'Unblock' : 'Block'}
+          </Button>
+          {chat.row.blocked ? null : (
+            <p className="mt-2 text-sm text-subtle-foreground">Hides it here only. Its messages still arrive.</p>
+          )}
+        </section>
+      </>
+    )
 
   if (wide)
     return (
-      <aside className="w-[292px] shrink-0 overflow-y-auto border-l border-border bg-surface" aria-label="Chat details">
+      <aside className="w-[292px] shrink-0 overflow-y-auto border-l border-border bg-surface" aria-label={label}>
         {body}
       </aside>
     )
@@ -141,7 +196,7 @@ export function DetailsPanel({
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        closeLabel="Close chat details"
+        closeLabel={`Close ${label.toLowerCase()}`}
         aria-describedby={undefined}
         onCloseAutoFocus={(e) => {
           e.preventDefault()
@@ -149,7 +204,7 @@ export function DetailsPanel({
         }}
         className="top-0 right-0 left-auto h-full max-h-none w-[min(100%,360px)] translate-x-0 translate-y-0 overflow-y-auto rounded-none pt-12 max-sm:w-full"
       >
-        <DialogTitle className="sr-only">Chat details</DialogTitle>
+        <DialogTitle className="sr-only">{label}</DialogTitle>
         {body}
       </DialogContent>
     </Dialog>

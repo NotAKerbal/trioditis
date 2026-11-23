@@ -15,6 +15,9 @@ here holds its headers, and skips a deploy only when git shows nothing in this f
 since the last one. It isn't part of
 the web app's deployment (the root `vercel.json`).
 
+The download page (`download/`, served at `/download`) links to the latest release's installers by
+file name; `download.js` puts a button for the visitor's own system at the top.
+
 The screenshots in `screenshots/` are of the real app running `pnpm dev --demo`, at 2x, in light
 and dark. Retake both when the app's look changes. The font is DM Sans (`fonts/OFL.txt`), the
 same file the app uses.

@@ -7,6 +7,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
+import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
 import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply, SmilePlus } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -16,7 +17,10 @@ import { isImage } from '~/data/media.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
 import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
+import { networkName } from '~/data/chats.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
+import { LinkCards } from './link-card.tsx'
+import { cardReplacesText, linkCards } from './link-preview.ts'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
 import type { SendAgainState } from './send-again.ts'
 
@@ -29,6 +33,8 @@ export interface ScheduledItem {
   replyTo: string | null
   /** Its cancel is on its way: Cancel is off until the server answers. */
   cancelling: boolean
+  /** In a conversation of several chats, the one it goes on, as the network chooser names it. */
+  via?: string | undefined
 }
 
 /** A cancelled scheduled message the server keeps until it's restored or discarded. */
@@ -38,6 +44,8 @@ export interface CancelledItem {
   replyTo: string | null
   /** Restored to the composer from here: it says so, and Restore stays. */
   restored: boolean
+  /** In a conversation of several chats, the one it was for. */
+  via?: string | undefined
 }
 
 interface MessageListProps {
@@ -48,7 +56,14 @@ interface MessageListProps {
   /** A group's messages from others carry their sender's name and avatar. */
   group: boolean
   /** The network has reactions; without them there's nothing to pick, and chips only show. */
-  canReact: boolean
+  canReact: boolean | ((m: Message) => boolean)
+  /**
+   * In a conversation of a person's chats on several networks, the network each message came
+   * or went by: a run of messages starts again where it changes, and says which.
+   */
+  networkOf?: ((m: Message) => Network) | undefined
+  /** Opens the profile of someone in the chat, from their avatar or name. */
+  onOpenSender?: ((ghostId: string, name: string, opener: HTMLElement) => void) | undefined
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
   scheduled: ScheduledItem[]
@@ -141,20 +156,22 @@ export function MessageList(props: MessageListProps) {
     } else if (atBottom.current) el.scrollTop = el.scrollHeight
     // New messages below grow the distance to the newest without a scroll: measure it again.
     setAway(fromBottom(el) > 300)
-  }, [messages, scheduled.length, props.typing, props.loadingMore])
+    // `loading` too: the messages can be here a moment before they're shown (useSettled).
+  }, [messages, scheduled.length, props.typing, props.loadingMore, props.loading])
 
   // Earlier messages load as the top of the list scrolls near; the button stays as a fallback.
   // A page can end early under the server's byte budget, so only the cursor says it's the start.
   useEffect(() => {
     const el = top.current
-    if (!el || !props.canLoadMore) return
+    // Not while the first page is held back (useSettled): nobody has scrolled up yet.
+    if (!el || !props.canLoadMore || props.loading) return
     const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && loadEarlierRef.current(), {
       root: scroller.current,
       rootMargin: '300px 0px 0px 0px',
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [props.canLoadMore])
+  }, [props.canLoadMore, props.loading])
   useEffect(() => {
     const el = scroller.current
     if (!el) return
@@ -176,6 +193,10 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
+  // Held back until what goes with them has come too (useSettled), so they show at once.
+  const shownMessages = props.loading ? [] : messages
+  const shownScheduled = props.loading ? [] : scheduled
+  const shownCancelled = props.loading ? [] : props.cancelled
   // Each of the person's sends in the list, by client message ID: how sending again stands.
   let lastDay = ''
 
@@ -192,7 +213,7 @@ export function MessageList(props: MessageListProps) {
         )}
         aria-live="polite"
       >
-        {props.canLoadMore ? (
+        {props.canLoadMore && !props.loading ? (
           <div ref={top} className="mb-3 flex justify-center">
             <Button size="sm" variant="ghost" onClick={loadEarlier}>
               Load earlier messages
@@ -200,13 +221,11 @@ export function MessageList(props: MessageListProps) {
           </div>
         ) : null}
         {props.loading ? (
-          <p className="animate-fade-in-late py-16 text-center text-sm text-subtle-foreground" aria-busy="true">
-            Opening messages…
-          </p>
+          <BubblesSkeleton />
         ) : messages.length === 0 && scheduled.length === 0 ? (
           <p className="py-16 text-center text-sm text-subtle-foreground">No messages here yet.</p>
         ) : null}
-        {messages.map((m, i) => {
+        {shownMessages.map((m, i) => {
           const day = dayLabel(m.at)
           const showDay = day !== lastDay
           lastDay = day
@@ -215,15 +234,24 @@ export function MessageList(props: MessageListProps) {
           // Messages around the same time share one time label above them, the day with it
           // when the day changes, as iMessage and Signal do. Each bubble's own is its tooltip.
           const showTime = !sameTime(prev, m)
-          const first = !sameRun(prev, m)
-          const last = !sameRun(m, next)
+          const network = props.networkOf?.(m) ?? props.network
+          // Each network's messages are their own run, said at its start when the network changes.
+          const sameChat = (a: Message | undefined, b: Message | undefined) => !a || !b || a.chatId === b.chatId
+          const first = !sameRun(prev, m) || !sameChat(prev, m)
+          const last = !sameRun(m, next) || !sameChat(m, next)
+          const via = props.networkOf && (!prev || props.networkOf(prev) !== network) ? network : undefined
+          const canReact = typeof props.canReact === 'function' ? props.canReact(m) : props.canReact
           const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
           const files = (!m.deleted && m.body?.attachments) || []
           const text = m.body ? captionOf(m.body) : ''
           const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
+          const cards = !m.deleted && m.body ? linkCards(m.body, text) : []
+          // A message that is only a link the network previewed shows the card alone.
+          const shownText = cardReplacesText(cards, text) ? '' : text
           // Pictures on their own are shown without a bubble around them, the time over a corner.
           // A file or a player keeps its bubble, so the time never sits on its controls.
-          const bare = !m.deleted && files.length > 0 && files.every(isImage) && !text && !quoted && !m.replyTo
+          const bare =
+            !m.deleted && files.length > 0 && files.every(isImage) && !text && !cards.length && !quoted && !m.replyTo
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
           // Delivery once per run of the person's own, at its end; a message still going, edited or
           // in trouble shows its own.
@@ -252,21 +280,55 @@ export function MessageList(props: MessageListProps) {
                   {messageTime(m.at)}
                 </p>
               ) : null}
+              {via ? (
+                <p
+                  className={cn(
+                    'mb-1 flex items-center gap-1 text-xs font-medium text-subtle-foreground',
+                    m.self && 'justify-end',
+                  )}
+                >
+                  <NetworkBadge network={via} label={networkName(via)} size={12} />
+                  {networkName(via)}
+                </p>
+              ) : null}
               {fromOther && first && sender ? (
-                <p className="mb-0.5 ml-12 truncate text-xs font-medium text-subtle-foreground">{sender}</p>
+                props.onOpenSender && m.ghostId ? (
+                  <Button
+                    variant="bare"
+                    type="button"
+                    className="mb-0.5 ml-12 block max-w-[calc(100%-3rem)] truncate text-xs font-medium text-subtle-foreground hover:text-foreground"
+                    onClick={(e) => props.onOpenSender!(m.ghostId!, sender, e.currentTarget)}
+                  >
+                    {sender}
+                  </Button>
+                ) : (
+                  <p className="mb-0.5 ml-12 truncate text-xs font-medium text-subtle-foreground">{sender}</p>
+                )
               ) : null}
               <div className={cn(fromOther && 'flex items-end gap-2')}>
                 {fromOther ? (
                   last ? (
                     // Level with the bubble's bottom, above any reactions under it (18px chips, 6px of
                     // them overlapping the bubble).
-                    <MediaAvatar
-                      network={props.network}
-                      picture={profile?.avatar}
-                      name={sender ?? ''}
-                      size={28}
-                      className={reacted?.length ? 'mb-[13px]' : 'mb-px'}
-                    />
+                    props.onOpenSender && m.ghostId ? (
+                      <Button
+                        variant="bare"
+                        type="button"
+                        aria-label={sender ? `Profile of ${sender}` : 'Profile'}
+                        className={cn('shrink-0 rounded-full', reacted?.length ? 'mb-[13px]' : 'mb-px')}
+                        onClick={(e) => props.onOpenSender!(m.ghostId!, sender ?? '', e.currentTarget)}
+                      >
+                        <MediaAvatar network={props.network} picture={profile?.avatar} name={sender ?? ''} size={28} />
+                      </Button>
+                    ) : (
+                      <MediaAvatar
+                        network={props.network}
+                        picture={profile?.avatar}
+                        name={sender ?? ''}
+                        size={28}
+                        className={reacted?.length ? 'mb-[13px]' : 'mb-px'}
+                      />
+                    )
                   ) : (
                     <span aria-hidden className="w-7 shrink-0" />
                   )
@@ -309,13 +371,10 @@ export function MessageList(props: MessageListProps) {
                     ) : m.body ? (
                       <>
                         {files.length ? (
-                          <Attachments
-                            network={props.network}
-                            attachments={files}
-                            className={bare ? undefined : 'my-1'}
-                          />
+                          <Attachments network={network} attachments={files} className={bare ? undefined : 'my-1'} />
                         ) : null}
-                        {text ? <Linked text={text} /> : null}
+                        {shownText ? <Linked text={shownText} /> : null}
+                        {cards.length ? <LinkCards cards={cards} network={network} self={m.self} /> : null}
                       </>
                     ) : (
                       'This message can’t be opened on this device.'
@@ -325,6 +384,16 @@ export function MessageList(props: MessageListProps) {
                     {meta && bare ? (
                       // Over the picture's corner, on a scrim so it reads on any picture.
                       <span className="absolute right-2 bottom-2 inline-flex rounded-full bg-scrim px-1.5 py-1 text-on-color">
+                        {meta}
+                      </span>
+                    ) : meta && cards.length ? (
+                      // Under a link's card, on its own short line: there's no last line of text to share.
+                      <span
+                        className={cn(
+                          'flex justify-end',
+                          m.self ? 'text-primary-foreground/90' : 'text-subtle-foreground',
+                        )}
+                      >
                         {meta}
                       </span>
                     ) : meta ? (
@@ -352,8 +421,8 @@ export function MessageList(props: MessageListProps) {
                           type="button"
                           key={r.key}
                           aria-pressed={r.mine}
-                          disabled={!props.canReact}
-                          title={props.canReact ? (r.mine ? 'Remove your reaction' : 'React with this too') : undefined}
+                          disabled={!canReact}
+                          title={canReact ? (r.mine ? 'Remove your reaction' : 'React with this too') : undefined}
                           onClick={() => props.onReact(m, r.key)}
                           className={cn(
                             'h-[18px] rounded-[11px] disabled:opacity-100 bg-surface px-1.5 text-sm leading-[18px] shadow-[0_0_0_1px_var(--border)] hover:shadow-[0_0_0_1px_var(--border-strong)]',
@@ -393,7 +462,7 @@ export function MessageList(props: MessageListProps) {
                       >
                         <Reply className="size-[15px]" />
                       </Button>
-                      {props.canReact ? (
+                      {canReact ? (
                         <ReactionPicker
                           mine={(reacted ?? []).filter((r) => r.mine).map((r) => r.key)}
                           onPick={(key) => props.onReact(m, key)}
@@ -406,7 +475,7 @@ export function MessageList(props: MessageListProps) {
             </div>
           )
         })}
-        {scheduled.map((s) => (
+        {shownScheduled.map((s) => (
           <div key={s.id} className="mt-3 ml-auto flex w-fit max-w-[min(78%,38rem)] flex-col items-end">
             <div className="rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap text-primary-ink shadow-[inset_0_0_0_1.5px_var(--accent-ring)] [overflow-wrap:anywhere]">
               {s.body === undefined ? (
@@ -421,6 +490,7 @@ export function MessageList(props: MessageListProps) {
             </div>
             <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-primary-ink">
               <Clock className="size-3" /> Sends {formatWhen(s.sendAt)}
+              {s.via ? ` on ${s.via}` : null}
               <Button
                 variant="link"
                 size="sm"
@@ -442,7 +512,7 @@ export function MessageList(props: MessageListProps) {
             </div>
           </div>
         ))}
-        {props.cancelled.map((c) => (
+        {shownCancelled.map((c) => (
           <CancelledRow
             key={c.id}
             item={c}
@@ -512,6 +582,7 @@ function CancelledRow({
       </div>
       <div className="mx-2.5 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {item.restored ? 'Cancelled message · Restored to your draft' : 'Cancelled message'}
+        {item.via ? ` · ${item.via}` : null}
         {confirming ? (
           <>
             <span className="text-danger">Discard it for good?</span>
@@ -686,4 +757,38 @@ function DeliveryProblem({
       </span>
     )
   return null
+}
+
+/** Where messages will be, while they load: bubbles' shapes at the bottom, as the chat will sit. */
+const SKELETON = [
+  { self: false, width: 'w-52' },
+  { self: false, width: 'w-36' },
+  { self: true, width: 'w-60' },
+  { self: false, width: 'w-44' },
+  { self: true, width: 'w-32' },
+  { self: true, width: 'w-48' },
+]
+
+function BubblesSkeleton() {
+  return (
+    // It waits a moment first, so a chat that loads quickly never shows it.
+    <div
+      aria-busy="true"
+      aria-label="Loading messages"
+      className="flex min-h-full animate-fade-in-late flex-col justify-end gap-1.5 pb-1"
+    >
+      {SKELETON.map((b, i) => (
+        <span key={i} className={cn('h-8 rounded-[18px] bg-muted', b.width, b.self && 'ml-auto')} />
+      ))}
+    </div>
+  )
+}
+
+/** The message list's place while a chat opens with nothing known of it yet. */
+export function MessagesSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col px-5 pt-4 pb-3">
+      <BubblesSkeleton />
+    </div>
+  )
 }

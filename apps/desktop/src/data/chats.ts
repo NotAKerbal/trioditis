@@ -13,6 +13,7 @@ import { liveHealth, useHeardClock, useNow } from '~/data/bridge-liveness.ts'
 import { checkWithinAYear } from '~/data/snooze.ts'
 import type { LastShown } from '~/features/shell/row-preview.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
+import { isTransient } from '~/lib/resilient-convex.ts'
 import type { ChatCollagePlaintext } from '@trioditis/core'
 import {
   openCached,
@@ -23,6 +24,7 @@ import {
   type MessagePlaintext,
 } from '~/lib/sealed.ts'
 import { useSession, type Session } from '~/lib/session.tsx'
+import type { PersonRef } from './conversations.ts'
 import { openLastMessage } from './last-message.ts'
 
 export type ChatId = Id<'chats'>
@@ -40,6 +42,8 @@ export interface Chat {
   topic: string | undefined
   /** Its picture, to decrypt and show (data/media.ts). */
   avatar: Attachment | undefined
+  /** The network the picture is fetched through, when it isn't the chat's own (a conversation's). */
+  avatarNetwork?: Network | undefined
   /** For a group: the members (ghost IDs) whose pictures make one when it has none of its own. */
   collage: string[]
   /** False until the bridge host has described the chat (or if this device can't open it). */
@@ -51,7 +55,82 @@ export interface Chat {
   muted: boolean
   /** The last message, opened here, for the list's preview; null until the row has one. */
   last: LastShown | null
+  /** In a direct chat, the other person's contact on its network, once the bridge host has said. */
+  dmGhostId: string | undefined
+  /**
+   * The People card a direct chat is with. On a conversation that puts a person's direct chats
+   * on several networks together (conversations.ts), the chats themselves are `members`, the
+   * newest first, and the rest of the fields sum them up.
+   */
+  person?: PersonRef | undefined
+  members?: Chat[] | undefined
 }
+
+/** The chats a row or pane stands for: a conversation's members, or the chat itself. */
+export const membersOf = (chat: Chat): Chat[] => chat.members ?? [chat]
+
+/**
+ * Runs an action on each chat of a conversation, all at once. True if every one went: each
+ * says its own failure.
+ */
+export async function onEach(chats: readonly Chat[], run: (chatId: ChatId) => Promise<boolean>) {
+  const done = await Promise.all(chats.map((c) => run(c.id)))
+  return done.every(Boolean)
+}
+
+/**
+ * One conversation for a person's direct chats: named and pictured after their card, unread if
+ * any of them is, muted if all are, and showing the newest message of any. It goes by the first
+ * chat's ID, so opening it opens that chat, and the pane finds the rest (conversations.ts).
+ */
+export function mergedChat(members: readonly Chat[], person: PersonRef | undefined): Chat {
+  const first = members[0]!
+  if (members.length < 2) return person ? { ...first, person } : first
+  const newest = members.reduce((a, b) => ((b.last?.at ?? 0) > (a.last?.at ?? 0) ? b : a))
+  const sum = (f: (c: Chat) => number) => members.reduce((n, c) => n + f(c), 0)
+  const pictured = members.find((c) => c.avatar)
+  return {
+    ...first,
+    row: {
+      ...first.row,
+      pinned: members.some((c) => c.row.pinned),
+      markedUnread: members.some((c) => c.row.markedUnread),
+      unreadCount: sum((c) => c.row.unreadCount),
+      mentionCount: sum((c) => c.row.mentionCount),
+      labelIds: [...new Set(members.flatMap((c) => c.row.labelIds))],
+      lastMessageAt: Math.max(...members.map((c) => c.row.lastMessageAt)),
+    },
+    name: person?.name || first.name,
+    named: !!person?.name || first.named,
+    // The first chat's picture, or another's, fetched through that chat's network.
+    avatar: pictured?.avatar,
+    avatarNetwork: pictured?.network,
+    described: members.some((c) => c.described),
+    unread: sum((c) => c.unread),
+    hasUnread: members.some((c) => c.hasUnread),
+    mentions: sum((c) => c.mentions),
+    muted: members.every((c) => c.muted),
+    last: newest.last,
+    person,
+    members: [...members],
+  }
+}
+
+/** Live rows for these chats, in order, leaving out any that's gone; undefined while any loads. */
+export function useChatsById(ids: readonly ChatId[]): Chat[] | undefined {
+  const session = useSession()
+  const answers = useQueries({
+    queries: ids.map((chatId) => ({ ...convexQuery(api.chats.get, { chatId }), retry: false })),
+    combine: rowsOf,
+  })
+  return useMemo(() => {
+    if (answers.some((a) => a.pending)) return undefined
+    return answers.flatMap((a) => (a.row ? [toChat(a.row as ChatRow, session)] : []))
+  }, [answers, session])
+}
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const rowsOf = (results: { data?: unknown; isPending: boolean }[]) =>
+  results.map((r) => ({ row: r.data ?? null, pending: r.isPending }))
 
 export const networkName = (network: string) => NETWORK_INFO[network as Network]?.name ?? network
 
@@ -127,6 +206,7 @@ export function toChat(row: ChatRow, session: Session, now = Date.now()): Chat {
     mentions: row.mentionCount,
     muted,
     last: openLastMessage(row.lastMessage, session),
+    dmGhostId: row.kind === 'dm' && typeof meta?.dmGhostId === 'string' ? meta.dmGhostId : undefined,
   }
 }
 
@@ -140,6 +220,8 @@ export interface ChatList {
   chats: Chat[] | undefined
   /** More chats exist past what's loaded: show "50+" and load on scroll. */
   canLoadMore: boolean
+  /** The next page is on its way. */
+  loading: boolean
   /** Every chat in the view is loaded: not while a page is still on its way. */
   exhausted: boolean
   loadMore: () => void
@@ -163,18 +245,42 @@ export function useChats(view: ChatView, filter: ChatFilter = {}, enabled = true
   })
   const chats = useMemo(
     () =>
-      !enabled || status === 'LoadingFirstPage' ? undefined : results.map((row) => toChat(row as ChatRow, session)),
+      !enabled || status === 'LoadingFirstPage'
+        ? undefined
+        : results.map((row) => {
+            remember(row as ChatRow, session)
+            return toChat(row as ChatRow, session)
+          }),
     [enabled, status, results, session],
   )
   return {
     chats,
     canLoadMore: status === 'CanLoadMore',
+    loading: status === 'LoadingMore',
     exhausted: enabled && status === 'Exhausted',
     loadMore: () => loadMore(50),
   }
 }
 
-export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
+// The latest row seen for each chat, from the list or the chat itself, so a chat opens at once
+// with what the sidebar already showed while the server is asked for it (useOpenChat). Rows are
+// sealed, and only this page's memory holds them.
+const knownRows = new Map<string, ChatRow>()
+const rowKey = (session: Session, chatId: string) => `${session.userId}/${chatId}`
+
+function remember(row: ChatRow, session: Session) {
+  knownRows.set(rowKey(session, row._id), row)
+}
+
+/** The open chat, and whether the server has answered for it yet. */
+export interface OpenChatState {
+  /** Undefined while it loads with nothing known of it; null when it's gone or not the person's. */
+  chat: Chat | null | undefined
+  /** False while what's shown is the sidebar's copy, not yet the server's answer. */
+  confirmed: boolean
+}
+
+export function useOpenChat(chatId: ChatId | undefined): OpenChatState {
   const session = useSession()
   // 'skip', not `enabled: false`: the Convex adapter subscribes to any query it's given.
   const { data, error } = useQuery({
@@ -182,28 +288,53 @@ export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
     retry: false,
   })
   return useMemo(() => {
-    if (!chatId) return null
-    // A ConvexError is the server saying the chat is gone or not the person's. Any other error
-    // is the server not answering in time, as when every query is asked again at once after the
-    // computer wakes: a chat already on screen stays open, with what it last showed, rather
-    // than closing under the person.
-    if (error && (error instanceof ConvexError || !data)) return null
-    return data ? toChat(data as ChatRow, session) : undefined
+    if (!chatId) return { chat: null, confirmed: true }
+    const key = rowKey(session, chatId)
+    const shown = openChatRow(data as ChatRow | undefined, error, knownRows.get(key))
+    // Gone for good: its old row mustn't open it again, from history say, while asked anew.
+    if (shown.gone) knownRows.delete(key)
+    else if (shown.confirmed && shown.row) remember(shown.row, session)
+    return { chat: shown.row ? toChat(shown.row, session) : shown.gone ? null : undefined, confirmed: shown.confirmed }
   }, [chatId, data, error, session])
+}
+
+/**
+ * Which row an open chat shows. Only a ConvexError closes it: the server saying the chat is
+ * gone or not the person's. Any other error is the server not answering in time, as when a busy
+ * server times out every query at once or the computer wakes and everything is asked again: the
+ * chat stays open with what it last showed, or the sidebar's copy of its row (`known`), or as
+ * loading, and is asked again (lib/resilient-convex.ts), rather than closing under the person.
+ */
+export function openChatRow(
+  data: ChatRow | undefined,
+  error: unknown,
+  known: ChatRow | undefined,
+): { row: ChatRow | undefined; confirmed: boolean; gone: boolean } {
+  if (error instanceof ConvexError) return { row: undefined, confirmed: true, gone: true }
+  if (data && !error) return { row: data, confirmed: true, gone: false }
+  return { row: data ?? known, confirmed: false, gone: false }
+}
+
+export function useChat(chatId: ChatId | undefined): Chat | null | undefined {
+  return useOpenChat(chatId).chat
 }
 
 export function useChatCounts() {
   return useQuery(convexQuery(api.chats.counts, {})).data
 }
 
-/** Runs a mutation and shows its error, as a sentence, instead of throwing. */
-function guarded<A extends unknown[]>(fn: (...args: A) => Promise<unknown>, fallback: string) {
+/**
+ * Runs a mutation and shows its error, as a sentence, instead of throwing. One the app makes by
+ * itself (`quiet`) says nothing when the server failed to answer: the busy line already says so
+ * (ServerBusy), and the person didn't ask for it.
+ */
+function guarded<A extends unknown[]>(fn: (...args: A) => Promise<unknown>, fallback: string, quiet = false) {
   return async (...args: A) => {
     try {
       await fn(...args)
       return true
     } catch (e) {
-      toast(errorMessage(e, fallback))
+      if (!(quiet && isTransient(e))) toast(errorMessage(e, fallback))
       return false
     }
   }
@@ -222,7 +353,8 @@ export function useChatActions() {
   const setLabels = useMutation(api.chats.setLabels)
   return useMemo(
     () => ({
-      markRead: guarded((chatId: ChatId) => markRead({ chatId }), 'That chat couldn’t be marked read.'),
+      // Mostly the app's own doing, when an open chat's messages are shown (read-while-open.tsx).
+      markRead: guarded((chatId: ChatId) => markRead({ chatId }), 'That chat couldn’t be marked read.', true),
       markUnread: guarded((chatId: ChatId) => markUnread({ chatId }), 'That chat couldn’t be marked unread.'),
       setArchived: guarded(
         (chatId: ChatId, archived: boolean) => setArchived({ chatId, archived }),
@@ -335,6 +467,19 @@ export function useAccounts() {
 
 export function useScheduled(chatId?: ChatId) {
   return useQuery(convexQuery(api.scheduled.list, chatId ? { chatId } : {})).data
+}
+
+type CancelledRow = FunctionReturnType<typeof api.scheduled.cancelled>[number]
+// Outside the hook, so useQueries can keep its result while the answers don't change.
+const cancelledOf = (results: { data?: CancelledRow[] | undefined }[]) =>
+  results.some((r) => !r.data) ? undefined : results.flatMap((r) => r.data!)
+
+/** Each of these chats' cancelled scheduled messages, asked chat by chat; undefined while any loads. */
+export function useCancelledIn(chatIds: readonly ChatId[]) {
+  return useQueries({
+    queries: chatIds.map((chatId) => convexQuery(api.scheduled.cancelled, { chatId })),
+    combine: cancelledOf,
+  })
 }
 
 /** Cancelled scheduled messages kept on the server until restored or discarded (scheduled.cancelled). */

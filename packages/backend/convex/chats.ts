@@ -88,15 +88,20 @@ export function clientLastMessage(last: Infer<typeof storedLastMessage>): Infer<
   }
 }
 
-export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+/** Looks up the account of a chat's login into `accounts`, unless it's there already. */
+async function lookUpAccount(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
   const accountKey = `${chat.network}:${chat.loginId}`
-  if (!accounts.has(accountKey)) {
-    const account = await ctx.db
-      .query('networkAccounts')
-      .withIndex('by_login', (q) => q.eq('network', chat.network).eq('loginId', chat.loginId))
-      .unique()
-    accounts.set(accountKey, account && account.userId === chat.userId ? account._id : null)
-  }
+  if (accounts.has(accountKey)) return accountKey
+  const account = await ctx.db
+    .query('networkAccounts')
+    .withIndex('by_login', (q) => q.eq('network', chat.network).eq('loginId', chat.loginId))
+    .unique()
+  accounts.set(accountKey, account && account.userId === chat.userId ? account._id : null)
+  return accountKey
+}
+
+export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<string, Id<'networkAccounts'> | null>) {
+  const accountKey = await lookUpAccount(ctx, chat, accounts)
   const labels = await ctx.db
     .query('chatLabels')
     .withIndex('by_chat', (q) => q.eq('chatId', chat._id))
@@ -124,6 +129,17 @@ export async function rowFor(ctx: QueryCtx, chat: Doc<'chats'>, accounts: Map<st
     lastMessageAt: chat.lastMessageAt,
     lastMessage: lastMessageOf(chat),
   }
+}
+
+/**
+ * Rows for several chats, read all at once: one after another, each chat's reads wait for the
+ * last chat's. Each account is looked up once, before the chats' labels.
+ */
+export async function rowsFor(ctx: QueryCtx, chats: Doc<'chats'>[]) {
+  const accounts = new Map<string, Id<'networkAccounts'> | null>()
+  const firsts = new Map(chats.map((chat) => [`${chat.network}:${chat.loginId}`, chat]))
+  await Promise.all([...firsts.values()].map((chat) => lookUpAccount(ctx, chat, accounts)))
+  return await Promise.all(chats.map((chat) => rowFor(ctx, chat, accounts)))
 }
 
 /**
@@ -162,7 +178,6 @@ export const list = query({
     const userId = member.userId
     const view = args.view ?? 'inbox'
     const opts = pageOptions(args.paginationOpts)
-    const accounts = new Map<string, Id<'networkAccounts'> | null>()
 
     if (args.labelId) {
       const label = await ctx.db.get(args.labelId)
@@ -175,20 +190,16 @@ export const list = query({
         .query('chatLabels')
         .withIndex('by_label', (q) => q.eq('labelId', labelId))
         .paginate(opts)
-      const chats = []
-      for (const row of result.page) {
-        const chat = await ctx.db.get(row.chatId)
-        if (
-          chat &&
+      const found = await Promise.all(result.page.map((row) => ctx.db.get(row.chatId)))
+      const chats = found.filter(
+        (chat): chat is Doc<'chats'> =>
+          !!chat &&
           chat.userId === userId &&
           chat.view === view &&
           (!args.network || chat.network === args.network) &&
-          !retired(chat)
-        ) {
-          chats.push(await rowFor(ctx, chat, accounts))
-        }
-      }
-      return { ...result, page: chats }
+          !retired(chat),
+      )
+      return { ...result, page: await rowsFor(ctx, chats) }
     }
 
     // One range, newest first: `pinned: true` sorts after `false`, so descending gives every
@@ -209,9 +220,13 @@ export const list = query({
         ? chats.withIndex('by_user_view_last', (q) => q.eq('userId', userId).eq('view', view))
         : chats.withIndex('by_user_view_pinned_last', (q) => q.eq('userId', userId).eq('view', view))
     const result = await range.order('desc').paginate(opts)
-    const page = []
-    for (const chat of result.page) if (!retired(chat)) page.push(await rowFor(ctx, chat, accounts))
-    return { ...result, page }
+    return {
+      ...result,
+      page: await rowsFor(
+        ctx,
+        result.page.filter((chat) => !retired(chat)),
+      ),
+    }
   },
 })
 
@@ -238,7 +253,6 @@ export const counts = query({
   handler: async (ctx) => {
     const member = await requireMember(ctx)
     const userId = member.userId
-    const now = Date.now()
     const scan = 4 * COUNT_CAP
     const inbox = await ctx.db
       .query('chats')
@@ -251,10 +265,10 @@ export const counts = query({
       .take(COUNT_CAP + 1)
     const capped = (n: number, partial: boolean) => ({ count: Math.min(n, COUNT_CAP), more: n > COUNT_CAP || partial })
     const scannedAll = inbox.length < scan
+    // Muted as stored, not by the clock: a query isn't run again as time passes, and a timed mute
+    // is cleared by a write when it ends (`muteEnded`), so the count and the client agree.
     const unread = inbox.filter(
-      (chat) =>
-        (chat.unreadCount > 0 || chat.markedUnread === true) &&
-        !(chat.mutedUntil !== undefined && chat.mutedUntil > now),
+      (chat) => (chat.unreadCount > 0 || chat.markedUnread === true) && chat.mutedUntil === undefined,
     ).length
     return {
       inbox: capped(unread, !scannedAll),
@@ -356,6 +370,21 @@ export const setMuted = mutation({
     if (until !== undefined) checkUntil(until)
     // "Until I unmute" is stored as the largest time a number holds exactly.
     await patchChat(ctx, chat, { mutedUntil: until ?? Number.MAX_SAFE_INTEGER })
+    // A query can't see time pass, so the unread badge (`counts`) and the lists would keep
+    // treating the chat as muted after `until` until something else wrote to it. Ending the
+    // mute with a write at `until` brings them up to date.
+    if (until !== undefined) await ctx.scheduler.runAt(until, internal.chats.muteEnded, { chatId: chat._id, until })
+    return null
+  },
+})
+
+/** Runs at a timed mute's end. A later mute or unmute of the same chat stands; this does nothing then. */
+export const muteEnded = internalMutation({
+  args: { chatId: v.id('chats'), until: v.number() },
+  returns: v.null(),
+  handler: async (ctx, { chatId, until }) => {
+    const chat = await ctx.db.get(chatId)
+    if (chat && chat.mutedUntil === until) await patchChat(ctx, chat, { mutedUntil: undefined })
     return null
   },
 })

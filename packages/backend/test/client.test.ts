@@ -158,6 +158,15 @@ describe('chat views', () => {
     expect(await a.query(api.chats.get, { chatId })).toMatchObject({ woke: true, archived: false })
   })
 
+  it('counts a chat as muted while its mute is stored, past its time until its end is written', async () => {
+    // So the count agrees with what clients load, whatever their clocks say (chats.muteEnded).
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    await aChat(t, 'user_a', 'mute-ending', { unreadCount: 1, mutedUntil: Date.now() - 1 })
+    await aChat(t, 'user_a', 'unmuted', { unreadCount: 1 })
+    expect((await a.query(api.chats.counts, {})).inbox).toEqual({ count: 1, more: false })
+  })
+
   it('counts badges from bounded ranges, capped at 99', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')
@@ -244,6 +253,46 @@ describe('chat actions', () => {
     await expect(
       a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 366 * day }),
     ).rejects.toThrow(/year/)
+  })
+
+  it('ends a timed mute at its time, so the unread count sees the chat again', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p', { unreadCount: 2 })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: Date.now() + 60_000 })
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(0)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBeNull()
+    expect((await a.query(api.chats.counts, {})).inbox.count).toBe(1)
+
+    // A mute changed before the first one's time leaves the later one standing.
+    const first = Date.now() + 60_000
+    await a.mutation(api.chats.setMuted, { chatId, muted: true, until: first })
+    await a.mutation(api.chats.setMuted, { chatId, muted: true })
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect((await a.query(api.chats.get, { chatId })).mutedUntil).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('ends the timed mutes set before mutes scheduled their own ends', async () => {
+    vi.useFakeTimers()
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const now = Date.now()
+    const over = await aChat(t, 'user_a', 'over', { mutedUntil: now - 1 })
+    const later = await aChat(t, 'user_a', 'later', { mutedUntil: now + 60_000 })
+    const forever = await aChat(t, 'user_a', 'forever', { mutedUntil: Number.MAX_SAFE_INTEGER })
+    const mutedUntil = async (chatId: Id<'chats'>) => (await a.query(api.chats.get, { chatId })).mutedUntil
+    await t.mutation(internal.migrations.scheduleMuteEnds, {})
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(over)).toBeNull()
+    expect(await mutedUntil(later)).toBe(now + 60_000)
+    vi.advanceTimersByTime(61_000)
+    await t.finishInProgressScheduledFunctions()
+    expect(await mutedUntil(later)).toBeNull()
+    expect(await mutedUntil(forever)).toBe(Number.MAX_SAFE_INTEGER)
   })
 })
 
@@ -510,6 +559,75 @@ describe('reads that large messages could push past the read limit', () => {
     const elsewhere = await a.query(api.messages.reactions, { chatId: other, messageIds: ids.slice(0, 3) })
     // Including the deleted one: from another chat it isn't a message there, not a deleted one.
     expect(elsewhere).toEqual({ [ids[0]!]: [], [ids[1]!]: [], [ids[2]!]: [] })
+  })
+
+  it('shows nothing of another person’s chat, and says nothing of its deleted messages', async () => {
+    const t = setup()
+    await signIn(t, 'user_a')
+    const c = await signIn(t, 'user_c')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const ids = await bigMessages(t, chatId, 3)
+    const ask = () => c.query(api.messages.reactions, { chatId, messageIds: ids })
+    const none = { [ids[0]!]: [], [ids[1]!]: [], [ids[2]!]: [] }
+    expect(await ask()).toEqual(none)
+    // The same answer however many reactions the messages have, and whether or not one of
+    // them is being deleted: what's in someone else's chat changes nothing.
+    await t.run(async (ctx) => {
+      for (const messageId of ids) {
+        for (let r = 0; r < 100; r++) {
+          await ctx.db.insert('reactions', {
+            userId: 'user_a',
+            chatId,
+            messageId,
+            senderKey: `ghost:${r}`,
+            key: '👍',
+            eventId: `r${messageId}-${r}`,
+            addedAt: 1,
+            networkTs: 1,
+          })
+        }
+      }
+    })
+    expect(await ask()).toEqual(none)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('reactionCleanups', { messageId: ids[0]!, chatId })
+    })
+    expect(await ask()).toEqual(none)
+  })
+
+  it('says nothing to anyone else of a marker from before markers named their chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const c = await signIn(t, 'user_c')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const mine = await aChat(t, 'user_c', 'q')
+    const [deleted, kept] = await bigMessages(t, chatId, 2)
+    await t.run(async (ctx) => {
+      for (const messageId of [deleted!, kept!]) {
+        await ctx.db.insert('reactions', {
+          userId: 'user_a',
+          chatId,
+          messageId,
+          senderKey: 'self',
+          key: '👍',
+          eventId: `r${messageId}`,
+          addedAt: 1,
+          networkTs: 1,
+        })
+      }
+    })
+    const ask = () => c.query(api.messages.reactions, { chatId: mine, messageIds: [deleted!, kept!] })
+    const before = await ask()
+    expect(before).toEqual({ [deleted!]: [], [kept!]: [] })
+    await t.run(async (ctx) => {
+      await ctx.db.insert('reactionCleanups', { messageId: deleted! })
+    })
+    expect(await ask()).toEqual(before)
+    // Its person still has it left out of its own chat, and empty from their others.
+    const own = await a.query(api.messages.reactions, { chatId, messageIds: [deleted!, kept!] })
+    expect(own).toEqual({ [kept!]: [{ key: '👍', senderKey: 'self' }] })
+    const other = await aChat(t, 'user_a', 'other')
+    expect(await a.query(api.messages.reactions, { chatId: other, messageIds: [deleted!] })).toEqual({ [deleted!]: [] })
   })
 })
 

@@ -171,13 +171,16 @@ func New(cfg Config) (*Host, error) {
 		h.Pusher = gateway.NewPusher(client, h.Store, cfg.HostID, cfg.Network, cfg.CommandAddr, cfg.Log.With().Str("component", "pusher").Logger())
 	}
 	notify := func() {}
+	var history connector.HistoryGate
 	if h.Pusher != nil {
 		notify = h.Pusher.Wake
+		history = h.Pusher
 	}
 	h.Connector = connector.New(connector.Options{
 		Network: cfg.Network, Store: h.Store, Keys: h.Keys, Media: mediaStore,
 		BridgeKey: cfg.BridgeKey,
 		Notify:    notify, SendTimeout: cfg.SendTimeout, Signin: cfg.Signin,
+		History: history,
 	})
 	bridgeCfg := BridgeConfig()
 	if cfg.AdjustBridgeConfig != nil {
@@ -229,6 +232,9 @@ func (h *Host) Start(ctx context.Context) error {
 		// Here, so a stop waits for it as for bridgev2's own post-start work.
 		if err := h.Connector.RefreshCollages(postCtx); err != nil && postCtx.Err() == nil {
 			h.Bridge.Log.Warn().Err(err).Msg("Choosing chats' collages failed; they're chosen again at the next start")
+		}
+		if err := h.Connector.DescribeDirectChats(postCtx); err != nil && postCtx.Err() == nil {
+			h.Config.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Describing direct chats again failed; it is tried again at the next start")
 		}
 	}()
 	// Restored from a backup since this database last started: the queue in it is the backup's,
