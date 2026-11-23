@@ -1,19 +1,25 @@
 package networks
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	gmessages "go.mau.fi/mautrix-gmessages/pkg/connector"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"go.mau.fi/util/exhttp"
 	"maunium.net/go/mautrix/bridgev2"
@@ -310,5 +316,72 @@ func TestGMessagesSendOnceClosesIdleConnections(t *testing.T) {
 	(&http.Client{Transport: &gmessagesSendOnce{next: inner}}).CloseIdleConnections()
 	if !inner.closed {
 		t.Fatal("CloseIdleConnections didn't reach the wrapped transport")
+	}
+}
+
+// A Google account login that fails before the emoji is logged with the step it stopped at,
+// Google's status, endpoint and error number, and none of Google's words or the request's keys.
+func TestGMessagesDescribeLoginError(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://messages.google.com/web/config?key=SECRETKEY", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpErr := events.HTTPError{
+		Resp: &http.Response{StatusCode: http.StatusUnauthorized, Request: req},
+		Body: []byte("body about someone@example.com"),
+	}
+	reqErr := events.RequestError{HTTP: &httpErr, Data: &gmproto.ErrorResponse{Type: 16, Message: "someone@example.com isn't signed in"}}
+	loginErr := fmt.Errorf("%w: %w", gmessages.ErrPairStartUnknown, fmt.Errorf("failed to fetch config: %w", reqErr))
+
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+	evt := log.Warn()
+	(&gmessagesConnector{}).DescribeLoginError(evt, loginErr)
+	evt.Send()
+
+	for _, secret := range []string{"someone@example.com", "SECRETKEY", "signed in"} {
+		if strings.Contains(buf.String(), secret) {
+			t.Fatalf("the log line has %q: %s", secret, buf.String())
+		}
+	}
+	var line struct {
+		Steps     []string `json:"gm_steps"`
+		Errors    []string `json:"gm_errors"`
+		ErrorType int64    `json:"google_error_type"`
+		Status    int      `json:"http_status"`
+		Endpoint  string   `json:"http_endpoint"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(line.Steps, []string{"fetch_config"}) {
+		t.Errorf("gm_steps: %v", line.Steps)
+	}
+	if !slices.Equal(line.Errors, []string{"pair_start_unknown"}) {
+		t.Errorf("gm_errors: %v", line.Errors)
+	}
+	if line.ErrorType != 16 || line.Status != http.StatusUnauthorized || line.Endpoint != "messages.google.com/web/config" {
+		t.Errorf("got google_error_type %d, http_status %d, http_endpoint %q", line.ErrorType, line.Status, line.Endpoint)
+	}
+}
+
+// The phone-side failures libgm names are logged by name, and the step before them.
+func TestGMessagesDescribeLoginErrorNamesLibgmErrors(t *testing.T) {
+	loginErr := fmt.Errorf("%w: %w", gmessages.ErrPairStartUnknown,
+		fmt.Errorf("failed to send client init: %w", libgm.ErrPhoneNotResponding))
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+	evt := log.Warn()
+	(&gmessagesConnector{}).DescribeLoginError(evt, loginErr)
+	evt.Send()
+	var line struct {
+		Steps  []string `json:"gm_steps"`
+		Errors []string `json:"gm_errors"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(line.Steps, []string{"send_client_init"}) || !slices.Equal(line.Errors, []string{"pair_start_unknown", "phone_not_responding"}) {
+		t.Errorf("got gm_steps %v, gm_errors %v", line.Steps, line.Errors)
 	}
 }

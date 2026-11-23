@@ -323,9 +323,9 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		if !s.finish() {
 			return
 		}
-		// Only the error's type is logged: a connector's error text can quote what the person
-		// typed. The person sees a code.
-		log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Login failed")
+		// Only what the error is made of is logged, never its text: a connector's error text can
+		// quote what the person typed. The person sees a code.
+		s.c.describeLoginError(log.Warn(), err).Msg("Login failed")
 		code := protocol.ErrLoginFailed
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = protocol.ErrTimeout
