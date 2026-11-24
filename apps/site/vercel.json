@@ -4,7 +4,7 @@
   "installCommand": "",
   "buildCommand": "",
   "outputDirectory": ".",
-  "ignoreCommand": "node ../../scripts/vercel-ignore.mjs site",
+  "ignoreCommand": "if node ../../scripts/vercel-ignore.mjs site; then exit 0; else exit 1; fi",
   "git": {
     "deploymentEnabled": {
       "**": false,

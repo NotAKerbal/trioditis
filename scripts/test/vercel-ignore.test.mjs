@@ -99,17 +99,46 @@ void test('it exits 0 to skip and 1 to build, whatever goes wrong', () => {
 })
 
 void test('each project’s vercel.json runs it for its own site and deploys only from dev', () => {
-  for (const [file, command, site] of [
-    ['apps/site/vercel.json', 'node ../../scripts/vercel-ignore.mjs site', 'site'],
-    ['apps/docs/vercel.json', 'node ../../scripts/vercel-ignore.mjs docs', 'docs'],
+  for (const [file, site] of [
+    ['apps/site/vercel.json', 'site'],
+    ['apps/docs/vercel.json', 'docs'],
   ]) {
     const config = JSON.parse(readFileSync(join(repoRoot, file), 'utf8'))
-    assert.equal(config.ignoreCommand, command, file)
+    assert.match(config.ignoreCommand, new RegExp(`^if node \\.\\./\\.\\./scripts/vercel-ignore\\.mjs ${site};`), file)
     assert.deepEqual(config.git?.deploymentEnabled, { '**': false, dev: true }, file)
     assert.ok(sites[site].includes(dirname(file)), file)
+    // Line endings in .gitattributes change the bytes of every file Vercel checks out.
+    assert.ok(sites[site].includes('.gitattributes'), file)
   }
-  assert.equal(
-    JSON.parse(readFileSync(join(repoRoot, 'vercel.json'), 'utf8')).ignoreCommand,
-    'node scripts/vercel-ignore.mjs web',
-  )
+})
+
+void test('the configured commands, run from each Root Directory, exit 0 or 1 even when Node doesn’t finish', () => {
+  // A `node` that is killed before it can exit: on its own, the shell would return 143.
+  const killed = mkdtempSync(join(tmpdir(), 'vercel-ignore-node-'))
+  writeFileSync(join(killed, 'node'), '#!/bin/sh\nkill -TERM $$\n', { mode: 0o755 })
+  const head = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const path = `${dirname(process.execPath)}:/usr/bin:/bin`
+  try {
+    for (const folder of ['apps/site', 'apps/docs', '.']) {
+      const { ignoreCommand } = JSON.parse(readFileSync(join(repoRoot, folder, 'vercel.json'), 'utf8'))
+      const run = (extra) =>
+        spawnSync('/bin/sh', ['-c', ignoreCommand], {
+          cwd: join(repoRoot, folder),
+          encoding: 'utf8',
+          env: { PATH: path, VERCEL_ENV: 'preview', ...extra },
+        }).status
+      // The same commit on both sides: nothing changed, so it skips.
+      assert.equal(run({ VERCEL_GIT_PREVIOUS_SHA: head, VERCEL_GIT_COMMIT_SHA: head }), 0, folder)
+      // The last deployed commit isn't in this clone.
+      assert.equal(run({ VERCEL_GIT_PREVIOUS_SHA: 'f'.repeat(40), VERCEL_GIT_COMMIT_SHA: head }), 1, folder)
+      assert.equal(
+        run({ PATH: `${killed}:${path}`, VERCEL_GIT_PREVIOUS_SHA: head, VERCEL_GIT_COMMIT_SHA: head }),
+        1,
+        folder,
+      )
+      assert.equal(run({ PATH: '/nonexistent', VERCEL_GIT_PREVIOUS_SHA: head, VERCEL_GIT_COMMIT_SHA: head }), 1, folder)
+    }
+  } finally {
+    rmSync(killed, { recursive: true, force: true })
+  }
 })

@@ -4,7 +4,7 @@
   "installCommand": "pnpm install --frozen-lockfile --filter @trioditis/docs...",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "ignoreCommand": "node ../../scripts/vercel-ignore.mjs docs",
+  "ignoreCommand": "if node ../../scripts/vercel-ignore.mjs docs; then exit 0; else exit 1; fi",
   "git": {
     "deploymentEnabled": {
       "**": false,

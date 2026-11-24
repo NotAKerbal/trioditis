@@ -3,7 +3,7 @@
   "framework": null,
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "node scripts/vercel-build.mjs",
-  "ignoreCommand": "node scripts/vercel-ignore.mjs web",
+  "ignoreCommand": "if node scripts/vercel-ignore.mjs web; then exit 0; else exit 1; fi",
   "git": {
     "deploymentEnabled": {
       "**": false,

@@ -6,7 +6,9 @@
 //   node scripts/vercel-ignore.mjs web          the web app (the root vercel.json), once its project exists
 //
 // Vercel skips the build when this exits 0 and builds when it exits 1. Any other exit code fails
-// the deployment, so every path out of here is 0 or 1, a crash included. It skips only when git
+// the deployment, so every path out of here is 0 or 1, a thrown error included. Node can still end
+// another way (killed, or not found), so each vercel.json wraps the call in
+// `if …; then exit 0; else exit 1; fi`, which turns anything but a clean skip into a build. It skips only when git
 // shows that none of the files the site is built from changed since the branch's last successful
 // deployment. Anything it can't tell builds: a branch's first deployment, a last deployed commit
 // that has fallen out of Vercel's shallow clone, a CLI deploy such as `pnpm preview`.
@@ -16,22 +18,23 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-// The install reads these for any site that installs dependencies, and .vercelignore decides
-// what Vercel uploads.
-const install = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', '.vercelignore']
+// Every site's files depend on these: .vercelignore decides what Vercel uploads, and
+// .gitattributes how git checks files out (line endings, for one).
+const checkout = ['.vercelignore', '.gitattributes']
+// The install reads these, for a site that installs dependencies.
+const install = [...checkout, 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc']
 
 // Everything each site's build reads. Keep these in step with what each build reaches outside
 // its own folder for, and with "The websites" in apps/docs/src/content/docs/contributing/workflow.md.
 export const sites = {
   // Plain files with no build: only the folder itself, and what Vercel uploads of it.
-  site: ['.vercelignore', 'apps/site'],
+  site: [...checkout, 'apps/site'],
   docs: [...install, 'apps/docs'],
   // Nightly's build: the web app, and the backend it deploys. .gitignore matters too: Tailwind
   // skips the files it lists.
   web: [
     ...install,
     '.gitignore',
-    '.gitattributes',
     'vercel.json',
     'apps/desktop',
     'packages',
