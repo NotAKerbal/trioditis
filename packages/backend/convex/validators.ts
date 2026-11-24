@@ -1,6 +1,6 @@
 import { v, type Infer } from 'convex/values'
 import { DELIVERY_STATES, NETWORKS } from '@trioditis/core'
-import { ERROR_CODES, LOGIN_STATES } from '@trioditis/core/bridge-protocol'
+import { ERROR_CODES, LOGIN_STATES, type BridgeEvent } from '@trioditis/core/bridge-protocol'
 
 // Validators shared by the schema and the functions. Wire shapes follow
 // docs/architecture/bridge-protocol.md; sealed shapes follow docs/architecture/sealing.md.
@@ -239,6 +239,54 @@ export const bridgeEvent = v.union(
   }),
 )
 export type BridgeEventDoc = Infer<typeof bridgeEvent>
+
+/** Every event type the bridge protocol has, read from `bridgeEvent` so no list is kept by hand. */
+export const BRIDGE_EVENT_TYPES: readonly BridgeEventDoc['type'][] = bridgeEvent.members.map(
+  (member) => member.fields.type.value,
+)
+
+/**
+ * The most an incoming sealed object may hold. A message row can hold two (the message and
+ * its latest edit), which must fit in Convex's 1 MiB document limit as base64 text.
+ */
+const MAX_INCOMING_SEALED_BYTES = 256 * 1024
+/**
+ * Chat and contact metadata (a name, a topic, an avatar's file reference) is small. Capping
+ * it keeps a whole inbox of rows well inside one query's read limit.
+ */
+const MAX_METADATA_SEALED_BYTES = 8 * 1024
+
+/** The event types that can carry `sealed`. */
+type SealedEventType = Extract<BridgeEventDoc, { sealed?: unknown }>['type']
+
+/**
+ * The most each event type's `sealed` may hold, in ciphertext bytes. Ingest quarantines an
+ * event over it, and the bridge host reads the same table from the protocol schema
+ * (scripts/write-protocol-schema.ts). An event type that gains `sealed` has to be given its
+ * limit here before the backend compiles.
+ */
+export const MAX_SEALED_BYTES: Record<SealedEventType, number> = {
+  message: MAX_INCOMING_SEALED_BYTES,
+  edit: MAX_INCOMING_SEALED_BYTES,
+  chat: MAX_METADATA_SEALED_BYTES,
+  chatCollage: MAX_METADATA_SEALED_BYTES,
+  contact: MAX_METADATA_SEALED_BYTES,
+  contactIdentifiers: MAX_METADATA_SEALED_BYTES,
+  loginState: MAX_METADATA_SEALED_BYTES,
+}
+
+/**
+ * Whether two types are the same, optional fields included: assignability alone would let
+ * one side gain an optional field the other doesn't know.
+ */
+type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false
+
+/**
+ * `@trioditis/core`'s wire types, which the gateway and clients use, describe exactly the
+ * events this validator accepts. If this fails to compile, one of them changed without the
+ * other.
+ */
+const _sameEvents: Same<BridgeEvent, BridgeEventDoc> = true
 
 /**
  * What a queued command asks the bridge host to do. `commandId` is the outbox row's ID. The

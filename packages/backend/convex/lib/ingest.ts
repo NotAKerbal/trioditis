@@ -1,6 +1,6 @@
 import type { Doc, Id } from '../_generated/dataModel'
 import type { MutationCtx } from '../_generated/server'
-import type { BridgeEventDoc } from '../validators'
+import { MAX_SEALED_BYTES, type BridgeEventDoc } from '../validators'
 import type { Network } from '@trioditis/core'
 import { isEnvelope } from './envelope'
 import { deletePayload, queueLogout } from './outbox'
@@ -805,16 +805,6 @@ async function applySendStatus(
   if (message) await ctx.db.patch(message._id, { delivery: advance(message.delivery, event.status) })
 }
 
-/**
- * The most an incoming sealed object may hold. A message row can hold two (the message and
- * its latest edit), which must fit in Convex's 1 MiB document limit as base64 text.
- */
-export const MAX_INCOMING_SEALED_BYTES = 256 * 1024
-/**
- * Chat and contact metadata (a name, a topic, an avatar's file reference) is small. Capping
- * it keeps a whole inbox of rows well inside one query's read limit.
- */
-export const MAX_METADATA_SEALED_BYTES = 8 * 1024
 /** The longest ID an event may carry: they are hashes and opaque IDs, never content. */
 export const MAX_ID_LENGTH = 256
 /** The most a login step may hold, in UTF-8 bytes. */
@@ -882,15 +872,7 @@ export async function applyEvent(ctx: MutationCtx, event: BridgeEventDoc, origin
   if (hasOversizedId(event)) throw new Unmappable('too_large')
   if ('sealed' in event && event.sealed !== undefined) {
     if (!isEnvelope(event.sealed)) throw new Unmappable('malformed_envelope')
-    const limit =
-      event.type === 'chat' ||
-      event.type === 'chatCollage' ||
-      event.type === 'contact' ||
-      event.type === 'contactIdentifiers' ||
-      event.type === 'loginState'
-        ? MAX_METADATA_SEALED_BYTES
-        : MAX_INCOMING_SEALED_BYTES
-    if (!isEnvelope(event.sealed, limit)) throw new Unmappable('too_large')
+    if (!isEnvelope(event.sealed, MAX_SEALED_BYTES[event.type])) throw new Unmappable('too_large')
   }
   await assertLoginOwner(ctx, event, origin)
   switch (event.type) {

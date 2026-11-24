@@ -77,6 +77,15 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 | `sendStatus`     | `clientMessageId`, `status`, `eventId?`, `error?`                                                                                  | `submitted`, `sent`, `delivered`, `read`, `failed`, `unknown`                                                                                                                                                                                                                                                          |
 | `backfillDone`   | `portalId`, `direction`, `more`                                                                                                    | History import progress                                                                                                                                                                                                                                                                                                |
 
+### One schema for both sides
+
+The backend's `bridgeEvent` validator (`packages/backend/convex/validators.ts`) is the one description of these events, with `MAX_SEALED_BYTES` beside it for each type's sealed limit. `pnpm --filter @trioditis/backend protocol-schema` writes it out for the bridge host:
+
+- `apps/bridge-host/internal/protocol/events.json`, each type's required and optional fields and sealed limit, which the bridge host embeds. It writes and validates every event by it.
+- `apps/bridge-host/internal/protocol/testdata/event-vectors.json`, example events the backend must accept and refuse. The gateway's tests check them against the validator. The bridge host's tests check that it sends every valid one back unchanged and never sends an invalid one.
+
+A test fails while either file is older than the validator, and the backend doesn't compile while `@trioditis/core`'s `BridgeEvent` type differs from the validator's. So a field added on one side alone fails CI on the other.
+
 ## Commands: gateway → bridge host
 
 `POST /v1/commands`

@@ -1,5 +1,7 @@
 // Package protocol holds the wire types of the bridge host ↔ gateway protocol,
-// docs/architecture/bridge-protocol.md. It mirrors packages/core/src/bridge-protocol.ts.
+// docs/architecture/bridge-protocol.md. Which fields each event type has comes from the
+// backend's validator, by way of events.json (schema.go); the Go types here must hold every
+// one of them, which the shared example events in testdata check.
 package protocol
 
 import (
@@ -90,7 +92,9 @@ type Event struct {
 
 // Size limits, from docs/architecture/bridge-protocol.md (Sizes, and the gateway's batch
 // rules). The backend quarantines anything over them, and the gateway refuses a request
-// body over 32 MiB, so the bridge host keeps every event within them.
+// body over 32 MiB, so the bridge host keeps every event within them. Validate takes each
+// event type's sealed limit from the schema (events.json); the connector cuts content down
+// to these two, and a test checks they are the schema's.
 const (
 	// MaxMessageSealedBytes is the most a message or edit's sealed ciphertext may hold.
 	MaxMessageSealedBytes = 256 * 1024
@@ -102,32 +106,6 @@ const (
 	// input (the backend refuses more, so a bigger one didn't come from a client).
 	MaxClientSealedBytes = 64 * 1024
 )
-
-// eventShape is what one event type carries beyond seq, type, userId, loginId and at.
-type eventShape struct{ required, optional []string }
-
-// eventShapes mirrors the backend's bridgeEvent validator
-// (packages/backend/convex/validators.ts), which the gateway also checks every event
-// against before sending it on: a field it doesn't expect, or a required one missing, gets
-// the event quarantined.
-var eventShapes = map[string]eventShape{
-	EventMessage:            {[]string{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, []string{"replyTo", "threadRoot", "clientMessageId", "mentionsMe"}},
-	EventEdit:               {[]string{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, []string{"clientMessageId"}},
-	EventReaction:           {[]string{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	EventReactionRemove:     {[]string{"portalId", "targetEventId", "sender", "key"}, nil},
-	EventRedaction:          {[]string{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	EventReceipt:            {[]string{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	EventTyping:             {[]string{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	EventChat:               {[]string{"portalId", "kind", "sealed"}, []string{"parentPortalId", "deleted", "isRequest"}},
-	EventContact:            {[]string{"ghostId", "sealed"}, nil},
-	EventContactIdentifiers: {[]string{"ghostId", "sealed"}, nil},
-	EventChatCollage:        {[]string{"portalId", "sealed"}, nil},
-	EventChatStarted:        {[]string{"requestId"}, []string{"portalId", "error"}},
-	EventLoginState:         {[]string{"state"}, []string{"error", "sealed"}},
-	EventLoginStep:          {[]string{"loginSessionId", "step"}, nil},
-	EventSendStatus:         {[]string{"clientMessageId", "status"}, []string{"eventId", "error"}},
-	EventBackfillDone:       {[]string{"portalId", "direction", "more"}, nil},
-}
 
 // field returns an event field by its JSON name, and whether it is set.
 func (e *Event) field(name string) (any, bool) {
@@ -202,13 +180,13 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	if e.bare {
 		return json.Marshal(out)
 	}
-	shape := eventShapes[e.Type]
-	for _, name := range shape.required {
+	shape := schema.Events[e.Type]
+	for _, name := range shape.Required {
 		if value, set := e.field(name); set || writesZero(name) {
 			out[name] = value
 		}
 	}
-	for _, name := range shape.optional {
+	for _, name := range shape.Optional {
 		if value, set := e.field(name); set {
 			out[name] = value
 		}
@@ -244,25 +222,22 @@ var ErrTooLarge = fmt.Errorf("%w: over the protocol's size limit", ErrInvalidEve
 // backend requires, and within the size limits. An event that fails it is a bug in the
 // bridge host; journaling it would only get it quarantined.
 func (e *Event) Validate() error {
-	shape, ok := eventShapes[e.Type]
+	shape, ok := schema.Events[e.Type]
 	if !ok {
 		return fmt.Errorf("%w: unknown event type %q", ErrInvalidEvent, e.Type)
 	}
 	if e.UserID == "" {
 		return fmt.Errorf("%w: %s event has no userId", ErrInvalidEvent, e.Type)
 	}
-	for _, name := range shape.required {
+	for _, name := range shape.Required {
 		// A network timestamp of 0 is odd but valid; every other required field must be set.
 		if _, set := e.field(name); !set && name != "networkTs" {
 			return fmt.Errorf("%w: %s event is missing %s", ErrInvalidEvent, e.Type, name)
 		}
 	}
-	if e.Sealed != nil {
-		limit := MaxMessageSealedBytes
-		if e.Type == EventChat || e.Type == EventChatCollage || e.Type == EventContact || e.Type == EventContactIdentifiers || e.Type == EventLoginState {
-			limit = MaxMetadataSealedBytes
-		}
-		if seal.DecodedLen(e.Sealed.CT) > limit {
+	// A type with no sealed content never writes it, so only a limit the schema gives applies.
+	if e.Sealed != nil && shape.MaxSealedBytes > 0 {
+		if seal.DecodedLen(e.Sealed.CT) > shape.MaxSealedBytes {
 			return fmt.Errorf("%s event: %w (sealed)", e.Type, ErrTooLarge)
 		}
 	}
@@ -336,10 +311,13 @@ type LoginStep struct {
 	Type         string        `json:"type"`
 	Instructions string        `json:"instructions,omitempty"`
 	Display      *LoginDisplay `json:"display,omitempty"`
-	Fields       []LoginField  `json:"fields,omitempty"`
-	Cookies      *LoginCookies `json:"cookies,omitempty"`
-	LoginID      string        `json:"loginId,omitempty"`
-	Error        string        `json:"error,omitempty"`
+	// ExpiresAt (bridge host time, ms) is when the step stops working, where the network says.
+	// No connector sets it yet; the app shows the step as expired after it.
+	ExpiresAt int64         `json:"expiresAt,omitempty"`
+	Fields    []LoginField  `json:"fields,omitempty"`
+	Cookies   *LoginCookies `json:"cookies,omitempty"`
+	LoginID   string        `json:"loginId,omitempty"`
+	Error     string        `json:"error,omitempty"`
 	// AfterCancel marks a complete step for a login the person had cancelled: it connected the
 	// account anyway, and they decide whether to keep it.
 	AfterCancel bool `json:"afterCancel,omitempty"`

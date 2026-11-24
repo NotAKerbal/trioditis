@@ -103,14 +103,14 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rawBatch struct {
-		Events []map[string]json.RawMessage `json:"events"`
+		Events []json.RawMessage `json:"events"`
 	}
 	_ = json.Unmarshal(raw, &rawBatch)
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	for _, evt := range rawBatch.Events {
-		if problem := validateEvent(evt); problem != "" {
-			g.invalid = append(g.invalid, problem)
+		if err := protocol.CheckShape(evt); err != nil {
+			g.invalid = append(g.invalid, err.Error())
 		}
 	}
 	g.batches = append(g.batches, &batch)
@@ -146,58 +146,6 @@ func (g *fakeGateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		committed = evt.Seq
 	}
 	_ = json.NewEncoder(w).Encode(protocol.EventBatchResponse{AckedThrough: committed})
-}
-
-// eventFields mirrors the backend's event validators (packages/backend/convex/validators.ts):
-// for each event type, its required and optional fields beyond the ones every event has.
-// The backend refuses an event with a missing or unknown field.
-var eventFields = map[string][2][]string{
-	protocol.EventMessage:            {{"portalId", "eventId", "networkTs", "sender", "sealed", "historical"}, {"replyTo", "threadRoot", "clientMessageId", "mentionsMe"}},
-	protocol.EventEdit:               {{"portalId", "eventId", "targetEventId", "networkTs", "sender", "sealed"}, {"clientMessageId"}},
-	protocol.EventReaction:           {{"portalId", "eventId", "targetEventId", "sender", "key", "networkTs"}, nil},
-	protocol.EventReactionRemove:     {{"portalId", "targetEventId", "sender", "key"}, nil},
-	protocol.EventRedaction:          {{"portalId", "targetEventId", "sender", "networkTs"}, nil},
-	protocol.EventReceipt:            {{"portalId", "sender", "upToEventId", "networkTs"}, nil},
-	protocol.EventTyping:             {{"portalId", "sender", "typing", "timeoutMs"}, nil},
-	protocol.EventChat:               {{"portalId", "kind", "sealed"}, {"parentPortalId", "deleted", "isRequest"}},
-	protocol.EventContact:            {{"ghostId", "sealed"}, nil},
-	protocol.EventContactIdentifiers: {{"ghostId", "sealed"}, nil},
-	protocol.EventChatCollage:        {{"portalId", "sealed"}, nil},
-	protocol.EventChatStarted:        {{"requestId"}, {"portalId", "error"}},
-	protocol.EventLoginState:         {{"state"}, {"error", "sealed"}},
-	protocol.EventLoginStep:          {{"loginSessionId", "step"}, nil},
-	protocol.EventSendStatus:         {{"clientMessageId", "status"}, {"eventId", "error"}},
-	protocol.EventBackfillDone:       {{"portalId", "direction", "more"}, nil},
-}
-
-func validateEvent(evt map[string]json.RawMessage) string {
-	var eventType string
-	_ = json.Unmarshal(evt["type"], &eventType)
-	fields, ok := eventFields[eventType]
-	if !ok {
-		return fmt.Sprintf("unknown event type %q", eventType)
-	}
-	allowed := map[string]bool{"seq": true, "type": true, "userId": true, "loginId": true, "at": true}
-	for _, name := range []string{"seq", "type", "userId", "loginId", "at"} {
-		if _, ok := evt[name]; !ok {
-			return fmt.Sprintf("%s event is missing %s", eventType, name)
-		}
-	}
-	for _, name := range fields[0] {
-		allowed[name] = true
-		if _, ok := evt[name]; !ok {
-			return fmt.Sprintf("%s event is missing %s", eventType, name)
-		}
-	}
-	for _, name := range fields[1] {
-		allowed[name] = true
-	}
-	for name := range evt {
-		if !allowed[name] {
-			return fmt.Sprintf("%s event has unexpected field %s", eventType, name)
-		}
-	}
-	return ""
 }
 
 func (g *fakeGateway) snapshot() []*protocol.Event {

@@ -85,6 +85,7 @@ Only disable a rule for a single line with an inline explanation:
 ## Keeping contracts in sync
 
 - **TypeScript ↔ Go:** Any change to the [Sealed Storage Spec](/security/sealing/) or [Bridge Protocol](/architecture/bridge-protocol/) must update **both** TypeScript (`packages/crypto`, `packages/core`, `packages/backend`, `apps/gateway`) and Go (`apps/bridge-host`) in the same pull request, including shared test vectors.
+- **Bridge events:** change the `bridgeEvent` validator, then run `pnpm --filter @trioditis/backend protocol-schema` and commit what it writes. The bridge host reads each event type's fields from it ([Bridge Protocol](/architecture/bridge-protocol/#one-schema-for-both-sides)).
 - **No plaintext leaks:** Never write plaintext message bodies, chat names, or contact names to Convex, logs, or unencrypted disk.
 - **No auto-retry after ambiguity:** Always surface the `unknown` delivery state rather than silently resending.
 - **Release notes:** User-visible changes add a short note under `release-notes/`, which the server updater surfaces in **Admin settings → Updates**.
