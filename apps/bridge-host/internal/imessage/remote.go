@@ -53,7 +53,7 @@ func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) (failed
 		"group-icon-changed", "group-icon-removed":
 		var msg bluebubbles.Message
 		if json.Unmarshal(evt.Data, &msg) == nil && msg.ChatGUID() != "" {
-			c.queueResync(ctx, msg.ChatGUID(), time.Time{}, false)
+			_ = c.queueResync(ctx, msg.ChatGUID(), time.Time{}, false)
 		}
 	case "message-send-error":
 		// A message Messages took and then failed to send. A send from Trioditis has its

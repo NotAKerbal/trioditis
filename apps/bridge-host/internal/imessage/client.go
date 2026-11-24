@@ -44,6 +44,8 @@ type Client struct {
 	// message bridgev2 never takes holds catch-up back only so many times.
 	failLock sync.Mutex
 	failures map[string]*attempts
+	// queue holds the socket's events until they are handled, across reconnects.
+	queue *eventQueue
 	// now, in tests, stands in for the clock.
 	now func() time.Time
 	// take, in tests, stands in for handing a message to bridgev2 (handleNewMessage).
@@ -74,7 +76,7 @@ var (
 )
 
 func newClient(c *Connector, login *bridgev2.UserLogin) *Client {
-	client := &Client{conn: c, login: login, failures: map[string]*attempts{}}
+	client := &Client{conn: c, login: login, failures: map[string]*attempts{}, queue: newEventQueue()}
 	if c.bridge != nil {
 		// The bridge's logger, not the login's.
 		client.acker = handled.NewAcker(c.bridge.BackgroundCtx, c.bridge.Log.With().Str("component", "imessage ack").Logger())
@@ -186,8 +188,10 @@ func (c *Client) session(ctx context.Context) error {
 		return err
 	}
 	// The socket never waits on handling: it must keep answering the server's pings while a
-	// catch-up runs or a chat is busy with a send. Events wait here instead.
-	queue := newEventQueue()
+	// catch-up runs or a chat is busy with a send. Events wait in the login's queue instead,
+	// which outlives the connection: an edit or unsend read before the connection dropped is
+	// handed over after the next catch-up, which can't fetch it again.
+	queue := c.queue
 	var caughtUp atomic.Bool
 	var failure error
 	var wg sync.WaitGroup
@@ -414,27 +418,33 @@ type attempts struct {
 }
 
 // handOver hands a caught-up message over, and says whether catching up must stop short of
-// it: bridgev2 couldn't take it, and hasn't failed it maxAttempts times yet.
-func (c *Client) handOver(ctx context.Context, msg *bluebubbles.Message) (holdBack bool) {
+// it (holdBack).
+func (c *Client) handOver(ctx context.Context, msg *bluebubbles.Message) bool {
 	take := c.handleNewMessage
 	if c.take != nil {
 		take = c.take
 	}
-	ok := take(msg)
+	return c.holdBack(ctx, "message:"+msg.GUID, take(msg))
+}
+
+// holdBack says whether something a catch-up couldn't bring in (ok false) must keep the time
+// synced up to where it is, so the next catch-up tries again: until it has failed maxAttempts
+// times, counted at most once per attemptSpacing. Something that went in is forgotten.
+func (c *Client) holdBack(ctx context.Context, key string, ok bool) bool {
 	c.failLock.Lock()
 	defer c.failLock.Unlock()
 	if ok {
-		delete(c.failures, msg.GUID)
+		delete(c.failures, key)
 		return false
 	}
 	now := time.Now()
 	if c.now != nil {
 		now = c.now()
 	}
-	a := c.failures[msg.GUID]
+	a := c.failures[key]
 	if a == nil {
 		a = &attempts{}
-		c.failures[msg.GUID] = a
+		c.failures[key] = a
 	}
 	if a.count == 0 || now.Sub(a.last) >= attemptSpacing {
 		a.count++
@@ -443,8 +453,8 @@ func (c *Client) handOver(ctx context.Context, msg *bluebubbles.Message) (holdBa
 	if a.count < maxAttempts {
 		return true
 	}
-	delete(c.failures, msg.GUID)
-	zerolog.Ctx(ctx).Error().Int("attempts", maxAttempts).Msg("A message couldn't be bridged after repeated catch-ups; leaving it")
+	delete(c.failures, key)
+	zerolog.Ctx(ctx).Error().Int("attempts", maxAttempts).Msg("Something couldn't be bridged after repeated catch-ups; leaving it")
 	return false
 }
 
@@ -464,7 +474,7 @@ func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 			if msg.ItemType != 0 {
 				// A rename, or someone added or leaving: the chat's details are fetched again.
 				if guid := msg.ChatGUID(); guid != "" {
-					c.queueResync(ctx, guid, time.Time{}, false)
+					_ = c.queueResync(ctx, guid, time.Time{}, false)
 				}
 				continue
 			}
@@ -508,17 +518,28 @@ func (c *Client) initialSync(ctx context.Context) error {
 		return chat.LastMessage.DateCreated
 	}
 	slices.SortStableFunc(chats, func(a, b bluebubbles.Chat) int { return cmp.Compare(last(&b), last(&a)) })
+	notTaken := false
 	for i := range chats[:min(len(chats), initialChats)] {
 		if at := last(&chats[i]); at > 0 {
-			c.queueResync(ctx, chats[i].GUID, time.UnixMilli(at), true)
+			// A chat bridgev2 couldn't make keeps the login from counting as synced, so the
+			// next connection makes it again rather than leaving it out until it gets a new
+			// message.
+			ok := c.queueResync(ctx, chats[i].GUID, time.UnixMilli(at), true)
+			if c.holdBack(ctx, "chat:"+string(chatID(chats[i].GUID)), ok) {
+				notTaken = true
+			}
 		}
+	}
+	if notTaken {
+		return errNotTaken
 	}
 	return nil
 }
 
-// queueResync has bridgev2 update a chat's details, and fetch its messages up to latest.
-func (c *Client) queueResync(ctx context.Context, chatGUID string, latest time.Time, create bool) {
-	c.login.QueueRemoteEvent(&simplevent.ChatResync{
+// queueResync has bridgev2 update a chat's details, and fetch its messages up to latest, and
+// says whether it could.
+func (c *Client) queueResync(ctx context.Context, chatGUID string, latest time.Time, create bool) bool {
+	res := c.login.QueueRemoteEvent(&simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventChatResync,
 			PortalKey:    c.portalKey(chatGUID),
@@ -527,6 +548,7 @@ func (c *Client) queueResync(ctx context.Context, chatGUID string, latest time.T
 		GetChatInfoFunc: c.GetChatInfo,
 		LatestMessageTS: latest,
 	})
+	return res.Success || res.Ignored
 }
 
 // GetChatInfo is a chat's details: for a direct chat, who it is with (its name and picture

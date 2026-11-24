@@ -423,3 +423,45 @@ func TestLookupFailureIsCertain(t *testing.T) {
 		t.Errorf("a failed lookup: %v", err)
 	}
 }
+
+// Before macOS 26 someone's iMessage and SMS conversations are separate chats in Messages;
+// their portal's history comes from both, each message once, newest kept within the limit.
+func TestHistoryFromEveryServiceChat(t *testing.T) {
+	var asked []string
+	var lock sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lock.Lock()
+		asked = append(asked, r.URL.Path)
+		lock.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/chat/iMessage;-;+15550001111/message":
+			_, _ = w.Write([]byte(`{"status":200,"data":[{"guid":"I2","dateCreated":40},{"guid":"I1","dateCreated":10}]}`))
+		case "/api/v1/chat/SMS;-;+15550001111/message":
+			_, _ = w.Write([]byte(`{"status":200,"data":[{"guid":"S1","dateCreated":30},{"guid":"I1","dateCreated":10}]}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"status":404,"error":{"type":"Database Error","message":"Chat does not exist!"}}`))
+		}
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	got, more, err := c.chatHistory(context.Background(), "any;-;+15550001111", bluebubbles.MessageQuery{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, m := range got {
+		ids = append(ids, m.GUID)
+	}
+	if strings.Join(ids, ",") != "I2,S1" || !more {
+		t.Errorf("history %v, more %v; want I2,S1 and more", ids, more)
+	}
+	if len(asked) != 3 {
+		t.Errorf("asked %v", asked)
+	}
+	// A group's own ID is asked for as it is.
+	if got := serviceChats("weird"); len(got) != 1 || got[0] != "weird" {
+		t.Errorf("serviceChats: %v", got)
+	}
+}

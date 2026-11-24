@@ -1,7 +1,9 @@
 package imessage
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -37,12 +39,12 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 	} else if params.AnchorMessage != nil {
 		q.Before = params.AnchorMessage.Timestamp.UnixMilli()
 	}
-	raw, err := c.bb.ChatMessages(ctx, string(params.Portal.ID), q)
+	raw, more, err := c.chatHistory(ctx, params.Portal.ID, q)
 	if err != nil {
 		return nil, err
 	}
 	slices.Reverse(raw)
-	resp := &bridgev2.FetchMessagesResponse{Forward: params.Forward, HasMore: len(raw) == limit}
+	resp := &bridgev2.FetchMessagesResponse{Forward: params.Forward, HasMore: more}
 	if len(raw) > 0 && !params.Forward {
 		// The server's bounds include their own time; the next page starts just before.
 		resp.Cursor = networkid.PaginationCursor(strconv.FormatInt(raw[0].DateCreated-1, 10))
@@ -121,6 +123,52 @@ func (c *Client) backfillTapbacks(params bridgev2.FetchMessagesParams, byID map[
 			go c.handleTapback(string(params.Portal.ID), t, kind)
 		}
 	}
+}
+
+// serviceChats are the chats Messages may keep for one portal. Before macOS 26, someone's
+// iMessage, SMS and RCS conversations are separate chats, which the portal's "any" ID brings
+// together; the server finds only one of them by that ID, so each is asked for by its own.
+func serviceChats(id networkid.PortalID) []string {
+	rest, ok := strings.CutPrefix(string(id), "any;")
+	if !ok {
+		return []string{string(id)}
+	}
+	return []string{"iMessage;" + rest, "SMS;" + rest, "RCS;" + rest}
+}
+
+// chatHistory is a portal's messages within q, newest first, from every chat Messages keeps
+// for it, each message once (on macOS 26 every name finds the same chat), and whether there
+// are more beyond them.
+func (c *Client) chatHistory(ctx context.Context, id networkid.PortalID, q bluebubbles.MessageQuery) ([]bluebubbles.Message, bool, error) {
+	seen := map[string]bool{}
+	var all []bluebubbles.Message
+	more := false
+	for _, guid := range serviceChats(id) {
+		page, err := c.bb.ChatMessages(ctx, guid, q)
+		var bbErr *bluebubbles.Error
+		if errors.As(err, &bbErr) && bbErr.NotFound() {
+			continue
+		} else if err != nil {
+			return nil, false, err
+		}
+		more = more || len(page) == q.Limit
+		for _, m := range page {
+			if m.GUID != "" && !seen[m.GUID] {
+				seen[m.GUID] = true
+				all = append(all, m)
+			}
+		}
+	}
+	slices.SortStableFunc(all, func(a, b bluebubbles.Message) int {
+		if a.DateCreated != b.DateCreated {
+			return cmp.Compare(b.DateCreated, a.DateCreated)
+		}
+		return cmp.Compare(a.GUID, b.GUID)
+	})
+	if len(all) > q.Limit {
+		all, more = all[:q.Limit], true
+	}
+	return all, more, nil
 }
 
 var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
