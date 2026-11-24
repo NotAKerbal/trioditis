@@ -149,8 +149,12 @@ var upgrades = dbutil.BuildUpgradeTable().
 		// The bridge host's own copy of each avatar, so a person who meets a contact long after
 		// the contact's picture was uploaded still gets it (media.Store.Keep). Its reference is
 		// sealed to the bridge key, like a kept avatar reference.
+		// And which contacts each person was sent with which avatar (ghost Matrix IDs, as
+		// trioditis_member keeps them): a person's copy of an avatar is one per content URI,
+		// but a person's aliases on a network (WhatsApp's phone number and LID) share one.
 		return execAll(ctx, db, []string{
 			`CREATE TABLE trioditis_avatar_kept (avatar_uri TEXT PRIMARY KEY, sealed TEXT NOT NULL)`,
+			`CREATE TABLE trioditis_avatar_sent (owner_user_id TEXT NOT NULL, mxid TEXT NOT NULL, avatar_uri TEXT NOT NULL, PRIMARY KEY (owner_user_id, mxid, avatar_uri))`,
 		})
 	}).
 	Finish()
@@ -944,6 +948,21 @@ func (s *Store) DeleteKeptAvatar(ctx context.Context, avatarURI string) error {
 // KeptAvatar is the sealed reference PutKeptAvatar kept, or ErrNotFound.
 func (s *Store) KeptAvatar(ctx context.Context, avatarURI string) (*seal.Envelope, error) {
 	return s.envelope(ctx, `SELECT sealed FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)
+}
+
+// PutAvatarSent records that a person was sent a contact (mxid) with an avatar.
+func (s *Store) PutAvatarSent(ctx context.Context, ownerUserID, mxid, avatarURI string) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_sent (owner_user_id, mxid, avatar_uri) VALUES ($1, $2, $3) ON CONFLICT (owner_user_id, mxid, avatar_uri) DO NOTHING`,
+		ownerUserID, mxid, avatarURI)
+	return err
+}
+
+// AvatarSent reports whether a person was sent a contact (mxid) with an avatar.
+func (s *Store) AvatarSent(ctx context.Context, ownerUserID, mxid, avatarURI string) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_avatar_sent WHERE owner_user_id=$1 AND mxid=$2 AND avatar_uri=$3`, ownerUserID, mxid, avatarURI).Scan(&n)
+	return n > 0, err
 }
 
 // ContactRooms lists the rooms that record whose profiles each person has been sent.

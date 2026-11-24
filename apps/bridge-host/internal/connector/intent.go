@@ -720,6 +720,7 @@ func (in *Intent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStrin
 	// Kept before anything else: the person who needs this picture may only turn up once its
 	// upload is long gone.
 	in.c.keepAvatar(ctx, avatarURL)
+	in.c.replaceLostAvatar(ctx, in.ghostID, avatarURL)
 	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, &avatarURL)
 }
 
@@ -1144,6 +1145,12 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	// Recorded once it's sent, so a person who has the reference was sent the avatar.
 	if newAvatar != nil {
 		c.putAvatarRef(ctx, o.userID, avatarURL, newAvatar)
+	}
+	if plain.Avatar != nil {
+		// On failure the next start's repair sends the contact again, harmlessly.
+		if err = c.Store.PutAvatarSent(ctx, o.userID, string(ids.GhostMXID(ghost)), string(avatarURL)); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Recording that a contact's avatar was sent failed")
+		}
 	}
 	return nil
 }

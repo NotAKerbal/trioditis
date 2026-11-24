@@ -216,7 +216,7 @@ func TestContactsSentWithoutTheirPictureAreSentItWhenNextSeen(t *testing.T) {
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"trioditis_avatar_kept", "trioditis_avatar_ref"} {
+	for _, table := range []string{"trioditis_avatar_kept", "trioditis_avatar_ref", "trioditis_avatar_sent"} {
 		if _, err := h2.host.DB.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatal(err)
 		}
@@ -287,8 +287,10 @@ func TestAContactsPictureTheHostStillHasIsSentAgainAtStart(t *testing.T) {
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_avatar_ref`); err != nil {
-		t.Fatal(err)
+	for _, stmt := range []string{`DELETE FROM trioditis_avatar_ref`, `DELETE FROM trioditis_avatar_sent`} {
+		if _, err := h2.host.DB.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before := gw.lastSeq()
 	if err := h2.host.Start(ctx); err != nil {
@@ -331,7 +333,7 @@ func TestARepairPassesBySomeoneLoggedOut(t *testing.T) {
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range []string{`DELETE FROM trioditis_avatar_ref`, `DELETE FROM user_login WHERE id='bob-testnet'`} {
+	for _, stmt := range []string{`DELETE FROM trioditis_avatar_ref`, `DELETE FROM trioditis_avatar_sent`, `DELETE FROM user_login WHERE id='bob-testnet'`} {
 		if _, err := h2.host.DB.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}
@@ -345,38 +347,39 @@ func TestARepairPassesBySomeoneLoggedOut(t *testing.T) {
 }
 
 // A contact's aliases (WhatsApp's phone number and LID ghosts) hold the same upload. When it's
-// gone and nobody has a copy, all of them are marked to be fetched again, so the picture one of
-// them fetches is set on the others too rather than taken for the one they have.
-func TestAContactsAliasesAreMarkedTogether(t *testing.T) {
+// gone and nobody has a copy, the picture fetched again for one of them, the next time they're
+// seen, also stands in for the lost one, so the other alias is sent it too: each to everyone who
+// has that alias, without its own fetch.
+func TestAContactsAliasesGetThePictureFetchedForOne(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
 	h.login("alice", "alice-testnet")
 	ctx := context.Background()
 	const chat = networkid.PortalID("crowd-alias")
-	// The alias is in no chat of alice's, so nothing else would look at it.
-	member, alias := testconnector.CrowdMember(chat, 1), networkid.UserID("alias-of-member")
+	member, alias := testconnector.CrowdMember(chat, 1), testconnector.CrowdMember(chat, 2)
 	picture := []byte("one person's picture")
-	if err := h.net.SetPicture(ctx, member, picture); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.net.SetPicture(ctx, alias, picture); err != nil {
-		t.Fatal(err)
+	for _, ghost := range []networkid.UserID{member, alias} {
+		if err := h.net.SetPicture(ctx, ghost, picture); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := h.net.Incoming("alice-testnet", chat, member, "a-1", "hello", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	gw.waitFor(t, "the member's message", isMessage("hello", h, "alice"))
 	gw.waitFor(t, "the member's contact", isContactOf(h, member))
+	gw.waitFor(t, "the alias's contact", isContactOf(h, alias))
 	h.host.Stop()
 
-	// As before kept copies, with the alias holding the member's upload, as a network's aliases do.
+	// As before kept copies, with the alias holding the member's upload, as a network's aliases
+	// do, and alice sent neither with it.
 	h2 := buildHost(t, dir, gw)
 	if err := h2.host.Store.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
 	stale, _ := ghostAvatar(t, h2, member)
-	for _, stmt := range []string{`DELETE FROM trioditis_avatar_kept`, `DELETE FROM trioditis_avatar_ref`} {
+	for _, stmt := range []string{`DELETE FROM trioditis_avatar_kept`, `DELETE FROM trioditis_avatar_ref`, `DELETE FROM trioditis_avatar_sent`} {
 		if _, err := h2.host.DB.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}
@@ -384,10 +387,20 @@ func TestAContactsAliasesAreMarkedTogether(t *testing.T) {
 	if _, err := h2.host.DB.Exec(ctx, `UPDATE ghost SET avatar_mxc=$1 WHERE id=$2`, stale, string(alias)); err != nil {
 		t.Fatal(err)
 	}
+	h2.net.KnowPicture(member, picture)
+	before := gw.lastSeq()
 	if err := h2.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer h2.host.Stop()
 	waitMarked(t, h2, member, stale)
-	waitMarked(t, h2, alias, stale)
+	if err := h2.net.Incoming("alice-testnet", chat, member, "a-2", "hello again", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	waitForPicture(t, h2, member, before, picture)
+	waitForPicture(t, h2, alias, before, picture)
+	// The alias's picture came from the member's fetch: it still holds the lost upload.
+	if mxc, _ := ghostAvatar(t, h2, alias); mxc != stale {
+		t.Fatalf("the alias fetched its own picture (%q)", mxc)
+	}
 }

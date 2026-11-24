@@ -235,6 +235,10 @@ const (
 // being repaired, at most once: one asked for again while being repaired goes back in once that's
 // done, so one contact can't take every worker.
 type avatarRepairs struct {
+	// lost holds, for each contact marked to have their picture fetched again in this process,
+	// the content URI of the lost one (networkid.UserID → id.ContentURIString).
+	lost sync.Map
+
 	lock  sync.Mutex
 	queue []networkid.UserID
 	state map[networkid.UserID]repairState
@@ -394,10 +398,8 @@ func (c *Connector) missingAvatar(ctx context.Context, userID string, ghost netw
 	if _, ours := media.ParseContentURI(dbGhost.AvatarMXC); !ours {
 		return false, nil
 	}
-	if _, err = c.Store.AvatarRef(ctx, userID, string(dbGhost.AvatarMXC)); errors.Is(err, store.ErrNotFound) {
-		return true, nil
-	}
-	return false, err
+	sent, err := c.Store.AvatarSent(ctx, userID, string(ids.GhostMXID(ghost)), string(dbGhost.AvatarMXC))
+	return !sent && err == nil, err
 }
 
 // repairContactAvatar sends a contact's picture to the people who have the contact without it,
@@ -425,19 +427,44 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 			err = c.sendAvatarToContactsWithout(ctx, g, uri)
 			return false
 		}
-		// Ghosts with the same content URI hold the same upload: one person's aliases, which a
-		// network sets together (WhatsApp's phone number and LID). They're marked too, so the
-		// picture one fetches again is set on the others rather than taken for the one they have.
-		var aliases []networkid.UserID
-		if aliases, err = c.ghostsWithAvatar(ctx, uri, g.ID); err != nil {
-			return false
-		}
-		for _, alias := range aliases {
-			c.queueAvatarRepair(alias)
-		}
+		// Remembered, so the picture fetched again also stands in for this lost one
+		// (replaceLostAvatar).
+		c.repairs.lost.Store(g.ID, uri)
 		return markAvatarStale(g)
 	}})
 	return err
+}
+
+// replaceLostAvatar makes a contact's newly set picture, when it replaces one that was marked
+// lost (repairContactAvatar), stand in for the lost one too: the host's copy of it is kept under
+// the lost content URI as well. A network's aliases for one person (WhatsApp's phone number and
+// LID) share an upload, and one of them may keep the lost URI (bridgev2 takes the same picture ID
+// for the picture it has); a repair of it then finds this copy and sends it. Aliases holding the
+// lost URI are queued for that. Called under the contact's lock, as its picture is set.
+func (c *Connector) replaceLostAvatar(ctx context.Context, ghost networkid.UserID, uri id.ContentURIString) {
+	v, ok := c.repairs.lost.LoadAndDelete(ghost)
+	if !ok || uri == "" || v.(id.ContentURIString) == uri {
+		return
+	}
+	lost := v.(id.ContentURIString)
+	kept, err := c.keptAvatar(ctx, uri)
+	if err == nil && kept != nil {
+		var sealed *seal.Envelope
+		if sealed, err = seal.SealJSON(kept, []seal.PublicKey{c.BridgeKey.Public}, keptAvatarContext(lost)); err == nil {
+			err = c.Store.ReplaceKeptAvatar(ctx, string(lost), sealed)
+		}
+	}
+	var aliases []networkid.UserID
+	if err == nil {
+		aliases, err = c.ghostsWithAvatar(ctx, lost, ghost)
+	}
+	if err != nil {
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping a picture for its lost one failed; aliases still holding the lost one are marked at the next start")
+		return
+	}
+	for _, alias := range aliases {
+		c.queueAvatarRepair(alias)
+	}
 }
 
 // ghostsWithAvatar lists the ghosts, other than except, whose saved avatar is uri.
@@ -474,10 +501,10 @@ func (c *Connector) sendAvatarToContactsWithout(ctx context.Context, g *bridgev2
 		if !ok {
 			continue
 		}
-		if _, err = c.Store.AvatarRef(ctx, userID, string(uri)); err == nil {
-			continue
-		} else if !errors.Is(err, store.ErrNotFound) {
+		if sent, err := c.Store.AvatarSent(ctx, userID, string(ids.GhostMXID(g.ID)), string(uri)); err != nil {
 			return err
+		} else if sent {
+			continue
 		}
 		o, err := c.anyOwnerFor(ctx, userID, g.ID)
 		if err != nil {
