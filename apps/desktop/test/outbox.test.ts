@@ -135,6 +135,7 @@ describe('sending a draft', () => {
   it('settles a send whose ID was used already as the server says, never sending it again', async () => {
     const a = chat()
     drafts.setDraftText(a, 'twice?')
+    const failedBefore = outboxMod.sendIdOf(drafts.getDraft<Reply>(a))
     const { port, sent } = fakePort({
       send: vi.fn(async () => ({ already: 'send' as const, delivery: 'failed' as const })),
     })
@@ -142,8 +143,12 @@ describe('sending a draft', () => {
     expect(outcome).toMatchObject({ kind: 'used', action: 'again' })
     expect(sent).toHaveLength(0)
     expect(port.send).toHaveBeenCalledTimes(1)
-    // It never went: back as a new draft, so sending it is a new message.
+    // It never went: back as a new draft, so sending it is a new message under a new ID, not
+    // the one the server has as failed.
     expect(drafts.getDraft(a).text).toBe('twice?')
+    const again = fakePort()
+    expect(await make(again.port).sendDraft(a)).toEqual({ kind: 'sent' })
+    expect(again.sent[0]!.clientMessageId).not.toBe(failedBefore)
   })
 })
 
