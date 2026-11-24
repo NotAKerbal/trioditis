@@ -1408,3 +1408,125 @@ describe('staying inside limits that a stuck host or a big chat could break', ()
     expect(await unread()).toBe(5)
   })
 })
+
+describe('editing and deleting the person’s own messages', () => {
+  /** One of the person's messages that reached the network, sent `ago` ms before now. */
+  async function own(t: T, chatId: Id<'chats'>, eventId: string, ago = 60_000) {
+    return await t.run(async (ctx) => {
+      const ts = Date.now() - ago
+      return await ctx.db.insert('messages', {
+        userId: 'user_a',
+        chatId,
+        network: 'whatsapp',
+        eventId,
+        networkTs: ts,
+        sortKey: `${String(ts).padStart(16, '0')}:${eventId}`,
+        sender: { self: true },
+        sealed: sealed(eventId),
+        sealedObjectId: eventId,
+        historical: false,
+      })
+    })
+  }
+
+  async function echo(t: T, event: Record<string, unknown>) {
+    return await t.mutation(api.gateway.ingest, {
+      secret: GATEWAY_SECRET,
+      ...HOST,
+      events: [{ seq: ++seq, userId: 'user_a', loginId: 'login_a', portalId: 'portal_1', at: Date.now(), ...event }],
+    } as never)
+  }
+
+  it('sends an edit with its sealed text and a deadline past the hand-off margin, and shows its echo', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const messageId = await own(t, chatId, 'net_1')
+    const before = Date.now()
+    await as.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(1), forBridge: sealed('e1') })
+    // The same edit again adds nothing.
+    await as.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(1), forBridge: sealed('e1') })
+    expect(await as.query(api.messages.editStates, { clientMessageIds: [id(1)] })).toEqual([
+      { clientMessageId: id(1), delivery: 'queued' },
+    ])
+    const [command, ...more] = await claim(t)
+    expect(more).toHaveLength(0)
+    expect(command!.payload).toEqual({
+      type: 'edit',
+      portalId: 'portal_1',
+      targetEventId: 'net_1',
+      clientMessageId: id(1),
+    })
+    expect(command!.sealed).toEqual(sealed('e1'))
+    // The bridge host checks an edit's deadline with an 11-minute margin.
+    expect(command!.notAfter).toBeGreaterThanOrEqual(before + 30 * 60 * 1000)
+    await accept(t, command!)
+    expect(await payloadOf(t, id(1))).toBeNull()
+    await status(t, id(1), 'sent')
+    await echo(t, {
+      type: 'edit',
+      eventId: 'net_edit_1',
+      targetEventId: 'net_1',
+      networkTs: Date.now(),
+      sender: { self: true },
+      sealed: sealed('copy'),
+      clientMessageId: id(1),
+    })
+    expect(await as.query(api.messages.editStates, { clientMessageIds: [id(1)] })).toEqual([
+      { clientMessageId: id(1), delivery: 'sent' },
+    ])
+    const message = await t.run(async (ctx) => await ctx.db.get(messageId))
+    expect(message).toMatchObject({ sealedEdit: sealed('copy'), editEventId: 'net_edit_1' })
+    // No pending copy was made for it, and it isn't a send that can be sent again.
+    expect(await t.run(async (ctx) => await ctx.db.query('messages').collect())).toHaveLength(1)
+    expect(await as.query(api.messages.retryStates, { clientMessageIds: [id(1)] })).toEqual([])
+  })
+
+  it('says an edit the network refused failed, and leaves the message as it was', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const messageId = await own(t, chatId, 'net_1')
+    await as.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(1), forBridge: sealed('e1') })
+    const [command] = await claim(t)
+    await accept(t, command!)
+    await status(t, id(1), 'failed')
+    expect(await as.query(api.messages.editStates, { clientMessageIds: [id(1)] })).toEqual([
+      { clientMessageId: id(1), delivery: 'failed' },
+    ])
+    expect(await t.run(async (ctx) => await ctx.db.get(messageId))).not.toHaveProperty('sealedEdit')
+  })
+
+  it('ends an edit that never went out at its deadline', async () => {
+    vi.useFakeTimers()
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const messageId = await own(t, chatId, 'net_1')
+    await as.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(1), forBridge: sealed('e1') })
+    vi.advanceTimersByTime(30 * 60 * 1000 + 1)
+    await heartbeat(t)
+    expect(await claim(t)).toHaveLength(0)
+    expect(await as.query(api.messages.editStates, { clientMessageIds: [id(1)] })).toEqual([
+      { clientMessageId: id(1), delivery: 'failed' },
+    ])
+    expect(await payloadOf(t, id(1))).toBeNull()
+  })
+
+  it('deletes a message once, and marks it deleted when the network says so', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const messageId = await own(t, chatId, 'net_1')
+    const before = Date.now()
+    await as.mutation(api.messages.remove, { chatId, messageId })
+    // Asked again while the first is waiting to go out, nothing is added.
+    await as.mutation(api.messages.remove, { chatId, messageId })
+    const [command, ...more] = await claim(t)
+    expect(more).toHaveLength(0)
+    expect(command!.payload).toEqual({ type: 'redact', portalId: 'portal_1', targetEventId: 'net_1' })
+    expect(command!.notAfter).toBeGreaterThanOrEqual(before + 10 * 60 * 1000)
+    await accept(t, command!)
+    // Nothing changes until the echo.
+    expect(await t.run(async (ctx) => await ctx.db.get(messageId))).not.toHaveProperty('redactedAt')
+    await echo(t, { type: 'redaction', targetEventId: 'net_1', sender: { self: true }, networkTs: Date.now() })
+    expect(await t.run(async (ctx) => await ctx.db.get(messageId))).toMatchObject({ redactedAt: expect.any(Number) })
+    await expect(as.mutation(api.messages.remove, { chatId, messageId })).rejects.toThrow(/can’t be deleted/)
+  })
+})

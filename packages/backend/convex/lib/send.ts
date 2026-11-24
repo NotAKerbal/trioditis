@@ -15,7 +15,7 @@ import { RETRY_PREFIX } from './retry'
 /** A send still waiting to go out after this asks the person first. */
 export const SEND_EXPIRY_MS = 24 * 60 * 60 * 1000
 
-const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{16,64}$/
+export const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{16,64}$/
 
 export interface SendInput {
   clientMessageId: string

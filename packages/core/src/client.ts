@@ -26,7 +26,21 @@ export interface NetworkInfo {
   termsRisk: boolean
   /** It has reactions, so the person can react (`messages.react`). See docs/networks. */
   reactions: boolean
+  /**
+   * The person can change the text of their own messages (`messages.edit`): for `maxAgeMs`
+   * after sending, or with no limit when that's null. Null when the network can't edit.
+   */
+  edit: { maxAgeMs: number | null } | null
+  /**
+   * The person can delete their own messages (`messages.remove`): for everyone in the chat, or
+   * only from their own account (`forEveryone` false, where others may keep it), for `maxAgeMs`
+   * after sending or with no limit. Null when the network can't delete.
+   */
+  delete: { forEveryone: boolean; maxAgeMs: number | null } | null
 }
+
+const MINUTE = 60 * 1000
+const HOUR = 60 * MINUTE
 
 /**
  * The networks `contacts.sync` works on: those where a contact's ID can be their phone number,
@@ -51,7 +65,12 @@ export const START_TARGETS: Partial<Record<Network, { contact: boolean; phone: b
   twitter: { contact: false, phone: false, username: true },
 }
 
-/** What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks. */
+/**
+ * What each network offers. Mirrors the bridge host's connectors; see docs/PLAN.md, Networks.
+ * `edit` and `delete` follow each connector's room features (its `GetCapabilities`): bridgev2
+ * refuses an edit past the connector's age limit, and the network a late deletion, so the app
+ * doesn't offer them then.
+ */
 export const NETWORK_INFO: Record<Network, NetworkInfo> = {
   whatsapp: {
     network: 'whatsapp',
@@ -63,6 +82,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: false,
     reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE },
+    delete: { forEveryone: true, maxAgeMs: 48 * HOUR },
   },
   signal: {
     network: 'signal',
@@ -73,6 +94,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'qr', kind: 'qr', name: 'Link a device' }],
     termsRisk: false,
     reactions: true,
+    edit: { maxAgeMs: 24 * HOUR },
+    delete: { forEveryone: true, maxAgeMs: 24 * HOUR },
   },
   gmessages: {
     network: 'gmessages',
@@ -85,6 +108,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'google', kind: 'cookies', name: 'Sign in with Google' }],
     termsRisk: false,
     reactions: true,
+    // RCS and SMS can’t take a message back: deleting removes it from the phone only.
+    edit: null,
+    delete: { forEveryone: false, maxAgeMs: null },
   },
   telegram: {
     network: 'telegram',
@@ -96,6 +122,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: false,
     reactions: true,
+    edit: { maxAgeMs: null },
+    delete: { forEveryone: true, maxAgeMs: null },
   },
   meta: {
     network: 'meta',
@@ -109,6 +137,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
     reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE },
+    delete: { forEveryone: true, maxAgeMs: null },
   },
   instagram: {
     network: 'instagram',
@@ -118,6 +148,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
     reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE },
+    delete: { forEveryone: true, maxAgeMs: null },
   },
   discord: {
     network: 'discord',
@@ -129,6 +161,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
     reactions: true,
+    // The bridge host has no Discord connector yet.
+    edit: null,
+    delete: null,
   },
   slack: {
     network: 'slack',
@@ -146,6 +181,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // use policy, and against many workspaces' own rules.
     termsRisk: true,
     reactions: true,
+    edit: { maxAgeMs: null },
+    delete: { forEveryone: true, maxAgeMs: null },
   },
   groupme: {
     network: 'groupme',
@@ -160,6 +197,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // GroupMe has a public API for third-party apps using a person's own access token.
     termsRisk: false,
     reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE },
+    delete: { forEveryone: true, maxAgeMs: null },
   },
   gvoice: {
     network: 'gvoice',
@@ -170,6 +209,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // Google checks for. See docs/networks/gvoice.md.
     termsRisk: true,
     reactions: false,
+    edit: null,
+    delete: null,
   },
   linkedin: {
     network: 'linkedin',
@@ -180,6 +221,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on linkedin.com' }],
     termsRisk: true,
     reactions: true,
+    edit: { maxAgeMs: 60 * MINUTE },
+    delete: { forEveryone: true, maxAgeMs: 60 * MINUTE },
   },
   twitter: {
     network: 'twitter',
@@ -190,6 +233,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on x.com' }],
     termsRisk: true,
     reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE },
+    // Only an encrypted (XChat) conversation deletes for everyone; any other, for the person only.
+    delete: { forEveryone: false, maxAgeMs: null },
   },
   bluesky: {
     network: 'bluesky',
@@ -199,6 +245,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'password', kind: 'form', name: 'App password' }],
     termsRisk: false,
     reactions: false,
+    edit: null,
+    delete: null,
   },
 }
 

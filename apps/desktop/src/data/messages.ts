@@ -34,6 +34,10 @@ export interface Message {
   replyTo: string | undefined
   clientMessageId: string | undefined
   delivery: DeliveryState | undefined
+  /** The person's edit is on its way: `body` is what they changed it to (edits.ts). */
+  editing?: boolean
+  /** The person asked to delete it, and the network hasn't said it's done (edits.ts). */
+  deleting?: boolean
 }
 
 const bodyCache = new Map<string, MessagePlaintext | null>()

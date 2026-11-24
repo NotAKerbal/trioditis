@@ -1,18 +1,19 @@
 import { paginationOptsValidator } from 'convex/server'
 import { ConvexError, v, type Infer } from 'convex/values'
 import { NETWORK_INFO, type Arrival, type ArrivalFeed } from '@trioditis/core'
-import type { Id } from './_generated/dataModel'
-import { internalMutation, mutation, query } from './_generated/server'
+import type { Doc, Id } from './_generated/dataModel'
+import { internalMutation, mutation, query, type MutationCtx } from './_generated/server'
 import { chatRow, clientLastMessage, lastMessage, rowFor } from './chats'
 import { ownChat, requireMember } from './lib/access'
 import { byteSize, MAX_MESSAGE_ROW_BYTES } from './lib/bounded'
+import { isEnvelope, MAX_CLIENT_SEALED_BYTES } from './lib/envelope'
 import { markOwnReadRange as markRange } from './lib/ingest'
 import { forgetMessage, lastOf } from './lib/lastMessage'
 import { retired } from './lib/networks'
 import { queueCommand } from './lib/outbox'
 import { retryPlan, retryState } from './lib/retry'
-import { alreadyUsed, checkSend, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
-import { envelope } from './validators'
+import { alreadyUsed, checkSend, CLIENT_MESSAGE_ID, clientMessageIdUsed, queueSend, refuseRetryId } from './lib/send'
+import { deliveryState, envelope } from './validators'
 
 /** The most messages one page holds. */
 const MAX_PAGE_ITEMS = 100
@@ -278,6 +279,160 @@ export const react = mutation({
       attempts: 0,
       createdAt: now,
       expiresAt: now + REACTION_TTL_MS,
+    })
+    return null
+  },
+})
+
+/**
+ * An edit that hasn't reached the network within this doesn't go: the person has moved on. It
+ * has to be longer than the margin the bridge host checks an edit's deadline with, as it does
+ * a send's (11 minutes; bridge-protocol.md, Send delivery rules), or every edit would be
+ * refused on arrival.
+ */
+const EDIT_TTL_MS = 30 * 60 * 1000
+/**
+ * A deletion that hasn't reached the bridge host within this isn't made, as for a reaction: it
+ * would turn up unexpectedly. The bridge host doesn't check a deletion's deadline itself.
+ */
+const DELETE_TTL_MS = 10 * 60 * 1000
+
+/**
+ * The person's own message in this chat, which reached the network and hasn't been deleted:
+ * the only kind a network lets them edit or delete. Someone else's, even where a group admin
+ * may delete it on the network, isn't offered.
+ */
+async function ownSentMessage(ctx: MutationCtx, chat: Doc<'chats'>, messageId: Id<'messages'>, done: string) {
+  const message = await ctx.db.get(messageId)
+  if (
+    !message ||
+    message.chatId !== chat._id ||
+    !('self' in message.sender) ||
+    message.eventId.startsWith('pending:') ||
+    message.redactedAt !== undefined
+  ) {
+    throw new ConvexError(`That message can’t be ${done}.`)
+  }
+  return message
+}
+
+/** Whether a message is older than a network's limit for changing it (null: no limit). */
+const pastLimit = (maxAgeMs: number | null, message: Doc<'messages'>, now: number) =>
+  maxAgeMs !== null && now - message.networkTs > maxAgeMs
+
+/**
+ * Changes the text of one of the person's own messages. The client seals the new message to
+ * the bridge key only (`forBridge`, kind `outbound`, object ID `clientMessageId`): nothing of
+ * it is stored but that, until the bridge host's `edit` echo brings the person's sealed copy,
+ * which then shows in `messages.list` as the message's latest edit. Where it stands meanwhile
+ * is `editStates`. Using the same `clientMessageId` again does nothing.
+ */
+export const edit = mutation({
+  args: {
+    chatId: v.id('chats'),
+    messageId: v.id('messages'),
+    clientMessageId: v.string(),
+    forBridge: envelope,
+  },
+  returns: v.null(),
+  handler: async (ctx, { chatId, messageId, clientMessageId, forBridge }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    const info = NETWORK_INFO[chat.network]
+    if (!info?.edit) throw new ConvexError(`${info?.name ?? 'This network'} can’t edit messages.`)
+    if (!CLIENT_MESSAGE_ID.test(clientMessageId)) throw new ConvexError('That message ID isn’t valid.')
+    refuseRetryId(clientMessageId)
+    if (await clientMessageIdUsed(ctx, member.userId, clientMessageId)) return null
+    if (!isEnvelope(forBridge, MAX_CLIENT_SEALED_BYTES)) {
+      throw new ConvexError('That edit isn’t sealed, or is too long.')
+    }
+    const message = await ownSentMessage(ctx, chat, messageId, 'edited')
+    const now = Date.now()
+    if (pastLimit(info.edit.maxAgeMs, message, now)) {
+      throw new ConvexError(`It’s too late to edit that message on ${info.name}.`)
+    }
+    await queueCommand(
+      ctx,
+      {
+        userId: chat.userId,
+        network: chat.network,
+        loginId: chat.loginId,
+        chatId: chat._id,
+        payload: { type: 'edit', portalId: chat.portalId, targetEventId: message.eventId, clientMessageId },
+        state: 'queued',
+        attempts: 0,
+        delivery: 'queued',
+        clientMessageId,
+        createdAt: now,
+        expiresAt: now + EDIT_TTL_MS,
+      },
+      forBridge,
+    )
+    return null
+  },
+})
+
+const MAX_EDIT_STATES = 100
+
+/**
+ * Where each of the person's edits stands, by its client message ID, as for a send: `sent` once
+ * the network has it (its `edit` echo comes with it), `failed` when it was refused or ran out of
+ * time, `unknown` when it may or may not have gone. IDs that aren't the person's edits are left out.
+ */
+export const editStates = query({
+  args: { clientMessageIds: v.array(v.string()) },
+  returns: v.array(v.object({ clientMessageId: v.string(), delivery: deliveryState })),
+  handler: async (ctx, { clientMessageIds }) => {
+    const member = await requireMember(ctx)
+    if (clientMessageIds.length > MAX_EDIT_STATES) throw new ConvexError(`Ask for at most ${MAX_EDIT_STATES} at once.`)
+    const out = []
+    for (const clientMessageId of new Set(clientMessageIds)) {
+      const row = await ctx.db
+        .query('outbox')
+        .withIndex('by_clientMessageId', (q) => q.eq('userId', member.userId).eq('clientMessageId', clientMessageId))
+        .first()
+      if (row?.payload.type !== 'edit') continue
+      out.push({ clientMessageId, delivery: row.delivery ?? 'queued' })
+    }
+    return out
+  },
+})
+
+/**
+ * Deletes one of the person's own messages on the network: for everyone in the chat, or on a
+ * network that can only do that much, from the person's own account (`NETWORK_INFO`, `delete`).
+ * The bridge host's `redaction` echo is what marks it deleted here; nothing changes until then.
+ * Asking again while one is still waiting to go out adds nothing.
+ */
+export const remove = mutation({
+  args: { chatId: v.id('chats'), messageId: v.id('messages') },
+  returns: v.null(),
+  handler: async (ctx, { chatId, messageId }) => {
+    const member = await requireMember(ctx)
+    const chat = await ownChat(ctx, member.userId, chatId)
+    const info = NETWORK_INFO[chat.network]
+    if (!info?.delete) throw new ConvexError(`${info?.name ?? 'This network'} can’t delete messages.`)
+    const message = await ownSentMessage(ctx, chat, messageId, 'deleted')
+    const now = Date.now()
+    if (pastLimit(info.delete.maxAgeMs, message, now)) {
+      throw new ConvexError(`It’s too late to delete that message on ${info.name}.`)
+    }
+    // Commands for one chat go out in order, so one still queued for it is ahead of this one.
+    const waiting = await ctx.db
+      .query('outbox')
+      .withIndex('by_chat', (q) => q.eq('chatId', chat._id).eq('state', 'queued'))
+      .take(100)
+    if (waiting.some((c) => c.payload.type === 'redact' && c.payload.targetEventId === message.eventId)) return null
+    await queueCommand(ctx, {
+      userId: chat.userId,
+      network: chat.network,
+      loginId: chat.loginId,
+      chatId: chat._id,
+      payload: { type: 'redact', portalId: chat.portalId, targetEventId: message.eventId },
+      state: 'queued',
+      attempts: 0,
+      createdAt: now,
+      expiresAt: now + DELETE_TTL_MS,
     })
     return null
   },

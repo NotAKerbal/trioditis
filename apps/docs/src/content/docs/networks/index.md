@@ -24,6 +24,27 @@ Every network carries a visible maturity label (`stable`, `beta`, or `experiment
 | [X](/networks/twitter/)                 | `twitter`   | **Experimental** | Legacy DMs + encrypted X Chat wired with HTTP/2 transport test; awaiting live verification                        | Sign in on x.com + X Chat PIN               | Yes      |
 | [Bluesky](/networks/bluesky/)           | `bluesky`   | **Experimental** | Text-only DMs wired with no-retry transport guard; 5s polling; awaiting live verification                         | App password                                | No       |
 
+### Editing and deleting your messages
+
+What each connector allows for your own messages, and for how long after sending. The app offers Edit and Delete only within these limits.
+
+| Network         | Edit       | Delete                            |
+| --------------- | ---------- | --------------------------------- |
+| WhatsApp        | 15 minutes | For everyone, 48 hours            |
+| Signal          | 24 hours   | For everyone, 24 hours            |
+| Google Messages | No         | Only from your phone, any time    |
+| Google Voice    | No         | No                                |
+| Telegram        | Any time   | For everyone, any time            |
+| Messenger       | 15 minutes | For everyone, any time            |
+| Instagram       | 15 minutes | For everyone, any time            |
+| Slack           | Any time   | For everyone, any time            |
+| GroupMe         | 15 minutes | For everyone, any time            |
+| LinkedIn        | 60 minutes | For everyone, 60 minutes          |
+| X               | 15 minutes | For everyone in X Chat; else, you |
+| Bluesky         | No         | No                                |
+
+Some networks also cap how many times a message can be edited (Signal 10, Messenger and Instagram 5, X 10); an edit past that is refused and the app says it wasn't saved.
+
 ### Not yet supported
 
 - **Discord:** `mautrix-discord` still uses the legacy bridge framework rather than `bridgev2`. Discord will join once its `bridgev2` migration lands.
