@@ -4,7 +4,7 @@ import { internalAction, internalMutation, internalQuery, query } from './_gener
 import { requireAdmin } from './lib/access'
 import { network } from './validators'
 
-// Whether the server is keeping up, for Admin settings → Server health: how quickly it answers
+// Whether the server is keeping up, for Settings → Admin → Server health: how quickly it answers
 // a small query of its own, and how each bridge host's deliveries are going. Times and counts
 // only, never anything a message or a chat says.
 

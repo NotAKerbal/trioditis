@@ -88,7 +88,7 @@ Only disable a rule for a single line with an inline explanation:
 - **Bridge events:** change the `bridgeEvent` validator, then run `pnpm --filter @trioditis/backend protocol-schema` and commit what it writes. The bridge host reads each event type's fields from it ([Bridge Protocol](/architecture/bridge-protocol/#one-schema-for-both-sides)).
 - **No plaintext leaks:** Never write plaintext message bodies, chat names, or contact names to Convex, logs, or unencrypted disk.
 - **No auto-retry after ambiguity:** Always surface the `unknown` delivery state rather than silently resending.
-- **Release notes:** User-visible changes add a short note under `release-notes/`, which the server updater surfaces in **Admin settings → Updates**.
+- **Release notes:** User-visible changes add a short note under `release-notes/`, which the server updater surfaces in **Settings → Admin → Updates**.
 
 ## Desktop releases
 

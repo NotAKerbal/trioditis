@@ -49,7 +49,7 @@ The gateway listens on `GATEWAY_INTERNAL_ADDR` (default `127.0.0.1:8601`). Each 
 
 ### Pressure and backpressure
 
-Every batch, heartbeats included, may carry `"pressure": {"backlog": 12, "pushMs": 850, "failedPushes": 0}`: the journal events not yet acknowledged, how long the host's last delivery took to be answered (ms), and its deliveries that failed in the last five minutes. They are counts only. The gateway passes them on if all three are non-negative numbers and drops them otherwise; Convex keeps each host's at most every 30 seconds (`bridgePressure`) for **Admin settings → Server health**.
+Every batch, heartbeats included, may carry `"pressure": {"backlog": 12, "pushMs": 850, "failedPushes": 0}`: the journal events not yet acknowledged, how long the host's last delivery took to be answered (ms), and its deliveries that failed in the last five minutes. They are counts only. The gateway passes them on if all three are non-negative numbers and drops them otherwise; Convex keeps each host's at most every 30 seconds (`bridgePressure`) for **Settings → Admin → Server health**.
 
 The host also acts on them, so a server short of CPU isn't swamped by history while people are using it:
 

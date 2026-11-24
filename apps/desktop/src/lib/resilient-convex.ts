@@ -14,7 +14,7 @@ export const isTransient = (error: unknown) => error instanceof Error && !(error
 
 /** How long after the last failed call the server still counts as busy. */
 const CALM_MS = 5_000
-/** How far back this device's own count of failed calls reaches (Admin settings → Server health). */
+/** How far back this device's own count of failed calls reaches (Settings → Admin → Server health). */
 const RECENT_MS = 5 * 60_000
 
 /**

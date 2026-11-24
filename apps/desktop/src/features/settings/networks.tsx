@@ -28,7 +28,7 @@ function accounts(count: number) {
 }
 
 /**
- * Admin settings → Networks: install the networks people on this server can connect, and
+ * Settings → Admin → Networks: install the networks people on this server can connect, and
  * remove them. Every network whose bridge the server runs can be installed; removing one
  * disconnects every account on it.
  */

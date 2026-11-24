@@ -24,7 +24,7 @@ Trioditis is in **active pre-release development** on `dev`. The core stack—Go
 
 ## Supported networks
 
-Trioditis currently ships bridge hosts for **13 messaging networks**. Admins choose which ones to offer inside **Admin settings → Networks** without touching server config.
+Trioditis currently ships bridge hosts for **13 messaging networks**. Admins choose which ones to offer inside **Settings → Admin → Networks** without touching server config.
 
 | Network             | ID          | Current maturity | Sign-in flow                                              | Platform ToS risk |
 | ------------------- | ----------- | ---------------- | --------------------------------------------------------- | ----------------- |

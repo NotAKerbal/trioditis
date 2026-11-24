@@ -35,11 +35,9 @@ import {
   Plug,
   Plus,
   RefreshCw,
-  Settings as SettingsIcon,
-  ShieldCheck,
   Users,
 } from 'lucide-react'
-import { useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useSidebarLayout } from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { passkeysUnavailable } from '~/lib/desktop.ts'
@@ -69,8 +67,8 @@ import { Updates } from './updates.tsx'
 /** Puts focus back on a control once it's rendered again: an opener a form or reveal replaced. */
 const refocus = (ref: RefObject<HTMLElement | null>) => requestAnimationFrame(() => ref.current?.focus())
 
-// Two sets of settings, each its own panel: everyone's own (Settings), and the server's, for
-// admins only (Admin settings).
+// Everyone's own settings, then the server's, which only admins see, under their own heading in
+// the same list so each is one click away.
 export const SETTINGS_SECTIONS = [
   { id: 'appearance', name: 'Appearance', icon: <Eye /> },
   { id: 'notifications', name: 'Notifications', icon: <Bell /> },
@@ -128,12 +126,10 @@ function Panel({
 }) {
   const session = useSession()
   const isAdmin = session.role === 'admin'
-  const asked = SETTINGS_SECTIONS.find((s) => s.id === section)
+  const own = SETTINGS_SECTIONS.filter((s) => !isAdminSection(s))
+  const server = isAdmin ? SETTINGS_SECTIONS.filter(isAdminSection) : []
   // A member who opens an admin section (an old link, say) gets their own settings instead.
-  const admin = isAdmin && !!asked && isAdminSection(asked)
-  const sections = SETTINGS_SECTIONS.filter((s) => isAdminSection(s) === admin)
-  const current = sections.find((s) => s.id === section) ?? sections[0]!
-  const other = SETTINGS_SECTIONS.find((s) => isAdminSection(s) !== admin)!
+  const current = [...own, ...server].find((s) => s.id === section) ?? own[0]!
   const currentItem = useRef<HTMLButtonElement>(null)
   const back = useRef<HTMLButtonElement>(null)
   /**
@@ -146,50 +142,63 @@ function Panel({
       const lost = !(focused instanceof HTMLElement) || focused === document.body || !focused.checkVisibility()
       if (lost && to.current?.checkVisibility()) to.current.focus()
     })
+  // Opened at the list on a section further down it (the account menu's Admin settings opens
+  // Members), the list starts there rather than at the top, where a short screen would hide it.
+  // Once, after the dialog has put focus on its first control.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const open = currentItem.current
+      if (!list || !open?.checkVisibility()) return
+      open.scrollIntoView({ block: 'nearest' })
+      open.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [])
+  const item = (s: (typeof SETTINGS_SECTIONS)[number]) => (
+    <Button
+      variant="bare"
+      key={s.id}
+      ref={s.id === current.id ? currentItem : undefined}
+      type="button"
+      aria-current={s.id === current.id ? 'page' : undefined}
+      onClick={() => {
+        // Choosing the open section again changes nothing, so a list it opened stays as it is;
+        // on a phone it shows that section.
+        if (s.id === current.id && !list) return
+        onSectionChange(s.id)
+        follow(back)
+      }}
+      className={cn(
+        'flex h-[34px] shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 [&_svg]:size-4',
+        s.id === current.id &&
+          'bg-surface font-semibold text-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] max-md:bg-transparent max-md:font-medium max-md:shadow-none',
+      )}
+    >
+      {s.icon}
+      {s.name}
+    </Button>
+  )
   return (
     <>
       <nav
         className={cn(
-          'w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px] max-md:w-full max-md:overflow-y-auto max-md:border-r-0 md:flex',
+          'w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail overflow-y-auto px-2.5 py-[18px] max-md:w-full max-md:border-r-0 md:flex',
           list ? 'flex' : 'hidden',
         )}
         aria-label="Settings sections"
       >
-        <DialogTitle className="mx-2 mb-3.5 text-md">{admin ? 'Admin settings' : 'Settings'}</DialogTitle>
-        {sections.map((s) => (
-          <Button
-            variant="bare"
-            key={s.id}
-            ref={s.id === current.id ? currentItem : undefined}
-            type="button"
-            aria-current={s.id === current.id ? 'page' : undefined}
-            onClick={() => {
-              // Choosing the open section again changes nothing, so a list it opened stays as it is;
-              // on a phone it shows that section.
-              if (s.id === current.id && !list) return
-              onSectionChange(s.id)
-              follow(back)
-            }}
-            className={cn(
-              'flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 max-md:shrink-0 [&_svg]:size-4',
-              s.id === current.id &&
-                'bg-surface font-semibold text-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] max-md:bg-transparent max-md:font-medium max-md:shadow-none',
-            )}
-          >
-            {s.icon}
-            {s.name}
-          </Button>
-        ))}
-        {isAdmin ? (
-          <Button
-            variant="bare"
-            type="button"
-            onClick={() => onSectionChange(other.id, 'list')}
-            className="mt-auto flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 max-md:shrink-0 [&_svg]:size-4"
-          >
-            {admin ? <SettingsIcon /> : <ShieldCheck />}
-            {admin ? 'Your settings' : 'Admin settings'}
-          </Button>
+        <DialogTitle className="mx-2 mb-3.5 text-md">Settings</DialogTitle>
+        {own.map(item)}
+        {server.length ? (
+          <div role="group" aria-labelledby="settings-admin" className="mt-4 flex shrink-0 flex-col gap-0.5">
+            <h3
+              id="settings-admin"
+              className="mx-2.5 mb-1.5 text-xs font-semibold tracking-[0.06em] text-subtle-foreground uppercase"
+            >
+              Admin
+            </h3>
+            {server.map(item)}
+          </div>
         ) : null}
       </nav>
       <div
@@ -207,7 +216,7 @@ function Panel({
             ref={back}
             variant="ghost"
             size="icon"
-            aria-label={admin ? 'Admin settings' : 'Settings'}
+            aria-label="Settings"
             onClick={() => {
               onSectionChange(current.id, 'list')
               follow(currentItem)

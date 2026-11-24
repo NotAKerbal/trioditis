@@ -41,7 +41,7 @@ Options (each one is kept for later reruns):
   --domain <name>      Domain mode: HTTPS on 80/443 for <name>, with ACME certificates
   --networks <list|all>
                        The networks this server runs a bridge host for, which admins can then
-                       install in the app (Admin settings, Networks). Comma-separated:
+                       install in the app (Settings → Admin → Networks). Comma-separated:
                        whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack,
                        groupme, linkedin, twitter, bluesky, imessage; or all (the default; Telegram
                        only with its API ID and hash). Fewer suit a small machine
@@ -930,7 +930,7 @@ EOF
   *) printf "Couldn't check whether the admin account exists. Until it does, the setup link is\n%s/setup#token=<TRIODITIS_SETUP_TOKEN from deploy/.env>.\n\n" "$public_url" ;;
 esac
 cat <<EOF
-Networks: admins install the ones people can connect in the app (Admin settings → Networks),
+Networks: admins install the ones people can connect in the app (Settings → Admin → Networks),
 from those this server bridges: ${bridged//,/, }.
 
 Manage it with deploy/trioditis (docker compose for this install), e.g.:
@@ -941,7 +941,7 @@ Manage it with deploy/trioditis (docker compose for this install), e.g.:
 EOF
 if [ "$updater" = 1 ]; then
   cat <<EOF
-Updates: admins choose the channel and update from the app (Admin settings → Updates). The
+Updates: admins choose the channel and update from the app (Settings → Admin → Updates). The
 updater's log: journalctl $([ "$(id -u)" = 0 ] || echo '--user ')-u trioditis-updater-$project
 EOF
 else
@@ -957,6 +957,6 @@ if [ "$updater" = 1 ] && ! git -C "$root" merge-base --is-ancestor HEAD refs/rem
   git -C "$root" merge-base --is-ancestor HEAD refs/remotes/origin/dev 2>/dev/null; then
   cat <<EOF
 This checkout is from dev, ahead of the Stable channel (main) the app starts on: choose
-Nightly in Admin settings → Updates to keep it updated.
+Nightly in Settings → Admin → Updates to keep it updated.
 EOF
 fi

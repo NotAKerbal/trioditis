@@ -52,7 +52,7 @@ Caddy also listens on `127.0.0.1:8090` inside its container solely for Docker he
 
 ## Automatic updates
 
-Trioditis includes a systemd updater service (`trioditis-updater-<project>`), enabled by default on systemd hosts, so admins can manage updates directly from **Admin settings → Updates**:
+Trioditis includes a systemd updater service (`trioditis-updater-<project>`), enabled by default on systemd hosts, so admins can manage updates directly from **Settings → Admin → Updates**:
 
 - **Channels:** **Stable** (`main`, default) or **Nightly** (`dev`). While running a pre-release install from `dev`, switch to **Nightly** so the updater tracks new changes.
 - **Schedule:** Toggle **Automatic updates** (off by default) to install updates nightly during the 4 AM host local hour, or trigger **Check now** / **Update now** on demand.
