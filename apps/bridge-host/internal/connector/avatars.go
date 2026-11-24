@@ -425,9 +425,37 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 			err = c.sendAvatarToContactsWithout(ctx, g, uri)
 			return false
 		}
+		// Ghosts with the same content URI hold the same upload: one person's aliases, which a
+		// network sets together (WhatsApp's phone number and LID). They're marked too, so the
+		// picture one fetches again is set on the others rather than taken for the one they have.
+		var aliases []networkid.UserID
+		if aliases, err = c.ghostsWithAvatar(ctx, uri, g.ID); err != nil {
+			return false
+		}
+		for _, alias := range aliases {
+			c.queueAvatarRepair(alias)
+		}
 		return markAvatarStale(g)
 	}})
 	return err
+}
+
+// ghostsWithAvatar lists the ghosts, other than except, whose saved avatar is uri.
+func (c *Connector) ghostsWithAvatar(ctx context.Context, uri id.ContentURIString, except networkid.UserID) ([]networkid.UserID, error) {
+	rows, err := c.Bridge.DB.Query(ctx, `SELECT id FROM ghost WHERE bridge_id=$1 AND avatar_mxc=$2 AND id<>$3`, c.Bridge.ID, string(uri), string(except))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []networkid.UserID
+	for rows.Next() {
+		var ghost networkid.UserID
+		if err = rows.Scan(&ghost); err != nil {
+			return nil, err
+		}
+		out = append(out, ghost)
+	}
+	return out, rows.Err()
 }
 
 // sendAvatarToContactsWithout sends the contact again, with their picture, to each person who has

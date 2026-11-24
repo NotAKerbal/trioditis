@@ -343,3 +343,51 @@ func TestARepairPassesBySomeoneLoggedOut(t *testing.T) {
 	defer h2.host.Stop()
 	waitForPicture(t, h2, member, before, picture)
 }
+
+// A contact's aliases (WhatsApp's phone number and LID ghosts) hold the same upload. When it's
+// gone and nobody has a copy, all of them are marked to be fetched again, so the picture one of
+// them fetches is set on the others too rather than taken for the one they have.
+func TestAContactsAliasesAreMarkedTogether(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, dir, gw)
+	h.login("alice", "alice-testnet")
+	ctx := context.Background()
+	const chat = networkid.PortalID("crowd-alias")
+	// The alias is in no chat of alice's, so nothing else would look at it.
+	member, alias := testconnector.CrowdMember(chat, 1), networkid.UserID("alias-of-member")
+	picture := []byte("one person's picture")
+	if err := h.net.SetPicture(ctx, member, picture); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.net.SetPicture(ctx, alias, picture); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.net.Incoming("alice-testnet", chat, member, "a-1", "hello", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "the member's message", isMessage("hello", h, "alice"))
+	gw.waitFor(t, "the member's contact", isContactOf(h, member))
+	h.host.Stop()
+
+	// As before kept copies, with the alias holding the member's upload, as a network's aliases do.
+	h2 := buildHost(t, dir, gw)
+	if err := h2.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := ghostAvatar(t, h2, member)
+	for _, stmt := range []string{`DELETE FROM trioditis_avatar_kept`, `DELETE FROM trioditis_avatar_ref`} {
+		if _, err := h2.host.DB.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h2.host.DB.Exec(ctx, `UPDATE ghost SET avatar_mxc=$1 WHERE id=$2`, stale, string(alias)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer h2.host.Stop()
+	waitMarked(t, h2, member, stale)
+	waitMarked(t, h2, alias, stale)
+}
