@@ -264,13 +264,13 @@ func TestAKeptCopyMakesAnOwnersCopyLaterButIsNeverServed(t *testing.T) {
 		t.Fatal("a kept copy opened with another key")
 	}
 	// One whose file is gone is no copy at all.
-	if !restarted.HasKept(*kept) {
+	if has, err := restarted.HasKept(*kept); !has || err != nil {
 		t.Fatal("the kept copy isn't there")
 	}
 	if err := os.Remove(filepath.Join(dir, "kept", kept.MediaID)); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.HasKept(*kept) {
+	if has, err := restarted.HasKept(*kept); has || err != nil {
 		t.Fatal("a kept copy with no file counted")
 	}
 }

@@ -301,3 +301,45 @@ func TestAContactsPictureTheHostStillHasIsSentAgainAtStart(t *testing.T) {
 		t.Fatal("a picture the host had was marked to be fetched again")
 	}
 }
+
+// Someone who logged out may still be recorded as having a contact: repairing the contact's
+// picture passes them by and still reaches everyone else.
+func TestARepairPassesBySomeoneLoggedOut(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice", "bob")
+	h := startHost(t, dir, gw)
+	h.login("alice", "alice-testnet")
+	h.login("bob", "bob-testnet")
+	ctx := context.Background()
+	const chat = networkid.PortalID("crowd-shared")
+	member := testconnector.CrowdMember(chat, 1)
+	picture := []byte("a picture both were sent")
+	if err := h.net.SetPicture(ctx, member, picture); err != nil {
+		t.Fatal(err)
+	}
+	for _, login := range []networkid.UserLoginID{"bob-testnet", "alice-testnet"} {
+		if err := h.net.Incoming(login, chat, member, networkid.MessageID("m-"+string(login)), "hello "+string(login), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		gw.waitFor(t, "the member's message", isMessage("hello "+string(login), h, map[networkid.UserLoginID]string{"alice-testnet": "alice", "bob-testnet": "bob"}[login]))
+	}
+	gw.waitFor(t, "the member's contact", isContactOf(h, member))
+	h.host.Stop()
+
+	// As if neither had been sent the picture, and bob's login were gone.
+	h2 := buildHost(t, dir, gw)
+	if err := h2.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`DELETE FROM trioditis_avatar_ref`, `DELETE FROM user_login WHERE id='bob-testnet'`} {
+		if _, err := h2.host.DB.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := gw.lastSeq()
+	if err := h2.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer h2.host.Stop()
+	waitForPicture(t, h2, member, before, picture)
+}

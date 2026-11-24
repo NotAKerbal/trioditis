@@ -321,6 +321,60 @@ func TestAFailedRecoveryIsntTakenForNoCopy(t *testing.T) {
 	}
 }
 
+// A kept copy whose reference can't be opened (damaged, or sealed to another key) is made again
+// from alice's copy, in its place, rather than taken for no copy at all.
+func TestAnUnopenableKeptAvatarIsMadeAgainFromSomeonesCopy(t *testing.T) {
+	c, uri := avatarSetup(t, t.TempDir())
+	ctx := context.Background()
+	otherKey, err := seal.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := seal.SealJSON(protocol.Attachment{MediaID: "nothing"}, []seal.PublicKey{otherKey.Public}, keptAvatarContext(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Store.ReplaceKeptAvatar(ctx, string(uri), bad); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("alice's copy wasn't used: %v %v", has, err)
+	}
+	if kept, err := c.keptAvatar(ctx, uri); kept == nil || err != nil {
+		t.Fatalf("the remade copy wasn't kept in its place: %v", err)
+	}
+}
+
+// A kept copy that can't be looked at for now (a permission or I/O error) isn't forgotten: the
+// key to it would be lost, and the picture taken for one nobody has.
+func TestAKeptAvatarThatCantBeLookedAtIsKept(t *testing.T) {
+	dir := t.TempDir()
+	c, uri := avatarSetup(t, dir)
+	ctx := context.Background()
+	before, err := c.Store.KeptAvatar(ctx, string(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(dir, "kept")
+	if err = os.Chmod(kept, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(kept, 0o700) })
+	if has, err := c.hasAvatarCopy(ctx, uri); err == nil {
+		t.Fatalf("an unreadable kept copy was taken as known (has %v)", has)
+	}
+	if err = os.Chmod(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	after, err := c.Store.KeptAvatar(ctx, string(uri))
+	if err != nil || after.CT != before.CT {
+		t.Fatalf("the kept copy's reference changed: %v", err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("the kept copy wasn't usable again: %v %v", has, err)
+	}
+}
+
 // fakeLogin is a login process the test moves along by hand.
 type fakeLogin struct{ cancelled chan struct{} }
 

@@ -141,27 +141,28 @@ func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString,
 }
 
 // keptAvatar is the reference to the bridge host's own copy of an avatar. One that was never kept
-// (an avatar from before copies were kept), or whose file is gone, is made again from the copy of
-// anyone who was sent the avatar (recoverKeptAvatar). Nil with no error means there's no usable
+// (an avatar from before copies were kept), can't be opened, or whose file is gone, is made again
+// from the copy of anyone who was sent the avatar (recoverKeptAvatar). Nil with no error means there's no usable
 // copy anywhere; an error, that it couldn't be told for now (a read or a write failed).
 func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) (*protocol.Attachment, error) {
 	sealed, err := c.Store.KeptAvatar(ctx, string(uri))
 	if errors.Is(err, store.ErrNotFound) {
-		return c.recoverKeptAvatar(ctx, uri)
+		return c.recoverKeptAvatar(ctx, uri, false)
 	} else if err != nil {
 		return nil, err
 	}
 	var kept protocol.Attachment
 	if err = seal.OpenJSON(sealed, c.BridgeKey, keptAvatarContext(uri), &kept); err != nil {
-		// Sealed to an earlier bridge key, as anyone's reference to it would be.
+		// Damaged, or sealed to an earlier bridge key: made again from someone's copy if one
+		// opens, in its place.
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's kept copy couldn't be opened")
-		return nil, nil
+		return c.recoverKeptAvatar(ctx, uri, true)
 	}
-	if !c.Media.HasKept(kept) {
-		if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
-			return nil, err
-		}
-		return c.recoverKeptAvatar(ctx, uri)
+	if has, err := c.Media.HasKept(kept); err != nil {
+		// Maybe there, just unreadable for now: the reference stays.
+		return nil, err
+	} else if !has {
+		return c.recoverKeptAvatar(ctx, uri, true)
 	}
 	return &kept, nil
 }
@@ -170,7 +171,7 @@ func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) (*p
 // sent, whose reference the host keeps (sealed to its own key), so a person who meets the contact
 // now gets the picture without asking the network for it again. Nil with no error if nobody has a
 // copy it can read; an error if one may be readable but reading or keeping it failed.
-func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIString) (*protocol.Attachment, error) {
+func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIString, replace bool) (*protocol.Attachment, error) {
 	owners, err := c.Store.AvatarRefOwners(ctx, string(uri))
 	if err != nil {
 		return nil, err
@@ -197,7 +198,11 @@ func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIStri
 		}
 		var keptSealed *seal.Envelope
 		if keptSealed, err = seal.SealJSON(kept, []seal.PublicKey{c.BridgeKey.Public}, keptAvatarContext(uri)); err == nil {
-			err = c.Store.PutKeptAvatar(ctx, string(uri), keptSealed)
+			if replace {
+				err = c.Store.ReplaceKeptAvatar(ctx, string(uri), keptSealed)
+			} else {
+				err = c.Store.PutKeptAvatar(ctx, string(uri), keptSealed)
+			}
 		}
 		if err != nil {
 			return nil, err

@@ -518,6 +518,10 @@ type owner struct {
 
 var errNotPortal = errors.New("room is not a portal")
 
+// errNoLogin is a portal whose login is gone (logged out), though rooms of it may still be
+// recorded.
+var errNoLogin = errors.New("portal has no login")
+
 func (c *Connector) owner(ctx context.Context, roomID id.RoomID) (*owner, error) {
 	key, ok := ids.ParseRoomID(roomID)
 	if !ok || key.Receiver == "" {
@@ -527,7 +531,7 @@ func (c *Connector) owner(ctx context.Context, roomID id.RoomID) (*owner, error)
 	if err != nil {
 		return nil, err
 	} else if login == nil {
-		return nil, fmt.Errorf("portal %s has no login", roomID)
+		return nil, fmt.Errorf("%w: %s", errNoLogin, roomID)
 	}
 	userID, ok := ids.ParseUserMXID(login.UserMXID)
 	if !ok {

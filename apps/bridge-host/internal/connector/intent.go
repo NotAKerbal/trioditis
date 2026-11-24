@@ -1284,7 +1284,8 @@ func (c *Connector) anyOwnerFor(ctx context.Context, userID string, ghost networ
 	}
 	for _, room := range rooms {
 		o, err := c.owner(ctx, id.RoomID(room))
-		if errors.Is(err, errNotPortal) {
+		if errors.Is(err, errNotPortal) || errors.Is(err, errNoLogin) {
+			// A chat of a login that's gone can't be the one the person shares with them.
 			continue
 		} else if err != nil {
 			return nil, err

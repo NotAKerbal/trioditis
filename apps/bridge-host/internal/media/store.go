@@ -233,13 +233,19 @@ func (s *Store) Keep(uri id.ContentURIString) (*protocol.Attachment, error) {
 	return &kept, nil
 }
 
-// HasKept reports whether a kept copy's file is still there.
-func (s *Store) HasKept(kept protocol.Attachment) bool {
+// HasKept reports whether a kept copy's file is still there. An error means it couldn't be
+// told (the file may be there, just unreadable for now).
+func (s *Store) HasKept(kept protocol.Attachment) (bool, error) {
 	if !validID(kept.MediaID) {
-		return false
+		return false, nil
 	}
 	info, err := os.Lstat(filepath.Join(s.keptDir(), kept.MediaID))
-	return err == nil && info.Mode().IsRegular()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
 }
 
 // CopyKept encrypts a new copy of a kept file (Keep) for ownerUserID, as AttachmentFor would

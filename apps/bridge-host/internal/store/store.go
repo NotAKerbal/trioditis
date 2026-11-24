@@ -922,6 +922,19 @@ func (s *Store) PutKeptAvatar(ctx context.Context, avatarURI string, sealed *sea
 	return err
 }
 
+// ReplaceKeptAvatar keeps the sealed reference to the bridge host's own copy of an avatar in
+// place of one that can't be used.
+func (s *Store) ReplaceKeptAvatar(ctx context.Context, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_kept (avatar_uri, sealed) VALUES ($1, $2) ON CONFLICT (avatar_uri) DO UPDATE SET sealed=excluded.sealed`,
+		avatarURI, string(payload))
+	return err
+}
+
 // DeleteKeptAvatar forgets the bridge host's copy of an avatar, one that can't be used.
 func (s *Store) DeleteKeptAvatar(ctx context.Context, avatarURI string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)
