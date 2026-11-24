@@ -176,7 +176,7 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 }
 
 // submitInput hands a step's input to the network and moves the login on with what it
-// answers. The input is a credential: this copy is cleared once handed over. The network gets
+// answers. The input is a credential: this copy is cleared as it is handed over. The network gets
 // a copy of its own, because a connector may keep the map it is given: mautrix-gmessages uses
 // it as its cookie jar for the rest of the login, and clearing it under the connector left the
 // request finishing Google pairing with no cookies (a 401). decoded says its cookies are
@@ -191,7 +191,7 @@ func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]st
 			err = errors.New("login process doesn't accept input")
 			break
 		}
-		next, err = proc.SubmitUserInput(s.ctx, maps.Clone(input))
+		next, err = proc.SubmitUserInput(s.ctx, handOver(input))
 	case bridgev2.LoginStepTypeCookies:
 		proc, ok := s.process.(bridgev2.LoginProcessCookies)
 		if !ok {
@@ -208,13 +208,21 @@ func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]st
 		s.lock.Lock()
 		s.cookieFields = fields
 		s.lock.Unlock()
-		next, err = proc.SubmitCookies(s.ctx, maps.Clone(input))
+		next, err = proc.SubmitCookies(s.ctx, handOver(input))
 	default:
 		err = errors.New("the current login step doesn't take input")
 	}
-	// The input is a credential; drop this copy as soon as it's handed over.
+	// Input no step took is still a credential.
 	clear(input)
 	s.advance(next, err)
+}
+
+// handOver gives a connector its own copy of a step's input and clears this one first, so the
+// host holds no credential while the connector works with it.
+func handOver(input map[string]string) map[string]string {
+	out := maps.Clone(input)
+	clear(input)
+	return out
 }
 
 func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command, check bool) error {
