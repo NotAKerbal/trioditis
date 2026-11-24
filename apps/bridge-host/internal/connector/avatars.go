@@ -423,10 +423,21 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 			err = c.sendAvatarToContactsWithout(ctx, g, uri)
 			return false
 		}
+		if !refetchesLostAvatars[c.Network] {
+			return false
+		}
 		return markAvatarStale(g)
 	}})
 	return err
 }
+
+// refetchesLostAvatars are the networks where a contact's lost picture is fetched again
+// (markAvatarStale): those whose connector, refreshing a contact, sets the picture on that
+// contact alone. WhatsApp's also sets it on the contact's other ID (phone number or LID) by a
+// mapping that can be stale once a number passes to someone else, so a fetch there could put one
+// person's photo on another; elsewhere a lost picture waits, as before, for the next change to it.
+// testnet is the test connector's.
+var refetchesLostAvatars = map[string]bool{"signal": true, "testnet": true}
 
 // sendAvatarToContactsWithout sends the contact again, with their picture, to each person who has
 // them without it. Called under the contact's lock.
