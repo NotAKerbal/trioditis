@@ -12,24 +12,14 @@ import {
   subscribeDrafts,
   type Draft,
 } from '~/data/drafts.ts'
-import {
-  draftSendId,
-  keyOf,
-  loadAll,
-  newKnown,
-  parseSent,
-  syncChat,
-  withChatLock,
-  type ChatKnown,
-} from '~/data/saved-drafts.ts'
+import { sendIdOf } from '~/data/outbox.ts'
+import { keyOf, loadAll, newKnown, parseSent, syncChat, withChatLock, type ChatKnown } from '~/data/saved-drafts.ts'
 import { useSession } from '~/lib/session.tsx'
 
 /** How long after the last keystroke a draft is sealed and saved. */
 const SAVE_AFTER_MS = 400
 
 type Reply = { eventId: string }
-
-const sendIdOf = (d: { id: string; text: string; reply: Reply | null }) => draftSendId(d.id, d.text, d.reply?.eventId)
 
 /** Whether `draft` is the one sent as `clientMessageId`: same identity, reply and text. */
 const isSentAs = (draft: Draft<Reply>, clientMessageId: string) => !!draft.id && sendIdOf(draft) === clientMessageId

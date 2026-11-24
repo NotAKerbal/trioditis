@@ -65,43 +65,22 @@ import {
   useTyping,
   type Message,
 } from '~/data/messages.ts'
-import {
-  appendToDraft,
-  endSend,
-  getDraft,
-  restoreDraft,
-  setDraftReply,
-  setDraftText,
-  takeForSend,
-  useDraft,
-  whileSending,
-} from '~/data/drafts.ts'
-import { checkWithinAYear, formatWhen, snoozeOptions } from '~/data/snooze.ts'
+import { getDraft, setDraftReply, setDraftText, useDraft } from '~/data/drafts.ts'
+import { useOutbox } from '~/data/use-outbox.ts'
+import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { errorMessage } from '~/lib/errors.ts'
-import { newClientId, sealMessage, sealText, tryOpen, type MessagePlaintext } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
-import {
-  addFiles,
-  draggingFiles,
-  filesOf,
-  removeFile,
-  setSending,
-  useOutgoingFiles,
-  type OutgoingFile,
-} from './outgoing-files.ts'
-import { messageTypeOf, uploadFile } from '~/data/media.ts'
+import { addFiles, draggingFiles, removeFile, useOutgoingFiles } from './outgoing-files.ts'
 import { DetailsPanel, type PanelView } from './details-panel.tsx'
 import { ChatAvatar } from './chat-avatar.tsx'
 import { MessageList, MessagesSkeleton } from './message-list.tsx'
 import { ReadWhileOpen } from './read-while-open.tsx'
 import type { ReadOnOpen } from '~/data/read-on-open.ts'
-import { draftSendId } from '~/data/saved-drafts.ts'
-import { beatenBySend, usedOutcome, type AlreadyUsed } from './already-used.ts'
-import { restoreConflict } from './cancel-scheduled.ts'
-import { againView, sendAgain, useSendingAgain } from './send-again.ts'
+import { beatenBySend } from './already-used.ts'
+import { againView, useSendingAgain } from './send-again.ts'
 
 interface ChatPaneProps {
   chatId: ChatId | undefined
@@ -226,7 +205,6 @@ function OpenChat({
   readStates: Map<string, ReadOnOpen>
   chosen: { current: ChatId | null }
 }) {
-  const session = useSession()
   const actions = useChatActions()
   // The person's direct chats on other networks, shown with this one as one conversation.
   const together = chatIds.length > 1 && chatIds.includes(chat.id)
@@ -303,16 +281,9 @@ function OpenChat({
   // Scheduled messages whose cancel is on its way: Cancel is off for them meanwhile.
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set())
   const bridge = useBridge()
-  const bridgeKey = bridge.key
-  const {
-    send,
-    sendAgain: sendAgainMutation,
-    discard,
-    schedule,
-    cancelScheduled,
-    forgetScheduled,
-    sendScheduledNow,
-  } = useSendMutations()
+  // Sending, scheduling and sending again (outbox.ts): this pane only says what came of them.
+  const outbox = useOutbox(bridge)
+  const { discard, cancelScheduled, forgetScheduled, sendScheduledNow } = useSendMutations()
   // Which of a conversation's chats a message goes by: the one chosen last (in the composer, or
   // by replying to a message in it), or the one a profile's Message or Open came here to send on;
   // else, once the messages are in, one with a draft already, then where they last wrote from,
@@ -440,167 +411,15 @@ function OpenChat({
     via: labelOf(c.chatId),
   }))
 
-  async function sendText(chatId: ChatId, text: string, reply?: string, clientMessageId = newClientId()) {
-    // Thrown, not only said, so a send again that couldn't go can be tried again.
-    if (!bridgeKey) {
-      toast('This server has no bridge key yet, so nothing can be sent.')
-      throw new Error('No bridge key')
-    }
-    const sealed = sealText(text, clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
-    try {
-      return await send({ chatId, clientMessageId, ...sealed, ...(reply ? { replyTo: reply } : {}) })
-    } catch (e) {
-      toast(errorMessage(e, 'That message couldn’t be sent.'))
-      throw e
-    }
+  const said = (outcome: { say?: string }) => {
+    if (outcome.say) toast(outcome.say)
   }
-
-  async function onSend() {
-    if ((!draft.trim() && !files.length) || lost) return
-    // Nothing leaves the composer until it can be sent.
-    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be sent.')
-    const to = sendChat.id
-    if (files.length) return sendFiles(to, files, bridgeKey)
-    // The draft's own send ID: the same draft sent again, from another tab or after a reload,
-    // is the same send. Noted as under way, and saved so, before the composer is cleared (I2).
-    const taken = takeForSend<Message>(to, sendIdOfTaken)
-    if (!taken) return
-    await whileSending(() =>
-      sendText(to, taken.text, replyIn(taken.reply, to), taken.clientMessageId).then(
-        (outcome) => settle(to, taken, outcome === 'queued' ? null : outcome),
-        () => {
-          // Back first, then the copy under way goes.
-          restoreDraft(to, taken.text, taken.reply, taken.id)
-          endSend(taken.clientMessageId, false)
-        },
-      ),
-    )
+  // The composer sends on the chosen chat; nothing sends while that chat is lost.
+  const onSend = async () => {
+    if (!lost) said(await outbox.sendDraft(sendChat.id))
   }
-
-  /**
-   * Sends the composer's files, each as a message of its own (a network takes one file a
-   * message), in order, the text as the first one's caption and the reply on it. Each file is
-   * encrypted and given to the bridge host that will send it before its message is sealed with
-   * its key. A file leaves the composer once its message is queued; at the first that can't be,
-   * the rest stay, and the text comes back if it hadn't gone.
-   */
-  async function sendFiles(to: ChatId, outgoing: OutgoingFile[], bridgePublicKey: string) {
-    const ids = outgoing.map((f) => f.id)
-    if (outgoing.some((f) => f.sending)) return
-    setSending(to, ids, true)
-    // The text, when there is any, is taken as a send of its own would be, under the same send
-    // ID: sent again from another tab, or after a reload brought it back without its file
-    // (files are only ever in memory), it's the same send to the server, so it never goes twice.
-    // A reply alone is taken too, so it goes with the first file and nothing else.
-    const taken = takeForSend<Message>(to, sendIdOfTaken)
-    const reply = taken ? taken.reply : getDraft<Message>(to).reply
-    if (!taken && reply) setDraftReply(to, null)
-    const keepLeft = () =>
-      setSending(
-        to,
-        ids.filter((id) => filesOf(to).some((left) => left.id === id)),
-        false,
-      )
-    let first = true
-    await whileSending(async () => {
-      for (const f of outgoing) {
-        const caption = first ? taken?.text : undefined
-        const clientMessageId = first && taken ? taken.clientMessageId : newClientId()
-        const replyTo = first ? replyIn(reply, to) : undefined
-        let outcome: Awaited<ReturnType<typeof send>>
-        try {
-          const attachment = await uploadFile(session.userId, to, f.file)
-          // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
-          const message: MessagePlaintext = {
-            type: messageTypeOf(attachment.mime),
-            body: caption || attachment.name || 'File',
-            attachments: [attachment],
-          }
-          const sealed = sealMessage(
-            message,
-            clientMessageId,
-            session.userId,
-            session.keyPair.publicKey,
-            bridgePublicKey,
-          )
-          outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
-        } catch (e) {
-          // Refused (a mutation that fails never ran), or never sent: nothing of it went.
-          if (first && taken) {
-            restoreDraft(to, taken.text, taken.reply, taken.id)
-            endSend(taken.clientMessageId, false)
-          } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
-          keepLeft()
-          toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
-          return
-        }
-        const used = outcome === 'queued' ? null : outcome
-        if (first && taken) settle(to, taken, used)
-        // The text's send ID was used already: by the text alone, from another tab, or by this
-        // file with it before a reload. Which isn't known, so nothing more goes by itself: the
-        // text is settled as any send of it would be, and the files stay for the person to send
-        // or remove once they've looked at the chat.
-        if (used) return keepLeft()
-        removeFile(to, f.id)
-        first = false
-      }
-    })
-  }
-
-  /**
-   * Settles a send or schedule the server took as new (`used` null), or found its ID used
-   * already (already-used.ts): done, and not sent again; may have gone, so the person checks
-   * the chat first; or never went, so its text comes back as a new draft.
-   */
-  function settle(
-    chatId: ChatId,
-    taken: { text: string; reply: Message | null; clientMessageId: string },
-    used: AlreadyUsed | null,
-  ) {
-    const outcome = used ? usedOutcome(used) : null
-    if (outcome?.action === 'again') {
-      // No identity given: a new draft, so sending it again is a new message.
-      restoreDraft(chatId, taken.text, taken.reply)
-      endSend(taken.clientMessageId, false)
-    } else endSend(taken.clientMessageId, true)
-    if (outcome) toast(outcome.say)
-  }
-
-  async function onSchedule(sendAt: number) {
-    if (!draft.trim() || lost) return
-    if (!bridgeKey) return toast('This server has no bridge key yet, so nothing can be scheduled.')
-    try {
-      checkWithinAYear(sendAt)
-    } catch (e) {
-      return toast(errorMessage(e, 'That time can’t be used.'))
-    }
-    const to = sendChat.id
-    // Taken out of the composer as it goes, like a send: it can't be sent or scheduled twice, and
-    // it comes back, ahead of anything typed since, only if it doesn't go.
-    const taken = takeForSend<Message>(to, sendIdOfTaken)
-    if (!taken) return
-    await whileSending(async () => {
-      try {
-        const sealed = sealText(taken.text, taken.clientMessageId, session.userId, session.keyPair.publicKey, bridgeKey)
-        const reply = replyIn(taken.reply, to)
-        const outcome = await schedule({
-          chatId: to,
-          clientMessageId: taken.clientMessageId,
-          sendAt,
-          ...sealed,
-          ...(reply ? { replyTo: reply } : {}),
-        })
-        if (typeof outcome === 'object') settle(to, taken, outcome)
-        else {
-          settle(to, taken, null)
-          toast(`Scheduled for ${formatWhen(sendAt)}`)
-        }
-      } catch (e) {
-        restoreDraft(to, taken.text, taken.reply, taken.id)
-        endSend(taken.clientMessageId, false)
-        toast(errorMessage(e, 'That message couldn’t be scheduled.'))
-      }
-    })
+  const onSchedule = async (sendAt: number) => {
+    if (!lost) said(await outbox.schedule(sendChat.id, sendAt))
   }
 
   /**
@@ -612,10 +431,11 @@ function OpenChat({
     // Into the draft of the chat it was for, in a conversation, whichever the composer is on now
     // (this can run after the cancel's answer comes back): it only ever goes on that chat.
     const chatId = chatOfScheduled.get(id) ?? sendChat.id
-    if (restoreConflict(getDraft<Message>(chatId), replyTo)) return toast('Clear or send your draft first.')
     // A reply goes back as one, to the message it answered, even one not loaded.
     const reply = replyTo ? (byEvent(replyTo) ?? replyStub(replyTo, chatId)) : null
-    const added = appendToDraft(chatId, body, reply)
+    const result = outbox.restoreCancelled(chatId, body, replyTo, reply)
+    if (result.kind === 'conflict') return toast(result.say)
+    const added = result.added
     setRestored((now) => new Set(now).add(id))
     // The composer shows it, unless it's on another chat with something in that one's draft.
     const current = sendIdRef.current
@@ -882,47 +702,9 @@ function OpenChat({
           onLoadMore={loadMore}
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
-          onSendAgain={(m) => {
-            // One attempt per link of the chain, whatever the clicks and from whichever row: the
-            // person chose to risk a duplicate on the network, once each time (send-again.ts).
-            const text = m.body?.body
-            const state = m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined
-            if (!text || !state) return
-            // The retry state can load before the bridge key on a cold start: say why nothing
-            // happened rather than ignore the click.
-            if (!bridgeKey)
-              return toast(
-                bridge.status === 'loading'
-                  ? 'Still connecting to the server. Try again in a moment.'
-                  : bridge.status === 'error'
-                    ? 'The server’s bridge key couldn’t be loaded, so nothing can be sent. Reload to try again.'
-                    : 'This server has no bridge key yet, so nothing can be sent.',
-              )
-            // A file goes again as it was: the bridge host still has it, and its key is in the copy.
-            const files = m.body?.attachments?.filter((a) => !a.failed && a.mediaId)
-            void sendAgain(state, (nextId) => {
-              const sealed = files?.length
-                ? sealMessage(
-                    { type: m.body!.type, body: text, attachments: files },
-                    nextId,
-                    session.userId,
-                    session.keyPair.publicKey,
-                    bridgeKey,
-                  )
-                : sealText(text, nextId, session.userId, session.keyPair.publicKey, bridgeKey)
-              return sendAgainMutation({
-                clientMessageId: m.clientMessageId!,
-                nextId,
-                ...sealed,
-                ...(m.replyTo ? { replyTo: m.replyTo } : {}),
-              })
-            }).then(
-              (created) => {
-                if (!created) toast('That message was sent again already, or can’t be now.')
-              },
-              (e: unknown) => toast(errorMessage(e, 'That message couldn’t be sent again.')),
-            )
-          }}
+          onSendAgain={(m) =>
+            void outbox.sendAgain(m, m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined).then(said)
+          }
           againOf={(m) => againView(m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined, sendingAgain)}
           onDiscard={(m) => {
             if (m.clientMessageId)
@@ -948,16 +730,8 @@ function OpenChat({
                   if (!answer.first) return toast('Already cancelled. It’s kept below to restore or discard.')
                   // Cancelled: its copy stays on the server, listed below. The text is the one the
                   // server returned, not what this list showed.
-                  const text = answer.copy
-                    ? tryOpen<MessagePlaintext>(
-                        answer.copy,
-                        session.keyPair,
-                        'message',
-                        session.userId,
-                        answer.clientMessageId,
-                      )?.body
-                    : undefined
-                  if (typeof text === 'string') restoreCancelled(id, text, answer.replyTo)
+                  const text = outbox.cancelledText(answer.copy, answer.clientMessageId)
+                  if (text !== undefined) restoreCancelled(id, text, answer.replyTo)
                   else toast('Cancelled. It’s kept below until you restore or discard it.')
                 },
                 (e: unknown) => toast(errorMessage(e, 'That scheduled message couldn’t be cancelled.')),
@@ -1055,10 +829,3 @@ function replyStub(eventId: string, chatId: ChatId): Message {
     delivery: undefined,
   }
 }
-
-/** A reply's event ID, when it's to a message in the chat it goes to: a network can't reply across chats. */
-const replyIn = (reply: Message | null, chatId: ChatId) =>
-  reply && (reply.chatId === chatId || !reply.chatId) ? reply.eventId : undefined
-
-const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
-  draftSendId(t.id, t.text, t.reply?.eventId)
