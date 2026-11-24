@@ -18,9 +18,13 @@ import (
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/imessage/bluebubbles"
 )
 
-// Every send here is made once. The server never resends on its own, and the client it is
-// made through never retries or follows a redirect; an outcome that isn't certain is left
-// uncertain, so the bridge host records the send as unknown and the person decides.
+// Every send here is made once, and only through the Private API. BlueBubbles' other way of
+// sending, scripting the Messages app, runs the script again when it times out and then
+// falls back to a second script (actions.ts, sendMessage), so one request can send a message
+// twice; its Private API path asks Messages once. Without the Private API, nothing is sent:
+// each send is refused before anything goes. The client never retries or follows a redirect,
+// and an outcome that isn't certain is left uncertain, so the bridge host records the send as
+// unknown and the person decides.
 
 var (
 	errNeedsPrivateAPI = bridgev2.WrapErrorInStatus(errors.New("imessage: this needs BlueBubbles' Private API on the Mac")).
@@ -29,8 +33,35 @@ var (
 			WithIsCertain(true).WithErrorReason(event.MessageStatusUnsupported).WithSendNotice(true)
 	errUnsupported = bridgev2.WrapErrorInStatus(errors.New("imessage: iMessage can't send that")).
 			WithIsCertain(true).WithErrorReason(event.MessageStatusUnsupported).WithSendNotice(true)
-	errUnconfirmed = errors.New("imessage: the Mac didn't confirm the change")
+	errUnconfirmed  = errors.New("imessage: the Mac didn't confirm the change")
+	errNoGUID       = errors.New("imessage: the Mac's answer named no message")
+	errMarkedFailed = bridgev2.WrapErrorInStatus(errors.New("imessage: Messages marked the message as not delivered")).
+			WithIsCertain(true).WithErrorReason(event.MessageStatusGenericError)
 )
+
+// canSend says whether the Mac can send: its Private API helper is running. When it last
+// wasn't, the server is asked again first, since the helper may have started since.
+func (c *Client) canSend(ctx context.Context) bool {
+	if c.privateAPI.Load() {
+		return true
+	}
+	if err := c.refreshInfo(ctx); err != nil {
+		return false
+	}
+	return c.privateAPI.Load()
+}
+
+// sentMessage checks what the Mac answered a send with: a message Messages marked failed
+// certainly didn't go, and an answer naming no message can't be matched to its echo.
+func sentMessage(sent *bluebubbles.Message) (*bluebubbles.Message, error) {
+	switch {
+	case sent == nil || sent.GUID == "":
+		return nil, errNoGUID
+	case sent.Error != 0:
+		return nil, errMarkedFailed
+	}
+	return sent, nil
+}
 
 // sendError is how a failed request is reported: certain when the server refused it before
 // acting, or the connection never opened, and otherwise left as it is, which bridgev2
@@ -74,7 +105,7 @@ func newTempGUID() string {
 func (c *Client) chatGUID(ctx context.Context, portal *bridgev2.Portal) (string, error) {
 	chat, err := c.bb.Chat(ctx, string(portal.ID))
 	var bbErr *bluebubbles.Error
-	if errors.As(err, &bbErr) && bbErr.Status == 404 {
+	if errors.As(err, &bbErr) && bbErr.NotFound() {
 		return "", nil
 	} else if err != nil {
 		return "", sendError(err)
@@ -82,23 +113,16 @@ func (c *Client) chatGUID(ctx context.Context, portal *bridgev2.Portal) (string,
 	return chat.GUID, nil
 }
 
-func (c *Client) method() bluebubbles.SendMethod {
-	if c.privateAPI.Load() {
-		return bluebubbles.MethodPrivateAPI
-	}
-	return bluebubbles.MethodAppleScript
-}
-
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	if c.bb == nil {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
+	if !c.canSend(ctx) {
+		return nil, errNeedsPrivateAPI
+	}
 	content := msg.Content
 	var replyTo string
 	if msg.ReplyTo != nil {
-		if !c.privateAPI.Load() {
-			return nil, errNeedsPrivateAPI
-		}
 		replyTo = string(msg.ReplyTo.ID)
 	}
 	chat, err := c.chatGUID(ctx, msg.Portal)
@@ -124,6 +148,9 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 		return nil, errUnsupported
 	}
 	if err != nil {
+		return nil, err
+	}
+	if sent, err = sentMessage(sent); err != nil {
 		return nil, err
 	}
 	at := time.Now()
@@ -152,14 +179,14 @@ func (c *Client) sendText(ctx context.Context, portal *bridgev2.Portal, chat, te
 		if address == "" || replyTo != "" {
 			return nil, errUnsupported
 		}
-		sent, err := c.bb.NewChat(ctx, address, newTempGUID(), text, c.method())
+		sent, err := c.bb.NewChat(ctx, address, newTempGUID(), text, bluebubbles.MethodPrivateAPI)
 		if err != nil {
 			return nil, sendError(err)
 		}
 		return sent, nil
 	}
 	sent, err := c.bb.SendText(ctx, bluebubbles.TextMessage{
-		ChatGUID: chat, TempGUID: newTempGUID(), Message: text, Method: c.method(), SelectedMessageGUID: replyTo,
+		ChatGUID: chat, TempGUID: newTempGUID(), Message: text, Method: bluebubbles.MethodPrivateAPI, SelectedMessageGUID: replyTo,
 	})
 	if err != nil {
 		return nil, sendError(err)
@@ -174,16 +201,13 @@ func (c *Client) sendFile(ctx context.Context, chat string, content *event.Messa
 		name = content.Body
 	}
 	name = safeFileName(name)
-	if caption != "" && !c.privateAPI.Load() {
-		return nil, errNeedsPrivateAPI
-	}
 	data, err := c.conn.bridge.Bot.DownloadMedia(ctx, content.URL, content.File)
 	if err != nil {
 		return nil, bridgev2.WrapErrorInStatus(err).WithIsCertain(true).WithErrorReason(event.MessageStatusGenericError)
 	}
 	if caption != "" {
-		// The file and its caption go as one message, which only the Private API can send.
-		// Uploading first puts the file on the Mac and sends nothing.
+		// The file and its caption go as one message. Uploading first puts the file on the Mac
+		// and sends nothing.
 		path, err := c.bb.Upload(ctx, name, data)
 		if err != nil {
 			var bbErr *bluebubbles.Error
@@ -203,7 +227,7 @@ func (c *Client) sendFile(ctx context.Context, chat string, content *event.Messa
 		return sent, nil
 	}
 	sent, err := c.bb.SendFile(ctx, bluebubbles.FileMessage{
-		ChatGUID: chat, TempGUID: newTempGUID(), Name: name, Data: data, Method: c.method(), SelectedMessageGUID: replyTo,
+		ChatGUID: chat, TempGUID: newTempGUID(), Name: name, Data: data, Method: bluebubbles.MethodPrivateAPI, SelectedMessageGUID: replyTo,
 	})
 	if err != nil {
 		return nil, sendError(err)
@@ -227,7 +251,7 @@ func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit)
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.privateAPI.Load() {
+	if !c.canSend(ctx) {
 		return errNeedsPrivateAPI
 	}
 	if msg.EditTarget.PartID != textPart {
@@ -254,14 +278,14 @@ func (c *Client) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.Ma
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.privateAPI.Load() {
+	if !c.canSend(ctx) {
 		return errNeedsPrivateAPI
 	}
 	unsent, err := c.bb.Unsend(ctx, string(msg.TargetMessage.ID))
 	if err != nil {
 		return sendError(err)
 	}
-	if unsent.DateRetracted == 0 {
+	if !unsent.Unsent() {
 		return errUnconfirmed
 	}
 	return nil
@@ -300,7 +324,7 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	if c.bb == nil {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
-	if !c.privateAPI.Load() {
+	if !c.canSend(ctx) {
 		return nil, errNeedsPrivateAPI
 	}
 	chat, err := c.chatGUID(ctx, msg.Portal)
@@ -319,7 +343,7 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.privateAPI.Load() {
+	if !c.canSend(ctx) {
 		return errNeedsPrivateAPI
 	}
 	name := tapbackName(msg.TargetReaction.Emoji)
@@ -368,13 +392,13 @@ var (
 	deleteMaxAge = jsontime.S(2 * time.Minute)
 )
 
-// GetCapabilities is what a chat can do. Most of iMessage needs the Private API on the Mac;
-// without it, the Mac can send text and files, and that is all.
+// GetCapabilities is what a chat can do. Everything sent needs the Private API on the Mac;
+// without it the Mac only receives, and the chat offers nothing to send.
 func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
 	if c.privateAPI.Load() {
 		return fullFeatures
 	}
-	return basicFeatures
+	return receiveOnly
 }
 
 func fileFeatures(caption event.CapabilitySupportLevel) event.FileFeatureMap {
@@ -389,14 +413,13 @@ func fileFeatures(caption event.CapabilitySupportLevel) event.FileFeatureMap {
 }
 
 var (
-	basicFeatures = &event.RoomFeatures{
-		ID:            "trioditis.imessage.capabilities.2026_11_24.basic",
-		File:          fileFeatures(event.CapLevelRejected),
-		MaxTextLength: 20000,
-		Reply:         event.CapLevelRejected,
-		Edit:          event.CapLevelRejected,
-		Delete:        event.CapLevelRejected,
-		Reaction:      event.CapLevelRejected,
+	receiveOnly = &event.RoomFeatures{
+		ID:       "trioditis.imessage.capabilities.2026_11_24.receive_only",
+		File:     event.FileFeatureMap{},
+		Reply:    event.CapLevelRejected,
+		Edit:     event.CapLevelRejected,
+		Delete:   event.CapLevelRejected,
+		Reaction: event.CapLevelRejected,
 	}
 	fullFeatures = &event.RoomFeatures{
 		ID:                  "trioditis.imessage.capabilities.2026_11_24.private_api",

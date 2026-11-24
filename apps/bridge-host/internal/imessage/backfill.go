@@ -54,7 +54,7 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 		if params.AnchorMessage != nil && networkid.MessageID(msg.GUID) == params.AnchorMessage.ID {
 			continue
 		}
-		if msg.GUID == "" || msg.ItemType != 0 || msg.DateRetracted != 0 || msg.IsFromMe && msg.Error != 0 {
+		if msg.GUID == "" || msg.ItemType != 0 || msg.Unsent() || msg.IsFromMe && msg.Error != 0 {
 			continue
 		}
 		if msg.TapbackType() != "" {

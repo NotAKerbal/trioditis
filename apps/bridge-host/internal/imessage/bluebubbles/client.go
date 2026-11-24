@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,19 +33,22 @@ type Client struct {
 const (
 	readTimeout = 60 * time.Second
 	sendTimeout = 150 * time.Second
+	// downloadTimeout bounds fetching one file, its body included.
+	downloadTimeout = 5 * time.Minute
 	// maxBody bounds an answer read into memory (not a download, which streams).
 	maxBody = 64 << 20
 )
 
 // New makes a client for the server at serverURL (http or https, as BlueBubbles shows it),
-// which takes password. It connects only to addresses allow allows (DefaultPolicy if nil).
+// which takes password. It connects only to addresses allow allows (the public internet
+// alone if nil).
 func New(serverURL, password string, allow AddressPolicy) (*Client, error) {
 	base, err := ParseServerURL(serverURL)
 	if err != nil {
 		return nil, err
 	}
 	if allow == nil {
-		allow = DefaultPolicy
+		allow = Policy{}.Allows
 	}
 	transport := &http.Transport{
 		// Never through a proxy from the environment: it would dial for us, past the check.
@@ -98,39 +102,80 @@ func (c *Client) ServerURL() string { return c.base.String() }
 // Error is the server answering a request with a failure.
 type Error struct {
 	Status int
+	// FromServer says the answer was BlueBubbles' own error envelope, with the status it
+	// states matching the HTTP one: not a proxy's or tunnel's page in front of it.
+	FromServer bool
 	// Type and Detail are the server's error type ("iMessage Error", "Validation Error", …)
-	// and its message, which can quote what was sent: never log Detail.
+	// and its message. Either can carry anything the server or a proxy wrote, the person's
+	// words included: they are only compared, never logged or put in Error().
 	Type   string
 	Detail string
 	// Failed is the message Messages made of a send it then marked failed, when the server
-	// says so: Messages has it, with an error, and won't send it on its own.
+	// says so: Messages has it, with its error code set, and won't send it on its own.
 	Failed *Message
 }
 
 func (e *Error) Error() string {
-	// The server's message can quote what was sent; only its status and type are said.
-	return fmt.Sprintf("bluebubbles: server answered %d (%s)", e.Status, e.Type)
+	return fmt.Sprintf("bluebubbles: server answered %d (%s)", e.Status, e.kind())
+}
+
+// kind is the error's type as one of a fixed set of words, for Error().
+func (e *Error) kind() string {
+	switch {
+	case !e.FromServer:
+		return "not BlueBubbles' answer"
+	case e.Failed != nil:
+		return "message failed"
+	case e.NeedsPrivateAPI():
+		return "needs the Private API"
+	}
+	switch e.Type {
+	case "Validation Error", "Authentication Error", "Database Error", "iMessage Error", "Server Error", "Gateway Timeout":
+		return e.Type
+	}
+	return "other"
 }
 
 // Unauthorized says the password was refused.
-func (e *Error) Unauthorized() bool { return e.Status == http.StatusUnauthorized }
+func (e *Error) Unauthorized() bool {
+	return e.FromServer && e.Status == http.StatusUnauthorized && e.Type == "Authentication Error"
+}
+
+// Throttled says the server is refusing attempts after too many wrong passwords.
+func (e *Error) Throttled() bool { return e.FromServer && e.Status == http.StatusTooManyRequests }
+
+// NotFound says the server has no such thing (a chat, a message).
+func (e *Error) NotFound() bool {
+	return e.FromServer && e.Status == http.StatusNotFound && e.Type == "Database Error"
+}
+
+// The server's words when a request needs the Private API, its helper running, or a newer
+// macOS (utils.ts checkPrivateApiStatus, messageInterface.ts).
+var privateAPIRefusals = []string{
+	"iMessage Private API is not enabled!",
+	"iMessage Private API Helper is not connected!",
+	"Unsend message is only supported on macOS Ventura and newer!",
+}
 
 // NeedsPrivateAPI says the request needs the Private API, which isn't switched on or whose
 // helper isn't running in Messages, or a newer macOS: the server refused it without trying.
 func (e *Error) NeedsPrivateAPI() bool {
-	return e.Status == http.StatusInternalServerError && e.Type == "iMessage Error" &&
-		(strings.Contains(e.Detail, "Private API") || strings.Contains(e.Detail, "only supported on macOS"))
+	return e.FromServer && e.Status == http.StatusInternalServerError && e.Type == "iMessage Error" &&
+		slices.Contains(privateAPIRefusals, e.Detail)
 }
 
 // Certain says the request certainly had no effect beyond what the error says: the server
-// refused it before acting (it was malformed, named something that isn't there, or needs
-// what the server hasn't got), or Messages marked the message it made failed. Anything else
-// (a timeout, an unexpected error) may have sent it.
+// refused it before acting (it was malformed, named something that isn't there, needed a
+// password or the Private API), or Messages marked the message it made failed. Anything else
+// (a timeout, an unexpected error, a proxy's answer) may have sent it.
 func (e *Error) Certain() bool {
+	if !e.FromServer {
+		return false
+	}
 	switch {
-	case e.Status >= 400 && e.Status < 500 && e.Status != http.StatusRequestTimeout:
+	case e.Status == http.StatusBadRequest && e.Type == "Validation Error":
 		return true
-	case e.NeedsPrivateAPI(), e.Failed != nil:
+	case e.Unauthorized(), e.Throttled(), e.NotFound(), e.NeedsPrivateAPI(), e.Failed != nil:
 		return true
 	}
 	return false
@@ -190,20 +235,17 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, q
 	var env envelope
 	if jsonErr := json.Unmarshal(data, &env); jsonErr != nil || resp.StatusCode >= 300 {
 		e := &Error{Status: resp.StatusCode}
-		if env.Error != nil {
+		if jsonErr == nil && env.Error != nil && env.Status == resp.StatusCode {
+			e.FromServer = true
 			e.Type, e.Detail = env.Error.Type, env.Error.Message
 		}
-		// "Message sent with an error": Messages has the message, marked failed (its error
-		// code is set). Any other failure carries no message, or one that isn't ours.
-		if e.Type == "iMessage Error" && e.Detail == "Message failed to send!" && len(env.Data) > 0 {
+		// A send Messages took and marked failed comes back with its message, error code set
+		// (messageRouter.ts: "Message sent with an error", or a rejected send's own message).
+		if e.FromServer && e.Type == "iMessage Error" && len(env.Data) > 0 {
 			var failed Message
 			if json.Unmarshal(env.Data, &failed) == nil && failed.GUID != "" && failed.Error != 0 {
 				e.Failed = &failed
 			}
-		}
-		if resp.StatusCode < 300 {
-			// A success that isn't the server's JSON: not a BlueBubbles server.
-			e.Status, e.Type = http.StatusBadGateway, "not BlueBubbles"
 		}
 		return nil, e
 	}
@@ -269,7 +311,7 @@ func (c *Client) ChatMessages(ctx context.Context, chatGUID string, q MessageQue
 		"offset": {"0"},
 		"limit":  {strconv.Itoa(q.Limit)},
 		"sort":   {map[bool]string{true: "ASC", false: "DESC"}[q.Ascending]},
-		"with":   {"attachment"},
+		"with":   {"attachment,message.messageSummaryInfo"},
 	}
 	if q.After > 0 {
 		query.Set("after", strconv.FormatInt(q.After, 10))
@@ -282,10 +324,23 @@ func (c *Client) ChatMessages(ctx context.Context, chatGUID string, q MessageQue
 	return messages, err
 }
 
+// MessagesSince lists messages in every chat created at or after after (Unix ms), oldest
+// first, one page of at most limit from offset, each with its chat, attachments and what was
+// unsent. It is how a reconnect catches up.
+func (c *Client) MessagesSince(ctx context.Context, after int64, offset, limit int) ([]Message, error) {
+	var messages []Message
+	// after must be a JSON number: a string passes the server's check and matches nothing.
+	_, err := c.postJSON(ctx, c.reads, "/api/v1/message/query", map[string]any{
+		"after": after, "sort": "ASC", "offset": offset, "limit": limit,
+		"with": []string{"chat", "attachment", "messageSummaryInfo"},
+	}, &messages)
+	return messages, err
+}
+
 // Message fetches one message.
 func (c *Client) Message(ctx context.Context, guid string) (*Message, error) {
 	var msg Message
-	if _, err := c.get(ctx, "/api/v1/message/"+url.PathEscape(guid), url.Values{"with": {"chats,attachment"}}, &msg); err != nil {
+	if _, err := c.get(ctx, "/api/v1/message/"+url.PathEscape(guid), url.Values{"with": {"chats,attachment,messageSummaryInfo"}}, &msg); err != nil {
 		return nil, err
 	}
 	return &msg, nil
@@ -513,9 +568,10 @@ func (c *Client) Download(ctx context.Context, path string) (io.ReadCloser, stri
 	if err != nil {
 		return nil, "", err
 	}
-	// Downloads may be large and slow; only the context bounds them.
+	// Downloads may be large and slow, but are bounded: one that stalls would hold up the
+	// login's events behind it, and nothing cancels a message's conversion.
 	hc := *c.reads
-	hc.Timeout = 0
+	hc.Timeout = downloadTimeout
 	resp, err := hc.Do(req)
 	if err != nil {
 		var urlErr *url.Error

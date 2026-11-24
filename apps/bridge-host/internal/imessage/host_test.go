@@ -36,6 +36,10 @@ type fakeMac struct {
 	texts   []map[string]any
 	history []map[string]any
 	frames  chan string
+	// drop, when sent to, ends the socket connection, as a Mac going away would.
+	drop chan struct{}
+	// queries counts catch-up queries, and what they asked.
+	queries []map[string]any
 	// failText is a text the server answers with an unexpected error, after which whether
 	// Messages sent it can't be known.
 	failText string
@@ -43,7 +47,7 @@ type fakeMac struct {
 }
 
 func newFakeMac(t *testing.T) *fakeMac {
-	m := &fakeMac{t: t, password: "correct horse", chatGUID: "iMessage;-;+15550001111", frames: make(chan string, 64)}
+	m := &fakeMac{t: t, password: "correct horse", chatGUID: "iMessage;-;+15550001111", frames: make(chan string, 64), drop: make(chan struct{})}
 	m.srv = httptest.NewServer(http.HandlerFunc(m.serve))
 	t.Cleanup(m.srv.Close)
 	return m
@@ -86,7 +90,21 @@ func (m *fakeMac) serve(w http.ResponseWriter, r *http.Request) {
 	case path == "/socket.io/":
 		m.socket(w, r)
 	case path == "/api/v1/server/info":
-		m.reply(w, 200, map[string]any{"computer_id": "MAC-1", "private_api": false, "helper_connected": false, "detected_imessage": "me@icloud.com"})
+		m.reply(w, 200, map[string]any{"computer_id": "me@Mac", "private_api": true, "helper_connected": true, "detected_imessage": "me@icloud.com"})
+	case path == "/api/v1/message/query":
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		m.lock.Lock()
+		m.queries = append(m.queries, body)
+		var found []map[string]any
+		after, _ := body["after"].(float64)
+		for _, msg := range m.history {
+			if float64(msg["dateCreated"].(int64)) >= after {
+				found = append(found, msg)
+			}
+		}
+		m.lock.Unlock()
+		m.reply(w, 200, found)
 	case path == "/api/v1/chat/query":
 		m.lock.Lock()
 		last := m.history[len(m.history)-1]
@@ -122,8 +140,8 @@ func (m *fakeMac) serve(w http.ResponseWriter, r *http.Request) {
 		guid := fmt.Sprintf("SENT-%d", m.next)
 		fail := body["message"] == m.failText
 		m.lock.Unlock()
-		if body["chatGuid"] != m.chatGUID {
-			m.t.Errorf("a send went to %v, not the chat's own GUID", body["chatGuid"])
+		if body["chatGuid"] != m.chatGUID || body["method"] != "private-api" {
+			m.t.Errorf("a send went to %v by %v, not the chat's own GUID by the Private API", body["chatGuid"], body["method"])
 		}
 		if fail {
 			m.reply(w, 500, map[string]string{"type": "Server Error", "message": "something broke"})
@@ -161,6 +179,8 @@ func (m *fakeMac) socket(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-m.drop:
 			return
 		case frame := <-m.frames:
 			if err := conn.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
@@ -369,6 +389,24 @@ func TestIMessageThroughTheHost(t *testing.T) {
 		t.Errorf("the Mac was asked to send %d times in all, want 2", n)
 	}
 
+	// The Mac goes away; a message arrives meanwhile. Once it's back, the message is caught
+	// up from the time the login last synced, before anything newer.
+	mac.lock.Lock()
+	missed := mac.message("MISSED-1", "while you were away", false, time.Now().UnixMilli())
+	mac.history = append(mac.history, missed)
+	mac.lock.Unlock()
+	mac.drop <- struct{}{}
+	th.waitFor("the missed message", func(e *protocol.Event) bool {
+		return e.Type == protocol.EventMessage && e.LoginID == loginID && th.body(e) == "while you were away"
+	})
+	mac.lock.Lock()
+	queries := len(mac.queries)
+	after, _ := mac.queries[len(mac.queries)-1]["after"].(float64)
+	mac.lock.Unlock()
+	if queries != 1 || int64(after) >= missed["dateCreated"].(int64) {
+		t.Errorf("catch-up queries %d, from %v", queries, after)
+	}
+
 	th.h.Stop()
 	// Nothing anyone wrote is kept readable on disk.
 	err := filepath.Walk(th.dir, func(path string, info os.FileInfo, err error) error {
@@ -379,7 +417,7 @@ func TestIMessageThroughTheHost(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, needle := range []string{"from before signing in", "hello from the Mac", "hi from Trioditis", "this one breaks"} {
+		for _, needle := range []string{"from before signing in", "hello from the Mac", "hi from Trioditis", "this one breaks", "while you were away"} {
 			if bytes.Contains(data, []byte(needle)) {
 				t.Errorf("%s holds %q", path, needle)
 			}

@@ -12,7 +12,9 @@ import (
 // IDs are what the Mac's Messages app calls things, as BlueBubbles reports them, so they stay
 // the same for the same thing: the bridge host keys its own opaque IDs on them.
 //
-//   - A login is its Mac: a hash of the server's computer ID.
+//   - A login is a member's Mac: a hash of who they are and the server's computer ID, which
+//     BlueBubbles makes of the Mac's user and host names, so two members' Macs with the same
+//     names are still two logins.
 //   - A chat is its GUID with the service written "any": "any;-;+15551234567" for a direct
 //     chat, "any;+;chat123…" for a group. macOS 26 moved every chat to "any", and BlueBubbles
 //     finds a chat by "any" on older systems too, so one chat keeps one ID across an upgrade.
@@ -23,9 +25,9 @@ import (
 //     not show them, so no one is shared between logins.
 //   - A message is its GUID.
 
-// loginID names the login for the Mac with this computer ID.
-func loginID(computerID string) networkid.UserLoginID {
-	sum := sha256.Sum256([]byte(computerID))
+// loginID names the login for a member's Mac with this computer ID.
+func loginID(member, computerID string) networkid.UserLoginID {
+	sum := sha256.Sum256([]byte(member + "\x00" + computerID))
 	return networkid.UserLoginID("mac-" + hex.EncodeToString(sum[:8]))
 }
 

@@ -21,18 +21,21 @@ type MessageMetadata struct {
 	EditedAt int64 `json:"edited_at,omitempty"`
 }
 
-// handleEvent hands one socket event to bridgev2. Only an event's kind is ever logged.
-func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) {
+// handleEvent hands one socket event to bridgev2. Only an event's kind is ever logged. It
+// returns the time of a new message bridgev2 couldn't take, so it can be fetched again, or 0.
+func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) (failedAt int64) {
 	log := zerolog.Ctx(ctx)
 	switch evt.Name {
 	case "new-message", "updated-message":
 		var msg bluebubbles.Message
 		if err := json.Unmarshal(evt.Data, &msg); err != nil {
 			log.Warn().Str("event", evt.Name).Msg("Couldn't read an event from BlueBubbles Server")
-			return
+			return 0
 		}
 		if evt.Name == "new-message" {
-			c.handleNewMessage(&msg)
+			if !c.handleNewMessage(&msg) {
+				return max(msg.DateCreated, 1)
+			}
 		} else {
 			c.handleUpdatedMessage(&msg)
 		}
@@ -58,21 +61,23 @@ func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) {
 		// one it reports later is in Messages, marked failed, for the person to see there.
 		log.Warn().Msg("Messages reported a message failed to send after taking it")
 	}
+	return 0
 }
 
-// handleNewMessage bridges a new message or tapback. Chat changes (renames, members) come as
-// their own events; a message Messages marked failed isn't one anyone received.
-func (c *Client) handleNewMessage(msg *bluebubbles.Message) {
+// handleNewMessage bridges a new message or tapback, and says whether bridgev2 took it (or
+// had it already). Chat changes (renames, members) come as their own events; a message
+// Messages marked failed isn't one anyone received, and one already unsent is gone.
+func (c *Client) handleNewMessage(msg *bluebubbles.Message) bool {
 	chatGUID := msg.ChatGUID()
-	if chatGUID == "" || msg.GUID == "" || msg.ItemType != 0 || msg.DateRetracted != 0 || msg.IsFromMe && msg.Error != 0 {
-		return
+	if chatGUID == "" || msg.GUID == "" || msg.ItemType != 0 || msg.Unsent() || msg.IsFromMe && msg.Error != 0 {
+		return true
 	}
 	if kind := msg.TapbackType(); kind != "" {
 		c.handleTapback(chatGUID, msg, kind)
-		return
+		return true
 	}
 	at := time.UnixMilli(msg.DateCreated)
-	c.login.QueueRemoteEvent(&simplevent.Message[*bluebubbles.Message]{
+	res := c.login.QueueRemoteEvent(&simplevent.Message[*bluebubbles.Message]{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventMessage,
 			PortalKey:    c.portalKey(chatGUID),
@@ -85,6 +90,7 @@ func (c *Client) handleNewMessage(msg *bluebubbles.Message) {
 		Data:               msg,
 		ConvertMessageFunc: c.convertMessage,
 	})
+	return res.Success || res.Ignored
 }
 
 // handleUpdatedMessage bridges what changed about a message: unsent, edited, or, for the
@@ -97,11 +103,15 @@ func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) {
 	key := c.portalKey(chatGUID)
 	sender := c.messageSender(chatGUID, msg)
 	switch {
-	case msg.DateRetracted != 0:
+	case msg.Unsent():
+		at := msg.DateRetracted
+		if at == 0 {
+			at = msg.DateEdited
+		}
 		c.login.QueueRemoteEvent(&simplevent.MessageRemove{
 			EventMeta: simplevent.EventMeta{
 				Type: bridgev2.RemoteEventMessageRemove, PortalKey: key, Sender: sender,
-				Timestamp: time.UnixMilli(msg.DateRetracted),
+				Timestamp: time.UnixMilli(at),
 			},
 			TargetMessage: networkid.MessageID(msg.GUID),
 		})

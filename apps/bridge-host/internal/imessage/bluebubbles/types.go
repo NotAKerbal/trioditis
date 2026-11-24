@@ -70,6 +70,11 @@ type Message struct {
 	DateRead      int64 `json:"dateRead"`
 	DateEdited    int64 `json:"dateEdited"`
 	DateRetracted int64 `json:"dateRetracted"`
+	// PartCount is how many parts are left (macOS 13): 0 once every part was unsent.
+	PartCount *int `json:"partCount"`
+	// MessageSummaryInfo says which parts were unsent (retractedParts), when the server was
+	// asked to read it.
+	MessageSummaryInfo json.RawMessage `json:"messageSummaryInfo"`
 
 	// A tapback points at the message it is on and says which it is ("love", "-love" when
 	// taken back, "2006"/"3006" for any emoji, which the server doesn't name).
@@ -123,6 +128,25 @@ func (m *Message) TapbackType() string {
 var tapbackNumbers = map[string]string{
 	"2000": "love", "2001": "like", "2002": "dislike", "2003": "laugh", "2004": "emphasize", "2005": "question", "2006": "emoji",
 	"3000": "-love", "3001": "-like", "3002": "-dislike", "3003": "-laugh", "3004": "-emphasize", "3005": "-question", "3006": "-emoji",
+}
+
+// Unsent says the whole message was taken back. Newer macOS versions leave dateRetracted
+// empty and mark an unsend as an edit that retracted every part (Message.ts isFullyUnsent).
+func (m *Message) Unsent() bool {
+	if m.DateRetracted != 0 {
+		return true
+	}
+	if m.DateEdited == 0 || m.PartCount == nil || *m.PartCount != 0 {
+		return false
+	}
+	var summary []struct {
+		RetractedParts []int `json:"retractedParts"`
+	}
+	if json.Unmarshal(m.MessageSummaryInfo, &summary) != nil || len(summary) == 0 {
+		// The server wasn't asked for the summary: no parts left after an edit is enough.
+		return true
+	}
+	return len(summary[0].RetractedParts) > 0
 }
 
 // ChatGUID is the chat the message is in.

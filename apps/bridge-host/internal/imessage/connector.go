@@ -17,10 +17,12 @@ import (
 // Connector is the iMessage network connector.
 type Connector struct {
 	bridge *bridgev2.Bridge
-	// allow says which addresses a Mac can be at (bluebubbles.DefaultPolicy if nil); tests
-	// reach a local fake server.
+	// allow says which addresses a Mac can be at: the public internet alone if nil.
 	allow bluebubbles.AddressPolicy
 }
+
+// NewConnector makes the connector, reaching Macs only where allow allows.
+func NewConnector(allow bluebubbles.AddressPolicy) *Connector { return &Connector{allow: allow} }
 
 var _ bridgev2.NetworkConnector = (*Connector)(nil)
 

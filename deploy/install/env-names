@@ -44,6 +44,7 @@ TELEGRAM_API_HASH
 # Not written by install.sh: settings an operator may add by hand, which backups keep too.
 META_PROXY
 BRIDGE_EGRESS_DENY
+IMESSAGE_MAC_NETWORKS
 INSTAGRAM_PROXY
 LOGIN_BROWSER_MAX
 DEBIAN_SNAPSHOT

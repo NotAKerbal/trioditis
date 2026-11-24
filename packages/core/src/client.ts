@@ -272,9 +272,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'bluebubbles', kind: 'form', name: 'BlueBubbles Server' }],
     // BlueBubbles drives the Messages app on the person's own Mac, as they would.
     termsRisk: false,
-    // Tapbacks, edits and unsending need BlueBubbles' Private API on the Mac; without it the
-    // Mac refuses them and the app says so. Messages allows an edit for 15 minutes, five times,
-    // and unsending for 2 minutes.
+    // Sending anything needs BlueBubbles' Private API on the Mac (its other way of sending can
+    // send twice); without it the Mac only receives, and refuses each send as unsupported.
+    // Messages allows an edit for 15 minutes, five times, and unsending for 2 minutes.
     reactions: true,
     edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
     delete: { forEveryone: true, maxAgeMs: 2 * MINUTE },

@@ -1,6 +1,7 @@
 package imessage
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,9 +41,6 @@ type Client struct {
 	stop    context.CancelFunc
 	done    chan struct{}
 
-	// queued counts events read from the socket and not yet handled, so the time synced up
-	// to is only moved past what has been handled.
-	queued atomic.Int64
 	// syncLock is held while recording the time synced up to, which catching up and the
 	// connection's ticker both do.
 	syncLock sync.Mutex
@@ -160,52 +159,122 @@ func (c *Client) run(ctx context.Context, done chan struct{}) {
 // helper is running, which can change while the Mac is up.
 const infoInterval = 5 * time.Minute
 
-// session is one connection: it asks the server about itself, then listens to its socket,
-// handing each event over in order, and catches up once the socket is up.
+// session is one connection. It asks the server about itself and opens the socket; once the
+// socket is up it catches up on what happened while the login was away, and only then hands
+// over the live events the socket brought meanwhile, in order. A live message is never handled
+// before the catch-up that would bring in an earlier one, so none is skipped.
 func (c *Client) session(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if err := c.refreshInfo(ctx); err != nil {
 		return err
 	}
-	// Events are handled on their own goroutine, in order: handling one can wait on a chat
-	// busy with a send, and the socket must keep answering the server's pings meanwhile.
-	events := make(chan bluebubbles.Event, 4096)
+	// The socket never waits on handling: it must keep answering the server's pings while a
+	// catch-up runs or a chat is busy with a send. Events wait here instead.
+	queue := newEventQueue()
+	var caughtUp atomic.Bool
+	var failure error
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for evt := range events {
-			c.handleEvent(ctx, evt)
-			c.queued.Add(-1)
-		}
+		c.keepUp(ctx, func() bool { return caughtUp.Load() && queue.pending() == 0 })
 	}()
-	go func() {
-		defer wg.Done()
-		c.keepUp(ctx)
-	}()
+	started := false
 	err := c.bb.Listen(ctx, func() {
+		if started {
+			return
+		}
+		started = true
 		c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.catchUp(ctx)
+			if err := c.catchUp(ctx, time.Now()); err != nil {
+				failure = err
+				cancel()
+				return
+			}
+			caughtUp.Store(true)
+			for {
+				evt, ok := queue.pop(ctx)
+				if !ok {
+					return
+				}
+				failedAt := c.handleEvent(ctx, evt)
+				if failedAt != 0 {
+					// bridgev2 couldn't take a message: fetch it again from the Mac. If even
+					// that fails, the session ends, and the next one catches up from before it.
+					if err := c.catchUpSince(ctx, failedAt-catchUpMargin.Milliseconds()); err != nil {
+						failure = err
+						cancel()
+						return
+					}
+				}
+				queue.done()
+			}
 		}()
-	}, func(evt bluebubbles.Event) {
-		c.queued.Add(1)
-		select {
-		case events <- evt:
-		case <-ctx.Done():
-			c.queued.Add(-1)
-		}
-	})
+	}, queue.push)
 	cancel()
-	close(events)
 	wg.Wait()
-	// What was read and not handled is dropped with the connection; the next catch-up
-	// starts from before it.
-	c.queued.Store(0)
+	if failure != nil {
+		return failure
+	}
 	return err
+}
+
+// eventQueue holds the socket's events, in order, until they are handled. It never refuses
+// one: what a reconnect would otherwise fetch again is only memory.
+type eventQueue struct {
+	lock  sync.Mutex
+	items []bluebubbles.Event
+	// count is the events pushed and not yet done, the one being handled included.
+	count int
+	wake  chan struct{}
+}
+
+func newEventQueue() *eventQueue { return &eventQueue{wake: make(chan struct{}, 1)} }
+
+func (q *eventQueue) push(evt bluebubbles.Event) {
+	q.lock.Lock()
+	q.items = append(q.items, evt)
+	q.count++
+	q.lock.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *eventQueue) pop(ctx context.Context) (bluebubbles.Event, bool) {
+	for {
+		q.lock.Lock()
+		if len(q.items) > 0 {
+			evt := q.items[0]
+			q.items[0] = bluebubbles.Event{}
+			q.items = q.items[1:]
+			q.lock.Unlock()
+			return evt, true
+		}
+		q.lock.Unlock()
+		select {
+		case <-ctx.Done():
+			return bluebubbles.Event{}, false
+		case <-q.wake:
+		}
+	}
+}
+
+func (q *eventQueue) done() {
+	q.lock.Lock()
+	q.count--
+	q.lock.Unlock()
+}
+
+func (q *eventQueue) pending() int {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	return q.count
 }
 
 func (c *Client) refreshInfo(ctx context.Context) error {
@@ -226,9 +295,9 @@ func (c *Client) refreshInfo(ctx context.Context) error {
 // syncInterval is how often a connected login records the time it is synced up to.
 const syncInterval = time.Minute
 
-// keepUp, while connected, records how far the login is synced and checks on the Private
-// API now and then.
-func (c *Client) keepUp(ctx context.Context) {
+// keepUp, while connected, records how far the login is synced, while settled says nothing is
+// waiting to be handled, and checks on the Private API now and then.
+func (c *Client) keepUp(ctx context.Context, settled func() bool) {
 	syncTick := time.NewTicker(syncInterval)
 	infoTick := time.NewTicker(infoInterval)
 	defer syncTick.Stop()
@@ -242,8 +311,8 @@ func (c *Client) keepUp(ctx context.Context) {
 				zerolog.Ctx(ctx).Debug().Str("error_type", fmt.Sprintf("%T", err)).Msg("Couldn't ask BlueBubbles Server about itself")
 			}
 		case now := <-syncTick.C:
-			// Everything read off the socket up to now has been handled.
-			if c.queued.Load() == 0 {
+			// Everything that arrived before the last tick has been handled.
+			if settled() {
 				c.markSynced(ctx, now.Add(-syncInterval))
 			}
 		}
@@ -269,49 +338,93 @@ const (
 	// catchUpMargin is how far before the time last synced a catch-up looks, for events
 	// that were on their way when the connection went.
 	catchUpMargin = 5 * time.Minute
-	chatPage      = 100
+	// chatPage is the most chats the server lists at once; maxChats bounds a listing.
+	chatPage = 1000
+	maxChats = 20 * chatPage
+	// messagePage is how many missed messages are fetched at once; maxCatchUp bounds one
+	// catch-up, past which the rest of a long absence is left to history.
+	messagePage = 500
+	maxCatchUp  = 20000
 )
 
-// catchUp brings in what changed while the login wasn't connected: each chat whose last
-// message is newer than the time it last synced up to, or, the first time, the most recent
-// chats. bridgev2 then fetches each one's missed messages (FetchMessages, forward).
-func (c *Client) catchUp(ctx context.Context) {
-	log := zerolog.Ctx(ctx)
-	connectedAt := time.Now()
+// catchUp brings in what happened while the login wasn't connected: every message created
+// since a little before the time it last synced up to, in every chat, oldest first, as if it
+// had come over the socket. A new login brings in its most recent chats instead, with their
+// recent history. connectedAt is when the socket came up: what came after is on the socket.
+func (c *Client) catchUp(ctx context.Context, connectedAt time.Time) error {
 	c.syncLock.Lock()
 	since := c.meta().SyncedUpTo
 	c.syncLock.Unlock()
-	first := since == 0
-	since -= catchUpMargin.Milliseconds()
-	count := 0
-	for offset := 0; ctx.Err() == nil; offset += chatPage {
-		chats, err := c.bb.Chats(ctx, offset, chatPage)
+	var err error
+	if since == 0 {
+		err = c.initialSync(ctx)
+	} else {
+		err = c.catchUpSince(ctx, since-catchUpMargin.Milliseconds())
+	}
+	if err != nil {
+		return err
+	}
+	c.markSynced(ctx, connectedAt.Add(-catchUpMargin))
+	return nil
+}
+
+// catchUpSince hands over every message created at or after after (Unix ms), oldest first.
+// Ones already bridged are recognized by their GUIDs. It fails, and the time synced up to
+// stays, only if the Mac can't be asked.
+func (c *Client) catchUpSince(ctx context.Context, after int64) error {
+	for offset := 0; offset < maxCatchUp; {
+		page, err := c.bb.MessagesSince(ctx, after, offset, messagePage)
 		if err != nil {
-			if ctx.Err() == nil {
-				log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Couldn't list chats to catch up")
-			}
-			return
+			return err
 		}
-		for i := range chats {
-			chat := &chats[i]
-			var last int64
-			if chat.LastMessage != nil {
-				last = chat.LastMessage.DateCreated
+		for i := range page {
+			msg := &page[i]
+			if msg.ItemType != 0 {
+				// A rename, or someone added or leaving: the chat's details are fetched again.
+				if guid := msg.ChatGUID(); guid != "" {
+					c.queueResync(ctx, guid, time.Time{}, false)
+				}
+				continue
 			}
-			if first && count >= initialChats || !first && last < since {
-				c.markSynced(ctx, connectedAt.Add(-catchUpMargin))
-				return
-			}
-			count++
-			c.queueResync(ctx, chat.GUID, time.UnixMilli(last), true)
+			c.handleNewMessage(msg)
 		}
-		if len(chats) < chatPage {
+		if len(page) < messagePage {
+			return nil
+		}
+		offset += len(page)
+	}
+	zerolog.Ctx(ctx).Warn().Int("messages", maxCatchUp).Msg("Caught up as far as one catch-up goes; older missed messages are left to history")
+	return nil
+}
+
+// initialSync brings in a new login's most recent chats, with their recent history. The
+// server lists chats in pages by when they were made, so every page is read before the most
+// recently active are picked.
+func (c *Client) initialSync(ctx context.Context) error {
+	var chats []bluebubbles.Chat
+	for offset := 0; offset < maxChats; offset += chatPage {
+		page, err := c.bb.Chats(ctx, offset, chatPage)
+		if err != nil {
+			return err
+		}
+		chats = append(chats, page...)
+		if len(page) < chatPage {
 			break
 		}
 	}
-	if ctx.Err() == nil {
-		c.markSynced(ctx, connectedAt.Add(-catchUpMargin))
+	last := func(chat *bluebubbles.Chat) int64 {
+		if chat.LastMessage == nil {
+			return 0
+		}
+		return chat.LastMessage.DateCreated
 	}
+	slices.SortStableFunc(chats, func(a, b bluebubbles.Chat) int { return cmp.Compare(last(&b), last(&a)) })
+	for i := range chats[:min(len(chats), initialChats)] {
+		if at := last(&chats[i]); at > 0 {
+			c.queueResync(ctx, chats[i].GUID, time.UnixMilli(at), true)
+		}
+	}
+	return nil
 }
 
 // queueResync has bridgev2 update a chat's details, and fetch its messages up to latest.

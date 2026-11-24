@@ -80,7 +80,7 @@ func (l *login) SubmitUserInput(ctx context.Context, input map[string]string) (*
 		return nil, errNoComputerID
 	}
 	ul, err := l.user.NewLogin(ctx, &database.UserLogin{
-		ID: loginID(info.ComputerID),
+		ID: loginID(string(l.user.MXID), info.ComputerID),
 		// The Apple ID is the person's own; it is only shown to them, as their account's name.
 		RemoteName: info.DetectedIMessage,
 		Metadata:   &LoginMetadata{ServerURL: bb.ServerURL(), Password: input["password"]},
@@ -118,7 +118,7 @@ func (c *Connector) DescribeLoginError(evt *zerolog.Event, err error) {
 		reason = "address_refused"
 	case errors.As(err, &bbErr) && bbErr.Unauthorized():
 		reason = "wrong_password"
-	case errors.As(err, &bbErr) && bbErr.Status == 429:
+	case errors.As(err, &bbErr) && bbErr.Throttled():
 		reason = "throttled"
 	case errors.As(err, &bbErr):
 		reason = "not_bluebubbles"

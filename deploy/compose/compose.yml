@@ -328,12 +328,15 @@ services:
       - bridge-bluesky:/data
 
   # iMessage reaches each person's own Mac, running BlueBubbles Server, at the address they
-  # give when they connect: on their network, over Tailscale, or through a public URL.
+  # give when they connect. Public addresses only, unless the operator lists the private
+  # ranges Macs may be on, such as a home network or a tailnet (docs/networks/imessage.md).
   bridge-imessage:
     <<: *bridge-host
     profiles: [imessage]
     environment:
       <<: *bridge-env
+      IMESSAGE_MAC_NETWORKS: ${IMESSAGE_MAC_NETWORKS:-}
+      BRIDGE_EGRESS_DENY: ${BRIDGE_EGRESS_DENY:-}
       BRIDGE_NETWORK: imessage
       BRIDGE_HOST_ID: imessage-1
       BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_imessage?sslmode=disable

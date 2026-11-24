@@ -17,6 +17,10 @@ import (
 
 func allowAll(netip.Addr) bool { return true }
 
+func envelope404(w http.ResponseWriter) {
+	reply(w, 404, `{"status":404,"error":{"type":"Database Error","message":"Chat does not exist!"}}`)
+}
+
 func TestParseServerURL(t *testing.T) {
 	for in, want := range map[string]string{
 		"192.168.1.20:1234":             "http://192.168.1.20:1234",
@@ -36,34 +40,52 @@ func TestParseServerURL(t *testing.T) {
 	}
 }
 
-// A Mac is on the person's network, a tailnet or a tunnel; the bridge host itself, the
-// machine it runs on and the clouds' metadata services are never one.
+// By default a Mac may only be on the public internet; the operator opens private ranges.
+// The bridge host itself, the machine it runs on and the clouds' metadata services never
+// open, whatever is listed.
 func TestAddressPolicy(t *testing.T) {
-	own := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
-	for addr, want := range map[string]bool{
-		"192.168.1.20":           true,
-		"10.0.0.5":               true,
-		"100.101.102.103":        true, // Tailscale
-		"fd7a:115c:a1e0::1":      true, // Tailscale over IPv6
-		"203.0.114.7":            true,
-		"127.0.0.1":              false,
-		"::1":                    false,
-		"0.0.0.0":                false,
-		"169.254.169.254":        false,
-		"fe80::1":                false,
-		"fd00:ec2::254":          false,
-		"100.100.100.200":        false,
-		"168.63.129.16":          false,
-		"224.0.0.1":              false,
-		"255.255.255.255":        false,
-		"172.18.0.4":             false, // the container's own network
-		"::ffff:127.0.0.1":       false,
-		"::ffff:192.168.1.20":    true,
-		"::ffff:169.254.169.254": false,
+	own := func() []netip.Prefix { return []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")} }
+	public := Policy{Own: own}
+	listed := Policy{
+		Allowed: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("100.64.0.0/10"),
+			netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("127.0.0.0/8")},
+		Deny: []netip.Prefix{netip.MustParsePrefix("192.168.1.1/32")},
+		Own:  own,
+	}
+	for addr, want := range map[string][2]bool{ // [public only, with the listing]
+		"203.0.114.7":            {true, true},
+		"2606:4700::1":           {true, true},
+		"192.168.1.20":           {false, true},
+		"192.168.2.20":           {false, false},
+		"10.0.0.5":               {false, false},
+		"100.101.102.103":        {false, true},  // Tailscale
+		"192.168.1.1":            {false, false}, // denied by the operator
+		"172.18.0.4":             {false, false}, // the container's own network
+		"127.0.0.1":              {false, false},
+		"::1":                    {false, false},
+		"0.0.0.0":                {false, false},
+		"169.254.169.254":        {false, false},
+		"fe80::1":                {false, false},
+		"fd00:ec2::254":          {false, false},
+		"100.100.100.200":        {false, false},
+		"168.63.129.16":          {false, false},
+		"224.0.0.1":              {false, false},
+		"255.255.255.255":        {false, false},
+		"::ffff:127.0.0.1":       {false, false},
+		"::ffff:192.168.1.20":    {false, true},
+		"::ffff:169.254.169.254": {false, false},
+		"fd7a:115c:a1e0::1":      {false, false},
 	} {
-		if got := addressAllowed(netip.MustParseAddr(addr), own); got != want {
+		a := netip.MustParseAddr(addr)
+		if got := [2]bool{public.Allows(a), listed.Allows(a)}; got != want {
 			t.Errorf("%s allowed: %v, want %v", addr, got, want)
 		}
+	}
+	if p, err := ParseNetworks(" 192.168.1.0/24, 100.64.0.0/10 ,10.0.0.7"); err != nil || len(p) != 3 || p[2].Bits() != 32 {
+		t.Errorf("ParseNetworks: %v, %v", p, err)
+	}
+	if _, err := ParseNetworks("192.168.1.0/24,nonsense"); err == nil {
+		t.Error("ParseNetworks took nonsense")
 	}
 }
 
@@ -132,17 +154,21 @@ func TestSendOutcomes(t *testing.T) {
 		{"validation", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 400, `{"status":400,"error":{"type":"Validation Error","message":"The chat guid field is required."}}`)
 		}, true, false, false},
-		{"no such chat", func(w http.ResponseWriter, r *http.Request) {
-			reply(w, 404, `{"status":404,"error":{"type":"Database Error","message":"Chat does not exist!"}}`)
-		}, true, false, false},
+		{"no such chat", func(w http.ResponseWriter, r *http.Request) { envelope404(w) }, true, false, false},
 		{"private api off", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 500, `{"status":500,"error":{"type":"iMessage Error","message":"iMessage Private API is not enabled!"}}`)
+		}, true, true, false},
+		{"helper not connected", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 500, `{"status":500,"error":{"type":"iMessage Error","message":"iMessage Private API Helper is not connected!"}}`)
 		}, true, true, false},
 		{"marked failed", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 500, `{"status":500,"message":"Message sent with an error. See attached message","error":{"type":"iMessage Error","message":"Message failed to send!"},"data":{"guid":"G","error":22}}`)
 		}, true, false, true},
+		{"rejected with its message", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 500, `{"status":500,"message":"Message Send Error","error":{"type":"iMessage Error","message":"Failed to send message! See attached message error code."},"data":{"guid":"G","error":4}}`)
+		}, true, false, true},
 		{"timed out waiting", func(w http.ResponseWriter, r *http.Request) {
-			reply(w, 500, `{"status":500,"message":"Message Send Error","error":{"type":"iMessage Error","message":"Failed to send message! See attached message error code."},"data":null}`)
+			reply(w, 500, `{"status":500,"message":"Message Send Error","error":{"type":"iMessage Error","message":"Failed to send message! Message not found in database after 60 seconds!"},"data":null}`)
 		}, false, false, false},
 		{"unhandled", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 500, `{"status":500,"error":{"type":"Server Error","message":"boom"}}`)
@@ -152,6 +178,17 @@ func TestSendOutcomes(t *testing.T) {
 		}, false, false, false},
 		{"redirect", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+		}, false, false, false},
+		// A proxy in front can answer after passing the send on: its 4xx isn't the server's.
+		{"proxy's 4xx", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(499)
+			_, _ = w.Write([]byte("<html>client closed request</html>"))
+		}, false, false, false},
+		{"envelope with another status", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 400, `{"status":500,"error":{"type":"Validation Error","message":"x"}}`)
+		}, false, false, false},
+		{"what a proxy writes into the type", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 500, `{"status":500,"error":{"type":"hi from the person pw","message":"boom"}}`)
 		}, false, false, false},
 	}
 	for _, tc := range cases {
@@ -169,7 +206,7 @@ func TestSendOutcomes(t *testing.T) {
 		if bbErr.Certain() != tc.certain || bbErr.NeedsPrivateAPI() != tc.needsP || (bbErr.Failed != nil) != tc.failed {
 			t.Errorf("%s: certain %v, needs Private API %v, failed %v", tc.name, bbErr.Certain(), bbErr.NeedsPrivateAPI(), bbErr.Failed != nil)
 		}
-		if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "pw") {
+		if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "hi from") {
 			t.Errorf("%s: the error quotes the server or the password: %v", tc.name, err)
 		}
 	}
@@ -274,6 +311,27 @@ func TestParseEvent(t *testing.T) {
 	for _, bad := range []string{``, `["x"`, `ab["x"]`, `[1]`, `[]`} {
 		if _, ok := parseEvent([]byte(bad)); ok {
 			t.Errorf("%q parsed", bad)
+		}
+	}
+}
+
+// Newer macOS versions mark an unsend as an edit that took back every part.
+func TestUnsent(t *testing.T) {
+	zero, one := 0, 1
+	for name, tc := range map[string]struct {
+		msg  Message
+		want bool
+	}{
+		"retracted":             {Message{DateRetracted: 5}, true},
+		"every part taken back": {Message{DateEdited: 5, PartCount: &zero, MessageSummaryInfo: json.RawMessage(`[{"retractedParts":[0]}]`)}, true},
+		"no summary, no parts":  {Message{DateEdited: 5, PartCount: &zero}, true},
+		"one part left":         {Message{DateEdited: 5, PartCount: &one, MessageSummaryInfo: json.RawMessage(`[{"retractedParts":[0]}]`)}, false},
+		"only edited":           {Message{DateEdited: 5, PartCount: &one}, false},
+		"no part count":         {Message{DateEdited: 5}, false},
+		"plain":                 {Message{}, false},
+	} {
+		if got := tc.msg.Unsent(); got != tc.want {
+			t.Errorf("%s: %v", name, got)
 		}
 	}
 }
