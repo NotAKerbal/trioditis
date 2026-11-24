@@ -90,6 +90,9 @@ type pendingCommand struct {
 	// attachment (checkTransmitDeadline); refusedLate is set when that check refused it.
 	notAfter    int64
 	refusedLate bool
+	// giveBack returns a send's share of the media store's budget for its file (reserveMedia)
+	// once its chat is released: the connector is done with the file by then.
+	giveBack func()
 }
 
 // stuckLimit is how long, in send timeouts, a command may sit inside bridgev2 before a send
@@ -384,6 +387,41 @@ func (c *Connector) checkTransmitDeadline(ctx context.Context) error {
 	}
 	pending.refusedLate = true
 	return errTransmitDeadline
+}
+
+// reserveMedia waits for a send's file to have its share of the media store's budget, just
+// before the connector reads it, and keeps the share with the send until its chat is released.
+// Then it checks the deadline once more, since the wait may have been long.
+func (c *Connector) reserveMedia(ctx context.Context, uri id.ContentURIString) error {
+	evt := bridgev2.GetMatrixEventFromContext(ctx)
+	if evt == nil {
+		return nil
+	}
+	raw, ok := c.pending.Load(evt.ID)
+	if !ok {
+		return nil
+	}
+	pending := raw.(*pendingCommand)
+	if pending.kind != pendingSend && pending.kind != pendingEdit {
+		return nil
+	}
+	giveBack, err := c.Media.Reserve(ctx, uri)
+	if err != nil {
+		return err
+	}
+	pending.lock.Lock()
+	if pending.released {
+		// Given up on while it waited: nothing is left to give it back later.
+		pending.lock.Unlock()
+		giveBack()
+		return errTransmitDeadline
+	}
+	if pending.giveBack != nil {
+		pending.giveBack()
+	}
+	pending.giveBack = giveBack
+	pending.lock.Unlock()
+	return c.checkTransmitDeadline(ctx)
 }
 
 func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check bool) error {
@@ -1146,6 +1184,10 @@ func (c *Connector) release(eventID id.EventID, pending *pendingCommand) {
 		return
 	}
 	pending.released = true
+	if pending.giveBack != nil {
+		pending.giveBack()
+		pending.giveBack = nil
+	}
 	c.busy.CompareAndDelete(pending.owner.portalID, eventID)
 	c.wakeWorker()
 }

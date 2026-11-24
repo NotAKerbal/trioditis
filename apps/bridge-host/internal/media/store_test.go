@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -120,12 +121,50 @@ func TestPutFileIsReadForItsOwnersSendOnly(t *testing.T) {
 	if got, err := store.Read(uri); err != nil || string(got) != "a photo" {
 		t.Fatalf("alice's send reads %q, %v", got, err)
 	}
-	// Bob naming alice's file, even with its key, finds nothing in his own directory.
-	if _, err = store.Register(att, "bob", time.Minute); err != nil {
+	// Bob naming alice's file, even with its key, finds nothing in his own directory, and his
+	// registration of the same ID leaves hers reading her file.
+	bobURI, err := store.Register(att, "bob", time.Minute)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.Read(uri); !errors.Is(err, ErrUnavailable) {
+	if bobURI == uri {
+		t.Fatal("two sends of one media ID share a content URI")
+	}
+	if _, err = store.Read(bobURI); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("bob's send read alice's file: %v", err)
+	}
+	if got, err := store.Read(uri); err != nil || string(got) != "a photo" {
+		t.Fatalf("after bob's registration, alice's send reads %q, %v", got, err)
+	}
+}
+
+func TestSendsWaitForTheirShareOfTheBudget(t *testing.T) {
+	b := newBudget(10)
+	first, err := b.acquire(context.Background(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err = b.acquire(ctx, 4); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("over the budget: %v, want to wait until the deadline", err)
+	}
+	got := make(chan func(), 1)
+	go func() {
+		// Larger than the whole budget: it waits for all of it.
+		giveBack, _ := b.acquire(context.Background(), 100)
+		got <- giveBack
+	}()
+	first()
+	first() // giving back twice gives back once
+	select {
+	case giveBack := <-got:
+		giveBack()
+	case <-time.After(time.Second):
+		t.Fatal("a share wasn't given once the budget was free")
+	}
+	if b.free != 10 {
+		t.Fatalf("free %d, want 10", b.free)
 	}
 }
 

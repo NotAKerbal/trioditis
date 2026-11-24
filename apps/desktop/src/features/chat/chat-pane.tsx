@@ -488,9 +488,13 @@ function OpenChat({
     const ids = outgoing.map((f) => f.id)
     if (outgoing.some((f) => f.sending)) return
     setSending(to, ids, true)
-    // The text, when there is any, is taken as a send of its own would be; a reply alone is
-    // taken too, so it goes with the first file and nothing else.
-    const taken = takeForSend<Message>(to, sendIdOfTaken)
+    // The text, when there is any, is taken as a send of its own would be, under a send ID of
+    // its own with the first file: the same draft sent as text alone, from another tab, is a
+    // different message, so neither is taken for the other. A reply alone is taken too, so it
+    // goes with the first file and nothing else.
+    const taken = takeForSend<Message>(to, (t) =>
+      sendIdOfTaken({ ...t, text: `${t.text}\n${fileKey(outgoing[0]!.file)}` }),
+    )
     const reply = taken ? taken.reply : getDraft<Message>(to).reply
     if (!taken && reply) setDraftReply(to, null)
     let first = true
@@ -529,8 +533,18 @@ function OpenChat({
           toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
           return
         }
+        const used = outcome === 'queued' ? null : outcome
+        if (first && taken) settle(to, taken, used)
+        // Its send ID was used already, by a send that never went: the file stays to send again.
+        if (used && usedOutcome(used).action === 'again') {
+          setSending(
+            to,
+            ids.filter((id) => filesOf(to).some((left) => left.id === id)),
+            false,
+          )
+          return
+        }
         removeFile(to, f.id)
-        if (first && taken) settle(to, taken, outcome === 'queued' ? null : outcome)
         first = false
       }
     })
@@ -1051,3 +1065,6 @@ const replyIn = (reply: Message | null, chatId: ChatId) =>
 
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
   draftSendId(t.id, t.text, t.reply?.eventId)
+
+/** What tells a file apart for a draft's send ID; the file itself never leaves the browser. */
+const fileKey = (file: File) => `\u0000file\n${file.name}\n${file.size}\n${file.lastModified}`

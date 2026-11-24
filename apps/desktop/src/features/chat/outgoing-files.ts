@@ -30,6 +30,9 @@ function set(chatId: string, files: OutgoingFile[]) {
 
 export const filesOf = (chatId: string) => store.get(chatId) ?? NONE
 
+/** Whether a reload would lose files waiting to be sent: they're kept nowhere else. */
+export const hasOutgoingFiles = () => store.size > 0
+
 /** Adds files to a chat's composer. Returns why some weren't, to say, or null. */
 export function addFiles(chatId: string, files: readonly File[]): string | null {
   const now = filesOf(chatId)

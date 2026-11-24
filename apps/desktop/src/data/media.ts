@@ -273,21 +273,33 @@ export function useMedia(
 // given to the gateway (PUT /media/<mediaId>) for the bridge host that will send it, under an
 // upload token Convex signs for the chat. The key goes only in the sealed send that follows.
 
-const uploadTokens = new Map<string, Promise<Token>>()
+const uploadTokens = new Map<string, Promise<Token & { askedAt: number }>>()
+/**
+ * An upload token is used for a few files sent together, not kept for long: it names the host
+ * running the chat's account when it was asked for, and another host may take the account over.
+ */
+const UPLOAD_TOKEN_REUSE_MS = 30_000
 
-function uploadTokenFor(chatId: string, stale?: string): Promise<Token> {
+function uploadTokenFor(chatId: string, stale?: string): Promise<Token & { askedAt: number }> {
   const held = uploadTokens.get(chatId)
   const ask = () => {
-    const asked = convex.mutation(api.media.upload, { chatId: chatId as never }).catch((error: unknown) => {
-      if (uploadTokens.get(chatId) === asked) uploadTokens.delete(chatId)
-      throw isTransient(error) ? new ServerBusy('The server is busy.') : error
-    })
+    const askedAt = Date.now()
+    const asked = convex.mutation(api.media.upload, { chatId: chatId as never }).then(
+      (t) => ({ ...t, askedAt }),
+      (error: unknown) => {
+        if (uploadTokens.get(chatId) === asked) uploadTokens.delete(chatId)
+        throw isTransient(error) ? new ServerBusy('The server is busy.') : error
+      },
+    )
     uploadTokens.set(chatId, asked)
     return asked
   }
   if (!held) return ask()
   return held.then(
-    (t) => (t.token !== stale && t.expiresAt - Date.now() > TOKEN_MARGIN_MS ? t : ask()),
+    (t) =>
+      t.token !== stale && Date.now() - t.askedAt < UPLOAD_TOKEN_REUSE_MS && t.expiresAt - Date.now() > TOKEN_MARGIN_MS
+        ? t
+        : ask(),
     () => ask(),
   )
 }
