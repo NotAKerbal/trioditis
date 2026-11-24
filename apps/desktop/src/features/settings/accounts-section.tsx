@@ -113,9 +113,9 @@ export function Accounts({ connect }: { connect: boolean }) {
               const methods = offered(a.network)?.flows ?? []
               return (
                 <div key={a._id}>
-                  <div className="flex min-h-[60px] items-center gap-3 px-4 py-3">
+                  <div className="flex min-h-[60px] flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
                     <NetworkBadge network={a.network} label={name.name} size={26} />
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-[1_1_10rem]">
                       <div className="truncate font-semibold">
                         {name.name}
                         {name.detail ? (

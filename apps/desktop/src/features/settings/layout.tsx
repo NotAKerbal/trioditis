@@ -67,7 +67,8 @@ export function Loading({ failed }: { failed?: boolean }) {
 
 /**
  * One row of a group: what it is on the left, its control on the right, and anything it opens
- * (a form, a reveal) below.
+ * (a form, a reveal) below. On a narrow screen a wide control moves under the title rather than
+ * squeezing it.
  */
 export function Setting({
   title,
@@ -82,8 +83,8 @@ export function Setting({
 }) {
   return (
     <div className="px-4 py-3">
-      <div className="flex min-h-9 items-center gap-[18px]">
-        <div className="min-w-0 flex-1">
+      <div className="flex min-h-9 flex-wrap items-center gap-x-[18px] gap-y-2">
+        <div className="min-w-0 flex-[1_1_10rem]">
           <div className="font-semibold">{title}</div>
           {about ? <div className="mt-0.5 text-sm text-muted-foreground">{about}</div> : null}
         </div>

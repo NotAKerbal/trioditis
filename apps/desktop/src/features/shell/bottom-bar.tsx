@@ -32,7 +32,7 @@ export function BottomBar({
 }: {
   name: string
   email: string
-  openSettings: (section: SettingsSection, connect?: boolean) => void
+  openSettings: (section: SettingsSection, how?: 'connect' | 'list') => void
 }) {
   const session = useSession()
   const health = useNetworkHealth()
@@ -67,14 +67,14 @@ export function BottomBar({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="top">
           <DropdownMenuLabel className="normal-case tracking-normal">{email}</DropdownMenuLabel>
-          <DropdownMenuItem onSelect={() => openSettings('appearance')}>
+          <DropdownMenuItem onSelect={() => openSettings('appearance', 'list')}>
             <Settings /> Settings
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', 'connect')}>
             <Plus /> Connect a network
           </DropdownMenuItem>
           {session.role === 'admin' ? (
-            <DropdownMenuItem onSelect={() => openSettings('members')}>
+            <DropdownMenuItem onSelect={() => openSettings('members', 'list')}>
               <ShieldCheck /> Admin settings
             </DropdownMenuItem>
           ) : null}
@@ -137,12 +137,12 @@ export function BottomBar({
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openSettings('accounts', true)}>
+          <DropdownMenuItem onSelect={() => openSettings('accounts', 'connect')}>
             <Plus /> Connect a network
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings('appearance')}>
+      <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings('appearance', 'list')}>
         <Settings className="size-[18px]" />
       </Button>
     </>
