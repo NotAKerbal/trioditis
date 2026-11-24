@@ -255,6 +255,9 @@ func (c *Client) handleQueued(ctx context.Context, queue *eventQueue, evt bluebu
 	case retry && c.holdBack(ctx, "update:"+eventKey(evt), false):
 		queue.pushFront(evt)
 		return errNotTaken
+	case !retry && evt.Name == "updated-message":
+		// Settled: a count from an earlier attempt at it is forgotten.
+		c.holdBack(ctx, "update:"+eventKey(evt), true)
 	}
 	return nil
 }
@@ -415,15 +418,28 @@ const (
 // recent history. connectedAt is when the socket came up: what came after is on the socket.
 func (c *Client) catchUp(ctx context.Context, connectedAt time.Time) error {
 	c.syncLock.Lock()
-	since := c.meta().SyncedUpTo
+	since, chatsMade := c.meta().SyncedUpTo, c.meta().ChatsMade
 	c.syncLock.Unlock()
-	var err error
-	if since == 0 {
-		err = c.initialSync(ctx)
-	} else {
-		err = c.catchUpSince(ctx, since-catchUpMargin.Milliseconds())
+	if !chatsMade {
+		if err := c.initialSync(ctx); err != nil {
+			return err
+		}
+		c.syncLock.Lock()
+		c.meta().ChatsMade = true
+		err := c.login.Save(ctx)
+		if err != nil {
+			c.meta().ChatsMade = false
+		}
+		c.syncLock.Unlock()
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
+	// A login from before it kept the time it signed in starts now.
+	if since == 0 {
+		since = connectedAt.UnixMilli()
+	}
+	if err := c.catchUpSince(ctx, since-catchUpMargin.Milliseconds()); err != nil {
 		return err
 	}
 	c.markSynced(ctx, connectedAt.Add(-catchUpMargin))
@@ -504,19 +520,27 @@ func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 	type tapKey struct{ chat, target, sender string }
 	latest := map[tapKey]*bluebubbles.Message{}
 	var order []tapKey
-	// atAfter is how many messages created exactly at after were already handed over.
-	atAfter := 0
+	// atAfter are the messages created exactly at after that were already handed over: the
+	// next page starts at that time again and leaves them out by GUID. An offset would count
+	// a message deleted on the Mac meanwhile and skip a later one in its place.
+	atAfter := map[string]bool{}
+	offset := 0
 	for {
-		page, err := c.bb.MessagesSince(ctx, after, atAfter, messagePage)
+		page, err := c.bb.MessagesSince(ctx, after, offset, messagePage)
 		if err != nil {
 			return err
 		}
+		progressed := false
 		for i := range page {
 			msg := &page[i]
-			if msg.DateCreated > after {
-				after, atAfter = msg.DateCreated, 0
+			if msg.DateCreated <= after && atAfter[msg.GUID] {
+				continue
 			}
-			atAfter++
+			progressed = true
+			if msg.DateCreated > after {
+				after, atAfter = msg.DateCreated, map[string]bool{}
+			}
+			atAfter[msg.GUID] = true
 			guid := msg.ChatGUID()
 			switch {
 			case msg.ItemType != 0:
@@ -539,6 +563,12 @@ func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 					notTaken = true
 				}
 			}
+		}
+		// Only a page all of one millisecond, already handed over, needs an offset to get
+		// past it.
+		offset = 0
+		if !progressed {
+			offset = len(atAfter)
 		}
 		if len(page) < messagePage {
 			break

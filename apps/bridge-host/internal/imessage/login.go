@@ -83,7 +83,7 @@ func (l *login) SubmitUserInput(ctx context.Context, input map[string]string) (*
 		ID: loginID(string(l.user.MXID), info.ComputerID),
 		// The Apple ID is the person's own; it is only shown to them, as their account's name.
 		RemoteName: info.DetectedIMessage,
-		Metadata:   &LoginMetadata{ServerURL: bb.ServerURL(), Password: input["password"]},
+		Metadata:   &LoginMetadata{ServerURL: bb.ServerURL(), Password: input["password"], SyncedUpTo: time.Now().UnixMilli()},
 	}, &bridgev2.NewLoginParams{DeleteOnConflict: true})
 	if err != nil {
 		return nil, fmt.Errorf("failed to save the login: %w", err)

@@ -283,7 +283,7 @@ func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit)
 	// it may yet be. Only this message, edited since, to this text, confirms it: an edit made
 	// meanwhile on another device would also be newer.
 	if edited.GUID != string(msg.EditTarget.ID) || edited.DateEdited <= before ||
-		messageText(edited) != strings.TrimSpace(strings.ReplaceAll(msg.Content.Body, "\ufffc", "")) {
+		bodyText(edited.Text) != bodyText(msg.Content.Body) {
 		return errUnconfirmed
 	}
 	// Its echo, the message updated with this edit, is then recognized as already applied.
@@ -306,6 +306,12 @@ func (c *Client) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.Ma
 		return errUnconfirmed
 	}
 	return nil
+}
+
+// bodyText is a message's text as compared: without the object marks Messages puts where
+// files go, or the spaces around it. A subject isn't part of it.
+func bodyText(text string) string {
+	return strings.TrimSpace(strings.ReplaceAll(text, "\ufffc", ""))
 }
 
 // tapbackName is the tapback an emoji stands for, if it is one of the six.

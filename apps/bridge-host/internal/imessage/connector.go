@@ -75,9 +75,12 @@ func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 type LoginMetadata struct {
 	ServerURL string `json:"server_url"`
 	Password  string `json:"password"`
-	// SyncedUpTo is the time (Unix ms) up to which the login has been connected and handed
-	// what arrived, so a reconnect catches up the chats that changed since.
+	// SyncedUpTo is the time (Unix ms) up to which the login has been handed everything that
+	// arrived, so a reconnect catches up from there. It starts when the login signs in: what
+	// came after that comes only through checked catch-ups, whatever happens to first sync.
 	SyncedUpTo int64 `json:"synced_up_to,omitempty"`
+	// ChatsMade is set once the login's most recent chats have been made (initialSync).
+	ChatsMade bool `json:"chats_made,omitempty"`
 }
 
 // CopyFrom takes a new sign-in's details for a login that already exists (the same member's

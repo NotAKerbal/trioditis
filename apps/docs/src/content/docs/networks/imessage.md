@@ -70,7 +70,7 @@ The app offers sending, tapbacks, editing and deleting on iMessage as the Privat
 
 Beyond `bridgev2`'s shared tables:
 
-- **`user_login.metadata`:** the BlueBubbles Server address and password, and the time the login last synced up to (cleared on logout).
+- **`user_login.metadata`:** the BlueBubbles Server address and password, the time the login has synced up to (from when it signed in), and whether its first chats were made (cleared on logout).
 - **Login IDs** are a hash of the member and the Mac's computer ID (BlueBubbles makes it of the Mac's user and host names).
 - **`user_login.remote_name`:** the Apple ID Messages is signed in with, when BlueBubbles reports it.
 - **`message.metadata`:** only the time a message was last edited. No message text is kept by the connector.

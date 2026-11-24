@@ -78,7 +78,7 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 		byID[bm.ID] = bm
 		resp.Messages = append(resp.Messages, bm)
 	}
-	c.backfillTapbacks(params, byID, tapbacks)
+	c.backfillTapbacks(ctx, params, byID, tapbacks)
 	return resp, nil
 }
 
@@ -86,7 +86,7 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 // history, a tapback can come a page before its message (it is newer): it is kept until the
 // page with its message comes, and goes on that message then. Going forward (catching up), one
 // on an earlier message is handed over as it happened, once the batch is in.
-func (c *Client) backfillTapbacks(params bridgev2.FetchMessagesParams, byID map[networkid.MessageID]*bridgev2.BackfillMessage, tapbacks []*bluebubbles.Message) {
+func (c *Client) backfillTapbacks(ctx context.Context, params bridgev2.FetchMessagesParams, byID map[networkid.MessageID]*bridgev2.BackfillMessage, tapbacks []*bluebubbles.Message) {
 	type key struct {
 		target networkid.MessageID
 		sender networkid.UserID
@@ -131,13 +131,23 @@ func (c *Client) backfillTapbacks(params bridgev2.FetchMessagesParams, byID map[
 				Sender:    c.messageSender(portal, t),
 				Emoji:     emoji,
 			})
-		case params.Forward:
+		case params.Forward && c.stored(ctx, params.Portal.PortalKey, k.target):
 			// After the batch: bridgev2 holds the chat while it backfills.
 			go c.handleTapback(portal, t, kind)
 		default:
 			c.keepTapback(params.Portal.PortalKey, k.target, t)
 		}
 	}
+}
+
+// stored says whether a message is bridged already. A tapback on one that isn't (older than
+// the first batch of a chat's history) waits for the page of history with it.
+func (c *Client) stored(ctx context.Context, portal networkid.PortalKey, id networkid.MessageID) bool {
+	if c.conn == nil || c.conn.bridge == nil {
+		return false
+	}
+	msg, err := c.conn.bridge.DB.Message.GetFirstPartByID(ctx, portal.Receiver, id)
+	return err == nil && msg != nil
 }
 
 // maxKeptTapbacks bounds the tapbacks kept for messages further back in history. They are kept

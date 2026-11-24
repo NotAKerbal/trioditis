@@ -482,7 +482,8 @@ func TestCatchUpPagesByTime(t *testing.T) {
 		lock.Lock()
 		var rows []string
 		for at := int64(1); at <= 600; at++ {
-			if at == 3 && deleted {
+			// The first page's last message, and one before it, are deleted after it is read.
+			if (at == 3 || at == 500) && deleted {
 				continue
 			}
 			if at >= body.After {
@@ -506,8 +507,8 @@ func TestCatchUpPagesByTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	for at := 1; at <= 600; at++ {
-		if seen[fmt.Sprintf("M%d", at)] == 0 {
-			t.Fatalf("M%d was skipped (%d handed over)", at, len(seen))
+		if n := seen[fmt.Sprintf("M%d", at)]; n != 1 {
+			t.Fatalf("M%d handed over %d times (%d in all)", at, n, len(seen))
 		}
 	}
 }
@@ -542,9 +543,9 @@ func TestHistoryTapbackWaitsForItsMessage(t *testing.T) {
 	p := portal("any;-;+15550001111")
 	params := bridgev2.FetchMessagesParams{Portal: p}
 	like := &bluebubbles.Message{GUID: "L", DateCreated: 5, AssociatedMessageGUID: "p:0/OLD", AssociatedMessageType: json.RawMessage(`"love"`), Handle: &bluebubbles.Handle{Address: "+15550001111"}}
-	c.backfillTapbacks(params, map[networkid.MessageID]*bridgev2.BackfillMessage{}, []*bluebubbles.Message{like})
+	c.backfillTapbacks(context.Background(), params, map[networkid.MessageID]*bridgev2.BackfillMessage{}, []*bluebubbles.Message{like})
 	old := &bridgev2.BackfillMessage{ID: "OLD"}
-	c.backfillTapbacks(params, map[networkid.MessageID]*bridgev2.BackfillMessage{"OLD": old}, nil)
+	c.backfillTapbacks(context.Background(), params, map[networkid.MessageID]*bridgev2.BackfillMessage{"OLD": old}, nil)
 	if len(old.Reactions) != 1 || old.Reactions[0].Emoji != "❤️" {
 		t.Errorf("reactions on the older message: %+v", old.Reactions)
 	}
@@ -617,5 +618,47 @@ func TestDownloadAsksAgain(t *testing.T) {
 	calls.Store(0)
 	if _, _, err = c.download(context.Background(), "/api/v1/attachment/missing/download"); err == nil || calls.Load() != 1 {
 		t.Errorf("a missing file: %v after %d calls", err, calls.Load())
+	}
+}
+
+// A page all of one millisecond, already handed over, is got past with an offset.
+func TestCatchUpPastOneMillisecond(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			After  int64 `json:"after"`
+			Offset int   `json:"offset"`
+			Limit  int   `json:"limit"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		var rows []string
+		for i := 0; i < 700; i++ {
+			at := int64(7)
+			if i >= 650 {
+				at = 8
+			}
+			if at >= body.After {
+				rows = append(rows, fmt.Sprintf(`{"guid":"M%d","text":"x","dateCreated":%d,"chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}}`, i, at))
+			}
+		}
+		rows = rows[min(body.Offset, len(rows)):]
+		rows = rows[:min(body.Limit, len(rows))]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":200,"data":[%s]}`, strings.Join(rows, ","))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	c.failures = map[string]*attempts{}
+	seen := map[string]int{}
+	c.take = func(m *bluebubbles.Message) bool { seen[m.GUID]++; return true }
+	if err := c.catchUpSince(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 700 {
+		t.Errorf("handed over %d of 700", len(seen))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("%s handed over %d times", id, n)
+		}
 	}
 }

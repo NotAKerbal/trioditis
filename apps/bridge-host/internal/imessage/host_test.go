@@ -403,7 +403,8 @@ func TestIMessageThroughTheHost(t *testing.T) {
 	queries := len(mac.queries)
 	after, _ := mac.queries[len(mac.queries)-1]["after"].(float64)
 	mac.lock.Unlock()
-	if queries != 1 || int64(after) >= missed["dateCreated"].(int64) {
+	// One from the time it signed in, at its first connection, and one on reconnecting.
+	if queries != 2 || int64(after) >= missed["dateCreated"].(int64) {
 		t.Errorf("catch-up queries %d, from %v", queries, after)
 	}
 
