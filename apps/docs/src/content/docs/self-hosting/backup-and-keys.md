@@ -15,9 +15,9 @@ The destination must live **outside** your git checkout (container image builds 
 
 Each backup creates a `0700` directory named `<project>-<date>-<time>` (appending `-2`, `-3`, … rather than overwriting) containing three `0600` files:
 
-- **`archive.enc`** — Encrypted archive of every Docker volume belonging to this Compose project (including volumes for previously disabled networks), ending with a manifest of entry counts, byte sizes, version, and PostgreSQL major version.
+- **`archive.enc`** — Encrypted, uncompressed tar archive of every Docker volume belonging to this Compose project (including volumes for previously disabled networks), ending with a manifest of entry counts, byte sizes, version, and PostgreSQL major version.
 - **`secrets.env.enc`** — Encrypted installer settings from `deploy/install/env-names`, **excluding** the server's private keys and `BACKUP_KEY`.
-- **`backup.info`** — Unencrypted metadata (format version, project name, git commit, timestamp) needed before restore starts.
+- **`backup.info`** — Unencrypted metadata (format version, project name, git commit, timestamp) needed before restore starts. Format 3 archives are uncompressed (the volumes are mostly sealed content and media, which gzip barely shrinks); restore still reads the gzip archives of format 2 and older. A backup taken while the checkout is at another commit than the one installed (pulled, the installer not run yet) is still gzip, format 2, so the installed version's restore can read it.
 
 ### Encryption & safety guarantees
 

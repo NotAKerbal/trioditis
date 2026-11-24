@@ -57,6 +57,7 @@ Trioditis includes a systemd updater service (`trioditis-updater-<project>`), en
 - **Channels:** **Stable** (`main`, default) or **Nightly** (`dev`). While running a pre-release install from `dev`, switch to **Nightly** so the updater tracks new changes.
 - **Schedule:** Toggle **Automatic updates** (off by default) to install updates nightly during the 4 AM host local hour, or trigger **Check now** / **Update now** on demand.
 - **Release notes:** Displays curated release notes (`release-notes/`) for pending and recently installed updates.
+- **Built before it stops:** The updater first builds the new version's images while the server keeps running (from a temporary checkout of the new commit, tagged `prebuild` until the update is over). A version that doesn't build is called off with the server still running, and the installer's own build afterwards comes from Docker's cache, so the server is only down for the backup and the restart. The build competes with the running server for CPU for a few minutes, so a small machine may answer slowly meanwhile.
 - **Safe rollback:** Before updating, the updater takes an encrypted backup (`deploy/trioditis backup --keep-stopped`, keeping the 3 newest snapshots in `UPDATE_BACKUP_DIR` or `~/.local/state/trioditis/<project>/updater-backups`). If the installer or migrations fail, it automatically checks out the previous commit and restores the pre-update backup.
 - **Forward-only:** Updates only fast-forward along the selected channel's branch and refuse checkouts with modified tracked files.
 
