@@ -275,10 +275,8 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 		return nil, ErrUnavailable
 	}
 	// A file the client put is in its owner's directory (Put); one from before that, in the
-	// store's own. Either way it opens only with the owner's key and associated data.
-	if !validID(mediaID) {
-		return nil, ErrUnavailable
-	}
+	// store's own. Either way it opens only with the owner's key and associated data. The ID
+	// is safe in a path: ParseContentURI refuses one with a separator or a dot.
 	ct, err := readNoFollow(filepath.Join(s.ownerDir(owner), mediaID))
 	if errors.Is(err, os.ErrNotExist) {
 		ct, err = readNoFollow(s.path(mediaID))
