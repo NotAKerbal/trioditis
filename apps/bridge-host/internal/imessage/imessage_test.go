@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -366,23 +367,59 @@ func TestCatchUpHoldsBack(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := testClient(t, srv)
-	c.failures = map[string]int{}
+	c.failures = map[string]*attempts{}
+	clock := time.Unix(0, 0)
+	c.now = func() time.Time { return clock }
 	var taken []string
 	c.take = func(m *bluebubbles.Message) bool {
 		taken = append(taken, m.GUID)
 		return m.GUID != "A"
 	}
 	ctx := context.Background()
-	for attempt := 1; attempt < maxAttempts; attempt++ {
+	// Catch-ups close together (an outage that fails everything) count as one attempt.
+	for i := 0; i < 5; i++ {
+		if err := c.catchUpSince(ctx, 0); !errors.Is(err, errNotTaken) {
+			t.Fatalf("quick retry %d: %v", i, err)
+		}
+	}
+	for attempt := 2; attempt < maxAttempts; attempt++ {
+		clock = clock.Add(attemptSpacing)
 		if err := c.catchUpSince(ctx, 0); !errors.Is(err, errNotTaken) {
 			t.Fatalf("attempt %d: %v", attempt, err)
 		}
 	}
+	clock = clock.Add(attemptSpacing)
 	if err := c.catchUpSince(ctx, 0); err != nil {
 		t.Fatalf("the last attempt: %v", err)
 	}
 	// Every message is handed over each time; the one after the failure isn't held up.
-	if len(taken) != 2*maxAttempts || taken[1] != "B" {
+	if len(taken) != 2*(5+maxAttempts-1) || taken[1] != "B" {
 		t.Errorf("handed over %v", taken)
+	}
+}
+
+// Signing in again to the same Mac, say with a changed password, keeps how far it is synced.
+func TestSignInAgainKeepsSync(t *testing.T) {
+	old := &LoginMetadata{ServerURL: "http://a", Password: "old", SyncedUpTo: 1234}
+	old.CopyFrom(&LoginMetadata{ServerURL: "https://b", Password: "new"})
+	if old.ServerURL != "https://b" || old.Password != "new" || old.SyncedUpTo != 1234 {
+		t.Errorf("%+v", old)
+	}
+}
+
+// A chat lookup happens before anything is sent, so its failure is certain.
+func TestLookupFailureIsCertain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/server/info" {
+			_, _ = w.Write([]byte(`{"status":200,"data":{"private_api":true,"helper_connected":true}}`))
+			return
+		}
+		w.WriteHeader(502)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	_, err := c.HandleMatrixMessage(context.Background(), matrixMessage(portal("any;+;chat1"), &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}))
+	if err == nil || !bridgev2.WrapErrorInStatus(err).IsCertain {
+		t.Errorf("a failed lookup: %v", err)
 	}
 }

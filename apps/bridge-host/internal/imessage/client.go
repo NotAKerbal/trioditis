@@ -43,7 +43,9 @@ type Client struct {
 	// failures counts, per message GUID, the catch-ups that couldn't hand it over, so one
 	// message bridgev2 never takes holds catch-up back only so many times.
 	failLock sync.Mutex
-	failures map[string]int
+	failures map[string]*attempts
+	// now, in tests, stands in for the clock.
+	now func() time.Time
 	// take, in tests, stands in for handing a message to bridgev2 (handleNewMessage).
 	take func(*bluebubbles.Message) bool
 
@@ -72,7 +74,7 @@ var (
 )
 
 func newClient(c *Connector, login *bridgev2.UserLogin) *Client {
-	client := &Client{conn: c, login: login, failures: map[string]int{}}
+	client := &Client{conn: c, login: login, failures: map[string]*attempts{}}
 	if c.bridge != nil {
 		// The bridge's logger, not the login's.
 		client.acker = handled.NewAcker(c.bridge.BackgroundCtx, c.bridge.Log.With().Str("component", "imessage ack").Logger())
@@ -262,6 +264,10 @@ func (q *eventQueue) push(evt bluebubbles.Event) {
 
 func (q *eventQueue) pop(ctx context.Context) (bluebubbles.Event, bool) {
 	for {
+		// A session that ended hands nothing more over: the next one catches up instead.
+		if ctx.Err() != nil {
+			return bluebubbles.Event{}, false
+		}
 		q.lock.Lock()
 		if len(q.items) > 0 {
 			evt := q.items[0]
@@ -340,9 +346,15 @@ func (c *Client) markSynced(ctx context.Context, at time.Time) {
 	if at.UnixMilli() <= meta.SyncedUpTo {
 		return
 	}
+	// Kept in memory only once saved: one that isn't saved isn't moved on, so a later save
+	// can't carry a time past what was never recorded.
+	before := meta.SyncedUpTo
 	meta.SyncedUpTo = at.UnixMilli()
-	if err := c.login.Save(ctx); err != nil && ctx.Err() == nil {
-		zerolog.Ctx(ctx).Err(err).Msg("Failed to save how far the login is synced")
+	if err := c.login.Save(ctx); err != nil {
+		meta.SyncedUpTo = before
+		if ctx.Err() == nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to save how far the login is synced")
+		}
 	}
 }
 
@@ -386,9 +398,20 @@ func (c *Client) catchUp(ctx context.Context, connectedAt time.Time) error {
 // stays, and the next catch-up fetches it again.
 var errNotTaken = errors.New("imessage: a caught-up message couldn't be bridged")
 
-// maxAttempts is how many catch-ups a message bridgev2 won't take holds back. Past that it is
-// left, and logged, so one message can't keep a login from ever catching up.
-const maxAttempts = 3
+// maxAttempts is how many catch-ups a message bridgev2 won't take holds back, counted at
+// most once per attemptSpacing, so a short outage (the database restarting, say) that fails
+// every message uses up no more than one. Past that the message is left, and logged, so one
+// message can't keep a login from ever catching up.
+const (
+	maxAttempts    = 3
+	attemptSpacing = 10 * time.Minute
+)
+
+// attempts is one message's failed catch-ups: how many were counted, and when the last was.
+type attempts struct {
+	count int
+	last  time.Time
+}
 
 // handOver hands a caught-up message over, and says whether catching up must stop short of
 // it: bridgev2 couldn't take it, and hasn't failed it maxAttempts times yet.
@@ -404,8 +427,20 @@ func (c *Client) handOver(ctx context.Context, msg *bluebubbles.Message) (holdBa
 		delete(c.failures, msg.GUID)
 		return false
 	}
-	c.failures[msg.GUID]++
-	if c.failures[msg.GUID] < maxAttempts {
+	now := time.Now()
+	if c.now != nil {
+		now = c.now()
+	}
+	a := c.failures[msg.GUID]
+	if a == nil {
+		a = &attempts{}
+		c.failures[msg.GUID] = a
+	}
+	if a.count == 0 || now.Sub(a.last) >= attemptSpacing {
+		a.count++
+		a.last = now
+	}
+	if a.count < maxAttempts {
 		return true
 	}
 	delete(c.failures, msg.GUID)

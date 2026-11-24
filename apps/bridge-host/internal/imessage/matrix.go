@@ -109,7 +109,11 @@ func (c *Client) chatGUID(ctx context.Context, portal *bridgev2.Portal) (string,
 	if errors.As(err, &bbErr) && bbErr.NotFound() {
 		return "", nil
 	} else if err != nil {
-		return "", sendError(err)
+		// Only a lookup failed: nothing was sent.
+		if errors.Is(sendError(err), errNeedsPrivateAPI) {
+			return "", errNeedsPrivateAPI
+		}
+		return "", bridgev2.WrapErrorInStatus(err).WithIsCertain(true).WithErrorReason(event.MessageStatusNetworkError)
 	}
 	return chat.GUID, nil
 }

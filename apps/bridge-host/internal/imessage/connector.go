@@ -80,6 +80,16 @@ type LoginMetadata struct {
 	SyncedUpTo int64 `json:"synced_up_to,omitempty"`
 }
 
+// CopyFrom takes a new sign-in's details for a login that already exists (the same member's
+// same Mac, signing in again, say with a changed password), keeping how far it is synced: a
+// sign-in starting over would bring in only the most recent chats, and miss what came while
+// it was away in the others.
+func (m *LoginMetadata) CopyFrom(other any) {
+	if o, ok := other.(*LoginMetadata); ok && o != nil {
+		m.ServerURL, m.Password = o.ServerURL, o.Password
+	}
+}
+
 func (c *Connector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	login.Client = newClient(c, login)
 	return nil
