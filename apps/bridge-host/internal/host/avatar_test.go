@@ -122,15 +122,40 @@ func oldHost(t *testing.T, dir string, gw *fakeGateway, member networkid.UserID,
 		t.Fatal(err)
 	}
 	h.net.KnowPicture(member, picture)
-	h.host.Connector.AvatarRepairPace = time.Millisecond
 	if err := h.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return h
 }
 
+// ghostAvatar is a member's saved avatar: its content URI, and whether bridgev2 has it set.
+func ghostAvatar(t *testing.T, h *harness, member networkid.UserID) (mxc string, set bool) {
+	t.Helper()
+	if err := h.host.DB.QueryRow(context.Background(), `SELECT avatar_mxc, avatar_set FROM ghost WHERE id=$1`, string(member)).Scan(&mxc, &set); err != nil {
+		t.Fatal(err)
+	}
+	return mxc, set
+}
+
+// waitMarked waits until a member's picture is marked to be fetched again, still naming the
+// saved picture, or has been fetched again already (bridgev2 may see them again meanwhile).
+func waitMarked(t *testing.T, h *harness, member networkid.UserID, stale string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mxc, set := ghostAvatar(t, h, member)
+		if mxc != stale || !set {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the picture wasn't marked to be fetched again")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // A contact whose picture was uploaded before the bridge host kept copies, first met afterwards,
-// is sent at once without it, and then with it, once fetched from the network again.
+// is sent at once without it, and with it once fetched again: the next time they're seen.
 func TestAContactWithNoCopyOfTheirPictureLeftIsSentItOnceFetchedAgain(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
@@ -147,6 +172,7 @@ func TestAContactWithNoCopyOfTheirPictureLeftIsSentItOnceFetchedAgain(t *testing
 
 	h2 := oldHost(t, dir, gw, member, picture)
 	defer h2.host.Stop()
+	stale, _ := ghostAvatar(t, h2, member)
 	if err := h2.net.Incoming("alice-testnet", chat, member, "old-1", "hello from before", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +181,17 @@ func TestAContactWithNoCopyOfTheirPictureLeftIsSentItOnceFetchedAgain(t *testing
 	if got := pictureOf(t, h2, first); got != nil {
 		t.Fatalf("the contact came with a picture, %q, though none could be sent then", got)
 	}
+	waitMarked(t, h2, member, stale)
+	if err := h2.net.Incoming("alice-testnet", chat, member, "old-2", "hello again", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	waitForPicture(t, h2, member, first.Seq, picture)
 }
 
 // At start, a person who was sent a contact without their picture (a database from before kept
-// copies) is sent it, once it's fetched again. A failed download leaves the contact to be tried
-// again, and sends nothing wrong meanwhile.
-func TestContactsSentWithoutTheirPictureAreSentItAtStart(t *testing.T) {
+// copies) is sent it once it's fetched again, the next time the contact is seen. A failed
+// download leaves the contact to be tried again, and sends nothing wrong meanwhile.
+func TestContactsSentWithoutTheirPictureAreSentItWhenNextSeen(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
@@ -191,35 +221,24 @@ func TestContactsSentWithoutTheirPictureAreSentItAtStart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var stale string
-	if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_mxc FROM ghost WHERE id=$1`, string(member)).Scan(&stale); err != nil || stale == "" {
-		t.Fatalf("the member has no picture saved: %q %v", stale, err)
+	stale, _ := ghostAvatar(t, h2, member)
+	if stale == "" {
+		t.Fatal("the member has no picture saved")
 	}
 	h2.net.KnowPicture(member, picture)
 	h2.net.BreakPictures(true)
-	h2.host.Connector.AvatarRepairPace = time.Millisecond
 	before := gw.lastSeq()
 	if err := h2.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// The failed download keeps what the next try needs: the saved picture, marked not set.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var mxc string
-		var set bool
-		if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_mxc, avatar_set FROM ghost WHERE id=$1`, string(member)).Scan(&mxc, &set); err != nil {
-			t.Fatal(err)
-		}
-		if !set {
-			if mxc != stale {
-				t.Fatalf("the failed download replaced the saved picture %q with %q", stale, mxc)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the picture wasn't fetched again")
-		}
-		time.Sleep(20 * time.Millisecond)
+	waitMarked(t, h2, member, stale)
+	if err := h2.net.Incoming("alice-testnet", chat, member, "s-2", "hello while it fails", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "the member's message", isMessage("hello while it fails", h2, "alice"))
+	// The failed download keeps what the next try needs: the saved picture, not set.
+	if mxc, set := ghostAvatar(t, h2, member); mxc != stale || set {
+		t.Fatalf("after a failed download the saved picture is %q (set %v), want %q unset", mxc, set, stale)
 	}
 	if e := lastContact(h2, member, before); e != nil && pictureOf(t, h2, e) != nil {
 		t.Fatal("a contact was sent with a picture though none could be downloaded")
@@ -228,5 +247,8 @@ func TestContactsSentWithoutTheirPictureAreSentItAtStart(t *testing.T) {
 
 	h3 := oldHost(t, dir, gw, member, picture)
 	defer h3.host.Stop()
+	if err := h3.net.Incoming("alice-testnet", chat, member, "s-3", "hello once it works", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	waitForPicture(t, h3, member, before, picture)
 }

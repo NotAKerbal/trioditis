@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -30,7 +29,7 @@ import (
 //     it was sent, so a later change to a name alone carries the picture they already have.
 //
 // A contact sent with no copy left to attach (one whose picture was uploaded before copies were
-// kept) has their picture fetched from the network again (RunAvatarRepairs).
+// kept) is marked for bridgev2 to fetch their picture again (RunAvatarRepairs).
 
 const (
 	// avatarKind is what a kept reference to a person's avatar copy is sealed as.
@@ -113,8 +112,23 @@ func (c *Connector) putAvatarRef(ctx context.Context, ownerUserID string, uri id
 }
 
 // copyKeptAvatar makes the owner a copy of an avatar from the bridge host's own, or nil if it
-// has none it can read.
+// has none it can use.
 func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString, ownerUserID string) *protocol.Attachment {
+	kept := c.keptAvatar(ctx, uri)
+	if kept == nil {
+		return nil
+	}
+	att, err := c.Media.CopyKept(*kept, ownerUserID)
+	if err != nil {
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Copying an avatar's kept copy failed")
+		return nil
+	}
+	return att
+}
+
+// keptAvatar is the reference to the bridge host's own copy of an avatar, or nil if it has none
+// it can use: none was kept, it was sealed to an earlier bridge key, or its file is gone.
+func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) *protocol.Attachment {
 	sealed, err := c.Store.KeptAvatar(ctx, string(uri))
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
@@ -127,30 +141,28 @@ func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString,
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's kept copy couldn't be opened")
 		return nil
 	}
-	att, err := c.Media.CopyKept(kept, ownerUserID)
-	if err != nil {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Copying an avatar's kept copy failed")
+	if !c.Media.HasKept(kept) {
 		return nil
 	}
-	return att
+	return &kept
 }
 
-// avatarRetryAfter is how long after one try a contact's picture is fetched again on demand: a
-// contact the network can't give a picture for isn't asked about at every message.
-const avatarRetryAfter = time.Hour
+// hasAvatarCopy reports whether the host can still make someone a copy of an avatar.
+func (c *Connector) hasAvatarCopy(ctx context.Context, uri id.ContentURIString) bool {
+	return c.Media.Available(uri) || c.keptAvatar(ctx, uri) != nil
+}
 
 // avatarRepairs is the queue of contacts whose picture is to be fetched again.
 type avatarRepairs struct {
 	lock   sync.Mutex
 	queue  []networkid.UserID
 	queued map[networkid.UserID]bool
-	tried  map[networkid.UserID]time.Time
 	wake   chan struct{}
 }
 
 func (r *avatarRepairs) init() {
 	if r.queued == nil {
-		r.queued, r.tried, r.wake = make(map[networkid.UserID]bool), make(map[networkid.UserID]time.Time), make(chan struct{}, 1)
+		r.queued, r.wake = make(map[networkid.UserID]bool), make(chan struct{}, 1)
 	}
 }
 
@@ -161,14 +173,14 @@ func (r *avatarRepairs) wakeChan() chan struct{} {
 	return r.wake
 }
 
-// queueAvatarRepair asks for a contact's picture to be fetched again, unless it already is or was
-// tried lately.
+// queueAvatarRepair asks for a contact's picture to be fetched again. It can't be done here:
+// this may be called while bridgev2 updates the contact, holding its lock.
 func (c *Connector) queueAvatarRepair(ghost networkid.UserID) {
 	r := &c.repairs
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	r.init()
-	if r.queued[ghost] || time.Since(r.tried[ghost]) < avatarRetryAfter {
+	if r.queued[ghost] {
 		return
 	}
 	r.queued[ghost] = true
@@ -189,21 +201,16 @@ func (c *Connector) nextAvatarRepair() (networkid.UserID, bool) {
 	ghost := r.queue[0]
 	r.queue = r.queue[1:]
 	delete(r.queued, ghost)
-	r.tried[ghost] = time.Now()
 	return ghost, true
 }
 
 // RunAvatarRepairs sends contacts their missing pictures until ctx ends. It first looks for
-// people sent a contact whose picture they don't have (scanContactAvatars), then fetches again,
-// one at a time so a long list doesn't run into the network's rate limits, the pictures of
-// contacts with no copy left. A contact it can't help now is looked at again at the next start.
+// people sent a contact whose picture they don't have (scanContactAvatars), then marks each
+// contact with no copy of their picture left for bridgev2 to fetch it again (markAvatarStale).
+// It never asks a network anything itself, so it never waits on one.
 func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 	if err := c.scanContactAvatars(ctx); err != nil && ctx.Err() == nil {
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Looking for contacts sent without their picture failed; it's tried again at the next start")
-	}
-	pace := c.AvatarRepairPace
-	if pace == 0 {
-		pace = time.Second
 	}
 	wake := c.repairs.wakeChan()
 	for {
@@ -216,13 +223,8 @@ func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 				continue
 			}
 		}
-		if err := c.repairContactAvatar(ctx, ghost); err != nil && ctx.Err() == nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Fetching a contact's picture again failed; it's tried again at the next start")
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(pace):
+		if err := c.markAvatarStale(ctx, ghost); err != nil && ctx.Err() == nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Marking a contact's picture to be fetched again failed; it's tried again at the next start")
 		}
 	}
 }
@@ -279,13 +281,9 @@ func (c *Connector) scanContactAvatar(ctx context.Context, userID string, ghost 
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	if !c.Media.Available(dbGhost.AvatarMXC) {
-		if _, err = c.Store.KeptAvatar(ctx, string(dbGhost.AvatarMXC)); errors.Is(err, store.ErrNotFound) {
-			c.queueAvatarRepair(ghost)
-			return nil
-		} else if err != nil {
-			return err
-		}
+	if !c.hasAvatarCopy(ctx, dbGhost.AvatarMXC) {
+		c.queueAvatarRepair(ghost)
+		return nil
 	}
 	o, err := c.anyOwnerFor(ctx, userID, ghost)
 	if err != nil || o == nil {
@@ -295,65 +293,32 @@ func (c *Connector) scanContactAvatar(ctx context.Context, userID string, ghost 
 	return c.emitContact(ctx, o, ghost, nil, nil)
 }
 
-// repairContactAvatar fetches a contact's picture from the network again, through a login of
-// someone who shares a chat with them, when the host has no copy of the one it has. Setting the
-// new upload sends it to everyone who has the contact (ghostProfileChanged).
-func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.UserID) error {
+// markAvatarStale makes bridgev2 fetch a contact's picture again, when the host has no copy of
+// the one it has. bridgev2 downloads a picture again only once it has forgotten which one it has,
+// and refreshes a contact whose avatar isn't set the next time it sees them (a message or a
+// reaction from them; WhatsApp in its next background resync), through the login that saw them.
+// So which picture it has is forgotten, under the contact's lock and saved with it; the content
+// URI stays until a new one replaces it, so a failed download leaves the contact to be found
+// again. The new upload is kept and sent to everyone who has the contact (ghostProfileChanged).
+func (c *Connector) markAvatarStale(ctx context.Context, ghostID networkid.UserID) error {
 	dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghostID)
 	if err != nil || dbGhost == nil || dbGhost.AvatarMXC == "" {
 		return err
 	}
 	stale := dbGhost.AvatarMXC
-	if _, ours := media.ParseContentURI(stale); !ours || c.Media.Available(stale) {
+	if _, ours := media.ParseContentURI(stale); !ours || c.hasAvatarCopy(ctx, stale) {
 		return nil
-	} else if _, err = c.Store.KeptAvatar(ctx, string(stale)); err == nil {
-		// Got since it was queued, so sent to everyone who has the contact.
-		return nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-	login, err := c.loginSharingChatWith(ctx, ghostID)
-	if err != nil || login == nil {
-		return err
 	}
 	ghost, err := c.Bridge.GetGhostByID(ctx, ghostID)
 	if err != nil {
 		return err
 	}
-	// bridgev2 downloads a picture again only once it has forgotten which one it has, so that is
-	// forgotten first, under the ghost's lock and saved with it. The content URI stays until a
-	// new one replaces it: if the download fails, the contact is still found and tried again,
-	// and bridgev2 also tries again the next time it sees them (the avatar isn't set).
 	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{ExtraUpdates: func(_ context.Context, g *bridgev2.Ghost) bool {
-		if g.AvatarMXC != stale {
+		if g.AvatarMXC != stale || (g.AvatarID == "" && g.AvatarHash == [32]byte{} && !g.AvatarSet) {
 			return false
 		}
 		g.AvatarID, g.AvatarHash, g.AvatarSet = "", [32]byte{}, false
 		return true
 	}})
-	// As bridgev2 itself does when it sees a ghost whose avatar isn't set. Some networks
-	// (WhatsApp) fetch it in their own background resync instead.
-	ghost.UpdateInfoIfNecessary(ctx, login, bridgev2.RemoteEventUnknown)
 	return nil
-}
-
-// loginSharingChatWith is a logged-in login of someone who shares a chat with the ghost, or nil.
-func (c *Connector) loginSharingChatWith(ctx context.Context, ghost networkid.UserID) (*bridgev2.UserLogin, error) {
-	rooms, err := c.Store.RoomsOf(ctx, string(ids.GhostMXID(ghost)))
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[networkid.UserLoginID]bool)
-	for _, room := range rooms {
-		key, ok := ids.ParseRoomID(id.RoomID(room))
-		if !ok || key.Receiver == "" || seen[key.Receiver] {
-			continue
-		}
-		seen[key.Receiver] = true
-		login := c.Bridge.GetCachedUserLoginByID(key.Receiver)
-		if login != nil && login.Client != nil && login.Client.IsLoggedIn() {
-			return login, nil
-		}
-	}
-	return nil, nil
 }

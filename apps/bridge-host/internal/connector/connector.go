@@ -56,9 +56,6 @@ type Options struct {
 	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
 	// before checking them; five seconds if zero.
 	DescribeSettle time.Duration
-	// AvatarRepairPace is how long RunAvatarRepairs waits between asking the network for one
-	// contact's picture and the next; a second if zero.
-	AvatarRepairPace time.Duration
 }
 
 // HistoryGate waits, for a bounded time, until the server has room for more history, and says
