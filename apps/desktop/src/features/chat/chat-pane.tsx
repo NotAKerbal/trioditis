@@ -491,10 +491,11 @@ function OpenChat({
     // The text, when there is any, is taken as a send of its own would be, under a send ID of
     // its own with the first file: the same draft sent as text alone, from another tab, is a
     // different message, so neither is taken for the other. A reply alone is taken too, so it
-    // goes with the first file and nothing else.
-    const taken = takeForSend<Message>(to, (t) =>
-      sendIdOfTaken({ ...t, text: `${t.text}\n${fileKey(outgoing[0]!.file)}` }),
-    )
+    // goes with the first file and nothing else. Should the page go between the server taking
+    // that send and this tab hearing so, the text comes back as a draft without its file (files
+    // are only ever in memory), and sending it then sends the text again: the person sees the
+    // file and its caption in the chat first.
+    const taken = takeForSend<Message>(to, (t) => sendIdOfTaken({ ...t, text: `${t.text}\n${fileKey(outgoing[0]!)}` }))
     const reply = taken ? taken.reply : getDraft<Message>(to).reply
     if (!taken && reply) setDraftReply(to, null)
     let first = true
@@ -1066,5 +1067,8 @@ const replyIn = (reply: Message | null, chatId: ChatId) =>
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
   draftSendId(t.id, t.text, t.reply?.eventId)
 
-/** What tells a file apart for a draft's send ID; the file itself never leaves the browser. */
-const fileKey = (file: File) => `\u0000file\n${file.name}\n${file.size}\n${file.lastModified}`
+/**
+ * What tells a file apart for a draft's send ID: its place in this composer, made at random when
+ * it was added, so two files alike in name, size and date are still two sends.
+ */
+const fileKey = (file: OutgoingFile) => `\u0000file\n${file.id}`

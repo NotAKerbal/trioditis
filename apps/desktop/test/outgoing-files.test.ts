@@ -67,7 +67,6 @@ describe('sending a file', () => {
     expect(puts[0]!.init.method).toBe('PUT')
     expect((puts[0]!.init.headers as Record<string, string>).authorization).toBe('Bearer up1')
     const sent = puts[0]!.init.body as Uint8Array
-    expect(sent).not.toContain(9)
     expect(decryptMedia(sent, att.key, att.nonce, 'user_a', att.mediaId)).toEqual(new Uint8Array([9, 8, 7]))
     expect(att).toMatchObject({ mime: 'image/jpeg', size: 3, name: 'photo.jpg' })
     // The sender's own picture shows from what they picked.

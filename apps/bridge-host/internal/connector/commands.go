@@ -93,6 +93,8 @@ type pendingCommand struct {
 	// giveBack returns a send's share of the media store's budget for its file (reserveMedia)
 	// once its chat is released: the connector is done with the file by then.
 	giveBack func()
+	// stopWait ends a wait for that share, once the chat is released: nothing is left to send.
+	stopWait context.CancelFunc
 }
 
 // stuckLimit is how long, in send timeouts, a command may sit inside bridgev2 before a send
@@ -240,7 +242,7 @@ var reverseMsgTypes = func() map[string]event.MessageType {
 
 // matrixContent builds the Matrix message bridgev2 hands the connector from a sealed send.
 // With register false it only checks the attachment, without making it readable.
-func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, register bool) (*event.MessageEventContent, event.Type, error) {
+func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, register bool, notAfter int64) (*event.MessageEventContent, event.Type, error) {
 	evtType := event.EventMessage
 	content := &event.MessageEventContent{MsgType: reverseMsgTypes[plain.Type], Body: plain.Body}
 	if plain.Type == "sticker" {
@@ -259,7 +261,10 @@ func (c *Connector) matrixContent(t *target, plain *protocol.MessagePlaintext, r
 			return nil, evtType, badRequest("invalid attachment")
 		}
 		if register {
-			uri, err := c.Media.Register(att, t.owner.userID, c.SendTimeout)
+			// Readable for as long as the send may still go: it can wait for others' files
+			// (reserveMedia) as well as its chat, and is refused after its deadline anyway.
+			ttl := max(c.SendTimeout, time.Until(time.UnixMilli(notAfter)))
+			uri, err := c.Media.Register(att, t.owner.userID, ttl)
 			if err != nil {
 				return nil, evtType, badRequest("invalid attachment")
 			}
@@ -405,11 +410,35 @@ func (c *Connector) reserveMedia(ctx context.Context, uri id.ContentURIString) e
 	if pending.kind != pendingSend && pending.kind != pendingEdit {
 		return nil
 	}
-	giveBack, err := c.Media.Reserve(ctx, uri)
+	// The wait ends when the send could no longer go (TransmitMargin before its deadline), or
+	// its chat is released.
+	wait, stop := context.WithCancel(ctx)
+	defer stop()
+	if pending.notAfter > 0 {
+		var stopDeadline context.CancelFunc
+		wait, stopDeadline = context.WithDeadline(wait, time.UnixMilli(pending.notAfter).Add(-TransmitMargin))
+		defer stopDeadline()
+	}
+	pending.lock.Lock()
+	if pending.released {
+		pending.lock.Unlock()
+		return errTransmitDeadline
+	}
+	pending.stopWait = stop
+	pending.lock.Unlock()
+	giveBack, err := c.Media.Reserve(wait, uri)
 	if err != nil {
+		if ctx.Err() == nil {
+			// Not this caller giving up: the send waited until it could no longer go.
+			pending.lock.Lock()
+			pending.refusedLate = true
+			pending.lock.Unlock()
+			return errTransmitDeadline
+		}
 		return err
 	}
 	pending.lock.Lock()
+	pending.stopWait = nil
 	if pending.released {
 		// Given up on while it waited: nothing is left to give it back later.
 		pending.lock.Unlock()
@@ -459,7 +488,7 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 		}
 	}
 	if check {
-		_, _, err = c.matrixContent(t, &plain, false)
+		_, _, err = c.matrixContent(t, &plain, false, cmd.NotAfter)
 		return err
 	}
 
@@ -480,7 +509,7 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 		}
 		return err
 	}
-	content, evtType, err := c.matrixContent(t, &plain, true)
+	content, evtType, err := c.matrixContent(t, &plain, true, cmd.NotAfter)
 	if err != nil {
 		return err
 	}
@@ -1187,6 +1216,10 @@ func (c *Connector) release(eventID id.EventID, pending *pendingCommand) {
 	if pending.giveBack != nil {
 		pending.giveBack()
 		pending.giveBack = nil
+	}
+	if pending.stopWait != nil {
+		pending.stopWait()
+		pending.stopWait = nil
 	}
 	c.busy.CompareAndDelete(pending.owner.portalID, eventID)
 	c.wakeWorker()
