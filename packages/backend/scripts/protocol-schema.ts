@@ -52,14 +52,24 @@ function fieldsOf(member: Node) {
 
 const typeOf = (member: Node) => member.fields!.type!.value as (typeof BRIDGE_EVENT_TYPES)[number]
 
-const isLiteralUnion = (node: Node) =>
-  node.kind === 'union' && node.members!.every((member) => member.kind === 'literal')
-
-/** Records the values each literal union under `node` allows, by the path to it. */
-function collectValues(node: Node, path: string, into: Record<string, unknown[]>) {
-  if (isLiteralUnion(node)) into[path] = node.members!.map((member) => member.value)
-  else if (node.kind === 'union') for (const member of node.members!) collectValues(member, path, into)
-  else if (node.kind === 'array') collectValues(node.element!, `${path}[]`, into)
+/**
+ * Records, by path, the values each field under `node` may take: a set of literals, or `any`
+ * once some branch of a union lets it be anything else (a string, an object). The sets of all
+ * of a union's branches are merged, so a value one branch allows is never refused.
+ */
+function collectValues(node: Node, path: string, into: Map<string, Set<unknown> | 'any'>) {
+  if (node.kind === 'literal') {
+    const values = into.get(path)
+    if (values === undefined) into.set(path, new Set([node.value]))
+    else if (values !== 'any') values.add(node.value)
+    return
+  }
+  if (node.kind === 'union') {
+    for (const member of node.members!) collectValues(member, path, into)
+    return
+  }
+  into.set(path, 'any')
+  if (node.kind === 'array') collectValues(node.element!, `${path}[]`, into)
   else if (node.kind === 'object' && !isEnvelopeNode(node))
     for (const [key, field] of Object.entries(node.fields!)) collectValues(field, `${path}.${key}`, into)
 }
@@ -69,8 +79,10 @@ export function buildSchema(): ProtocolSchema {
   for (const member of members) {
     const type = typeOf(member)
     const fields = fieldsOf(member)
+    const collected = new Map<string, Set<unknown> | 'any'>()
+    for (const [name, field] of fields) collectValues(field, name, collected)
     const values: Record<string, unknown[]> = {}
-    for (const [name, field] of fields) collectValues(field, name, values)
+    for (const [path, allowed] of collected) if (allowed !== 'any') values[path] = [...allowed]
     const shape: EventShape = {
       required: fields.filter(([, field]) => field.isOptional === 'required').map(([name]) => name),
       optional: fields.filter(([, field]) => field.isOptional === 'optional').map(([name]) => name),
@@ -115,9 +127,9 @@ const isEnvelopeNode = (node: Node) => node.kind === 'object' && Object.keys(nod
  * `full` sets every field, optional ones included, takes the last choice of each union and
  * non-zero values. Otherwise only required fields are set, with the first choice of each
  * union and zero values (`false`, `0`, `[]`), which a bridge host has to send as such rather
- * than leave out. `choose` overrides which choice the union at a path takes.
+ * than leave out. `choose` overrides which choice the unions at some paths take.
  */
-function sample(node: Node, path: string, full: boolean, choose?: { path: string; index: number }): unknown {
+function sample(node: Node, path: string, full: boolean, choose = new Map<string, number>()): unknown {
   if (isEnvelopeNode(node)) return SAMPLE_ENVELOPE
   const name = path.slice(path.lastIndexOf('.') + 1).replace('[]', '')
   switch (node.kind) {
@@ -131,7 +143,7 @@ function sample(node: Node, path: string, full: boolean, choose?: { path: string
       return node.value
     case 'union': {
       const choices = node.members!
-      const index = choose?.path === path ? choose.index : full ? choices.length - 1 : 0
+      const index = choose.get(path) ?? (full ? choices.length - 1 : 0)
       return sample(choices[index]!, path, full, choose)
     }
     case 'array':
@@ -150,17 +162,32 @@ function sample(node: Node, path: string, full: boolean, choose?: { path: string
   }
 }
 
-/** The path and number of choices of every union in an event with every field. */
-function unionsOf(node: Node, path: string, out: { path: string; choices: Node[] }[] = []) {
+type Choice = { path: string; index: number; label: string }
+
+/**
+ * Every union in an event with every field, with its path, its choices, and the choices of
+ * the unions it sits inside (`within`), which an example of it has to take to reach it.
+ */
+function unionsOf(
+  node: Node,
+  path: string,
+  within: Choice[] = [],
+  out: { path: string; choices: Node[]; within: Choice[] }[] = [],
+) {
   if (isEnvelopeNode(node)) return out
   if (node.kind === 'union') {
-    out.push({ path, choices: node.members! })
-    for (const member of node.members!) unionsOf(member, path, out)
-  } else if (node.kind === 'array') unionsOf(node.element!, `${path}[]`, out)
+    out.push({ path, choices: node.members!, within })
+    node.members!.forEach((member, index) =>
+      unionsOf(member, path, [...within, { path, index, label: labelOf(member, index) }], out),
+    )
+  } else if (node.kind === 'array') unionsOf(node.element!, `${path}[]`, within, out)
   else if (node.kind === 'object')
-    for (const [key, field] of Object.entries(node.fields!)) unionsOf(field, path ? `${path}.${key}` : key, out)
+    for (const [key, field] of Object.entries(node.fields!)) unionsOf(field, path ? `${path}.${key}` : key, within, out)
   return out
 }
+
+const labelOf = (choice: Node, index: number) =>
+  choice.kind === 'literal' ? JSON.stringify(choice.value) : `choice ${index + 1}`
 
 type Vector = { name: string; event: Record<string, unknown> }
 
@@ -180,9 +207,9 @@ export function buildVectors(): ProtocolVectors {
     for (const union of unionsOf(member, '')) {
       if (union.path === 'type') continue
       union.choices.forEach((choice, index) => {
-        const label = choice.kind === 'literal' ? JSON.stringify(choice.value) : `choice ${index + 1}`
-        const event = sample(member, '', true, { path: union.path, index }) as Record<string, unknown>
-        valid.push({ name: `${type} with ${union.path} ${label}`, event })
+        const path = [...union.within, { path: union.path, index, label: labelOf(choice, index) }]
+        const event = sample(member, '', true, new Map(path.map((c) => [c.path, c.index]))) as Record<string, unknown>
+        valid.push({ name: `${type} with ${path.map((c) => `${c.path} ${c.label}`).join(', ')}`, event })
       })
     }
     for (const [name, field] of Object.entries(member.fields!)) {

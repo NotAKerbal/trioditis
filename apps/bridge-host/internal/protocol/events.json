@@ -24,7 +24,11 @@
         "clientMessageId",
         "mentionsMe"
       ],
-      "values": {},
+      "values": {
+        "sender.self": [
+          true
+        ]
+      },
       "maxSealedBytes": 262144
     },
     "edit": {
@@ -39,7 +43,11 @@
       "optional": [
         "clientMessageId"
       ],
-      "values": {},
+      "values": {
+        "sender.self": [
+          true
+        ]
+      },
       "maxSealedBytes": 262144
     },
     "reaction": {
@@ -52,7 +60,11 @@
         "networkTs"
       ],
       "optional": [],
-      "values": {}
+      "values": {
+        "sender.self": [
+          true
+        ]
+      }
     },
     "reactionRemove": {
       "required": [
@@ -62,7 +74,11 @@
         "key"
       ],
       "optional": [],
-      "values": {}
+      "values": {
+        "sender.self": [
+          true
+        ]
+      }
     },
     "redaction": {
       "required": [
@@ -72,7 +88,11 @@
         "networkTs"
       ],
       "optional": [],
-      "values": {}
+      "values": {
+        "sender.self": [
+          true
+        ]
+      }
     },
     "receipt": {
       "required": [
@@ -82,7 +102,11 @@
         "networkTs"
       ],
       "optional": [],
-      "values": {}
+      "values": {
+        "sender.self": [
+          true
+        ]
+      }
     },
     "typing": {
       "required": [
@@ -92,7 +116,11 @@
         "timeoutMs"
       ],
       "optional": [],
-      "values": {}
+      "values": {
+        "sender.self": [
+          true
+        ]
+      }
     },
     "chat": {
       "required": [

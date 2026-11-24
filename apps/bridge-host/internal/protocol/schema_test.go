@@ -2,14 +2,17 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -104,35 +107,50 @@ func TestInvalidEventsAreNeverSent(t *testing.T) {
 	}
 }
 
-// constants are the string constants protocol.go declares whose names start with prefix.
+// constants are the values of the string constants this package declares (outside its
+// tests) whose names start with prefix. Go's type checker works them out, so a constant
+// written as an expression counts as well as a literal. Imports aren't loaded: no constant
+// here depends on one, and the errors that leaves elsewhere don't matter to this.
 func constants(t *testing.T, prefix string) []string {
 	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), "protocol.go", nil, 0)
+	fset := token.NewFileSet()
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []string
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
+	var files []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			value := spec.(*ast.ValueSpec)
-			for i, name := range value.Names {
-				if !strings.HasPrefix(name.Name, prefix) || i >= len(value.Values) {
-					continue
-				}
-				if lit, ok := value.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					text, _ := strconv.Unquote(lit.Value)
-					out = append(out, text)
-				}
-			}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, file)
+	}
+	config := types.Config{
+		Importer: importerFunc(func(string) (*types.Package, error) { return nil, errors.New("not loaded") }),
+		Error:    func(error) {},
+	}
+	pkg, _ := config.Check("protocol", fset, files, nil)
+	var out []string
+	for _, name := range pkg.Scope().Names() {
+		c, ok := pkg.Scope().Lookup(name).(*types.Const)
+		if ok && strings.HasPrefix(name, prefix) && c.Val().Kind() == constant.String {
+			out = append(out, constant.StringVal(c.Val()))
 		}
 	}
 	slices.Sort(out)
+	if len(out) == 0 {
+		t.Fatalf("no %s constants found", prefix)
+	}
 	return out
 }
+
+type importerFunc func(path string) (*types.Package, error)
+
+func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
 
 func sorted(values []any) []string {
 	var out []string

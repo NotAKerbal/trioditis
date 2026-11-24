@@ -6,6 +6,17 @@ import { SCHEMA_FILE, VECTORS_FILE, buildSchema, buildVectors } from '../scripts
 const onDisk = (file: string) =>
   JSON.parse(readFileSync(new URL(file, new URL('../scripts/', import.meta.url)), 'utf8'))
 
+/** What a JSON value holds at a dotted path, where a step ending in `[]` is each element of an array. */
+function valuesAt(value: unknown, path: string[]): unknown[] {
+  if (path.length === 0) return [value]
+  if (typeof value !== 'object' || value === null) return []
+  const step = path[0]!.replace(/\[\]$/, '')
+  const next = (value as Record<string, unknown>)[step]
+  if (next === undefined) return []
+  if (!path[0]!.endsWith('[]')) return valuesAt(next, path.slice(1))
+  return Array.isArray(next) ? next.flatMap((item) => valuesAt(item, path.slice(1))) : []
+}
+
 // The bridge host reads the protocol's event schema from these files, not from the validator,
 // so a validator change that isn't written out would leave it checking events by the old rules.
 describe('protocol schema', () => {
@@ -25,7 +36,7 @@ describe('protocol schema', () => {
       ])
       for (const [path, values] of Object.entries(shape.values)) {
         for (const value of values) {
-          expect(examples.some((vector) => vector.name === `${type} with ${path} ${JSON.stringify(value)}`)).toBe(true)
+          expect(examples.some((vector) => valuesAt(vector.event, path.split('.')).includes(value))).toBe(true)
         }
       }
       // One for each required field it leaves out, and one with a field it doesn't have.
