@@ -28,8 +28,8 @@ import (
 //   - for each person, the reference to their copy (avatarRef), recorded once metadata carrying
 //     it was sent, so a later change to a name alone carries the picture they already have.
 //
-// A contact sent with no copy left to attach (one whose picture was uploaded before copies were
-// kept) is marked for bridgev2 to fetch their picture again (RunAvatarRepairs).
+// A contact sent without a copy of their picture (one uploaded before copies were kept) is sent
+// it again, or marked for bridgev2 to fetch it again if no copy is left (RunAvatarRepairs).
 
 const (
 	// avatarKind is what a kept reference to a person's avatar copy is sealed as.
@@ -211,15 +211,21 @@ func (c *Connector) nextAvatarRepair() (networkid.UserID, bool) {
 	return ghost, true
 }
 
-// RunAvatarRepairs sends contacts their missing pictures until ctx ends. It first looks for
-// people sent a contact whose picture they don't have (scanContactAvatars), then marks each
-// contact with no copy of their picture left for bridgev2 to fetch it again (markAvatarStale).
-// It never asks a network anything itself, so it never waits on one.
+// avatarRepairWorkers is how many contacts are repaired at once: one whose lock a network holds
+// while it waits on a request of its own (WhatsApp's resync) doesn't hold the others up.
+const avatarRepairWorkers = 4
+
+// RunAvatarRepairs sends contacts their missing pictures until ctx ends. It first queues each
+// contact someone was sent without their picture (scanContactAvatars), then repairs each queued
+// contact (repairContactAvatar). It never asks a network anything itself, so it never waits on
+// one; and a stop doesn't wait for a repair waiting on a contact's lock, which bridgev2 gives no
+// way to give up on: that repair ends once the lock is free, or fails once the database is closed.
 func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 	if err := c.scanContactAvatars(ctx); err != nil && ctx.Err() == nil {
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Looking for contacts sent without their picture failed; it's tried again at the next start")
 	}
 	wake := c.repairs.wakeChan()
+	workers := make(chan struct{}, avatarRepairWorkers)
 	for {
 		ghost, ok := c.nextAvatarRepair()
 		if !ok {
@@ -230,27 +236,24 @@ func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 				continue
 			}
 		}
-		// bridgev2 waits for a contact's lock with no way to give up, and a network may hold it
-		// while it waits on a request of its own (WhatsApp's resync), so a stop doesn't wait for
-		// the marking: it ends once the lock is free, or fails once the database is closed.
-		done := make(chan error, 1)
-		go func() { done <- c.markAvatarStale(ctx, ghost) }()
 		select {
 		case <-ctx.Done():
 			return
-		case err := <-done:
-			if err != nil && ctx.Err() == nil {
-				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Marking a contact's picture to be fetched again failed; it's tried again at the next start")
-			}
+		case workers <- struct{}{}:
 		}
+		go func() {
+			defer func() { <-workers }()
+			if err := c.repairContactAvatar(ctx, ghost); err != nil && ctx.Err() == nil {
+				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Repairing a contact's picture failed; it's tried again at the next start")
+			}
+		}()
 	}
 }
 
-// scanContactAvatars finds each person sent a contact whose picture they don't have a copy of
+// scanContactAvatars queues each contact someone was sent without a copy of their picture
 // (before copies were kept, a contact who turned up in someone's chat more than
 // media.UploadTTL after their picture was uploaded was sent with none, and nothing sent it again
-// unless the picture changed). Where the host still has the picture, the contact is sent again
-// with it; otherwise the contact's picture is queued to be fetched again.
+// unless the picture changed).
 func (c *Connector) scanContactAvatars(ctx context.Context) error {
 	rooms, err := c.Store.ContactRooms(ctx)
 	if err != nil {
@@ -274,8 +277,10 @@ func (c *Connector) scanContactAvatars(ctx context.Context) error {
 			if !ok {
 				continue
 			}
-			if err = c.scanContactAvatar(ctx, userID, ghost); err != nil {
+			if missing, err := c.missingAvatar(ctx, userID, ghost); err != nil {
 				failed++
+			} else if missing {
+				c.queueAvatarRepair(ghost)
 			}
 		}
 	}
@@ -285,57 +290,91 @@ func (c *Connector) scanContactAvatars(ctx context.Context) error {
 	return nil
 }
 
-func (c *Connector) scanContactAvatar(ctx context.Context, userID string, ghost networkid.UserID) error {
+// missingAvatar reports whether a person was sent a contact without a copy of the picture the
+// bridge host has saved for them.
+func (c *Connector) missingAvatar(ctx context.Context, userID string, ghost networkid.UserID) (bool, error) {
 	dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghost)
 	if err != nil || dbGhost == nil || dbGhost.AvatarMXC == "" {
-		return err
+		return false, err
 	}
 	if _, ours := media.ParseContentURI(dbGhost.AvatarMXC); !ours {
-		return nil
+		return false, nil
 	}
-	if _, err = c.Store.AvatarRef(ctx, userID, string(dbGhost.AvatarMXC)); err == nil {
-		return nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
+	if _, err = c.Store.AvatarRef(ctx, userID, string(dbGhost.AvatarMXC)); errors.Is(err, store.ErrNotFound) {
+		return true, nil
 	}
-	if !c.hasAvatarCopy(ctx, dbGhost.AvatarMXC) {
-		c.queueAvatarRepair(ghost)
-		return nil
-	}
-	o, err := c.anyOwnerFor(ctx, userID, ghost)
-	if err != nil || o == nil {
-		return err
-	}
-	// The host has the picture: the contact is sent again with it.
-	return c.emitContact(ctx, o, ghost, nil, nil)
+	return false, err
 }
 
-// markAvatarStale makes bridgev2 fetch a contact's picture again, when the host has no copy of
-// the one it has. bridgev2 downloads a picture again only once it has forgotten which one it has,
-// and refreshes a contact whose avatar isn't set the next time it sees them (a message or a
-// reaction from them; WhatsApp in its next background resync), through the login that saw them.
-// So which picture it has is forgotten, under the contact's lock and saved with it; the content
-// URI stays until a new one replaces it, so a failed download leaves the contact to be found
-// again. The new upload is kept and sent to everyone who has the contact (ghostProfileChanged).
-func (c *Connector) markAvatarStale(ctx context.Context, ghostID networkid.UserID) error {
-	dbGhost, err := c.Bridge.DB.Ghost.GetByID(ctx, ghostID)
-	if err != nil || dbGhost == nil || dbGhost.AvatarMXC == "" {
+// repairContactAvatar sends a contact's picture to the people who have the contact without it,
+// under the contact's lock, which bridgev2 holds while it changes their picture and sends it on:
+// so what goes out is the picture they have now, and nothing sent here lands after a newer one.
+// If the host has no copy of it left, it marks the contact for bridgev2 to fetch the picture
+// again instead (markAvatarStale).
+func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.UserID) error {
+	ghost, err := c.Bridge.GetExistingGhostByID(ctx, ghostID)
+	if err != nil || ghost == nil {
 		return err
 	}
-	stale := dbGhost.AvatarMXC
-	if _, ours := media.ParseContentURI(stale); !ours || c.hasAvatarCopy(ctx, stale) {
-		return nil
-	}
-	ghost, err := c.Bridge.GetGhostByID(ctx, ghostID)
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) bool {
+		uri := g.AvatarMXC
+		if _, ours := media.ParseContentURI(uri); !ours {
+			return false
+		}
+		if c.hasAvatarCopy(ctx, uri) {
+			err = c.sendAvatarToContactsWithout(ctx, g, uri)
+			return false
+		}
+		return markAvatarStale(g)
+	}})
+	return err
+}
+
+// sendAvatarToContactsWithout sends the contact again, with their picture, to each person who has
+// them without it. Called under the contact's lock.
+func (c *Connector) sendAvatarToContactsWithout(ctx context.Context, g *bridgev2.Ghost, uri id.ContentURIString) error {
+	rooms, err := c.Store.RoomsOf(ctx, string(ids.GhostMXID(g.ID)))
 	if err != nil {
 		return err
 	}
-	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{ExtraUpdates: func(_ context.Context, g *bridgev2.Ghost) bool {
-		if g.AvatarMXC != stale || (g.AvatarID == "" && g.AvatarHash == [32]byte{} && !g.AvatarSet) {
-			return false
+	var name *string
+	if g.Name != "" {
+		name = &g.Name
+	}
+	for _, room := range rooms {
+		userID, ok := strings.CutPrefix(room, "contacts:")
+		if !ok {
+			continue
 		}
-		g.AvatarID, g.AvatarHash, g.AvatarSet = "", [32]byte{}, false
-		return true
-	}})
+		if _, err = c.Store.AvatarRef(ctx, userID, string(uri)); err == nil {
+			continue
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		o, err := c.anyOwnerFor(ctx, userID, g.ID)
+		if err != nil {
+			return err
+		} else if o == nil {
+			continue
+		}
+		if err = c.emitContact(ctx, o, g.ID, name, &uri); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// markAvatarStale makes bridgev2 fetch a contact's picture again, and says whether it changed
+// anything. bridgev2 downloads a picture again only once it has forgotten which one it has, and
+// refreshes a contact whose avatar isn't set the next time it sees them (a message or a reaction
+// from them; WhatsApp in its next background resync), through the login that saw them. So which
+// picture it has is forgotten, and saved with the contact; the content URI stays until a new one
+// replaces it, so a failed download leaves the contact to be found again. The new upload is kept
+// and sent to everyone who has the contact (ghostProfileChanged). Called under the contact's lock.
+func markAvatarStale(g *bridgev2.Ghost) bool {
+	if g.AvatarID == "" && g.AvatarHash == [32]byte{} && !g.AvatarSet {
+		return false
+	}
+	g.AvatarID, g.AvatarHash, g.AvatarSet = "", [32]byte{}, false
+	return true
 }

@@ -260,3 +260,44 @@ func TestContactsSentWithoutTheirPictureAreSentItWhenNextSeen(t *testing.T) {
 	waitForPicture(t, h2, member, before, picture)
 	h2.host.Stop()
 }
+
+// At start, a person who was sent a contact without a picture the host still has a copy of is
+// sent it again, without waiting for the contact to be seen.
+func TestAContactsPictureTheHostStillHasIsSentAgainAtStart(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, dir, gw)
+	h.login("alice", "alice-testnet")
+	ctx := context.Background()
+	const chat = networkid.PortalID("crowd-kept")
+	member := testconnector.CrowdMember(chat, 1)
+	picture := []byte("a picture the host kept")
+	if err := h.net.SetPicture(ctx, member, picture); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.net.Incoming("alice-testnet", chat, member, "k-1", "hello", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "the member's message", isMessage("hello", h, "alice"))
+	gw.waitFor(t, "the member's contact", isContactOf(h, member))
+	h.host.Stop()
+
+	// As if alice had been sent the contact without it, though the host kept its copy.
+	h2 := buildHost(t, dir, gw)
+	if err := h2.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_avatar_ref`); err != nil {
+		t.Fatal(err)
+	}
+	before := gw.lastSeq()
+	if err := h2.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer h2.host.Stop()
+	waitForPicture(t, h2, member, before, picture)
+	// And the saved picture is left as it was: nothing needed fetching again.
+	if _, set := ghostAvatar(t, h2, member); !set {
+		t.Fatal("a picture the host had was marked to be fetched again")
+	}
+}
