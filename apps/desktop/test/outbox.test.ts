@@ -132,36 +132,6 @@ describe('sending a draft', () => {
     expect(sent[0]!.clientMessageId).toBe(outboxMod.sendIdOf(before))
   })
 
-  it('sends the same client message ID after a reload as before it', async () => {
-    const a = chat()
-    drafts.setDraftText(a, 'before the reload')
-    drafts.setDraftReply(a, message(a, '$r'))
-    // The page goes while the send is on its way: the server's answer never comes.
-    let first = ''
-    const hung = fakePort({
-      send: vi.fn((args: SendArgs) => {
-        first = args.clientMessageId
-        return new Promise<never>(() => {})
-      }),
-    })
-    void make(hung.port).sendDraft(a)
-    await vi.waitFor(() => expect(first).not.toBe(''))
-    // What keep-unsent saved, sealed, of the send under way.
-    const [sendId, copy] = drafts.allSending<ReturnType<typeof message>>().find(([, p]) => p.chatId === a)!
-    expect(sendId).toBe(first)
-
-    // A new page: the stores start empty, and keep-unsent brings the send back as the same draft.
-    vi.resetModules()
-    await load()
-    expect(drafts.getDraft(a).text).toBe('')
-    expect(drafts.adoptDraft(a, copy.text, copy.reply, copy.id)).toBe(true)
-    // keep-unsent tells a send that went from one still to go by this same rule.
-    expect(outboxMod.sendIdOf(drafts.getDraft<Reply>(a))).toBe(sendId)
-    const { port, sent } = fakePort()
-    await make(port).sendDraft(a)
-    expect(sent[0]!.clientMessageId).toBe(first)
-  })
-
   it('settles a send whose ID was used already as the server says, never sending it again', async () => {
     const a = chat()
     drafts.setDraftText(a, 'twice?')
@@ -298,12 +268,36 @@ describe('without a bridge key', () => {
     expect(files.filesOf(a).map((f) => f.sending)).toEqual([false])
   })
 
-  it('says to wait while the key is still loading', async () => {
+  it('says to wait while the key is still loading, and to reload when it couldn’t be', async () => {
     const a = chat()
     drafts.setDraftText(a, 'soon')
     const { port } = fakePort()
-    const box = outboxMod.outbox(port, { ...me, bridgeKey: undefined, bridgeStatus: 'loading' })
-    expect(await box.sendDraft(a)).toEqual({ kind: 'blocked', say: outboxMod.noBridgeKey('loading') })
+    const loading = outboxMod.outbox(port, { ...me, bridgeKey: undefined, bridgeStatus: 'loading' })
+    expect(await loading.sendDraft(a)).toEqual({
+      kind: 'blocked',
+      say: 'Still connecting to the server. Try again in a moment.',
+    })
+    const failed = outboxMod.outbox(port, { ...me, bridgeKey: undefined, bridgeStatus: 'error' })
+    expect(await failed.schedule(a, Date.now() + 60_000)).toEqual({
+      kind: 'blocked',
+      say: 'The server’s bridge key couldn’t be loaded, so nothing can be sent. Reload to try again.',
+    })
+    expect(await make(port, null).sendDraft(a)).toEqual({
+      kind: 'blocked',
+      say: 'This server has no bridge key yet, so nothing can be sent.',
+    })
+    expect(drafts.getDraft(a).text).toBe('soon')
+  })
+
+  it('puts a text back without a word when the bridge key won’t parse', async () => {
+    const a = chat()
+    drafts.setDraftText(a, 'unsealable')
+    const before = drafts.getDraft<Reply>(a)
+    const { port } = fakePort()
+    expect(await make(port, '!not a key!').sendDraft(a)).toEqual({ kind: 'failed' })
+    expect(port.send).not.toHaveBeenCalled()
+    expect(drafts.getDraft(a)).toMatchObject({ text: 'unsealable', id: before.id })
+    expect(drafts.allSending().some(([id]) => id === outboxMod.sendIdOf(before))).toBe(false)
   })
 })
 

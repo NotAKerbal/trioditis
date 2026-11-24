@@ -64,7 +64,8 @@ export interface SendingAs {
  * - `blocked`: nothing was taken: there's no bridge key, or the time can't be used.
  * - `sent` / `scheduled`: the server has it.
  * - `used`: its send ID was used already; settled as `usedOutcome` says, never sent again.
- * - `failed`: what hadn't gone is back in the composer.
+ * - `failed`: what hadn't gone is back in the composer. Said, unless there's nothing the person
+ *   can do about it (a draft whose copy couldn't be sealed).
  */
 export type Outcome =
   | { kind: 'empty'; say?: undefined }
@@ -72,7 +73,7 @@ export type Outcome =
   | { kind: 'sent'; say?: undefined }
   | { kind: 'scheduled'; say: string }
   | { kind: 'used'; action: 'done' | 'check' | 'again'; say: string }
-  | { kind: 'failed'; say: string }
+  | { kind: 'failed'; say?: string }
 
 /** What became of a send again: `declined` when the server didn't make the attempt. */
 export type AgainOutcome =
@@ -156,11 +157,19 @@ export function outbox(port: OutboxPort, as: SendingAs) {
     // Noted as under way, and saved so, before the composer is cleared (I2).
     const taken = takeForSend<Reply>(chatId, sendIdOf)
     if (!taken) return { kind: 'empty' }
-    return whileSending(async () => {
+    return whileSending(async (): Promise<Outcome> => {
+      let sealed: ReturnType<typeof seal>
+      try {
+        sealed = seal({ type: 'text', body: taken.text }, taken.clientMessageId, bridgeKey)
+      } catch {
+        // Only a bridge key that won't parse fails here, which the person can't fix: the text
+        // comes back as the same draft without a word, as a text send always has.
+        putBack(chatId, taken)
+        return { kind: 'failed' }
+      }
       let answer: FunctionReturnType<typeof api.messages.send>
       try {
         const replyTo = replyIn(taken.reply, chatId)
-        const sealed = seal({ type: 'text', body: taken.text }, taken.clientMessageId, bridgeKey)
         answer = await port.send({
           chatId,
           clientMessageId: taken.clientMessageId,
@@ -232,8 +241,9 @@ export function outbox(port: OutboxPort, as: SendingAs) {
         if (used) {
           keepLeft()
           if (first && taken) return settle(chatId, taken, used)!
-          const { action, say } = usedOutcome(used)
-          return { kind: 'used', action, say }
+          // A file's own new ID found used can only be a collision of random IDs: nothing of the
+          // draft came back, so there's nothing to tell, only the files left to send.
+          return { kind: 'failed' }
         }
         if (first && taken) settle(chatId, taken, null)
         removeFile(chatId, f.id)
