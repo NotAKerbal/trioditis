@@ -633,12 +633,11 @@ compose() {
 # --- Images -------------------------------------------------------------------------------
 
 say "Building the images from this checkout (the first build takes a few minutes)"
-# Without the build attestations BuildKit adds by default (their timestamps give every build a
-# new image ID), an unchanged image keeps its ID, so Compose leaves its containers running
-# instead of recreating them, and everything that waits for them, on every run.
-export BUILDX_NO_DEFAULT_ATTESTATIONS=1
-# The Node image is built first, by itself: it generates the key pairs the rest needs.
-docker build -q -f "$here/docker/node.Dockerfile" -t "$project/node:local" "$root" >/dev/null
+# Signal's library is only built when Signal is bridged (build-images.sh).
+build_options=()
+[[ " ${network_list[*]} " != *" signal "* ]] || build_options+=(--with-signal)
+"$here/install/build-images.sh" --project "$project" --tag local --version "$version" \
+  --debian-snapshot "$(get DEBIAN_SNAPSHOT)" "${build_options[@]}"
 
 # Only the pairs chosen above are generated, so a kept pair (which clients may already have
 # sealed to) never changes. The container logs nothing: its output is private keys.
@@ -663,18 +662,6 @@ write_file "$here/runtime/config.json" \
   "{ \"convexUrl\": \"$public_url/convex\", \"convexSiteUrl\": \"$public_url\", \"environment\": \"selfhosted\" }" 644
 # The commit the functions are deployed from (deploy-functions.sh reads it).
 write_file "$here/runtime/version" "$version" 644
-
-# Every bridge host runs one image, built here once: Compose would build it for each
-# network's service at the same time, and the builds collide on the shared tag. Signal's
-# library (Rust) is only built when Signal is bridged (as it is with all): it adds a long
-# first build.
-with_signal=0
-[[ " ${network_list[*]} " != *" signal "* ]] || with_signal=1
-# DEBIAN_SNAPSHOT in deploy/.env, if the operator set one, pins the Debian packages to that day
-# (docs/deploy.md, Building the same images again); compose.yml passes it to the sign-in browser.
-docker build -q --build-arg "WITH_SIGNAL=$with_signal" --build-arg "DEBIAN_SNAPSHOT=$(get DEBIAN_SNAPSHOT)" \
-  -f "$here/docker/bridge-host.Dockerfile" -t "$project/bridge-host:local" "$root" >/dev/null
-compose build --quiet
 
 # Only Caddy is published, in every mode: the Convex backend (3210, 3211) and everything
 # else stay on the internal network, since the backend trusts the client address Caddy

@@ -64,7 +64,7 @@ for file in archive.enc secrets.env.enc; do
   [ "$(head -c 19 "$backup/$file")" = trioditis-backup-v1 ] && decrypt "$backup/$file" >/dev/null &&
     check ok "$file is encrypted, and opens with BACKUP_KEY" || check fail "$file is encrypted, and opens with BACKUP_KEY"
 done
-grep -qx 'format=2' "$backup/backup.info" && grep -qx "project=$project" "$backup/backup.info" &&
+grep -qx 'format=3' "$backup/backup.info" && grep -qx "project=$project" "$backup/backup.info" &&
   check ok "backup.info names the format and project" || check fail "backup.info names the format and project"
 decrypt "$backup/secrets.env.enc" >"$root/secrets.plain"
 # The .env's lines for the listed names, which is everything but the two private keys here.
@@ -76,7 +76,7 @@ done <"$root/deploy/.env" | sort)
   check ok "secrets.env is deploy/.env without the private keys and the backup key" ||
   check fail "secrets.env is deploy/.env without the private keys and the backup key"
 decrypt "$backup/archive.enc" | docker run --rm --log-driver none -i --entrypoint sh "$tool" -c '
-  mkdir /x && tar -xzf - -C /x && ! grep -rqF -e "$1" -e "$2" -e "$3" /x && grep -q "^created [0-9]" /x/trioditis-backup.manifest &&
+  mkdir /x && tar -xf - -C /x && ! grep -rqF -e "$1" -e "$2" -e "$3" /x && grep -q "^created [0-9]" /x/trioditis-backup.manifest &&
     grep -q "^postgres 17$" /x/trioditis-backup.manifest' sh "$bk" "$ak" "$(private_value BACKUP_KEY)" &&
   check ok "the archive holds no key, and its manifest says when and which Postgres" ||
   check fail "the archive holds no key, and its manifest says when and which Postgres"

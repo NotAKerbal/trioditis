@@ -1,6 +1,6 @@
 #!/bin/sh
-# How install.sh writes its files, against a stub docker that stops it at `compose build`
-# (just after the runtime config is written), so nothing is built or started: an existing
+# How install.sh writes its files, against a stub docker that stops it at its first `docker
+# compose` (just after the runtime config is written), so nothing is built or started: an existing
 # deploy/.env it can't read stops the install and stays as it was; a symlink at
 # deploy/runtime/config.json is replaced, not followed; the values Compose gets come from
 # deploy/.env only, not from exported variables; and half a key pair (a public key without
@@ -38,6 +38,7 @@ checkout() {
   rm -rf "$work/checkout"
   mkdir -p "$work/checkout/deploy/install"
   cp "$installer" "$work/checkout/deploy/install/install.sh"
+  cp "$repo/deploy/install/build-images.sh" "$work/checkout/deploy/install/build-images.sh"
   cp -r "$repo/deploy/compose" "$work/checkout/deploy/compose"
   cp -r "$repo/deploy/scripts" "$work/checkout/deploy/scripts"
   cp -r "$repo/deploy/updater" "$work/checkout/deploy/updater"

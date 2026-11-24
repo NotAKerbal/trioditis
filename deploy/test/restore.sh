@@ -193,7 +193,7 @@ done
   check fail "deploy/.env keeps the server's keys and hand-added settings, and the backup's others ($(cat "$root/differs" 2>/dev/null))"
 rm -f "$root/differs"
 [ -n "$recovery" ] && [ "$recovery" != "$b1" ] && decrypt "$recovery/archive.enc" |
-  docker run --rm -i --log-driver none --entrypoint sh "$tool" -c "tar -xzOf - ./${project}_bridge-whatsapp/new" | grep -qx later &&
+  docker run --rm -i --log-driver none --entrypoint sh "$tool" -c "tar -xOf - ./${project}_bridge-whatsapp/new" | grep -qx later &&
   check ok "the server as it was is backed up first" || check fail "the server as it was is backed up first"
 rm -f "$root/installs" "$root/deploy/.restore-settle"
 
@@ -235,7 +235,7 @@ mkdir -m 700 "$backups/older"
 decrypt "$b1/secrets.env.enc" >"$backups/older/secrets.env"
 # shellcheck disable=SC2016 # expanded in the container
 decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
-  mkdir /x && cd /x && tar -xzf - &&
+  mkdir /x && cd /x && tar -xf - &&
   sed -i -e "1s/.*/trioditis-backup 1/" -e "/^\(id\|created\|version\|postgres\) /d" trioditis-backup.manifest &&
   tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/older/archive.tgz"
 fill bridge-whatsapp 'echo three >/v/a'
@@ -245,13 +245,27 @@ run restore --yes "$backups/older"
   { check fail "an older unencrypted backup restores, with a warning"; cat "$root/out" >&2; }
 rm -rf "$backups/older" "$root/installs" "$root/deploy/.restore-settle"
 
+# An encrypted backup from before archives were left uncompressed (format 2, a gzip archive)
+# still restores: the same backup, its archive gzipped and encrypted again.
+mkdir -m 700 "$backups/gzipped"
+sed 's/^format=3$/format=2/' "$b1/backup.info" >"$backups/gzipped/backup.info"
+cp "$b1/secrets.env.enc" "$backups/gzipped/"
+decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint gzip "$tool" -c |
+  encrypt "$backups/gzipped/archive.enc" >"$backups/gzipped/archive.enc"
+fill bridge-whatsapp 'echo six >/v/a'
+run restore --yes "$backups/gzipped"
+[ "$status" = 0 ] && [ "$(contents)" = "$as_backed_up" ] &&
+  check ok "an older encrypted backup, its archive gzipped, restores" ||
+  { check fail "an older encrypted backup, its archive gzipped, restores"; cat "$root/out" >&2; }
+rm -rf "$backups/gzipped" "$root/installs" "$root/deploy/.restore-settle"
+
 # Volumes that don't come out as the manifest says (an older backup whose manifest is wrong):
 # the server as it was is put back, and the restore fails.
 mkdir -m 700 "$backups/wrong"
 decrypt "$b1/secrets.env.enc" >"$backups/wrong/secrets.env"
 # shellcheck disable=SC2016 # expanded in the container
 decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
-  mkdir /x && cd /x && tar -xzf - &&
+  mkdir /x && cd /x && tar -xf - &&
   sed -i -e "s/^\(volume [^ ]*_bridge-whatsapp [0-9]*\) [0-9]*$/\1 999999/" -e "/^id /d" trioditis-backup.manifest &&
   tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/wrong/archive.tgz"
 fill bridge-whatsapp 'echo five >/v/a'
@@ -324,7 +338,7 @@ mkdir -m 700 "$backups/older-again"
 decrypt "$b1/secrets.env.enc" >"$backups/older-again/secrets.env"
 # shellcheck disable=SC2016 # expanded in the container
 decrypt "$b1/archive.enc" | docker run --rm -i --log-driver none --entrypoint sh "$tool" -c '
-  mkdir /x && cd /x && tar -xzf - &&
+  mkdir /x && cd /x && tar -xf - &&
   sed -i -e "1s/.*/trioditis-backup 1/" -e "/^\(id\|created\|version\|postgres\) /d" trioditis-backup.manifest &&
   tar -czf - $(ls -A | grep -vx trioditis-backup.manifest | sed "s|^|./|") ./trioditis-backup.manifest' >"$backups/older-again/archive.tgz"
 rm -f "$env_file" "$root/deploy/.restore-settle"

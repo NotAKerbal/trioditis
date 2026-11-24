@@ -1,8 +1,9 @@
 #!/bin/sh
 # What the updater (deploy/updater/updater.sh) does with a checkout, against a throwaway git
-# remote whose commits carry a stub installer, a stub deploy/trioditis that records backups and
-# restores, and a stub docker that records the reports: it backs the server up first, and an
-# update whose backup fails installs nothing; it moves the checkout's local branch for the
+# remote whose commits carry a stub installer and image build, a stub deploy/trioditis that
+# records backups and restores, and a stub docker that records the reports: it builds the new
+# version's images while the server runs, and a version that doesn't build is called off with
+# nothing stopped; it backs the server up next, and an update whose backup fails installs nothing; it moves the checkout's local branch for the
 # channel forward to the channel's newest commit (so a later `git pull` works) and runs that
 # commit's installer, the backup having left the server stopped; after a failed install it goes
 # back to the commit it was on and restores the backup from before the update (which installs
@@ -33,6 +34,7 @@ cat >"$work/source/deploy/install/install.sh" <<'EOF'
 #!/bin/sh
 root=$(cd "$(dirname "$0")/../.." && pwd)
 echo "installed $(git -C "$root" rev-parse HEAD)" >>"$UPDATER_TEST_LOG"
+echo install >>"$UPDATER_TEST_LOG.sequence"
 # How it was run: its options, and whether it was handed the install's lock.
 lock=no
 if [ -e /dev/fd/9 ] && [ /dev/fd/9 -ef "$root/deploy/.operation.lock" ]; then lock=held; fi
@@ -46,6 +48,17 @@ git_ -C "$work/source" commit -qm one
 c1=$(git -C "$work/source" rev-parse HEAD)
 git_ -C "$work/source" checkout -qb dev
 echo two >"$work/source/file"
+# From c2 on, a stub image build: it records how it was run and from which commit, and leaves a
+# `prebuild` image for the stub docker to list (failing while $UPDATER_TEST_LOG.build-fails exists).
+cat >"$work/source/deploy/install/build-images.sh" <<'EOF'
+#!/bin/sh
+root=$(cd "$(dirname "$0")/../.." && pwd)
+echo "build $* at $(git -C "$root" rev-parse HEAD)" >>"$UPDATER_TEST_LOG.builds"
+echo build >>"$UPDATER_TEST_LOG.sequence"
+if [ -e "$UPDATER_TEST_LOG.build-fails" ]; then printf '\033[31merror:\033[0m The web image broke.\n' >&2; exit 1; fi
+touch "$REPORT_LOG.prebuilt"
+EOF
+chmod +x "$work/source/deploy/install/build-images.sh"
 # Its note: a line that isn't one is left out, and a tab in a line's text is dropped.
 mkdir -p "$work/source/release-notes"
 printf 'New: Make it\ttwo.\nnot a note\nInternal: Count higher.' >"$work/source/release-notes/two.md"
@@ -63,7 +76,7 @@ git -C "$work/checkout" config grep.column true
 mkdir -p "$work/checkout/deploy/updater" "$work/checkout/deploy/scripts"
 cp "$repo/deploy/updater/updater.sh" "$work/checkout/deploy/updater/"
 cp "$repo/deploy/scripts/env.sh" "$work/checkout/deploy/scripts/"
-printf 'COMPOSE_PROJECT_NAME=trioditis-test\nUPDATER_SECRET=test-secret\nUPDATE_BACKUP_DIR=%s\n' "$work/backups" >"$work/checkout/deploy/.env"
+printf 'COMPOSE_PROJECT_NAME=trioditis-test\nUPDATER_SECRET=test-secret\nUPDATE_BACKUP_DIR=%s\nTRIODITIS_NETWORKS=whatsapp,signal\nDEBIAN_SNAPSHOT=20260101T000000Z\n' "$work/backups" >"$work/checkout/deploy/.env"
 # A stub deploy/trioditis: a backup makes a directory with a backup.info (failing while
 # $UPDATER_TEST_LOG.backup-fails exists), and a restore records what it restored and, as the
 # real one does, runs the installer (failing first while $UPDATER_TEST_LOG.restore-fails exists).
@@ -81,6 +94,7 @@ case "$1" in
     kept=started
     [ "$2" != --keep-stopped ] || { kept=stopped; shift; }
     echo "backup $2 $kept lock=$lock" >>"$UPDATER_TEST_LOG.backups"
+    echo backup >>"$UPDATER_TEST_LOG.sequence"
     [ ! -e "$UPDATER_TEST_LOG.backup-fails" ] || { echo "The disk is full." >&2; echo "The backup failed." >&2; exit 1; }
     n=$(cat "$UPDATER_TEST_LOG.n" 2>/dev/null || echo 0)
     n=$((n + 1))
@@ -123,6 +137,9 @@ case " $* " in
   # What's running, after the updater stopped the server: nothing, unless a test says a container
   # is still up.
   ' ps '*) [ ! -e "$REPORT_LOG.still-running" ] || echo abc123 ;;
+  # The images the build beforehand tagged, and their removal.
+  ' image ls '*) [ ! -e "$REPORT_LOG.prebuilt" ] || echo trioditis-test/node:prebuild ;;
+  ' image rm '*) echo "drop $3" >>"$UPDATER_TEST_LOG.sequence" && rm -f "$REPORT_LOG.prebuilt" ;;
   *) echo "stub: unexpected docker $*" >&2; exit 1 ;;
 esac
 EOF
@@ -139,7 +156,10 @@ run() {
   : >"$work/installs.backups"
   : >"$work/installs.server"
   : >"$work/installs.restores"
-  bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
+  : >"$work/installs.builds"
+  : >"$work/installs.sequence"
+  rm -f "$work/reports.prebuilt"
+  HOME=$work/home bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
 }
 head_is() { [ "$(git -C "$work/checkout" rev-parse HEAD)" = "$1" ]; }
@@ -147,6 +167,16 @@ head_is() { [ "$(git -C "$work/checkout" rev-parse HEAD)" = "$1" ]; }
 run update stable
 head_is "$c1" && grep -q '^idle|Already up to date' "$work/out" && [ ! -s "$work/installs" ] &&
   check ok "up to date with stable: nothing installs" || check fail "up to date with stable: nothing installs ($(cat "$work/out"))"
+
+# A version whose images don't build: called off before the backup, with the server running.
+touch "$work/installs.build-fails"
+run update nightly
+rm -f "$work/installs.build-fails"
+head_is "$c1" && [ ! -s "$work/installs" ] && [ ! -s "$work/installs.backups" ] && [ ! -s "$work/installs.server" ] &&
+  grep -q "^failed|${c2%"${c2#???????}"} didn't build, so the server kept running and nothing was installed: The web image broke.$" "$work/out" &&
+  grep -qx 'pending_target=' "$work/checkout/deploy/.updater-state" && grep -qx 'failed_target=' "$work/checkout/deploy/.updater-state" &&
+  check ok "a version that doesn't build is called off before the backup, the server left running, and says why" ||
+  check fail "a version that doesn't build is called off before the backup, the server left running, and says why ($(cat "$work/out" "$work/installs.sequence"))"
 
 # A backup that fails: nothing installs.
 touch "$work/installs.backup-fails"
@@ -168,6 +198,13 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
 [ "$(cat "$work/installs.how")" = "--no-setup-link lock=held" ] &&
   check ok "the installer runs holding the updater's lock, and prints no setup link" ||
   check fail "the installer runs holding the updater's lock, and prints no setup link ($(cat "$work/installs.how"))"
+[ "$(cat "$work/installs.builds")" = "build --project trioditis-test --tag prebuild --version $c2 --debian-snapshot 20260101T000000Z --with-signal at $c2" ] &&
+  check ok "it builds the new version's images first, with that version's build and the install's settings" ||
+  check fail "it builds the new version's images first, with that version's build and the install's settings ($(cat "$work/installs.builds"))"
+[ "$(cat "$work/installs.sequence" | tr '\n' ' ')" = "build backup install drop trioditis-test/node:prebuild " ] &&
+  [ ! -e "$work/home/.local/state/trioditis/trioditis-test/prebuild" ] &&
+  check ok "then backs up and installs, and only then drops the images it built and its checkout" ||
+  check fail "then backs up and installs, and only then drops the images it built and its checkout ($(cat "$work/installs.sequence"))"
 [ "$(cat "$work/installs.backups")" = "backup $work/backups/updater-backups stopped lock=held" ] &&
   check ok "it backs the server up first, holding the lock, and leaves it stopped for the install" ||
   check fail "it backs the server up first, holding the lock ($(cat "$work/installs.backups"))"
@@ -247,10 +284,24 @@ git_ -C "$work/checkout" checkout -q --detach "$c2"
 printf 'pending_target=%s\npending_previous=%s\npending_request=req5\npending_phase=backup\n' "$c3" "$c2" >"$state"
 run recover
 head_is "$c2" && [ ! -s "$work/installs" ] && grep -qx 'start lock=held' "$work/installs.server" &&
-  grep -q "^failed|The update to ${c3%"${c3#???????}"} was cut off while the server was being backed up, before anything was installed.*|req5|" "$work/reports" &&
+  grep -q "^failed|The update to ${c3%"${c3#???????}"} was cut off before anything was installed.*|req5|" "$work/reports" &&
   grep -qx 'pending_target=' "$state" && grep -qx 'failed_target=' "$state" &&
   check ok "an update cut off while backing up starts the server again, installing nothing" ||
   check fail "an update cut off while backing up starts the server again, installing nothing ($(cat "$work/reports" "$work/installs.server" "$state"))"
+rm -f "$state"
+
+# Cut off while building (nothing stopped or installed): the next start drops what it built,
+# starts nothing, and reports the request done without counting the target as failed.
+git_ -C "$work/checkout" checkout -q --detach "$c2"
+printf 'pending_target=%s\npending_previous=%s\npending_request=req11\npending_phase=build\n' "$c3" "$c2" >"$state"
+mkdir -p "$work/home/.local/state/trioditis/trioditis-test/prebuild"
+run recover
+head_is "$c2" && [ ! -s "$work/installs" ] && [ ! -s "$work/installs.server" ] &&
+  [ ! -e "$work/home/.local/state/trioditis/trioditis-test/prebuild" ] &&
+  grep -q "^failed|The update to ${c3%"${c3#???????}"} was cut off before anything was installed.*|req11|" "$work/reports" &&
+  grep -qx 'pending_target=' "$state" && grep -qx 'failed_target=' "$state" &&
+  check ok "an update cut off while building starts nothing, drops its checkout, and reports the request done" ||
+  check fail "an update cut off while building starts nothing, drops its checkout, and reports the request done ($(cat "$work/reports" "$work/installs.server" "$state"))"
 rm -f "$state"
 
 # From c1, with dev at c3: a request cancelled before the update claimed it, and a lock held

@@ -97,3 +97,12 @@ decrypt() {
     docker run --rm -i --network none --log-driver none -e BACKUP_KEY -e BACKUP_CONTEXT \
     "$node_image" node --input-type=module -e "$(cat "$scripts/backup-crypt.mjs")" decrypt <"$1"
 }
+# encrypt <file>: stdin encrypted as that backup file would be (the counterpart of decrypt), on
+# stdout, for making a backup in an older format.
+encrypt() {
+  case "$(basename "$1")" in archive.enc) role=archive ;; *) role=settings ;; esac
+  backup_id=$(sed -n 's/^id=//p' "$(dirname "$1")/backup.info" 2>/dev/null)
+  BACKUP_KEY=$(private_value BACKUP_KEY) BACKUP_CONTEXT=${backup_id:+$backup_id/$role} \
+    docker run --rm -i --network none --log-driver none -e BACKUP_KEY -e BACKUP_CONTEXT \
+    "$node_image" node --input-type=module -e "$(cat "$scripts/backup-crypt.mjs")" encrypt
+}
