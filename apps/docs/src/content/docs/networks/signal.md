@@ -39,7 +39,7 @@ or built locally with Rust `1.98.1` (`cargo build -p libsignal-ffi --release --l
 
 ## Why Trioditis patches `mautrix-signal`
 
-Upstream `mautrix-signal` automatically resends messages on dropped WebSockets and `500`/`503` responses, which can deliver duplicates. Trioditis pins a minimal, CI-verified patch (`apps/bridge-host/third_party/mautrix-signal.patch`) so any ambiguous send or 60-second unanswered send returns `unknown` instead of silently retrying, and caches messages for Signal decryption-error retries **only** for recipients Signal confirmed accepting.
+Upstream `mautrix-signal` automatically resends messages on dropped WebSockets and `500`/`503` responses, which can deliver duplicates. Trioditis pins a minimal, CI-verified patch (`apps/bridge-host/third_party/mautrix-signal.patch`) so any ambiguous send or 60-second unanswered send returns `unknown` instead of silently retrying, and caches messages for Signal decryption-error retries **only** for recipients Signal confirmed accepting. An edit or a deletion that reaches only some of a group's members is reported as uncertain too (`sendChange`), so the app doesn't show an edit as saved, or drop its copy of a message, that some members still see as it was.
 
 ## Unsupported & known limits
 

@@ -74,6 +74,9 @@ describe('which messages can be edited or deleted', () => {
       false,
     )
     expect(canEditMessage(message('a', { body: null }), 'signal', NOW)).toBe(false)
+    // Formatting, a forwarded Telegram message's header among it, would be lost; Telegram won't edit a forward.
+    const forwarded = { type: 'text' as const, body: 'Forwarded message from Ann', html: '<blockquote>hi</blockquote>' }
+    expect(canEditMessage(message('a', { body: forwarded }), 'telegram', NOW)).toBe(false)
   })
 
   it('deletes files too, within each network’s own limit', () => {

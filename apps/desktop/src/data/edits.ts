@@ -22,7 +22,8 @@ const within = (m: Message, maxAgeMs: number | null, now: number) => maxAgeMs ==
 
 /**
  * Whether the person can change this message's text now: their own plain text message (one with
- * a file or cut short isn't), on a network that edits, inside its time limit and its cap on
+ * a file, formatting, or cut short isn't: an edit is plain text, and a forwarded Telegram message,
+ * which Telegram won't edit, always has formatting), on a network that edits, inside its time limit and its cap on
  * edits (messages.edit).
  */
 export function canEditMessage(m: Message, network: Network, now: number): boolean {
@@ -35,6 +36,7 @@ export function canEditMessage(m: Message, network: Network, now: number): boole
     body.type === 'text' &&
     !!body.body &&
     !body.attachments?.length &&
+    !body.html &&
     !body.truncated &&
     (limit.maxEdits === undefined || m.edits < limit.maxEdits) &&
     within(m, limit.maxAgeMs, now)

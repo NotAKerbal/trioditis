@@ -1001,6 +1001,7 @@ func TestConformance(t *testing.T) {
 		for i, plain := range []protocol.MessagePlaintext{
 			{Type: "image", Body: "a.png"},
 			{Type: "text", Body: "caption", Attachments: []protocol.Attachment{{MediaID: "AAAAAAAAAAAAAAAAAAAAAA", Mime: "image/png", Size: 1}}},
+			{Type: "text", Body: "what it says", HTML: "<b>something else</b>"},
 		} {
 			id := fmt.Sprintf("cm-media-edit-%d", i)
 			edit := sendCommand(id, "")
