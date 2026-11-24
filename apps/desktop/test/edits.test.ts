@@ -25,6 +25,7 @@ function message(id: string, fields: Partial<Message> = {}): Message {
     at: NOW - MINUTE,
     body: { type: 'text', body: 'hello' },
     edited: false,
+    edits: 0,
     deleted: false,
     replyTo: undefined,
     clientMessageId: undefined,
@@ -52,6 +53,12 @@ describe('which messages can be edited or deleted', () => {
     expect(canEditMessage(message('a', { at: NOW - 16 * MINUTE }), 'whatsapp', NOW)).toBe(false)
     expect(canEditMessage(message('a', { at: 0 }), 'telegram', NOW)).toBe(true)
     expect(canEditMessage(message('a'), 'gmessages', NOW)).toBe(false)
+    // GroupMe's connector keeps an edit's text unsealed, and X can edit only some chats.
+    expect(canEditMessage(message('a'), 'groupme', NOW)).toBe(false)
+    expect(canEditMessage(message('a'), 'twitter', NOW)).toBe(false)
+    // Signal allows ten edits of a message.
+    expect(canEditMessage(message('a', { edits: 9 }), 'signal', NOW)).toBe(true)
+    expect(canEditMessage(message('a', { edits: 10 }), 'signal', NOW)).toBe(false)
     expect(canEditMessage(message('a'), 'bluesky', NOW)).toBe(false)
   })
 

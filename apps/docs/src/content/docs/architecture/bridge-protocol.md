@@ -96,19 +96,19 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 - **Size caps:** Sealed messages/edits in events max 256 KiB (auto-truncated with `truncated: true`); chat/contact metadata and collages max 8 KiB; client outbound sends and login input max 64 KiB; login steps max 64 KiB; `hostId` max 64 chars.
 - **Deadlines:** Sends carry `notAfter` (24 hours); reactions and their removals carry `notAfter` (10 minutes); login commands expire after 10 minutes (`expired`). Payloads are deleted from the host as soon as execution finishes.
 
-| Type                | Fields                                                                             | Outcome event                                    |
-| ------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `send`              | `portalId`, `clientMessageId`, `sealed` (`outbound`), `notAfter`, `replyTo?`       | `sendStatus`, then echoed `message`              |
-| `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed` (`outbound`), `notAfter?` | `sendStatus`, then `edit`                        |
-| `react` / `unreact` | `portalId`, `targetEventId`, `key`, `notAfter?`                                    | `reaction` / `reactionRemove`                    |
-| `redact`            | `portalId`, `targetEventId`                                                        | `redaction`                                      |
-| `markRead`          | `portalId`, `upToEventId`                                                          | none                                             |
-| `typing`            | `portalId`, `typing`                                                               | none                                             |
-| `loginStart`        | `loginSessionId`, `network`, `flowId?`                                             | `loginStep`                                      |
-| `loginSubmit`       | `loginSessionId`, `stepId`, `sealed` (`outbound`, `<loginSessionId>/<stepId>`)     | `loginStep`                                      |
-| `loginCancel`       | `loginSessionId`                                                                   | `loginStep` (`cancelled`)                        |
-| `logout`            | —                                                                                  | `loginState` (`LOGGED_OUT`)                      |
-| `backfill`          | `portalId`, `beforeEventId?`, `limit` (1–500)                                      | `historical: true` messages, then `backfillDone` |
+| Type                | Fields                                                                                              | Outcome event                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `send`              | `portalId`, `clientMessageId`, `sealed` (`outbound`), `notAfter`, `replyTo?`                        | `sendStatus`, then echoed `message`              |
+| `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed` (`outbound`, plain text only), `notAfter?` | `sendStatus`, then `edit`                        |
+| `react` / `unreact` | `portalId`, `targetEventId`, `key`, `notAfter?`                                                     | `reaction` / `reactionRemove`                    |
+| `redact`            | `portalId`, `targetEventId`                                                                         | `redaction`                                      |
+| `markRead`          | `portalId`, `upToEventId`                                                                           | none                                             |
+| `typing`            | `portalId`, `typing`                                                                                | none                                             |
+| `loginStart`        | `loginSessionId`, `network`, `flowId?`                                                              | `loginStep`                                      |
+| `loginSubmit`       | `loginSessionId`, `stepId`, `sealed` (`outbound`, `<loginSessionId>/<stepId>`)                      | `loginStep`                                      |
+| `loginCancel`       | `loginSessionId`                                                                                    | `loginStep` (`cancelled`)                        |
+| `logout`            | —                                                                                                   | `loginState` (`LOGGED_OUT`)                      |
+| `backfill`          | `portalId`, `beforeEventId?`, `limit` (1–500)                                                       | `historical: true` messages, then `backfillDone` |
 
 ### Send delivery rules
 

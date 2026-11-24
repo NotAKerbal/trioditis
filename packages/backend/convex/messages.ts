@@ -351,6 +351,9 @@ export const edit = mutation({
     if (pastLimit(info.edit.maxAgeMs, message, now)) {
       throw new ConvexError(`It’s too late to edit that message on ${info.name}.`)
     }
+    if (info.edit.maxEdits !== undefined && (message.edits ?? 0) >= info.edit.maxEdits) {
+      throw new ConvexError(`${info.name} doesn’t allow that message to be edited again.`)
+    }
     await queueCommand(
       ctx,
       {

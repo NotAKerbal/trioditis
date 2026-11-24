@@ -28,15 +28,17 @@ export interface NetworkInfo {
   reactions: boolean
   /**
    * The person can change the text of their own messages (`messages.edit`): for `maxAgeMs`
-   * after sending, or with no limit when that's null. Null when the network can't edit.
+   * after sending, or with no limit when that's null, and at most `maxEdits` times where the
+   * network caps it. Null when the network can't edit.
    */
-  edit: { maxAgeMs: number | null } | null
+  edit: { maxAgeMs: number | null; maxEdits?: number } | null
   /**
    * The person can delete their own messages (`messages.remove`): for everyone in the chat, or
-   * only from their own account (`forEveryone` false, where others may keep it), for `maxAgeMs`
-   * after sending or with no limit. Null when the network can't delete.
+   * only from their own account (`forEveryone` false, where others may keep it), or either,
+   * depending on the chat (`'depends'`), for `maxAgeMs` after sending or with no limit. Null when
+   * the network can't delete.
    */
-  delete: { forEveryone: boolean; maxAgeMs: number | null } | null
+  delete: { forEveryone: boolean | 'depends'; maxAgeMs: number | null } | null
 }
 
 const MINUTE = 60 * 1000
@@ -94,7 +96,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'qr', kind: 'qr', name: 'Link a device' }],
     termsRisk: false,
     reactions: true,
-    edit: { maxAgeMs: 24 * HOUR },
+    edit: { maxAgeMs: 24 * HOUR, maxEdits: 10 },
     delete: { forEveryone: true, maxAgeMs: 24 * HOUR },
   },
   gmessages: {
@@ -137,7 +139,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE },
+    edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
     delete: { forEveryone: true, maxAgeMs: null },
   },
   instagram: {
@@ -148,7 +150,7 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE },
+    edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
     delete: { forEveryone: true, maxAgeMs: null },
   },
   discord: {
@@ -197,7 +199,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     // GroupMe has a public API for third-party apps using a person's own access token.
     termsRisk: false,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE },
+    // The connector keeps an edit's text in the bridge database unsealed (its native_content), so
+    // edits aren't offered.
+    edit: null,
     delete: { forEveryone: true, maxAgeMs: null },
   },
   gvoice: {
@@ -233,9 +237,11 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'cookies', kind: 'cookies', name: 'Sign in on x.com' }],
     termsRisk: true,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE },
-    // Only an encrypted (XChat) conversation deletes for everyone; any other, for the person only.
-    delete: { forEveryone: false, maxAgeMs: null },
+    // Only an encrypted (XChat) conversation can be edited, and only it deletes for everyone; any
+    // other deletes for the person only. Which one a chat is isn't known here, so edits aren't
+    // offered and a deletion says it depends.
+    edit: null,
+    delete: { forEveryone: 'depends', maxAgeMs: null },
   },
   bluesky: {
     network: 'bluesky',

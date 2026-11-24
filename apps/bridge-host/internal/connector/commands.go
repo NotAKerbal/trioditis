@@ -483,6 +483,11 @@ func (c *Connector) handleSend(ctx context.Context, cmd *protocol.Command, check
 		if cmd.TargetEventID == "" {
 			return badRequest("targetEventId is required")
 		}
+		// An edit changes a message's text, nothing else: one carrying a file or another kind
+		// of message would have the connector replace media, which the app never offers.
+		if plain.Type != "text" || len(plain.Attachments) > 0 {
+			return badRequest("an edit is plain text only")
+		}
 		if err = c.checkTarget(ctx, t, cmd.TargetEventID); err != nil {
 			return err
 		}

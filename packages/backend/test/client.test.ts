@@ -470,6 +470,25 @@ describe('editing and deleting', () => {
     expect(commands.map((c) => c.payload.type)).toEqual(['edit', 'redact', 'edit', 'redact'])
   })
 
+  it('stops at a network’s cap on edits, counting each edit that arrives', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    // Signal allows ten edits of a message.
+    const chatId = await aChat(t, 'user_a', 'p', { network: 'signal' })
+    await aMessage(t, chatId, 'net_nine', Date.now(), { ...mine, network: 'signal', edits: 9 })
+    await aMessage(t, chatId, 'net_ten', Date.now(), { ...mine, network: 'signal', edits: 10 })
+    const nine = await messageIdOf(t, 'net_nine')
+    await a.mutation(api.messages.edit, { chatId, messageId: nine, clientMessageId: id(1), forBridge: sealed('e') })
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId,
+        messageId: await messageIdOf(t, 'net_ten'),
+        clientMessageId: id(2),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/Signal doesn’t allow that message to be edited again/)
+  })
+
   it('refuses a network that can’t, an ID or edit that isn’t valid, and someone else’s chat', async () => {
     const t = setup()
     const a = await signIn(t, 'user_a')

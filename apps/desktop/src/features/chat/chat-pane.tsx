@@ -1048,7 +1048,14 @@ function OpenChat({
           onCancelReply={() => setReplyTo(null)}
           onSend={editing ? saveEdit : () => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
-          disabled={lost ? 'Choose where to send this.' : composerBlocked(sendChat.row, bridge.status)}
+          disabled={
+            // An edit goes on its message's own chat, whichever one the composer sends on.
+            editing
+              ? composerBlocked((members.find((c) => c.id === editing.message.chatId) ?? chat).row, bridge.status)
+              : lost
+                ? 'Choose where to send this.'
+                : composerBlocked(sendChat.row, bridge.status)
+          }
           editing={editing ? { onCancel: () => setEditing(null) } : null}
           onEditLast={() => {
             const now = Date.now()
@@ -1059,10 +1066,18 @@ function OpenChat({
         <Dialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
           <DialogContent className="w-[min(400px,calc(100vw-32px))] p-6">
             <DialogTitle className="text-md">
-              {deleteLimit?.forEveryone === false ? 'Delete for you?' : 'Delete for everyone?'}
+              {deleteLimit?.forEveryone === false
+                ? 'Delete for you?'
+                : deleteLimit?.forEveryone === 'depends'
+                  ? 'Delete message?'
+                  : 'Delete for everyone?'}
             </DialogTitle>
             {deleteLimit?.forEveryone === false ? (
               <DialogDescription className="mt-2 text-sm">Others in the chat may still have it.</DialogDescription>
+            ) : deleteLimit?.forEveryone === 'depends' ? (
+              <DialogDescription className="mt-2 text-sm">
+                It’s deleted for everyone in an encrypted chat, and only for you in others.
+              </DialogDescription>
             ) : (
               <DialogDescription className="sr-only">It’s deleted for everyone in the chat.</DialogDescription>
             )}
@@ -1128,6 +1143,7 @@ function replyStub(eventId: string, chatId: ChatId): Message {
     at: 0,
     body: null,
     edited: false,
+    edits: 0,
     deleted: false,
     replyTo: undefined,
     clientMessageId: undefined,

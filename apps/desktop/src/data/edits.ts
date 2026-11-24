@@ -22,7 +22,8 @@ const within = (m: Message, maxAgeMs: number | null, now: number) => maxAgeMs ==
 
 /**
  * Whether the person can change this message's text now: their own plain text message (one with
- * a file or cut short isn't), on a network that edits, inside its time limit (messages.edit).
+ * a file or cut short isn't), on a network that edits, inside its time limit and its cap on
+ * edits (messages.edit).
  */
 export function canEditMessage(m: Message, network: Network, now: number): boolean {
   const limit = NETWORK_INFO[network]?.edit
@@ -35,6 +36,7 @@ export function canEditMessage(m: Message, network: Network, now: number): boole
     !!body.body &&
     !body.attachments?.length &&
     !body.truncated &&
+    (limit.maxEdits === undefined || m.edits < limit.maxEdits) &&
     within(m, limit.maxAgeMs, now)
   )
 }

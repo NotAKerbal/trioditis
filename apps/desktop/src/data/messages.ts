@@ -30,6 +30,8 @@ export interface Message {
   /** The opened content: the latest edit if there is one. Null if deleted or unopenable. */
   body: MessagePlaintext | null
   edited: boolean
+  /** How many edits of it have arrived, for networks that cap them (NETWORK_INFO `maxEdits`). */
+  edits: number
   deleted: boolean
   replyTo: string | undefined
   clientMessageId: string | undefined
@@ -59,6 +61,7 @@ function toMessage(m: Doc<'messages'>, session: Session): Message {
     at: m.networkTs,
     body: m.redactedAt ? null : openBody(m, session),
     edited: !!m.sealedEdit,
+    edits: m.edits ?? 0,
     deleted: m.redactedAt !== undefined,
     replyTo: m.replyTo,
     clientMessageId: m.clientMessageId,

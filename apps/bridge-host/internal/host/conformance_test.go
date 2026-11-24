@@ -995,6 +995,26 @@ func TestConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("an edit that isn't plain text is refused before it runs", func(t *testing.T) {
+		before := len(h.net.Sent())
+		target := gw.waitFor(t, "a message in this chat", isMessage("from my phone", h, "alice")).EventID
+		for i, plain := range []protocol.MessagePlaintext{
+			{Type: "image", Body: "a.png"},
+			{Type: "text", Body: "caption", Attachments: []protocol.Attachment{{MediaID: "AAAAAAAAAAAAAAAAAAAAAA", Mime: "image/png", Size: 1}}},
+		} {
+			id := fmt.Sprintf("cm-media-edit-%d", i)
+			edit := sendCommand(id, "")
+			edit.Type, edit.TargetEventID = protocol.CommandEdit, target
+			edit.Sealed = h.sealForBridge("alice", id, plain)
+			if status, body := h.command(edit); status != http.StatusBadRequest || strings.TrimSpace(body) != `{"error":"invalid_command"}` {
+				t.Fatalf("expected 400 invalid_command for a %s edit, got %d %s", plain.Type, status, body)
+			}
+		}
+		if len(h.net.Sent()) != before {
+			t.Fatal("a media edit was run")
+		}
+	})
+
 	t.Run("a reply to a message in another chat is refused", func(t *testing.T) {
 		if err := h.net.Incoming(aliceNet, "other-chat", "peer-other", "o1", "in another chat", time.Now()); err != nil {
 			t.Fatal(err)

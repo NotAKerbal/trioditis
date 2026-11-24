@@ -1429,11 +1429,15 @@ describe('editing and deleting the person’s own messages', () => {
     })
   }
 
-  async function echo(t: T, event: Record<string, unknown>) {
+  /** Each host numbers its own events: another host's start from 1. */
+  async function echo(t: T, event: Record<string, unknown>, hostId = HOST.hostId, hostSeq?: number) {
     return await t.mutation(api.gateway.ingest, {
       secret: GATEWAY_SECRET,
       ...HOST,
-      events: [{ seq: ++seq, userId: 'user_a', loginId: 'login_a', portalId: 'portal_1', at: Date.now(), ...event }],
+      hostId,
+      events: [
+        { seq: hostSeq ?? ++seq, userId: 'user_a', loginId: 'login_a', portalId: 'portal_1', at: Date.now(), ...event },
+      ],
     } as never)
   }
 
@@ -1508,6 +1512,47 @@ describe('editing and deleting the person’s own messages', () => {
       { clientMessageId: id(1), delivery: 'failed' },
     ])
     expect(await payloadOf(t, id(1))).toBeNull()
+  })
+
+  it('takes an edit’s and a deletion’s echoes from the host they went to, after the login moved', async () => {
+    const { t, as } = await ready()
+    const chatId = await aChat(t, 'user_a')
+    const edited = await own(t, chatId, 'net_1')
+    const removed = await own(t, chatId, 'net_2')
+    await as.mutation(api.messages.edit, {
+      chatId,
+      messageId: edited,
+      clientMessageId: id(1),
+      forBridge: sealed('e1'),
+    })
+    const [editCommand] = await claim(t)
+    await accept(t, editCommand!)
+    await as.mutation(api.messages.remove, { chatId, messageId: removed })
+    const [removeCommand] = await claim(t)
+    await accept(t, removeCommand!)
+    // whatsapp-1 made both, then the login moved to whatsapp-2 before their echoes arrived.
+    await loginOn(t, 'whatsapp-2')
+    const editEcho = {
+      type: 'edit',
+      eventId: 'net_edit_1',
+      targetEventId: 'net_1',
+      networkTs: Date.now(),
+      sender: { self: true },
+      sealed: sealed('copy'),
+      clientMessageId: id(1),
+    }
+    const removeEcho = { type: 'redaction', targetEventId: 'net_2', sender: { self: true }, networkTs: Date.now() }
+    // The same echoes from a host that neither runs the login nor was given them are refused.
+    await echo(t, editEcho, 'whatsapp-3', 1)
+    await echo(t, removeEcho, 'whatsapp-3', 2)
+    const quarantined = await t.run(async (ctx) => await ctx.db.query('quarantine').collect())
+    expect(quarantined.map((q) => q.reason)).toEqual(['foreign_host', 'foreign_host'])
+    expect(await t.run(async (ctx) => await ctx.db.get(edited))).not.toHaveProperty('sealedEdit')
+    await status(t, id(1), 'sent')
+    await echo(t, editEcho)
+    await echo(t, removeEcho)
+    expect(await t.run(async (ctx) => await ctx.db.get(edited))).toMatchObject({ editEventId: 'net_edit_1', edits: 1 })
+    expect(await t.run(async (ctx) => await ctx.db.get(removed))).toMatchObject({ redactedAt: expect.any(Number) })
   })
 
   it('deletes a message once, and marks it deleted when the network says so', async () => {
