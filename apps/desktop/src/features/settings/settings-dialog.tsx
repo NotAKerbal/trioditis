@@ -37,7 +37,7 @@ import {
   RefreshCw,
   Users,
 } from 'lucide-react'
-import { useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useSidebarLayout } from '~/data/chats.ts'
 import { authClient, derivedAuthPassword } from '~/lib/auth-client.ts'
 import { passkeysUnavailable } from '~/lib/desktop.ts'
@@ -142,6 +142,18 @@ function Panel({
       const lost = !(focused instanceof HTMLElement) || focused === document.body || !focused.checkVisibility()
       if (lost && to.current?.checkVisibility()) to.current.focus()
     })
+  // Opened at the list on a section further down it (the account menu's Admin settings opens
+  // Members), the list starts there rather than at the top, where a short screen would hide it.
+  // Once, after the dialog has put focus on its first control.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const open = currentItem.current
+      if (!list || !open?.checkVisibility()) return
+      open.scrollIntoView({ block: 'nearest' })
+      open.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [])
   const item = (s: (typeof SETTINGS_SECTIONS)[number]) => (
     <Button
       variant="bare"
