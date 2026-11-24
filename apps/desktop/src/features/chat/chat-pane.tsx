@@ -1,5 +1,5 @@
 import type { Id } from '@trioditis/backend/dataModel'
-import { NETWORK_INFO, type Attachment } from '@trioditis/core'
+import { NETWORK_INFO } from '@trioditis/core'
 import { Button } from '@trioditis/ui/button'
 import {
   DropdownMenu,
@@ -504,50 +504,43 @@ function OpenChat({
     let first = true
     await whileSending(async () => {
       for (const f of outgoing) {
-        let caption = first ? taken?.text : undefined
-        let clientMessageId = first && taken ? taken.clientMessageId : newClientId()
-        let replyTo = first ? replyIn(reply, to) : undefined
-        let attachment: Attachment | undefined
-        for (;;) {
-          let outcome: Awaited<ReturnType<typeof send>>
-          try {
-            attachment ??= await uploadFile(session.userId, to, f.file)
-            // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
-            const message: MessagePlaintext = {
-              type: messageTypeOf(attachment.mime),
-              body: caption || attachment.name || 'File',
-              attachments: [attachment],
-            }
-            const sealed = sealMessage(
-              message,
-              clientMessageId,
-              session.userId,
-              session.keyPair.publicKey,
-              bridgePublicKey,
-            )
-            outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
-          } catch (e) {
-            // Refused (a mutation that fails never ran), or never sent: nothing of it went.
-            if (first && taken) {
-              restoreDraft(to, taken.text, taken.reply, taken.id)
-              endSend(taken.clientMessageId, false)
-            } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
-            keepLeft()
-            toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
-            return
+        const caption = first ? taken?.text : undefined
+        const clientMessageId = first && taken ? taken.clientMessageId : newClientId()
+        const replyTo = first ? replyIn(reply, to) : undefined
+        let outcome: Awaited<ReturnType<typeof send>>
+        try {
+          const attachment = await uploadFile(session.userId, to, f.file)
+          // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
+          const message: MessagePlaintext = {
+            type: messageTypeOf(attachment.mime),
+            body: caption || attachment.name || 'File',
+            attachments: [attachment],
           }
-          const used = outcome === 'queued' ? null : outcome
-          if (first && taken) settle(to, taken, used)
-          if (!used) break
-          // The send ID was used already, by a send that never went: the text is back in the
-          // composer (settle), and the files stay to send again.
-          if (usedOutcome(used).action === 'again') return keepLeft()
-          // The text went, or may have, from another tab or before a reload: this tab's send
-          // with it never ran, so the file goes by itself, as a message of its own.
-          caption = undefined
-          replyTo = undefined
-          clientMessageId = newClientId()
+          const sealed = sealMessage(
+            message,
+            clientMessageId,
+            session.userId,
+            session.keyPair.publicKey,
+            bridgePublicKey,
+          )
+          outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
+        } catch (e) {
+          // Refused (a mutation that fails never ran), or never sent: nothing of it went.
+          if (first && taken) {
+            restoreDraft(to, taken.text, taken.reply, taken.id)
+            endSend(taken.clientMessageId, false)
+          } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
+          keepLeft()
+          toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
+          return
         }
+        const used = outcome === 'queued' ? null : outcome
+        if (first && taken) settle(to, taken, used)
+        // The text's send ID was used already: by the text alone, from another tab, or by this
+        // file with it before a reload. Which isn't known, so nothing more goes by itself: the
+        // text is settled as any send of it would be, and the files stay for the person to send
+        // or remove once they've looked at the chat.
+        if (used) return keepLeft()
         removeFile(to, f.id)
         first = false
       }

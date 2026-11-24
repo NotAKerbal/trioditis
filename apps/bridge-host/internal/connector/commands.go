@@ -421,6 +421,8 @@ func (c *Connector) reserveMedia(ctx context.Context, uri id.ContentURIString) e
 	}
 	pending.lock.Lock()
 	if pending.released {
+		// Its file is never read, so it never went.
+		pending.refusedLate = true
 		pending.lock.Unlock()
 		return errTransmitDeadline
 	}
