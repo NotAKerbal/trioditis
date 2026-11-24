@@ -77,6 +77,7 @@ export default defineConfig({
             { label: 'LinkedIn', slug: 'networks/linkedin' },
             { label: 'X', slug: 'networks/twitter' },
             { label: 'Bluesky', slug: 'networks/bluesky' },
+            { label: 'iMessage', slug: 'networks/imessage' },
           ],
         },
         {

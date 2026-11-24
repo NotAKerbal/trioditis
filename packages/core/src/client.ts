@@ -65,6 +65,8 @@ export const START_TARGETS: Partial<Record<Network, { contact: boolean; phone: b
   slack: { contact: true, phone: false, username: false },
   linkedin: { contact: true, phone: false, username: false },
   twitter: { contact: false, phone: false, username: true },
+  // A username on iMessage is the email address someone's Apple ID uses.
+  imessage: { contact: true, phone: true, username: true },
 }
 
 /**
@@ -260,6 +262,22 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     reactions: false,
     edit: null,
     delete: null,
+  },
+  imessage: {
+    network: 'imessage',
+    name: 'iMessage',
+    maturity: 'experimental',
+    // The person's own Mac runs BlueBubbles Server, signed in to Messages; the login is its
+    // address and password. See docs/networks/imessage.md.
+    flows: [{ id: 'bluebubbles', kind: 'form', name: 'BlueBubbles Server' }],
+    // BlueBubbles drives the Messages app on the person's own Mac, as they would.
+    termsRisk: false,
+    // Tapbacks, edits and unsending need BlueBubbles' Private API on the Mac; without it the
+    // Mac refuses them and the app says so. Messages allows an edit for 15 minutes, five times,
+    // and unsending for 2 minutes.
+    reactions: true,
+    edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
+    delete: { forEveryone: true, maxAgeMs: 2 * MINUTE },
   },
 }
 

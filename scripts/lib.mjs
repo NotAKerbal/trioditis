@@ -214,6 +214,7 @@ export const portsFor = (slot) => ({
     linkedin: 10109 + 20 * slot,
     twitter: 10110 + 20 * slot,
     bluesky: 10111 + 20 * slot,
+    imessage: 10112 + 20 * slot,
   },
 })
 

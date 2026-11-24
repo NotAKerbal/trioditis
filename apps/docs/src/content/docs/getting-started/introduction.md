@@ -8,7 +8,7 @@ _Trioditis_ ("of the three roads") is an open-source, self-hosted universal mess
 Anyone can spin up a Trioditis server and invite family, friends, or teammates. Each member has their own account, connects their own messaging networks, and holds the keys to their own stored message history.
 
 :::note[Development status]
-Trioditis is in **active pre-release development** on `dev`. The core stack—Go bridge host with 12 network connectors, isolated Chromium sign-in browser, Node gateway, self-hosted Convex backend on PostgreSQL, sealed storage cryptography, desktop & web app, systemd auto-updater, encrypted backup & restore, and Docker Compose / Proxmox installer—is built and running. Expect rough edges while pre-release work continues toward v1.
+Trioditis is in **active pre-release development** on `dev`. The core stack—Go bridge host with 13 network connectors, isolated Chromium sign-in browser, Node gateway, self-hosted Convex backend on PostgreSQL, sealed storage cryptography, desktop & web app, systemd auto-updater, encrypted backup & restore, and Docker Compose / Proxmox installer—is built and running. Expect rough edges while pre-release work continues toward v1.
 :::
 
 ## Design principles
@@ -24,7 +24,7 @@ Trioditis is in **active pre-release development** on `dev`. The core stack—Go
 
 ## Supported networks
 
-Trioditis currently ships bridge hosts for **12 messaging networks**. Admins choose which ones to offer inside **Admin settings → Networks** without touching server config.
+Trioditis currently ships bridge hosts for **13 messaging networks**. Admins choose which ones to offer inside **Admin settings → Networks** without touching server config.
 
 | Network             | ID          | Current maturity | Sign-in flow                                              | Platform ToS risk |
 | ------------------- | ----------- | ---------------- | --------------------------------------------------------- | ----------------- |
@@ -40,6 +40,7 @@ Trioditis currently ships bridge hosts for **12 messaging networks**. Admins cho
 | **LinkedIn**        | `linkedin`  | Experimental     | Sign in on linkedin.com                                   | Yes               |
 | **X**               | `twitter`   | Experimental     | Sign in on x.com                                          | Yes               |
 | **Bluesky**         | `bluesky`   | Experimental     | App password (with DM access)                             | No                |
+| **iMessage**        | `imessage`  | Experimental     | BlueBubbles Server on your Mac (address & password)       | No                |
 
 Discord awaits upstream `mautrix-discord`'s migration to `bridgev2`. See the [Networks guides](/networks/) for per-network implementation status, unsupported features, and setup steps.
 
