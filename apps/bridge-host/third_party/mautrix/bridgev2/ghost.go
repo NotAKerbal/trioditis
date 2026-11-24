@@ -176,10 +176,15 @@ func (ghost *Ghost) prepareAvatar(ctx context.Context, avatar *Avatar) (changed,
 	if ghost.AvatarID == avatar.ID && (avatar.Remove || ghost.AvatarMXC != "") && ghost.AvatarSet {
 		return false, false
 	}
+	// Trioditis: the avatar's ID is put back if its download fails, so a network that only
+	// fetches an avatar whose ID changed (WhatsApp) tries again, rather than taking the failed
+	// one for the one it has.
+	oldID := ghost.AvatarID
 	ghost.AvatarID = avatar.ID
 	if !avatar.Remove {
 		newMXC, newHash, err := avatar.Reupload(ctx, ghost.Intent, ghost.AvatarHash, ghost.AvatarMXC)
 		if err != nil {
+			ghost.AvatarID = oldID
 			ghost.AvatarSet = false
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to reupload avatar")
 			return true, false

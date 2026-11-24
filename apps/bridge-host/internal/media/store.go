@@ -42,6 +42,9 @@ const UploadTTL = 10 * time.Minute
 
 var ErrUnavailable = errors.New("media: file is not available")
 
+// ErrCorrupt is a kept copy (Keep) whose file doesn't decrypt: it can never make a copy again.
+var ErrCorrupt = errors.New("media: kept copy is corrupt")
+
 type upload struct {
 	data    []byte
 	name    string
@@ -251,7 +254,7 @@ func (s *Store) CopyKept(kept protocol.Attachment, ownerUserID string) (*protoco
 	}
 	data, err := seal.DecryptMedia(ct, kept.Key, kept.Nonce, KeptOwner, kept.MediaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
 	defer clear(data)
 	return s.writeCopy(s.ownerDir(ownerUserID), ownerUserID, data, kept.Name, kept.Mime)

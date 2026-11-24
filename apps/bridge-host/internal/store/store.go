@@ -917,6 +917,12 @@ func (s *Store) PutKeptAvatar(ctx context.Context, avatarURI string, sealed *sea
 	return err
 }
 
+// DeleteKeptAvatar forgets the bridge host's copy of an avatar, one that can't be used.
+func (s *Store) DeleteKeptAvatar(ctx context.Context, avatarURI string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)
+	return err
+}
+
 // KeptAvatar is the sealed reference PutKeptAvatar kept, or ErrNotFound.
 func (s *Store) KeptAvatar(ctx context.Context, avatarURI string) (*seal.Envelope, error) {
 	return s.envelope(ctx, `SELECT sealed FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)

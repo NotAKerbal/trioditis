@@ -119,7 +119,14 @@ func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString,
 		return nil
 	}
 	att, err := c.Media.CopyKept(*kept, ownerUserID)
-	if err != nil {
+	if errors.Is(err, media.ErrCorrupt) {
+		// Forgotten, so the contact's picture is fetched again (markAvatarStale).
+		c.Log.Warn().Msg("An avatar's kept copy is corrupt; it's fetched again")
+		if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Forgetting an avatar's corrupt kept copy failed")
+		}
+		return nil
+	} else if err != nil {
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Copying an avatar's kept copy failed")
 		return nil
 	}
@@ -223,8 +230,18 @@ func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 				continue
 			}
 		}
-		if err := c.markAvatarStale(ctx, ghost); err != nil && ctx.Err() == nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Marking a contact's picture to be fetched again failed; it's tried again at the next start")
+		// bridgev2 waits for a contact's lock with no way to give up, and a network may hold it
+		// while it waits on a request of its own (WhatsApp's resync), so a stop doesn't wait for
+		// the marking: it ends once the lock is free, or fails once the database is closed.
+		done := make(chan error, 1)
+		go func() { done <- c.markAvatarStale(ctx, ghost) }()
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-done:
+			if err != nil && ctx.Err() == nil {
+				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Marking a contact's picture to be fetched again failed; it's tried again at the next start")
+			}
 		}
 	}
 }

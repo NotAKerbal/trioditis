@@ -25,6 +25,26 @@ index 4ac591e7a08acc6176b77d5af7f8a7e29fb5fb0d..b3dbcb84efc23199e4d40d6c2db5cebd
  		select {
  		case manualTask := <-br.manualBackfills:
  			manualTask.addLogAndDo(ctx)
+diff --git a/bridgev2/ghost.go b/bridgev2/ghost.go
+index aad5f066ef306ef5cfbb24709576ef910629c2b4..11b04ea6f4eb75207196ca8bc798fc18ff09dbf6 100644
+--- a/bridgev2/ghost.go
++++ b/bridgev2/ghost.go
+@@ -176,10 +176,15 @@ func (ghost *Ghost) prepareAvatar(ctx context.Context, avatar *Avatar) (changed,
+ 	if ghost.AvatarID == avatar.ID && (avatar.Remove || ghost.AvatarMXC != "") && ghost.AvatarSet {
+ 		return false, false
+ 	}
++	// Trioditis: the avatar's ID is put back if its download fails, so a network that only
++	// fetches an avatar whose ID changed (WhatsApp) tries again, rather than taking the failed
++	// one for the one it has.
++	oldID := ghost.AvatarID
+ 	ghost.AvatarID = avatar.ID
+ 	if !avatar.Remove {
+ 		newMXC, newHash, err := avatar.Reupload(ctx, ghost.Intent, ghost.AvatarHash, ghost.AvatarMXC)
+ 		if err != nil {
++			ghost.AvatarID = oldID
+ 			ghost.AvatarSet = false
+ 			zerolog.Ctx(ctx).Err(err).Msg("Failed to reupload avatar")
+ 			return true, false
 diff --git a/bridgev2/portal.go b/bridgev2/portal.go
 index 1eef3b9b491326870c9cfd4961d42a608488fb3c..f7b6b354d9eaad9202b67259ea9610eb3aa00c97 100644
 --- a/bridgev2/portal.go

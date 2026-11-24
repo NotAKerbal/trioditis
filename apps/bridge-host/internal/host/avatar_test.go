@@ -236,19 +236,27 @@ func TestContactsSentWithoutTheirPictureAreSentItWhenNextSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	gw.waitFor(t, "the member's message", isMessage("hello while it fails", h2, "alice"))
-	// The failed download keeps what the next try needs: the saved picture, not set.
+	// The failed download keeps what the next try needs: the saved picture, not set, and no
+	// picture ID, so a network that fetches only a picture whose ID changed (WhatsApp) fetches
+	// it again.
 	if mxc, set := ghostAvatar(t, h2, member); mxc != stale || set {
 		t.Fatalf("after a failed download the saved picture is %q (set %v), want %q unset", mxc, set, stale)
+	}
+	var avatarID string
+	if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_id FROM ghost WHERE id=$1`, string(member)).Scan(&avatarID); err != nil {
+		t.Fatal(err)
+	}
+	if avatarID != "" {
+		t.Fatalf("the failed download left picture ID %q", avatarID)
 	}
 	if e := lastContact(h2, member, before); e != nil && pictureOf(t, h2, e) != nil {
 		t.Fatal("a contact was sent with a picture though none could be downloaded")
 	}
-	h2.host.Stop()
-
-	h3 := oldHost(t, dir, gw, member, picture)
-	defer h3.host.Stop()
-	if err := h3.net.Incoming("alice-testnet", chat, member, "s-3", "hello once it works", time.Now()); err != nil {
+	// Once the network's media server works again, the next time they're seen brings it.
+	h2.net.BreakPictures(false)
+	if err := h2.net.Incoming("alice-testnet", chat, member, "s-3", "hello once it works", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	waitForPicture(t, h3, member, before, picture)
+	waitForPicture(t, h2, member, before, picture)
+	h2.host.Stop()
 }

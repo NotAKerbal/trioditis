@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -161,6 +163,43 @@ func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
 	c.BridgeKey, _ = seal.GenerateKeyPair()
 	if att, _ := c.avatarFor(ctx, uri, "alice"); att != nil {
 		t.Fatal("a reference sealed to another key must not open")
+	}
+}
+
+// A kept copy whose file doesn't decrypt is forgotten, so the contact's picture is fetched again
+// rather than taken as one the host still has.
+func TestACorruptKeptAvatarIsForgotten(t *testing.T) {
+	dir := t.TempDir()
+	store, err := media.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConnector(t)
+	if c.BridgeKey, err = seal.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	c.Media = store
+	ctx := context.Background()
+	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
+	c.keepAvatar(ctx, uri)
+	if c.Media, err = media.New(dir); err != nil {
+		t.Fatal(err)
+	}
+	if !c.hasAvatarCopy(ctx, uri) {
+		t.Fatal("the kept copy wasn't kept")
+	}
+	files, err := os.ReadDir(filepath.Join(dir, "kept"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("kept files: %v %v", files, err)
+	}
+	if err = os.Truncate(filepath.Join(dir, "kept", files[0].Name()), 3); err != nil {
+		t.Fatal(err)
+	}
+	if att, _ := c.avatarFor(ctx, uri, "bob"); att != nil {
+		t.Fatal("a corrupt kept copy made a copy")
+	}
+	if c.hasAvatarCopy(ctx, uri) {
+		t.Fatal("a corrupt kept copy still counts")
 	}
 }
 

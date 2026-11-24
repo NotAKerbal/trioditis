@@ -50,8 +50,9 @@ whose handling then fails part way is dropped as a duplicate when redelivered. T
 `bridgev2.RemoteEventDone`, called with each remote event's real outcome when its handler
 returns, which the host waits on (`internal/handled`). It also adds `bridgev2.BeforeBackfillTask`,
 called before each backfill queue task and before any portal lock, where the host holds older
-history back while its server is behind (`internal/gateway/pressure.go`). Every change is marked
-`Trioditis:`.
+history back while its server is behind (`internal/gateway/pressure.go`). And a ghost's avatar ID
+is put back when its download fails, so WhatsApp, which fetches only an avatar whose ID changed,
+tries it again (`internal/connector/avatars.go`). Every change is marked `Trioditis:`.
 
 **Updating mautrix:** change its version in `../go.mod`, `node scripts/signal-fork.mjs update
 mautrix`, check that `handleSingleEventWithDelayLogging` (`bridgev2/portal.go`) still hands
