@@ -235,10 +235,6 @@ const (
 // being repaired, at most once: one asked for again while being repaired goes back in once that's
 // done, so one contact can't take every worker.
 type avatarRepairs struct {
-	// lost holds, for each contact marked to have their picture fetched again in this process,
-	// the content URI of the lost one (networkid.UserID → id.ContentURIString).
-	lost sync.Map
-
 	lock  sync.Mutex
 	queue []networkid.UserID
 	state map[networkid.UserID]repairState
@@ -427,62 +423,9 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 			err = c.sendAvatarToContactsWithout(ctx, g, uri)
 			return false
 		}
-		// Remembered, so the picture fetched again also stands in for this lost one
-		// (replaceLostAvatar).
-		c.repairs.lost.Store(g.ID, uri)
 		return markAvatarStale(g)
 	}})
 	return err
-}
-
-// replaceLostAvatar makes a contact's newly set picture, when it replaces one that was marked
-// lost (repairContactAvatar), stand in for the lost one too: the host's copy of it is kept under
-// the lost content URI as well. A network's aliases for one person (WhatsApp's phone number and
-// LID) share an upload, and one of them may keep the lost URI (bridgev2 takes the same picture ID
-// for the picture it has); a repair of it then finds this copy and sends it. Aliases holding the
-// lost URI are queued for that. Called under the contact's lock, as its picture is set.
-func (c *Connector) replaceLostAvatar(ctx context.Context, ghost networkid.UserID, uri id.ContentURIString) {
-	v, ok := c.repairs.lost.LoadAndDelete(ghost)
-	if !ok || uri == "" || v.(id.ContentURIString) == uri {
-		return
-	}
-	lost := v.(id.ContentURIString)
-	kept, err := c.keptAvatar(ctx, uri)
-	if err == nil && kept != nil {
-		var sealed *seal.Envelope
-		if sealed, err = seal.SealJSON(kept, []seal.PublicKey{c.BridgeKey.Public}, keptAvatarContext(lost)); err == nil {
-			err = c.Store.ReplaceKeptAvatar(ctx, string(lost), sealed)
-		}
-	}
-	var aliases []networkid.UserID
-	if err == nil {
-		aliases, err = c.ghostsWithAvatar(ctx, lost, ghost)
-	}
-	if err != nil {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping a picture for its lost one failed; aliases still holding the lost one are marked at the next start")
-		return
-	}
-	for _, alias := range aliases {
-		c.queueAvatarRepair(alias)
-	}
-}
-
-// ghostsWithAvatar lists the ghosts, other than except, whose saved avatar is uri.
-func (c *Connector) ghostsWithAvatar(ctx context.Context, uri id.ContentURIString, except networkid.UserID) ([]networkid.UserID, error) {
-	rows, err := c.Bridge.DB.Query(ctx, `SELECT id FROM ghost WHERE bridge_id=$1 AND avatar_mxc=$2 AND id<>$3`, c.Bridge.ID, string(uri), string(except))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []networkid.UserID
-	for rows.Next() {
-		var ghost networkid.UserID
-		if err = rows.Scan(&ghost); err != nil {
-			return nil, err
-		}
-		out = append(out, ghost)
-	}
-	return out, rows.Err()
 }
 
 // sendAvatarToContactsWithout sends the contact again, with their picture, to each person who has

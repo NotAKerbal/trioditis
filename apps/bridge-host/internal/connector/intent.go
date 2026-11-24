@@ -720,7 +720,6 @@ func (in *Intent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStrin
 	// Kept before anything else: the person who needs this picture may only turn up once its
 	// upload is long gone.
 	in.c.keepAvatar(ctx, avatarURL)
-	in.c.replaceLostAvatar(ctx, in.ghostID, avatarURL)
 	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, &avatarURL)
 }
 
