@@ -2,9 +2,15 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/seal"
@@ -98,22 +104,74 @@ func TestInvalidEventsAreNeverSent(t *testing.T) {
 	}
 }
 
-// The bridge host names every event type the backend has, and no other: a type added on
-// one side only fails here.
-func TestEveryEventTypeIsTheBackendsToo(t *testing.T) {
-	ours := []string{
-		EventMessage, EventEdit, EventReaction, EventReactionRemove, EventRedaction, EventReceipt, EventTyping,
-		EventChat, EventContact, EventContactIdentifiers, EventChatCollage, EventChatStarted, EventLoginState,
-		EventLoginStep, EventSendStatus, EventBackfillDone,
+// constants are the string constants protocol.go declares whose names start with prefix.
+func constants(t *testing.T, prefix string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "protocol.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var theirs []string
+	var out []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value := spec.(*ast.ValueSpec)
+			for i, name := range value.Names {
+				if !strings.HasPrefix(name.Name, prefix) || i >= len(value.Values) {
+					continue
+				}
+				if lit, ok := value.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					text, _ := strconv.Unquote(lit.Value)
+					out = append(out, text)
+				}
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func sorted(values []any) []string {
+	var out []string
+	for _, value := range values {
+		out = append(out, fmt.Sprint(value))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// The event types, send statuses, error codes and login step types the bridge host declares
+// are exactly the backend's: one added or dropped on either side alone fails here.
+func TestTheBridgeHostsValuesAreTheBackends(t *testing.T) {
+	var types []any
 	for name := range schema.Events {
-		theirs = append(theirs, name)
+		types = append(types, name)
 	}
-	slices.Sort(ours)
-	slices.Sort(theirs)
-	if !slices.Equal(ours, theirs) {
-		t.Fatalf("bridge host has %v, backend has %v", ours, theirs)
+	for _, c := range []struct {
+		prefix string
+		theirs []any
+	}{
+		{"Event", types},
+		{"Status", schema.Events[EventSendStatus].Values["status"]},
+		{"Err", schema.Events[EventSendStatus].Values["error"]},
+		{"Step", schema.Events[EventLoginStep].Values["step.type"]},
+	} {
+		if ours, theirs := constants(t, c.prefix), sorted(c.theirs); !slices.Equal(ours, theirs) {
+			t.Errorf("%s constants: bridge host has %v, backend has %v", c.prefix, ours, theirs)
+		}
+	}
+	// Every error field takes the same codes.
+	for name, shape := range schema.Events {
+		for path, values := range shape.Values {
+			if path == "error" || strings.HasSuffix(path, ".error") {
+				if ours, theirs := constants(t, "Err"), sorted(values); !slices.Equal(ours, theirs) {
+					t.Errorf("%s %s: bridge host has %v, backend has %v", name, path, ours, theirs)
+				}
+			}
+		}
 	}
 }
 
@@ -135,6 +193,16 @@ func TestSealedLimitsAreTheBackends(t *testing.T) {
 		if shape.MaxSealedBytes == 0 {
 			if slices.Contains(shape.Required, "sealed") || slices.Contains(shape.Optional, "sealed") {
 				t.Errorf("%s carries sealed content with no limit", name)
+			}
+			// Sealed content a caller attached to a type that has none is never sent, but is still
+			// refused over the message limit, as before the schema.
+			var evt Event
+			if err := json.Unmarshal(full[name], &evt); err != nil {
+				t.Fatal(err)
+			}
+			evt.Sealed = &seal.Envelope{V: 1, Nonce: "n", CT: seal.Encode(make([]byte, MaxMessageSealedBytes+1)), Keys: envelope.Keys}
+			if evt.Validate() == nil {
+				t.Errorf("%s with %d sealed bytes attached was accepted", name, MaxMessageSealedBytes+1)
 			}
 			continue
 		}
@@ -164,6 +232,9 @@ func TestCheckShapeRefusesWhatTheGatewayWould(t *testing.T) {
 		`{"seq":1,"type":"typing","userId":"u","loginId":"l","at":1,"portalId":"p","sender":{"self":true},"typing":true,"timeoutMs":1,"body":"hi"}`,
 		`{"seq":1,"type":"nope","userId":"u","loginId":"l","at":1}`,
 		`{"type":"backfillDone","userId":"u","loginId":"l","at":1,"portalId":"p","direction":"forward","more":false}`,
+		`{"seq":1,"type":"backfillDone","userId":"u","loginId":"l","at":1,"portalId":"p","direction":"sideways","more":false}`,
+		`{"seq":1,"type":"sendStatus","userId":"u","loginId":"l","at":1,"clientMessageId":"c","status":{"sent":true}}`,
+		`{"seq":1,"type":"loginStep","userId":"u","loginId":"l","at":1,"loginSessionId":"s","step":{"stepId":"1","type":"done"}}`,
 	} {
 		if CheckShape([]byte(body)) == nil {
 			t.Errorf("accepted %s", body)

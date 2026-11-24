@@ -276,10 +276,16 @@ export const MAX_SEALED_BYTES: Record<SealedEventType, number> = {
 }
 
 /**
+ * A type written out as plain objects, so that an interface and the intersection it extends
+ * compare equal to the same fields written as one object.
+ */
+type Flat<T> = T extends object ? { [K in keyof T]: Flat<T[K]> } : T
+
+/**
  * Whether two types are the same, optional fields included: assignability alone would let
  * one side gain an optional field the other doesn't know.
  */
-type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false
+type Same<A, B> = (<T>() => T extends Flat<A> ? 1 : 2) extends <T>() => T extends Flat<B> ? 1 : 2 ? true : false
 
 /**
  * `@trioditis/core`'s wire types, which the gateway and clients use, describe exactly the

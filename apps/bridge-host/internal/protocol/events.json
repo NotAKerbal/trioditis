@@ -24,6 +24,7 @@
         "clientMessageId",
         "mentionsMe"
       ],
+      "values": {},
       "maxSealedBytes": 262144
     },
     "edit": {
@@ -38,6 +39,7 @@
       "optional": [
         "clientMessageId"
       ],
+      "values": {},
       "maxSealedBytes": 262144
     },
     "reaction": {
@@ -49,7 +51,8 @@
         "key",
         "networkTs"
       ],
-      "optional": []
+      "optional": [],
+      "values": {}
     },
     "reactionRemove": {
       "required": [
@@ -58,7 +61,8 @@
         "sender",
         "key"
       ],
-      "optional": []
+      "optional": [],
+      "values": {}
     },
     "redaction": {
       "required": [
@@ -67,7 +71,8 @@
         "sender",
         "networkTs"
       ],
-      "optional": []
+      "optional": [],
+      "values": {}
     },
     "receipt": {
       "required": [
@@ -76,7 +81,8 @@
         "upToEventId",
         "networkTs"
       ],
-      "optional": []
+      "optional": [],
+      "values": {}
     },
     "typing": {
       "required": [
@@ -85,7 +91,8 @@
         "typing",
         "timeoutMs"
       ],
-      "optional": []
+      "optional": [],
+      "values": {}
     },
     "chat": {
       "required": [
@@ -98,6 +105,14 @@
         "deleted",
         "isRequest"
       ],
+      "values": {
+        "kind": [
+          "dm",
+          "group",
+          "channel",
+          "space"
+        ]
+      },
       "maxSealedBytes": 8192
     },
     "contact": {
@@ -106,6 +121,7 @@
         "sealed"
       ],
       "optional": [],
+      "values": {},
       "maxSealedBytes": 8192
     },
     "contactIdentifiers": {
@@ -114,6 +130,7 @@
         "sealed"
       ],
       "optional": [],
+      "values": {},
       "maxSealedBytes": 8192
     },
     "chatCollage": {
@@ -122,6 +139,7 @@
         "sealed"
       ],
       "optional": [],
+      "values": {},
       "maxSealedBytes": 8192
     },
     "chatStarted": {
@@ -131,7 +149,23 @@
       "optional": [
         "portalId",
         "error"
-      ]
+      ],
+      "values": {
+        "error": [
+          "network_rejected",
+          "not_connected",
+          "timeout",
+          "invalid_command",
+          "expired",
+          "unsupported",
+          "rate_limited",
+          "bad_credentials",
+          "login_failed",
+          "internal",
+          "not_found",
+          "invalid_identifier"
+        ]
+      }
     },
     "loginState": {
       "required": [
@@ -141,6 +175,30 @@
         "error",
         "sealed"
       ],
+      "values": {
+        "state": [
+          "CONNECTING",
+          "CONNECTED",
+          "TRANSIENT_DISCONNECT",
+          "BAD_CREDENTIALS",
+          "UNKNOWN_ERROR",
+          "LOGGED_OUT"
+        ],
+        "error": [
+          "network_rejected",
+          "not_connected",
+          "timeout",
+          "invalid_command",
+          "expired",
+          "unsupported",
+          "rate_limited",
+          "bad_credentials",
+          "login_failed",
+          "internal",
+          "not_found",
+          "invalid_identifier"
+        ]
+      },
       "maxSealedBytes": 8192
     },
     "loginStep": {
@@ -148,7 +206,37 @@
         "loginSessionId",
         "step"
       ],
-      "optional": []
+      "optional": [],
+      "values": {
+        "step.type": [
+          "displayAndWait",
+          "userInput",
+          "cookies",
+          "complete",
+          "cancelled",
+          "error"
+        ],
+        "step.display.type": [
+          "qr",
+          "code",
+          "emoji",
+          "nothing"
+        ],
+        "step.error": [
+          "network_rejected",
+          "not_connected",
+          "timeout",
+          "invalid_command",
+          "expired",
+          "unsupported",
+          "rate_limited",
+          "bad_credentials",
+          "login_failed",
+          "internal",
+          "not_found",
+          "invalid_identifier"
+        ]
+      }
     },
     "sendStatus": {
       "required": [
@@ -158,7 +246,31 @@
       "optional": [
         "eventId",
         "error"
-      ]
+      ],
+      "values": {
+        "status": [
+          "submitted",
+          "sent",
+          "delivered",
+          "read",
+          "failed",
+          "unknown"
+        ],
+        "error": [
+          "network_rejected",
+          "not_connected",
+          "timeout",
+          "invalid_command",
+          "expired",
+          "unsupported",
+          "rate_limited",
+          "bad_credentials",
+          "login_failed",
+          "internal",
+          "not_found",
+          "invalid_identifier"
+        ]
+      }
     },
     "backfillDone": {
       "required": [
@@ -166,7 +278,13 @@
         "direction",
         "more"
       ],
-      "optional": []
+      "optional": [],
+      "values": {
+        "direction": [
+          "backward",
+          "forward"
+        ]
+      }
     }
   }
 }

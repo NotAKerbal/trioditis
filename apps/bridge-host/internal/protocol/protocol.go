@@ -235,9 +235,14 @@ func (e *Event) Validate() error {
 			return fmt.Errorf("%w: %s event is missing %s", ErrInvalidEvent, e.Type, name)
 		}
 	}
-	// A type with no sealed content never writes it, so only a limit the schema gives applies.
-	if e.Sealed != nil && shape.MaxSealedBytes > 0 {
-		if seal.DecodedLen(e.Sealed.CT) > shape.MaxSealedBytes {
+	if e.Sealed != nil {
+		// A type with no sealed content never writes it; the message limit still bounds what a
+		// caller attached by mistake, as it always has.
+		limit := shape.MaxSealedBytes
+		if limit == 0 {
+			limit = MaxMessageSealedBytes
+		}
+		if seal.DecodedLen(e.Sealed.CT) > limit {
 			return fmt.Errorf("%s event: %w (sealed)", e.Type, ErrTooLarge)
 		}
 	}

@@ -26,7 +26,16 @@ type Node = {
   value?: unknown
 }
 
-type EventShape = { required: string[]; optional: string[]; maxSealedBytes?: number }
+/**
+ * `values` holds, for each field (by dotted path; `[]` steps into an array) that is one of a
+ * set of values rather than any string or number, which values it may be.
+ */
+type EventShape = {
+  required: string[]
+  optional: string[]
+  maxSealedBytes?: number
+  values: Record<string, unknown[]>
+}
 
 export type ProtocolSchema = {
   comment: string
@@ -43,14 +52,29 @@ function fieldsOf(member: Node) {
 
 const typeOf = (member: Node) => member.fields!.type!.value as (typeof BRIDGE_EVENT_TYPES)[number]
 
+const isLiteralUnion = (node: Node) =>
+  node.kind === 'union' && node.members!.every((member) => member.kind === 'literal')
+
+/** Records the values each literal union under `node` allows, by the path to it. */
+function collectValues(node: Node, path: string, into: Record<string, unknown[]>) {
+  if (isLiteralUnion(node)) into[path] = node.members!.map((member) => member.value)
+  else if (node.kind === 'union') for (const member of node.members!) collectValues(member, path, into)
+  else if (node.kind === 'array') collectValues(node.element!, `${path}[]`, into)
+  else if (node.kind === 'object' && !isEnvelopeNode(node))
+    for (const [key, field] of Object.entries(node.fields!)) collectValues(field, `${path}.${key}`, into)
+}
+
 export function buildSchema(): ProtocolSchema {
   const events: Record<string, EventShape> = {}
   for (const member of members) {
     const type = typeOf(member)
     const fields = fieldsOf(member)
+    const values: Record<string, unknown[]> = {}
+    for (const [name, field] of fields) collectValues(field, name, values)
     const shape: EventShape = {
       required: fields.filter(([, field]) => field.isOptional === 'required').map(([name]) => name),
       optional: fields.filter(([, field]) => field.isOptional === 'optional').map(([name]) => name),
+      values,
     }
     const limit = (MAX_SEALED_BYTES as Record<string, number>)[type]
     if (limit !== undefined) shape.maxSealedBytes = limit
@@ -91,10 +115,11 @@ const isEnvelopeNode = (node: Node) => node.kind === 'object' && Object.keys(nod
  * `full` sets every field, optional ones included, takes the last choice of each union and
  * non-zero values. Otherwise only required fields are set, with the first choice of each
  * union and zero values (`false`, `0`, `[]`), which a bridge host has to send as such rather
- * than leave out.
+ * than leave out. `choose` overrides which choice the union at a path takes.
  */
-function sample(node: Node, name: string, full: boolean): unknown {
+function sample(node: Node, path: string, full: boolean, choose?: { path: string; index: number }): unknown {
   if (isEnvelopeNode(node)) return SAMPLE_ENVELOPE
+  const name = path.slice(path.lastIndexOf('.') + 1).replace('[]', '')
   switch (node.kind) {
     case 'string':
       return `${name}-1`
@@ -106,14 +131,16 @@ function sample(node: Node, name: string, full: boolean): unknown {
       return node.value
     case 'union': {
       const choices = node.members!
-      return sample(full ? choices[choices.length - 1]! : choices[0]!, name, full)
+      const index = choose?.path === path ? choose.index : full ? choices.length - 1 : 0
+      return sample(choices[index]!, path, full, choose)
     }
     case 'array':
-      return full ? [sample(node.element!, name, full)] : []
+      return full ? [sample(node.element!, `${path}[]`, full, choose)] : []
     case 'object': {
       const out: Record<string, unknown> = {}
       for (const [key, field] of Object.entries(node.fields!)) {
-        if (full || field.isOptional === 'required') out[key] = sample(field, key, full)
+        if (full || field.isOptional === 'required')
+          out[key] = sample(field, path ? `${path}.${key}` : key, full, choose)
       }
       return out
     }
@@ -123,19 +150,41 @@ function sample(node: Node, name: string, full: boolean): unknown {
   }
 }
 
+/** The path and number of choices of every union in an event with every field. */
+function unionsOf(node: Node, path: string, out: { path: string; choices: Node[] }[] = []) {
+  if (isEnvelopeNode(node)) return out
+  if (node.kind === 'union') {
+    out.push({ path, choices: node.members! })
+    for (const member of node.members!) unionsOf(member, path, out)
+  } else if (node.kind === 'array') unionsOf(node.element!, `${path}[]`, out)
+  else if (node.kind === 'object')
+    for (const [key, field] of Object.entries(node.fields!)) unionsOf(field, path ? `${path}.${key}` : key, out)
+  return out
+}
+
 type Vector = { name: string; event: Record<string, unknown> }
 
-export type ProtocolVectors = { comment: string; valid: Vector[]; invalid: Vector[] }
+export type ProtocolVectors = { comment: string; validator: unknown; valid: Vector[]; invalid: Vector[] }
 
 export function buildVectors(): ProtocolVectors {
   const valid: Vector[] = []
   const invalid: Vector[] = []
   for (const member of members) {
     const type = typeOf(member)
-    const full = sample(member, type, true) as Record<string, unknown>
-    const minimal = sample(member, type, false) as Record<string, unknown>
+    const full = sample(member, '', true) as Record<string, unknown>
+    const minimal = sample(member, '', false) as Record<string, unknown>
     valid.push({ name: `${type} with every field`, event: full })
     valid.push({ name: `${type} with only its required fields`, event: minimal })
+    // Every choice of every union, so a value one side drops (a send status, an error code)
+    // shows up as an example the other side still has.
+    for (const union of unionsOf(member, '')) {
+      if (union.path === 'type') continue
+      union.choices.forEach((choice, index) => {
+        const label = choice.kind === 'literal' ? JSON.stringify(choice.value) : `choice ${index + 1}`
+        const event = sample(member, '', true, { path: union.path, index }) as Record<string, unknown>
+        valid.push({ name: `${type} with ${union.path} ${label}`, event })
+      })
+    }
     for (const [name, field] of Object.entries(member.fields!)) {
       if (name === 'type' || field.isOptional === 'optional') continue
       const { [name]: _missing, ...rest } = minimal
@@ -152,7 +201,9 @@ export function buildVectors(): ProtocolVectors {
     comment:
       'Generated by packages/backend/scripts/write-protocol-schema.ts from the bridgeEvent validator. ' +
       'The backend accepts every valid event and refuses every invalid one; the bridge host must send each valid ' +
-      'one back unchanged and never send an invalid one.',
+      'one back unchanged and never send an invalid one. `validator` is the validator itself, so that any change ' +
+      'to it shows here.',
+    validator: (bridgeEvent as unknown as { json: unknown }).json,
     valid,
     invalid,
   }
