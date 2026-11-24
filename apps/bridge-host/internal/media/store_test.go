@@ -193,3 +193,74 @@ func (zeros) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
 }
+
+// The bridge host's own copy of an upload outlives it, and a person's copy can be made from it
+// after a restart; but nobody can fetch the host's copy itself, and its plaintext is never on disk.
+func TestAKeptCopyMakesAnOwnersCopyLaterButIsNeverServed(t *testing.T) {
+	dir := t.TempDir()
+	store, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext := []byte("a contact's picture")
+	uri := store.Upload(plaintext, "avatar.jpg", "image/jpeg")
+	kept, err := store.Keep(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := store.Keep(uri); err != nil || *again != *kept {
+		t.Fatalf("keeping again made another copy: %+v, %v", again, err)
+	}
+	if _, err := store.Open(kept.MediaID, "alice"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("the kept copy was served: %v", err)
+	}
+	if _, err := store.Open(kept.MediaID, KeptOwner); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("the kept copy was served to its own owner name: %v", err)
+	}
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err == nil && bytes.Contains(data, plaintext) {
+			t.Errorf("plaintext on disk in %s", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A restart: the upload is gone, the kept copy isn't.
+	restarted, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.Keep(uri); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("an upload outlived the restart: %v", err)
+	}
+	att, err := restarted.CopyKept(*kept, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att.MediaID == kept.MediaID || att.Key == kept.Key || att.Mime != "image/jpeg" || att.Name != "avatar.jpg" || att.Size != len(plaintext) {
+		t.Fatalf("alice's copy: %+v", att)
+	}
+	f, err := restarted.Open(att.MediaID, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := seal.DecryptMedia(readAll(t, f), att.Key, att.Nonce, "alice", att.MediaID)
+	if err != nil || !bytes.Equal(got, plaintext) {
+		t.Fatalf("alice's copy opened to %q, %v", got, err)
+	}
+	if _, err := restarted.Open(att.MediaID, "bob"); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("alice's copy was served to bob")
+	}
+	// A kept reference with the wrong key opens nothing.
+	forged := *kept
+	forged.Key = att.Key
+	if _, err := restarted.CopyKept(forged, "alice"); err == nil {
+		t.Fatal("a kept copy opened with another key")
+	}
+}

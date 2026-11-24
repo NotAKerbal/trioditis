@@ -48,6 +48,7 @@ type upload struct {
 	mime    string
 	expires time.Time
 	copies  map[string]protocol.Attachment // per owner user ID
+	kept    *protocol.Attachment           // the bridge host's own copy (Keep), once made
 }
 
 // registered is one send's file: its own entry, under an ID made for the send, so two sends
@@ -173,21 +174,82 @@ func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*pro
 	if att, ok := up.copies[ownerUserID]; ok {
 		return &att, nil
 	}
-	copyID := randomID()
-	enc, err := seal.EncryptMedia(up.data, ownerUserID, copyID)
+	att, err := s.writeCopy(s.ownerDir(ownerUserID), ownerUserID, up.data, up.name, up.mime)
 	if err != nil {
 		return nil, err
 	}
-	dir := s.ownerDir(ownerUserID)
+	up.copies[ownerUserID] = *att
+	return att, nil
+}
+
+// KeptOwner is who a kept copy (Keep) is encrypted for, in its associated data: the bridge
+// host itself. It can't be a user's ID, which never has a slash.
+const KeptOwner = "trioditis/bridge-host"
+
+// keptDir is where kept copies are written. Nothing serves it: Open reads only owners'
+// directories and media IDs, which can't name a directory.
+func (s *Store) keptDir() string { return filepath.Join(s.dir, "kept") }
+
+// Keep encrypts a copy of an upload for the bridge host itself and returns its reference,
+// for the caller to seal to the bridge key. It is how an avatar outlives its upload for
+// people the host hasn't sent it to yet: the bridge often uploads a contact's picture long
+// before the contact turns up in anyone's chat. Repeated calls reuse the copy.
+func (s *Store) Keep(uri id.ContentURIString) (*protocol.Attachment, error) {
+	mediaID, ok := ParseContentURI(uri)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	up, ok := s.uploads[mediaID]
+	if !ok || time.Now().After(up.expires) {
+		return nil, ErrUnavailable
+	}
+	if up.kept != nil {
+		att := *up.kept
+		return &att, nil
+	}
+	att, err := s.writeCopy(s.keptDir(), KeptOwner, up.data, up.name, up.mime)
+	if err != nil {
+		return nil, err
+	}
+	up.kept = att
+	kept := *att
+	return &kept, nil
+}
+
+// CopyKept encrypts a new copy of a kept file (Keep) for ownerUserID, as AttachmentFor would
+// have while its upload lived. The plaintext is only ever in memory.
+func (s *Store) CopyKept(kept protocol.Attachment, ownerUserID string) (*protocol.Attachment, error) {
+	if !validID(kept.MediaID) || ownerUserID == "" {
+		return nil, ErrUnavailable
+	}
+	ct, err := readNoFollow(filepath.Join(s.keptDir(), kept.MediaID))
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	data, err := seal.DecryptMedia(ct, kept.Key, kept.Nonce, KeptOwner, kept.MediaID)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(data)
+	return s.writeCopy(s.ownerDir(ownerUserID), ownerUserID, data, kept.Name, kept.Mime)
+}
+
+// writeCopy encrypts data for ownerUserID under a new media ID and writes the ciphertext in dir.
+func (s *Store) writeCopy(dir, ownerUserID string, data []byte, name, mime string) (*protocol.Attachment, error) {
+	copyID := randomID()
+	enc, err := seal.EncryptMedia(data, ownerUserID, copyID)
+	if err != nil {
+		return nil, err
+	}
 	if err = os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("media: failed to make the owner's directory: %w", err)
+		return nil, fmt.Errorf("media: failed to make the copy's directory: %w", err)
 	}
 	if err = writeNew(filepath.Join(dir, copyID), enc.Ciphertext); err != nil {
 		return nil, fmt.Errorf("media: failed to write file: %w", err)
 	}
-	att := protocol.Attachment{MediaID: copyID, Mime: up.mime, Size: len(up.data), Name: up.name, Key: enc.Key, Nonce: enc.Nonce}
-	up.copies[ownerUserID] = att
-	return &att, nil
+	return &protocol.Attachment{MediaID: copyID, Mime: mime, Size: len(data), Name: name, Key: enc.Key, Nonce: enc.Nonce}, nil
 }
 
 // MaxClientFile is the largest ciphertext a client may put here to send: a 100 MiB file and its

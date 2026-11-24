@@ -34,7 +34,6 @@ WhatsApp is Trioditis's primary and most mature network:
 - **Best-effort `notAfter` send deadline:** Checked before handoff (11-minute margin) and when reading media (2-minute margin). Past handoff, `whatsmeow`'s per-login `messageSendLock` does not honor context deadlines and waits indefinitely for an ack after a reconnect, which can delay queued sends past `notAfter`. Late sends are always reported truthfully (`sent` or `unknown`), never falsely marked `expired`.
 - **Transport-level frame retry inside `whatsmeow`:** If a connection drops before WhatsApp acknowledges a frame, `whatsmeow` may retransmit the same frame (same message ID, deduplicated by WhatsApp) after reconnecting. Any connector error after handoff is therefore reported as `unknown` and never retried by Trioditis. Edits and deletions go the same way: a retransmitted frame is the same edit with the same ID, not a new one.
 - **Unsupported event types:** Polls, call notices, and multi-attachment single messages (max one attachment per send) are currently dropped or unsupported.
-- **Avatars older than 10 minutes:** Media uploads live in memory for 10 minutes; a new device joining later sees no avatar until the chat/contact avatar updates (`avatarUnchanged: true`).
 
 ## What's stored in plaintext
 

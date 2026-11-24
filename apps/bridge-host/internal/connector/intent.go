@@ -717,6 +717,9 @@ func (in *Intent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStrin
 	if in.kind != intentGhost {
 		return nil
 	}
+	// Kept before anything else: the person who needs this picture may only turn up once its
+	// upload is long gone.
+	in.c.keepAvatar(ctx, avatarURL)
 	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, &avatarURL)
 }
 
@@ -1116,45 +1119,6 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 		}
 	}
 	return c.emitContactProfile(ctx, o, ghost, plain)
-}
-
-// avatarKind is what a kept avatar reference is sealed as. It is sealed to the bridge key
-// only: the bridge host reads it back, nobody else does.
-const avatarKind seal.Kind = "avatarRef"
-
-// avatarFor is the owner's sealed copy of an avatar, to put in a chat or contact's metadata.
-// An avatar's upload lives only minutes, but its sealed copy stays in the media store, so the
-// first copy is kept (sealed to the bridge key) and attached again once the upload is gone:
-// otherwise a later change to the name alone would carry no avatar, and a device that never
-// saw it would show none. Nil when there is neither.
-func (c *Connector) avatarFor(ctx context.Context, uri id.ContentURIString, ownerUserID string) *protocol.Attachment {
-	sealCtx := seal.Context{Kind: avatarKind, OwnerUserID: ownerUserID, ObjectID: string(uri)}
-	att, err := c.Media.AttachmentFor(uri, ownerUserID)
-	if err == nil {
-		kept, err := seal.SealJSON(att, []seal.PublicKey{c.BridgeKey.Public}, sealCtx)
-		if err == nil {
-			err = c.Store.PutAvatarRef(ctx, ownerUserID, string(uri), kept)
-		}
-		if err != nil {
-			// The avatar still goes now; only a later resend of it is lost.
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping an avatar's reference failed")
-		}
-		return att
-	}
-	kept, err := c.Store.AvatarRef(ctx, ownerUserID, string(uri))
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's reference failed")
-		}
-		return nil
-	}
-	var ref protocol.Attachment
-	if err = seal.OpenJSON(kept, c.BridgeKey, sealCtx, &ref); err != nil {
-		// Sealed to an earlier bridge key, say: the avatar is left as the client has it.
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's reference couldn't be opened")
-		return nil
-	}
-	return &ref
 }
 
 // emitContactProfile seals a contact's profile and sends it to the person.
