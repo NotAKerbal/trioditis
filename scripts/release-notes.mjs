@@ -1,5 +1,5 @@
 // Release notes: every pull request adds a file to release-notes/ saying what it changes, which
-// the updater shows admins before and after an update (Admin settings → Updates). See
+// the updater shows admins before and after an update (Settings → Admin → Updates). See
 // docs/CONTRIBUTING.md, Release notes.
 //
 //   node scripts/release-notes.mjs check

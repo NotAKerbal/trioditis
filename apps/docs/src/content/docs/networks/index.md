@@ -3,7 +3,7 @@ title: Networks Overview
 description: Status, capabilities, sign-in methods, and operator controls for all 12 messaging networks in Trioditis.
 ---
 
-Each messaging network runs as its own isolated Go `bridge-host` process implementing `mautrix` `bridgev2`'s `NetworkConnector`. By default, a self-hosted server builds and starts all 12 bridge hosts, and admins enable or disable networks for members inside **Admin settings → Networks** without restarting the server.
+Each messaging network runs as its own isolated Go `bridge-host` process implementing `mautrix` `bridgev2`'s `NetworkConnector`. By default, a self-hosted server builds and starts all 12 bridge hosts, and admins enable or disable networks for members inside **Settings → Admin → Networks** without restarting the server.
 
 ## Implementation status matrix
 

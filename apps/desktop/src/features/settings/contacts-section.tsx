@@ -13,7 +13,7 @@ import { useSession } from '~/lib/session.tsx'
 import { Group, Heading, Loading, Setting } from './layout.tsx'
 
 /**
- * Admin settings → Contacts: the Google client ID people sign in to Google with to bring their
+ * Settings → Admin → Contacts: the Google client ID people sign in to Google with to bring their
  * contacts into People. Without one, People says how to import an export file instead.
  */
 export function Contacts() {
