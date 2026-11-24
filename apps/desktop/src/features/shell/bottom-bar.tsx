@@ -16,6 +16,7 @@ import { networkName, useNetworkHealth } from '~/data/chats.ts'
 import type { SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { signOut } from '~/lib/sign-out.ts'
 import { useSession } from '~/lib/session.tsx'
+import { accountSquares } from './account-squares.ts'
 
 const STATUS_TEXT = {
   online: 'Connected',
@@ -38,6 +39,7 @@ export function BottomBar({
   const health = useNetworkHealth()
   const connected = (health ?? []).filter((h) => h.status !== 'none')
   const trouble = connected.filter((h) => h.status !== 'online')
+  const accounts = accountSquares(connected)
   const initials =
     name
       .trim()
@@ -96,23 +98,29 @@ export function BottomBar({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="flex h-8 items-center gap-2 rounded-[9px] px-2 text-sm font-medium text-muted-foreground hover:bg-rail-hover"
+            className="flex h-8 min-w-0 items-center gap-2 rounded-[9px] px-2 text-sm font-medium text-muted-foreground hover:bg-rail-hover min-[320px]:shrink-0"
             aria-label="Network status"
           >
-            <span className="flex gap-[3px]">
-              {(connected.length ? connected : [null]).map((h, i) => (
-                <i
-                  key={h?.network ?? i}
-                  className={cn(
-                    'block size-1.5 rounded-full',
-                    !h ? 'bg-border-strong' : h.status === 'online' ? 'bg-success' : 'bg-warning',
-                  )}
-                />
-              ))}
+            {/*
+              A square per account, two rows filled a column at a time, a network's accounts side by
+              side. The person's name gives way to them; only on a screen narrower than any phone do
+              the squares themselves, never the count of those in trouble.
+            */}
+            <span className="grid min-w-0 grid-flow-col grid-rows-[repeat(2,6px)] gap-[2px] overflow-hidden">
+              {accounts.length ? (
+                accounts.map((a) => (
+                  <i
+                    key={a.id}
+                    className={cn('block size-1.5 rounded-[1.5px]', a.online ? 'bg-success' : 'bg-warning')}
+                  />
+                ))
+              ) : (
+                <i className="block size-1.5 rounded-[1.5px] bg-border-strong" />
+              )}
             </span>
             {/* "Offline" only when it is: a network with some accounts still connected is degraded. */}
             {trouble.length ? (
-              <span className="text-warning">
+              <span className="shrink-0 whitespace-nowrap text-warning">
                 {trouble.length}{' '}
                 {trouble.every((h) => h.status === 'offline')
                   ? 'offline'
