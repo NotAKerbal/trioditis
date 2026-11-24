@@ -3,6 +3,7 @@ package networks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"reflect"
@@ -280,26 +281,49 @@ func TestLinkedInSendIsNotRepeated(t *testing.T) {
 	})
 }
 
-// Only message creation and reactions are changed: an edit, at the same endpoint with the
-// message's URN, gets LinkedIn's own answer, and other actions keep DoRaw's retries.
-func TestLinkedInOtherRequestsPassThrough(t *testing.T) {
-	linkedIn := &countingTransport{fail: status(http.StatusTeapot)}
-	cli := linkedingo.NewClient(context.Background(), linkedingo.NewURN("me"), linkedingo.NewEmptyStringCookieJar(), "", "", "", linkedingo.Handlers{})
-	httpClient, err := linkedingoHTTPClient(cli)
-	if err != nil {
-		t.Fatal(err)
+// An edit or a deletion reaches LinkedIn once even when its outcome is ambiguous: repeated, an
+// edit could overwrite a newer one made on the phone meanwhile. A refusal stays LinkedIn's own.
+func TestLinkedInEditAndRecallAreNotRepeated(t *testing.T) {
+	message := linkedingo.NewURN("urn:li:msg_message:1")
+	for name, change := range map[string]func(*linkedingo.Client) error{
+		"edit": func(cli *linkedingo.Client) error {
+			return cli.EditMessage(context.Background(), message, linkedingo.SendMessageBody{Text: "edited"})
+		},
+		"recall": func(cli *linkedingo.Client) error { return cli.RecallMessage(context.Background(), message) },
+	} {
+		for _, code := range []int{http.StatusBadGateway, http.StatusTeapot} {
+			t.Run(fmt.Sprintf("%s %d", name, code), func(t *testing.T) {
+				linkedIn := &countingTransport{fail: status(code)}
+				cli := linkedingo.NewClient(context.Background(), linkedingo.NewURN("me"), linkedingo.NewEmptyStringCookieJar(), "", "", "", linkedingo.Handlers{})
+				httpClient, err := linkedingoHTTPClient(cli)
+				if err != nil {
+					t.Fatal(err)
+				}
+				httpClient.Transport = &linkedinSendOnce{next: linkedIn}
+				err = change(cli)
+				var respErr *linkedingo.ResponseError
+				want := code
+				if code >= 500 {
+					want = http.StatusInternalServerError
+				}
+				if !errors.As(err, &respErr) || respErr.StatusCode != want {
+					t.Fatalf("got %v, want a %d", err, want)
+				}
+				if n := linkedIn.calls.Load(); n != 1 {
+					t.Fatalf("it reached LinkedIn %d times, want once", n)
+				}
+			})
+		}
 	}
-	httpClient.Transport = &linkedinSendOnce{next: linkedIn}
-	err = cli.EditMessage(context.Background(), linkedingo.NewURN("urn:li:msg_message:1"), linkedingo.SendMessageBody{Text: "edited"})
-	var respErr *linkedingo.ResponseError
-	if !errors.As(err, &respErr) || respErr.StatusCode != http.StatusTeapot {
-		t.Fatalf("got %v, want LinkedIn's own 418", err)
-	}
+}
 
+// Other requests keep DoRaw's retries: only creating, editing and deleting messages and
+// reactions are changed.
+func TestLinkedInOtherRequestsPassThrough(t *testing.T) {
 	sendOnce := &linkedinSendOnce{next: &countingTransport{fail: status(http.StatusBadGateway)}}
 	for _, target := range []string{
-		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages/urn%3Ali%3Amsg_message%3A1",
 		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerMessages?action=markAllRead",
+		"https://www.linkedin.com/voyager/api/voyagerMessagingDashMessengerConversations?action=typing",
 	} {
 		req, _ := http.NewRequest(http.MethodPost, target, nil)
 		resp, err := sendOnce.RoundTrip(req)

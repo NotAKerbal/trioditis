@@ -34,7 +34,7 @@ What each connector allows for your own messages, and for how long after sending
 | Signal          | 24 hours   | For everyone, 24 hours            |
 | Google Messages | No         | Only from your phone, any time    |
 | Google Voice    | No         | No                                |
-| Telegram        | Any time   | For everyone, any time            |
+| Telegram        | 48 hours   | For everyone, any time            |
 | Messenger       | 15 minutes | For everyone, any time            |
 | Instagram       | 15 minutes | For everyone, any time            |
 | Slack           | Any time   | For everyone, any time            |
@@ -43,7 +43,7 @@ What each connector allows for your own messages, and for how long after sending
 | X               | No         | For everyone in X Chat; else, you |
 | Bluesky         | No         | No                                |
 
-Signal allows 10 edits of a message, and Messenger and Instagram 5; the app stops offering Edit at that count. GroupMe's connector keeps an edit's new text unsealed in the bridge database, and X can only edit its encrypted chats, which the app can't tell apart, so neither offers editing. A Slack workspace can turn editing or deleting off, or limit it; the app can't see that, and says so when Slack refuses.
+Signal allows 10 edits of a message, and the app stops offering Edit at that count. Messenger and Instagram allow 5; the app doesn't count them itself (Messenger can report one edit twice), so a sixth is refused and the app says it wasn't saved. GroupMe's connector keeps an edit's new text unsealed in the bridge database, and X can only edit its encrypted chats, which the app can't tell apart, so neither offers editing. A Slack workspace can turn editing or deleting off, or limit it; the app can't see that, and says so when Slack refuses.
 
 ### Not yet supported
 

@@ -109,26 +109,38 @@ func privateField[T any](ptr any, name string) (T, error) {
 }
 
 // linkedinMessagesPath is where linkedingo creates a message (SendMessage, and NewChat for a
-// new group's first message), with ?action=createMessage, and adds or takes away a reaction,
-// with ?action=reactWithEmoji or unreactWithEmoji.
+// new group's first message), with ?action=createMessage, adds or takes away a reaction, with
+// ?action=reactWithEmoji or unreactWithEmoji, and deletes a message, with ?action=recall. An
+// edit (EditMessage) goes to the message's own path under it: <path>/<its URN>.
 const linkedinMessagesPath = "/voyager/api/voyagerMessagingDashMessengerMessages"
 
 // linkedinOnceActions are the actions that go to LinkedIn once: repeating one could add a
-// message twice, or undo what the person did meanwhile elsewhere (a reaction they took away).
-var linkedinOnceActions = map[string]bool{"createMessage": true, "reactWithEmoji": true, "unreactWithEmoji": true}
-
-func isLinkedInOnce(req *http.Request) bool {
-	return req.Method == http.MethodPost && req.URL.Host == "www.linkedin.com" &&
-		req.URL.Path == linkedinMessagesPath && linkedinOnceActions[req.URL.Query().Get("action")]
+// message twice, or undo what the person did meanwhile elsewhere (a reaction they took away, or
+// a message deleted after they sent it again).
+var linkedinOnceActions = map[string]bool{
+	"createMessage": true, "reactWithEmoji": true, "unreactWithEmoji": true, "recall": true,
 }
 
-// linkedinSendOnce makes an ambiguous outcome of creating a message, or of a reaction, final. DoRaw gives a
+func isLinkedInOnce(req *http.Request) bool {
+	if req.Method != http.MethodPost || req.URL.Host != "www.linkedin.com" {
+		return false
+	}
+	// An edit repeated could overwrite a newer one the person made on their phone meanwhile.
+	if strings.HasPrefix(req.URL.Path, linkedinMessagesPath+"/") {
+		return true
+	}
+	return req.URL.Path == linkedinMessagesPath && linkedinOnceActions[req.URL.Query().Get("action")]
+}
+
+// linkedinSendOnce makes an ambiguous outcome of creating, editing or deleting a message, or of
+// a reaction, final. DoRaw gives a
 // response back without repeating it unless it is a 502, 503 or 504, so a create that failed
 // in transport, with any 5xx, or with a redirect (which the client doesn't follow, and which
 // says nothing of whether the message was created) comes back as 500 Internal Server Error.
 // The connector reports a 5xx as a server error it isn't certain about, which the bridge
 // host records as unknown; a reaction it isn't sure of is never confirmed, so the client goes
-// back to what the server says. Every other request, edits included, is untouched.
+// back to what the server says; an edit it isn't sure of is unknown too, and a deletion is never
+// confirmed. Every other request is untouched.
 type linkedinSendOnce struct {
 	next http.RoundTripper
 }

@@ -455,19 +455,31 @@ describe('editing and deleting', () => {
     await expect(a.mutation(api.messages.remove, { chatId, messageId: old })).rejects.toThrow(
       /too late to delete that message on WhatsApp/,
     )
-    // Telegram has no limit.
-    const telegram = await aChat(t, 'user_a', 't', { network: 'telegram' })
-    await aMessage(t, telegram, 'net_t', now - 400 * 24 * 60 * MINUTE, { ...mine, network: 'telegram' })
-    const ancient = await messageIdOf(t, 'net_t')
+    // Slack has no limit; Telegram edits for 48 hours and deletes any time.
+    const slack = await aChat(t, 'user_a', 's', { network: 'slack' })
+    await aMessage(t, slack, 'net_s', now - 400 * 24 * 60 * MINUTE, { ...mine, network: 'slack' })
+    const ancient = await messageIdOf(t, 'net_s')
     await a.mutation(api.messages.edit, {
-      chatId: telegram,
+      chatId: slack,
       messageId: ancient,
       clientMessageId: id(3),
       forBridge: sealed('e'),
     })
-    await a.mutation(api.messages.remove, { chatId: telegram, messageId: ancient })
+    await a.mutation(api.messages.remove, { chatId: slack, messageId: ancient })
+    const telegram = await aChat(t, 'user_a', 't', { network: 'telegram' })
+    await aMessage(t, telegram, 'net_t', now - 49 * 60 * MINUTE, { ...mine, network: 'telegram' })
+    const twoDays = await messageIdOf(t, 'net_t')
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId: telegram,
+        messageId: twoDays,
+        clientMessageId: id(4),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/too late to edit that message on Telegram/)
+    await a.mutation(api.messages.remove, { chatId: telegram, messageId: twoDays })
     const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
-    expect(commands.map((c) => c.payload.type)).toEqual(['edit', 'redact', 'edit', 'redact'])
+    expect(commands.map((c) => c.payload.type)).toEqual(['edit', 'redact', 'edit', 'redact', 'redact'])
   })
 
   it('stops at a network’s cap on edits, counting each edit that arrives', async () => {

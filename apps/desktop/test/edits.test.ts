@@ -49,9 +49,11 @@ describe('which messages can be edited or deleted', () => {
     expect(canEditMessage(message('a', { pending: true }), 'whatsapp', NOW)).toBe(false)
     expect(canEditMessage(message('a', { deleted: true, body: null }), 'whatsapp', NOW)).toBe(false)
     expect(canEditMessage(message('a', { deleting: true }), 'whatsapp', NOW)).toBe(false)
-    // WhatsApp edits for 15 minutes; Telegram has no limit; Google Messages and Bluesky can't.
+    // WhatsApp edits for 15 minutes, Telegram 48 hours, Slack any time; Google Messages and Bluesky can’t.
     expect(canEditMessage(message('a', { at: NOW - 16 * MINUTE }), 'whatsapp', NOW)).toBe(false)
-    expect(canEditMessage(message('a', { at: 0 }), 'telegram', NOW)).toBe(true)
+    expect(canEditMessage(message('a', { at: 0 }), 'slack', NOW)).toBe(true)
+    expect(canEditMessage(message('a', { at: NOW - 47 * 60 * MINUTE }), 'telegram', NOW)).toBe(true)
+    expect(canEditMessage(message('a', { at: NOW - 49 * 60 * MINUTE }), 'telegram', NOW)).toBe(false)
     expect(canEditMessage(message('a'), 'gmessages', NOW)).toBe(false)
     // GroupMe's connector keeps an edit's text unsealed, and X can edit only some chats.
     expect(canEditMessage(message('a'), 'groupme', NOW)).toBe(false)

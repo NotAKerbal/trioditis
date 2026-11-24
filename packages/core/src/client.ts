@@ -124,7 +124,8 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: false,
     reactions: true,
-    edit: { maxAgeMs: null },
+    // Telegram's edit_time_limit: 48 hours (only Saved Messages has none).
+    edit: { maxAgeMs: 48 * HOUR },
     delete: { forEveryone: true, maxAgeMs: null },
   },
   meta: {
@@ -139,7 +140,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
+    // Five edits at most; bridgev2 counts them and refuses a sixth, which the app reports. The
+    // app doesn't count them itself: the connector can report one edit twice.
+    edit: { maxAgeMs: 15 * MINUTE },
     delete: { forEveryone: true, maxAgeMs: null },
   },
   instagram: {
@@ -150,7 +153,9 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
     reactions: true,
-    edit: { maxAgeMs: 15 * MINUTE, maxEdits: 5 },
+    // Five edits at most; bridgev2 counts them and refuses a sixth, which the app reports. The
+    // app doesn't count them itself: the connector can report one edit twice.
+    edit: { maxAgeMs: 15 * MINUTE },
     delete: { forEveryone: true, maxAgeMs: null },
   },
   discord: {

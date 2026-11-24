@@ -44,10 +44,30 @@ export interface Message {
 
 const bodyCache = new Map<string, MessagePlaintext | null>()
 
+/**
+ * An edit as shown: one with no files of its own changed only the text (a caption, on a picture
+ * or file), so the original's files stay with it.
+ */
+export function withOriginalFiles(edit: MessagePlaintext, original: MessagePlaintext | null): MessagePlaintext {
+  if (edit.attachments?.length || !original?.attachments?.length) return edit
+  return { ...edit, type: original.type, attachments: original.attachments }
+}
+
+// The shown edit for each opened edit, so a message's body stays the same object between lists.
+const shownEdits = new WeakMap<MessagePlaintext, { original: MessagePlaintext | null; shown: MessagePlaintext }>()
+
 function openBody(m: Doc<'messages'>, session: Session): MessagePlaintext | null {
-  const envelope = m.sealedEdit ?? m.sealed
-  const objectId = m.sealedEdit ? m.editEventId! : m.sealedObjectId
-  return openCached(bodyCache, envelope, session.keyPair, session.kid, 'message', session.userId, objectId)
+  const open = (envelope: Doc<'messages'>['sealed'], objectId: string) =>
+    envelope ? openCached(bodyCache, envelope, session.keyPair, session.kid, 'message', session.userId, objectId) : null
+  const original = open(m.sealed, m.sealedObjectId)
+  if (!m.sealedEdit) return original
+  const edit = open(m.sealedEdit, m.editEventId!)
+  if (!edit) return null
+  const kept = shownEdits.get(edit)
+  if (kept && kept.original === original) return kept.shown
+  const shown = withOriginalFiles(edit, original)
+  shownEdits.set(edit, { original, shown })
+  return shown
 }
 
 function toMessage(m: Doc<'messages'>, session: Session): Message {
