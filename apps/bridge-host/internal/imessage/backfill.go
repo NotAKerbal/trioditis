@@ -82,29 +82,42 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 	return resp, nil
 }
 
-// backfillTapbacks puts each person's last tapback on the message it is on, where that message
-// is in the batch. Going forward (catching up), one on an earlier message is handed over as
-// it happened, once the batch is in; going back, one on a message older than the batch comes
-// with that message's own batch only if it is in it, so it is left.
+// backfillTapbacks puts each person's last tapback on the message it is on. Going back through
+// history, a tapback can come a page before its message (it is newer): it is kept until the
+// page with its message comes, and goes on that message then. Going forward (catching up), one
+// on an earlier message is handed over as it happened, once the batch is in.
 func (c *Client) backfillTapbacks(params bridgev2.FetchMessagesParams, byID map[networkid.MessageID]*bridgev2.BackfillMessage, tapbacks []*bluebubbles.Message) {
 	type key struct {
 		target networkid.MessageID
 		sender networkid.UserID
 	}
+	portal := string(params.Portal.ID)
 	latest := map[key]*bluebubbles.Message{}
 	var order []key
-	for _, t := range tapbacks {
-		sender := c.messageSender(string(params.Portal.ID), t)
-		k := key{networkid.MessageID(targetGUID(t.AssociatedMessageGUID)), sender.Sender}
-		if _, ok := latest[k]; !ok {
+	add := func(t *bluebubbles.Message) {
+		k := key{networkid.MessageID(targetGUID(t.AssociatedMessageGUID)), c.messageSender(portal, t).Sender}
+		if prev, ok := latest[k]; !ok {
 			order = append(order, k)
+		} else if prev.DateCreated > t.DateCreated {
+			return
 		}
 		latest[k] = t
+	}
+	// Tapbacks kept from newer pages, on messages in this one.
+	for id := range byID {
+		for _, t := range c.takeKeptTapbacks(params.Portal.PortalKey, id) {
+			add(t)
+		}
+	}
+	for _, t := range tapbacks {
+		add(t)
 	}
 	for _, k := range order {
 		t := latest[k]
 		kind := t.TapbackType()
-		if bm := byID[k.target]; bm != nil {
+		bm := byID[k.target]
+		switch {
+		case bm != nil:
 			name := strings.TrimPrefix(kind, "-")
 			emoji := tapbackEmoji[name]
 			if name == "emoji" {
@@ -115,14 +128,50 @@ func (c *Client) backfillTapbacks(params bridgev2.FetchMessagesParams, byID map[
 			}
 			bm.Reactions = append(bm.Reactions, &bridgev2.BackfillReaction{
 				Timestamp: time.UnixMilli(t.DateCreated),
-				Sender:    c.messageSender(string(params.Portal.ID), t),
+				Sender:    c.messageSender(portal, t),
 				Emoji:     emoji,
 			})
-		} else if params.Forward {
+		case params.Forward:
 			// After the batch: bridgev2 holds the chat while it backfills.
-			go c.handleTapback(string(params.Portal.ID), t, kind)
+			go c.handleTapback(portal, t, kind)
+		default:
+			c.keepTapback(params.Portal.PortalKey, k.target, t)
 		}
 	}
+}
+
+// maxKeptTapbacks bounds the tapbacks kept for messages further back in history. They are kept
+// in memory: a restart in the middle of a chat's history loses them, and the messages they
+// were on come in without them.
+const maxKeptTapbacks = 10000
+
+type keptKey struct {
+	portal networkid.PortalKey
+	target networkid.MessageID
+}
+
+func (c *Client) keepTapback(portal networkid.PortalKey, target networkid.MessageID, t *bluebubbles.Message) {
+	c.keptLock.Lock()
+	defer c.keptLock.Unlock()
+	if c.kept == nil {
+		c.kept = map[keptKey][]*bluebubbles.Message{}
+	}
+	if c.keptCount >= maxKeptTapbacks {
+		return
+	}
+	k := keptKey{portal, target}
+	c.kept[k] = append(c.kept[k], t)
+	c.keptCount++
+}
+
+func (c *Client) takeKeptTapbacks(portal networkid.PortalKey, target networkid.MessageID) []*bluebubbles.Message {
+	c.keptLock.Lock()
+	defer c.keptLock.Unlock()
+	k := keptKey{portal, target}
+	kept := c.kept[k]
+	delete(c.kept, k)
+	c.keptCount -= len(kept)
+	return kept
 }
 
 // serviceChats are the chats Messages may keep for one portal. Before macOS 26, someone's

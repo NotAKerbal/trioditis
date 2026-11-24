@@ -2,6 +2,8 @@ package bluebubbles
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"os"
@@ -41,6 +43,9 @@ func transport(err error) error {
 	switch {
 	case errors.Is(err, ErrAddressRefused):
 		return &TransportError{kind: "the address is one a Mac may not be at", notSent: true, refused: true}
+	case certificateRefused(err):
+		// The certificate is checked in the handshake, before any of the request is written.
+		return &TransportError{kind: "the server's certificate was refused", notSent: true}
 	case dial:
 		return &TransportError{kind: "couldn't connect", notSent: true}
 	case errors.Is(err, context.Canceled):
@@ -53,6 +58,15 @@ func transport(err error) error {
 		return &TransportError{kind: "timed out"}
 	}
 	return &TransportError{kind: "the connection failed"}
+}
+
+// certificateRefused says the server's certificate failed verification.
+func certificateRefused(err error) bool {
+	var verify *tls.CertificateVerificationError
+	var unknown x509.UnknownAuthorityError
+	var host x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &verify) || errors.As(err, &unknown) || errors.As(err, &host) || errors.As(err, &invalid)
 }
 
 // errUnreadable is an answer that came but couldn't be read as the server writes it.

@@ -2,12 +2,14 @@ package imessage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -54,17 +56,9 @@ func (c *Client) fetchAttachment(ctx context.Context, portal *bridgev2.Portal, i
 	if att.TotalBytes > maxFileBytes {
 		return nil, errTooLarge{}
 	}
-	body, contentType, err := c.bb.Download(ctx, bluebubbles.AttachmentPath(att.GUID))
+	data, contentType, err := c.download(ctx, bluebubbles.AttachmentPath(att.GUID))
 	if err != nil {
 		return nil, err
-	}
-	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, maxFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxFileBytes {
-		return nil, errTooLarge{}
 	}
 	mimeType := mediaType(contentType)
 	if mimeType == "" || mimeType == "application/octet-stream" {
@@ -92,6 +86,42 @@ func (c *Client) fetchAttachment(ctx context.Context, portal *bridgev2.Portal, i
 		},
 	}
 	return content, nil
+}
+
+// downloadTries is how many times a file is asked for when the transfer breaks off: once the
+// message is saved, a file it came without can't be fetched again.
+var downloadTries = []time.Duration{0, 2 * time.Second, 5 * time.Second}
+
+// download fetches a file whole, asking again if the transfer breaks off (it is only a read).
+// A file the Mac says it hasn't got, or one too large, isn't asked for again.
+func (c *Client) download(ctx context.Context, path string) ([]byte, string, error) {
+	var err error
+	for _, wait := range downloadTries {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case <-time.After(wait):
+		}
+		var body io.ReadCloser
+		var contentType string
+		body, contentType, err = c.bb.Download(ctx, path)
+		if err == nil {
+			var data []byte
+			data, err = io.ReadAll(io.LimitReader(body, maxFileBytes+1))
+			body.Close()
+			if err == nil {
+				if len(data) > maxFileBytes {
+					return nil, "", errTooLarge{}
+				}
+				return data, contentType, nil
+			}
+		}
+		var bbErr *bluebubbles.Error
+		if errors.As(err, &bbErr) && bbErr.Status >= 400 && bbErr.Status < 500 {
+			return nil, "", err
+		}
+	}
+	return nil, "", err
 }
 
 // mediaType is a Content-Type's media type alone, in lower case.

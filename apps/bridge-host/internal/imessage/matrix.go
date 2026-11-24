@@ -41,14 +41,23 @@ var (
 
 // canSend says whether the Mac can send: its Private API helper is running. When it last
 // wasn't, the server is asked again first, since the helper may have started since.
-func (c *Client) canSend(ctx context.Context) bool {
+func (c *Client) canSend(ctx context.Context) error {
 	if c.privateAPI.Load() {
-		return true
+		return nil
 	}
 	if err := c.refreshInfo(ctx); err != nil {
-		return false
+		// Only the server's description was asked for: nothing was sent, whatever went wrong.
+		reason := event.MessageStatusNetworkError
+		var bbErr *bluebubbles.Error
+		if errors.As(err, &bbErr) && bbErr.Unauthorized() {
+			reason = event.MessageStatusBridgeUnavailable
+		}
+		return bridgev2.WrapErrorInStatus(err).WithIsCertain(true).WithErrorReason(reason)
 	}
-	return c.privateAPI.Load()
+	if !c.privateAPI.Load() {
+		return errNeedsPrivateAPI
+	}
+	return nil
 }
 
 // sentMessage checks what the Mac answered a send with: a message Messages marked failed
@@ -122,8 +131,8 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	if c.bb == nil {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
-	if !c.canSend(ctx) {
-		return nil, errNeedsPrivateAPI
+	if err := c.canSend(ctx); err != nil {
+		return nil, err
 	}
 	content := msg.Content
 	var replyTo string
@@ -256,8 +265,8 @@ func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit)
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.canSend(ctx) {
-		return errNeedsPrivateAPI
+	if err := c.canSend(ctx); err != nil {
+		return err
 	}
 	if msg.EditTarget.PartID != textPart {
 		return errUnsupported
@@ -270,8 +279,11 @@ func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit)
 	if err != nil {
 		return sendError(err)
 	}
-	// The server answers after 30 seconds even if the edit never showed: it may still.
-	if edited.DateEdited <= before {
+	// The server answers after 30 seconds with the message as it then is, edited or not, and
+	// it may yet be. Only this message, edited since, to this text, confirms it: an edit made
+	// meanwhile on another device would also be newer.
+	if edited.GUID != string(msg.EditTarget.ID) || edited.DateEdited <= before ||
+		messageText(edited) != strings.TrimSpace(strings.ReplaceAll(msg.Content.Body, "\ufffc", "")) {
 		return errUnconfirmed
 	}
 	// Its echo, the message updated with this edit, is then recognized as already applied.
@@ -283,14 +295,14 @@ func (c *Client) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.Ma
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.canSend(ctx) {
-		return errNeedsPrivateAPI
+	if err := c.canSend(ctx); err != nil {
+		return err
 	}
 	unsent, err := c.bb.Unsend(ctx, string(msg.TargetMessage.ID))
 	if err != nil {
 		return sendError(err)
 	}
-	if !unsent.Unsent() {
+	if unsent.GUID != string(msg.TargetMessage.ID) || !unsent.Unsent() {
 		return errUnconfirmed
 	}
 	return nil
@@ -329,8 +341,8 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	if c.bb == nil {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
-	if !c.canSend(ctx) {
-		return nil, errNeedsPrivateAPI
+	if err := c.canSend(ctx); err != nil {
+		return nil, err
 	}
 	chat, err := c.chatGUID(ctx, msg.Portal)
 	if err != nil {
@@ -353,8 +365,8 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 	if c.bb == nil {
 		return bridgev2.ErrNotLoggedIn
 	}
-	if !c.canSend(ctx) {
-		return errNeedsPrivateAPI
+	if err := c.canSend(ctx); err != nil {
+		return err
 	}
 	name := tapbackName(msg.TargetReaction.Emoji)
 	if name == "" {

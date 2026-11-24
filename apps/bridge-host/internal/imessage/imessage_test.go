@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -463,5 +464,158 @@ func TestHistoryFromEveryServiceChat(t *testing.T) {
 	// A group's own ID is asked for as it is.
 	if got := serviceChats("weird"); len(got) != 1 || got[0] != "weird" {
 		t.Errorf("serviceChats: %v", got)
+	}
+}
+
+// Catch-up pages follow on from the last message's time, so a message deleted on the Mac
+// between pages doesn't push a later one past the next page.
+func TestCatchUpPagesByTime(t *testing.T) {
+	var lock sync.Mutex
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			After  int64 `json:"after"`
+			Offset int   `json:"offset"`
+			Limit  int   `json:"limit"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		lock.Lock()
+		var rows []string
+		for at := int64(1); at <= 600; at++ {
+			if at == 3 && deleted {
+				continue
+			}
+			if at >= body.After {
+				rows = append(rows, fmt.Sprintf(`{"guid":"M%d","text":"x","dateCreated":%d,"chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}}`, at, at))
+			}
+		}
+		// The first page is read, then a message in it is deleted on the Mac.
+		deleted = true
+		lock.Unlock()
+		rows = rows[min(body.Offset, len(rows)):]
+		rows = rows[:min(body.Limit, len(rows))]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":200,"data":[%s]}`, strings.Join(rows, ","))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	c.failures = map[string]*attempts{}
+	seen := map[string]int{}
+	c.take = func(m *bluebubbles.Message) bool { seen[m.GUID]++; return true }
+	if err := c.catchUpSince(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	for at := 1; at <= 600; at++ {
+		if seen[fmt.Sprintf("M%d", at)] == 0 {
+			t.Fatalf("M%d was skipped (%d handed over)", at, len(seen))
+		}
+	}
+}
+
+// Catching up applies each person's last tapback on a message only: a like, its removal and a
+// like again, replayed one by one, would take away the like the message has.
+func TestCatchUpAppliesLastTapback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		tap := func(guid, kind string, at int) string {
+			return fmt.Sprintf(`{"guid":"%s","dateCreated":%d,"associatedMessageGuid":"p:0/T","associatedMessageType":"%s","chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}}`, guid, at, kind)
+		}
+		_, _ = fmt.Fprintf(w, `{"status":200,"data":[%s,%s,{"guid":"T","text":"x","dateCreated":1,"chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}},%s]}`,
+			tap("L1", "love", 2), tap("U1", "-love", 3), tap("L2", "love", 4))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	c.failures = map[string]*attempts{}
+	var taken []string
+	c.take = func(m *bluebubbles.Message) bool { taken = append(taken, m.GUID); return true }
+	if err := c.catchUpSince(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(taken, ",") != "T,L2" {
+		t.Errorf("handed over %v; want the message, then the last tapback", taken)
+	}
+}
+
+// A tapback in a newer page of history waits for the page with its message.
+func TestHistoryTapbackWaitsForItsMessage(t *testing.T) {
+	c := &Client{login: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "mac-1"}}}
+	p := portal("any;-;+15550001111")
+	params := bridgev2.FetchMessagesParams{Portal: p}
+	like := &bluebubbles.Message{GUID: "L", DateCreated: 5, AssociatedMessageGUID: "p:0/OLD", AssociatedMessageType: json.RawMessage(`"love"`), Handle: &bluebubbles.Handle{Address: "+15550001111"}}
+	c.backfillTapbacks(params, map[networkid.MessageID]*bridgev2.BackfillMessage{}, []*bluebubbles.Message{like})
+	old := &bridgev2.BackfillMessage{ID: "OLD"}
+	c.backfillTapbacks(params, map[networkid.MessageID]*bridgev2.BackfillMessage{"OLD": old}, nil)
+	if len(old.Reactions) != 1 || old.Reactions[0].Emoji != "❤️" {
+		t.Errorf("reactions on the older message: %+v", old.Reactions)
+	}
+}
+
+// Asking whether the Mac can send is only a read: whatever goes wrong, nothing was sent.
+func TestSendPrecheckFailureIsCertain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(502) }))
+	defer srv.Close()
+	c := testClient(t, srv)
+	_, err := c.HandleMatrixMessage(context.Background(), matrixMessage(portal("any;+;chat1"), &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}))
+	if status := bridgev2.WrapErrorInStatus(err); err == nil || !status.IsCertain || errors.Is(err, errNeedsPrivateAPI) {
+		t.Errorf("a failed precheck: %v", err)
+	}
+}
+
+// An edit is confirmed only by this message, edited since, to this text.
+func TestEditConfirmation(t *testing.T) {
+	mac := &recordingMac{privateAPI: true}
+	c := testClient(t, mac.server(t))
+	edit := func(answer string) error {
+		mac.lock.Lock()
+		mac.sendAnswer = answer
+		mac.lock.Unlock()
+		target := &database.Message{ID: "G", PartID: textPart, Metadata: &MessageMetadata{EditedAt: 10}}
+		return c.HandleMatrixEdit(context.Background(), &bridgev2.MatrixEdit{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.MessageEventContent]{Content: &event.MessageEventContent{Body: "new"}},
+			EditTarget:      target,
+		})
+	}
+	if err := edit(`{"status":200,"data":{"guid":"G","text":"new","dateEdited":20}}`); err != nil {
+		t.Errorf("a confirmed edit: %v", err)
+	}
+	for name, answer := range map[string]string{
+		"not edited since":     `{"status":200,"data":{"guid":"G","text":"new","dateEdited":10}}`,
+		"edited to other text": `{"status":200,"data":{"guid":"G","text":"from another device","dateEdited":20}}`,
+		"another message":      `{"status":200,"data":{"guid":"H","text":"new","dateEdited":20}}`,
+	} {
+		if err := edit(answer); !errors.Is(err, errUnconfirmed) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A transfer that breaks off is asked for again; a file the Mac hasn't got isn't.
+func TestDownloadAsksAgain(t *testing.T) {
+	tries := downloadTries
+	downloadTries = []time.Duration{0, 0, 0}
+	defer func() { downloadTries = tries }()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "missing"):
+			calls.Add(1)
+			w.WriteHeader(404)
+		case calls.Add(1) == 1:
+			// Promise a body and cut it off.
+			w.Header().Set("Content-Length", "100")
+			_, _ = w.Write([]byte("partial"))
+		default:
+			_, _ = w.Write([]byte("whole"))
+		}
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	data, _, err := c.download(context.Background(), "/api/v1/attachment/A/download")
+	if err != nil || string(data) != "whole" || calls.Load() != 2 {
+		t.Errorf("got %q, %v after %d calls", data, err, calls.Load())
+	}
+	calls.Store(0)
+	if _, _, err = c.download(context.Background(), "/api/v1/attachment/missing/download"); err == nil || calls.Load() != 1 {
+		t.Errorf("a missing file: %v after %d calls", err, calls.Load())
 	}
 }

@@ -384,3 +384,20 @@ func TestTransportErrorsSayFixedWords(t *testing.T) {
 		t.Errorf("a refused connection: %v", err)
 	}
 }
+
+// A certificate is refused in the handshake, before any of the request goes.
+func TestCertificateRefusedIsNotSent(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the request reached the server")
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, "pw", allowAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.SendText(context.Background(), TextMessage{ChatGUID: "c", TempGUID: "t", Message: "x", Method: MethodPrivateAPI})
+	var tErr *TransportError
+	if !errors.As(err, &tErr) || !tErr.NotSent() {
+		t.Errorf("a refused certificate: %v", err)
+	}
+}

@@ -48,6 +48,10 @@ type Client struct {
 	queue *eventQueue
 	// now, in tests, stands in for the clock.
 	now func() time.Time
+	// kept are tapbacks from history waiting for the page with their message (backfill.go).
+	keptLock  sync.Mutex
+	kept      map[keptKey][]*bluebubbles.Message
+	keptCount int
 	// take, in tests, stands in for handing a message to bridgev2 (handleNewMessage).
 	take func(*bluebubbles.Message) bool
 
@@ -221,17 +225,11 @@ func (c *Client) session(ctx context.Context) error {
 				if !ok {
 					return
 				}
-				failedAt := c.handleEvent(ctx, evt)
-				if failedAt != 0 {
-					// bridgev2 couldn't take a message: fetch it again from the Mac. If even
-					// that fails, the session ends, and the next one catches up from before it.
-					if err := c.catchUpSince(ctx, failedAt-catchUpMargin.Milliseconds()); err != nil {
-						failure = err
-						cancel()
-						return
-					}
+				if err := c.handleQueued(ctx, queue, evt); err != nil {
+					failure = err
+					cancel()
+					return
 				}
-				queue.done()
 			}
 		}()
 	}, queue.push)
@@ -241,6 +239,30 @@ func (c *Client) session(ctx context.Context) error {
 		return failure
 	}
 	return err
+}
+
+// handleQueued handles one event popped from the queue, and settles it there whatever
+// happens. A new message bridgev2 couldn't take is fetched again from the Mac; a change to a
+// message it couldn't apply goes back at the head of the queue, as a catch-up can't fetch it
+// again. Either way, if that doesn't settle it, the session ends with the error, and the next
+// one catches up from before it (holdBack bounds how often one thing can do that).
+func (c *Client) handleQueued(ctx context.Context, queue *eventQueue, evt bluebubbles.Event) error {
+	defer queue.done()
+	failedAt, retry := c.handleEvent(ctx, evt)
+	switch {
+	case failedAt != 0:
+		return c.catchUpSince(ctx, failedAt-catchUpMargin.Milliseconds())
+	case retry && c.holdBack(ctx, "update:"+eventKey(evt), false):
+		queue.pushFront(evt)
+		return errNotTaken
+	}
+	return nil
+}
+
+// eventKey names a change to a message, for holdBack: its message and when it changed.
+func eventKey(evt bluebubbles.Event) string {
+	sum := sha256.Sum256(evt.Data)
+	return hex.EncodeToString(sum[:8])
 }
 
 // eventQueue holds the socket's events, in order, until they are handled. It never refuses
@@ -258,6 +280,18 @@ func newEventQueue() *eventQueue { return &eventQueue{wake: make(chan struct{}, 
 func (q *eventQueue) push(evt bluebubbles.Event) {
 	q.lock.Lock()
 	q.items = append(q.items, evt)
+	q.count++
+	q.lock.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// pushFront puts an event back at the head of the queue, to be handled next.
+func (q *eventQueue) pushFront(evt bluebubbles.Event) {
+	q.lock.Lock()
+	q.items = append([]bluebubbles.Event{evt}, q.items...)
 	q.count++
 	q.lock.Unlock()
 	select {
@@ -371,10 +405,8 @@ const (
 	// chatPage is the most chats the server lists at once; maxChats bounds a listing.
 	chatPage = 1000
 	maxChats = 20 * chatPage
-	// messagePage is how many missed messages are fetched at once; maxCatchUp bounds one
-	// catch-up, past which the rest of a long absence is left to history.
+	// messagePage is how many missed messages are fetched at once.
 	messagePage = 500
-	maxCatchUp  = 20000
 )
 
 // catchUp brings in what happened while the login wasn't connected: every message created
@@ -458,37 +490,64 @@ func (c *Client) holdBack(ctx context.Context, key string, ok bool) bool {
 	return false
 }
 
-// catchUpSince hands over every message created at or after after (Unix ms), oldest first.
-// Ones already bridged are recognized by their GUIDs. It fails, so the time synced up to
-// stays, if the Mac can't be asked or bridgev2 couldn't take a message (handOver).
+// catchUpSince hands over every message created at or after after (Unix ms), oldest first,
+// however many there are. Ones already bridged are recognized by their GUIDs. It fails, so the
+// time synced up to stays, if the Mac can't be asked or bridgev2 couldn't take something
+// (holdBack).
+//
+// Pages follow on from the last message's time, not an offset: a message deleted on the Mac
+// between pages would shift every later one back past an offset. Tapbacks are applied after
+// the messages, each person's last on each message only: replaying a like, its removal and a
+// like again one by one would take away the like the message has now.
 func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 	notTaken := false
-	offset := 0
-	for offset < maxCatchUp {
-		page, err := c.bb.MessagesSince(ctx, after, offset, messagePage)
+	type tapKey struct{ chat, target, sender string }
+	latest := map[tapKey]*bluebubbles.Message{}
+	var order []tapKey
+	// atAfter is how many messages created exactly at after were already handed over.
+	atAfter := 0
+	for {
+		page, err := c.bb.MessagesSince(ctx, after, atAfter, messagePage)
 		if err != nil {
 			return err
 		}
 		for i := range page {
 			msg := &page[i]
-			if msg.ItemType != 0 {
+			if msg.DateCreated > after {
+				after, atAfter = msg.DateCreated, 0
+			}
+			atAfter++
+			guid := msg.ChatGUID()
+			switch {
+			case msg.ItemType != 0:
 				// A rename, or someone added or leaving: the chat's details are fetched again.
-				if guid := msg.ChatGUID(); guid != "" {
+				if guid != "" {
 					_ = c.queueResync(ctx, guid, time.Time{}, false)
 				}
-				continue
-			}
-			if c.handOver(ctx, msg) {
-				notTaken = true
+			case msg.TapbackType() != "" && guid != "":
+				sender := "me"
+				if !msg.IsFromMe {
+					sender = string(c.messageSender(guid, msg).Sender)
+				}
+				k := tapKey{string(chatID(guid)), targetGUID(msg.AssociatedMessageGUID), sender}
+				if _, ok := latest[k]; !ok {
+					order = append(order, k)
+				}
+				latest[k] = msg
+			default:
+				if c.handOver(ctx, msg) {
+					notTaken = true
+				}
 			}
 		}
 		if len(page) < messagePage {
 			break
 		}
-		offset += len(page)
 	}
-	if offset >= maxCatchUp {
-		zerolog.Ctx(ctx).Warn().Int("messages", maxCatchUp).Msg("Caught up as far as one catch-up goes; older missed messages are left to history")
+	for _, k := range order {
+		if c.handOver(ctx, latest[k]) {
+			notTaken = true
+		}
 	}
 	if notTaken {
 		return errNotTaken
@@ -496,9 +555,11 @@ func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 	return nil
 }
 
-// initialSync brings in a new login's most recent chats, with their recent history. The
-// server lists chats in pages by when they were made, so every page is read before the most
-// recently active are picked.
+// initialSync makes a new login's most recent chats. Their history comes from bridgev2's
+// backfill queue, a page at a time, as for every network: what a new login needs complete is
+// only what comes after it signs in, which the socket and catch-ups bring. The server lists
+// chats in pages by when they were made, so every page is read before the most recently
+// active are picked.
 func (c *Client) initialSync(ctx context.Context) error {
 	var chats []bluebubbles.Chat
 	for offset := 0; offset < maxChats; offset += chatPage {
@@ -524,7 +585,7 @@ func (c *Client) initialSync(ctx context.Context) error {
 			// A chat bridgev2 couldn't make keeps the login from counting as synced, so the
 			// next connection makes it again rather than leaving it out until it gets a new
 			// message.
-			ok := c.queueResync(ctx, chats[i].GUID, time.UnixMilli(at), true)
+			ok := c.queueResync(ctx, chats[i].GUID, time.Time{}, true)
 			if c.holdBack(ctx, "chat:"+string(chatID(chats[i].GUID)), ok) {
 				notTaken = true
 			}

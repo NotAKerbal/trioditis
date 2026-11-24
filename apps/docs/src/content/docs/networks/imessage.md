@@ -54,15 +54,17 @@ The app offers sending, tapbacks, editing and deleting on iMessage as the Privat
 
 ## Unsupported & known limits
 
-- **The Mac must stay on and reachable.** While it isn't, sends fail (`not_connected` if the bridge host can't reach it at all) and the account shows as disconnected. When it's back, the bridge host first brings in every message created since the time it last synced, minus five minutes, in every chat, oldest first, up to 20,000; only then does it hand over what arrived live meanwhile. A message the bridge host can't store holds the catch-up back, and is fetched again on later ones; after three tries at least ten minutes apart it is left, so one message can't stop a login from catching up. Signing in again to the same Mac (with a changed password, say) keeps how far it had synced.
+- **The Mac must stay on and reachable.** While it isn't, sends fail (`not_connected` if the bridge host can't reach it at all) and the account shows as disconnected. When it's back, the bridge host first brings in every message created since the time it last synced, minus five minutes, in every chat, oldest first, applying each person's last tapback on each message after the messages; only then does it hand over what arrived live meanwhile. A message, tapback, edit or unsend the bridge host can't store holds the time it has synced up to, and is tried again; after three tries at least ten minutes apart it is left, so one can't stop a login from catching up. Signing in again to the same Mac (with a changed password, say) keeps how far it had synced.
 - **What changed while away, beyond new messages:** catching up brings in new messages and tapbacks; an edit, unsend or read receipt on an older message made while the bridge host was away isn't brought in.
 - **iMessage and SMS with the same person are one chat**, as on an iPhone. Chats are keyed by their `any;` GUID (macOS 26 moved every chat to it, and BlueBubbles finds a chat by it on older systems too). On older systems, history comes from each service's chat and is merged; a send goes to whichever chat Messages finds first, iMessage when there is one.
+- **History:** a new login makes its 50 most recently active chats, and their history comes in a page at a time in the background, as for other networks. A tapback in history that comes a page before the message it is on waits for that page, in memory: a restart in the middle of a chat's history loses it.
 - **Starting a chat** happens on its first message, which must be text. A file can't start one.
 - **Tapbacks:** the six classic ones go both ways. Any other emoji tapback comes in when Messages' text for it ("Reacted 🎉 to …") is in English, and can't be sent (BlueBubbles can't send one). Stickers on messages aren't brought in.
+- **Messages of several parts** (several photos, or photos and text): a tapback, edit or unsend acts on the whole message. A tapback on one photo shows on the message, and unsending one photo of several isn't shown until the whole message is unsent.
 - **Edits** are allowed for 15 minutes, five times; **unsending** for 2 minutes (macOS 13 or newer). An edit or unsend the Mac doesn't confirm within 30 seconds is reported uncertain, since it may still go.
 - **A failure Messages reports later:** a message Messages marks failed after BlueBubbles has answered is marked in Messages on the Mac, but stays sent in Trioditis.
 - **Messages only an Apple device can show** (games, Apple Cash, app balloons) come in as a note saying so.
-- **Files** up to 100 MiB both ways. Pictures Messages keeps as HEIC come in as JPEG, and voice messages as MP3.
+- **Files** up to 100 MiB both ways. Pictures Messages keeps as HEIC come in as JPEG, and voice messages as MP3. A transfer that breaks off is asked for twice more; a file still missing after that comes in as a note.
 
 ## What's stored in plaintext
 

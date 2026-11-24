@@ -22,22 +22,24 @@ type MessageMetadata struct {
 }
 
 // handleEvent hands one socket event to bridgev2. Only an event's kind is ever logged. It
-// returns the time of a new message bridgev2 couldn't take, so it can be fetched again, or 0.
-func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) (failedAt int64) {
+// returns the time of a new message (or tapback) bridgev2 couldn't take, so it can be fetched
+// again, or 0; and whether a change to a message (an edit or unsend) couldn't be applied, so
+// the event must be kept and tried again: a catch-up can't fetch a change again.
+func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) (failedAt int64, retry bool) {
 	log := zerolog.Ctx(ctx)
 	switch evt.Name {
 	case "new-message", "updated-message":
 		var msg bluebubbles.Message
 		if err := json.Unmarshal(evt.Data, &msg); err != nil {
 			log.Warn().Str("event", evt.Name).Msg("Couldn't read an event from BlueBubbles Server")
-			return 0
+			return 0, false
 		}
 		if evt.Name == "new-message" {
 			if !c.handleNewMessage(&msg) {
-				return max(msg.DateCreated, 1)
+				return max(msg.DateCreated, 1), false
 			}
-		} else {
-			c.handleUpdatedMessage(&msg)
+		} else if !c.handleUpdatedMessage(&msg) {
+			return 0, true
 		}
 	case "typing-indicator":
 		var typing bluebubbles.TypingIndicator
@@ -61,7 +63,7 @@ func (c *Client) handleEvent(ctx context.Context, evt bluebubbles.Event) (failed
 		// one it reports later is in Messages, marked failed, for the person to see there.
 		log.Warn().Msg("Messages reported a message failed to send after taking it")
 	}
-	return 0
+	return 0, false
 }
 
 // handleNewMessage bridges a new message or tapback, and says whether bridgev2 took it (or
@@ -73,8 +75,7 @@ func (c *Client) handleNewMessage(msg *bluebubbles.Message) bool {
 		return true
 	}
 	if kind := msg.TapbackType(); kind != "" {
-		c.handleTapback(chatGUID, msg, kind)
-		return true
+		return c.handleTapback(chatGUID, msg, kind)
 	}
 	at := time.UnixMilli(msg.DateCreated)
 	evt := &simplevent.Message[*bluebubbles.Message]{
@@ -104,12 +105,14 @@ func (c *Client) handleNewMessage(msg *bluebubbles.Message) bool {
 }
 
 // handleUpdatedMessage bridges what changed about a message: unsent, edited, or, for the
-// person's own message in a direct chat, read by the other person.
-func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) {
+// person's own message in a direct chat, read by the other person. It says whether bridgev2
+// took the unsend or edit (or had it already); a read receipt is only ever tried once.
+func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) bool {
 	chatGUID := msg.ChatGUID()
 	if chatGUID == "" || msg.GUID == "" || msg.ItemType != 0 || msg.TapbackType() != "" {
-		return
+		return true
 	}
+	ok := true
 	key := c.portalKey(chatGUID)
 	sender := c.messageSender(chatGUID, msg)
 	switch {
@@ -118,15 +121,15 @@ func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) {
 		if at == 0 {
 			at = msg.DateEdited
 		}
-		c.login.QueueRemoteEvent(&simplevent.MessageRemove{
+		ok = taken(c.login.QueueRemoteEvent(&simplevent.MessageRemove{
 			EventMeta: simplevent.EventMeta{
 				Type: bridgev2.RemoteEventMessageRemove, PortalKey: key, Sender: sender,
 				Timestamp: time.UnixMilli(at),
 			},
 			TargetMessage: networkid.MessageID(msg.GUID),
-		})
+		}))
 	case msg.DateEdited != 0:
-		c.login.QueueRemoteEvent(&simplevent.Message[*bluebubbles.Message]{
+		ok = taken(c.login.QueueRemoteEvent(&simplevent.Message[*bluebubbles.Message]{
 			EventMeta: simplevent.EventMeta{
 				Type: bridgev2.RemoteEventEdit, PortalKey: key, Sender: sender,
 				Timestamp: time.UnixMilli(msg.DateEdited),
@@ -134,12 +137,12 @@ func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) {
 			TargetMessage:   networkid.MessageID(msg.GUID),
 			Data:            msg,
 			ConvertEditFunc: c.convertEdit,
-		})
+		}))
 	}
 	address := dmAddress(key.ID)
 	if msg.IsFromMe && msg.DateRead != 0 && address != "" {
-		if last, ok := c.lastRead.Load(key.ID); ok && last.(string) == msg.GUID {
-			return
+		if last, seen := c.lastRead.Load(key.ID); seen && last.(string) == msg.GUID {
+			return ok
 		}
 		c.lastRead.Store(key.ID, msg.GUID)
 		c.login.QueueRemoteEvent(&simplevent.Receipt{
@@ -151,7 +154,11 @@ func (c *Client) handleUpdatedMessage(msg *bluebubbles.Message) {
 			ReadUpTo:   time.UnixMilli(msg.DateRead),
 		})
 	}
+	return ok
 }
+
+// taken says whether bridgev2 took an event, or had it already.
+func taken(res bridgev2.EventHandlingResult) bool { return res.Success || res.Ignored }
 
 // messageSender is who sent a message: the person, or the handle it came from (in a direct
 // chat, the chat's other person if the server left the handle out).
@@ -170,7 +177,8 @@ var tapbackEmoji = map[string]string{
 	"love": "❤️", "like": "👍", "dislike": "👎", "laugh": "😂", "emphasize": "‼️", "question": "❓",
 }
 
-func (c *Client) handleTapback(chatGUID string, msg *bluebubbles.Message, kind string) {
+// handleTapback bridges a tapback, and says whether bridgev2 took it (or had nothing to do).
+func (c *Client) handleTapback(chatGUID string, msg *bluebubbles.Message, kind string) bool {
 	remove := strings.HasPrefix(kind, "-")
 	name := strings.TrimPrefix(kind, "-")
 	emoji := tapbackEmoji[name]
@@ -179,7 +187,7 @@ func (c *Client) handleTapback(chatGUID string, msg *bluebubbles.Message, kind s
 	}
 	if emoji == "" && !remove {
 		// A sticker on a message, or an emoji the server didn't say.
-		return
+		return true
 	}
 	meta := simplevent.EventMeta{
 		Type:      bridgev2.RemoteEventReaction,
@@ -191,11 +199,11 @@ func (c *Client) handleTapback(chatGUID string, msg *bluebubbles.Message, kind s
 		meta.Type = bridgev2.RemoteEventReactionRemove
 	}
 	// One tapback per person per message: a new one replaces theirs (no emoji ID).
-	c.login.QueueRemoteEvent(&simplevent.Reaction{
+	return taken(c.login.QueueRemoteEvent(&simplevent.Reaction{
 		EventMeta:     meta,
 		TargetMessage: networkid.MessageID(targetGUID(msg.AssociatedMessageGUID)),
 		Emoji:         emoji,
-	})
+	}))
 }
 
 // reactedEmoji is the emoji in an emoji tapback's text, which Messages writes as
