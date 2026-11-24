@@ -193,10 +193,15 @@ function Panel({
         ) : null}
       </nav>
       <div
-        className={cn('relative min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4', list && 'max-md:hidden')}
+        className={cn(
+          // Isolated, so the phone's header stacks under the window's close button, not over it.
+          'relative isolate min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4',
+          list && 'max-md:hidden',
+        )}
       >
-        {/* On a phone the list isn't beside the section, so the section names itself. */}
-        <div className="absolute top-4 right-14 left-2 flex items-center gap-1 md:hidden">
+        {/* On a phone the list isn't beside the section, so the section names itself. It stays at
+            the top while the section scrolls, so the way back is always in reach. */}
+        <div className="sticky -top-14 z-10 -mx-4 -mt-14 flex h-14 items-start gap-1 bg-surface pt-4 pr-14 pl-2 md:hidden">
           <Button
             ref={back}
             variant="ghost"
@@ -209,7 +214,7 @@ function Panel({
           >
             <ArrowLeft className="size-[18px]" />
           </Button>
-          <span className="truncate font-semibold" aria-hidden>
+          <span className="truncate leading-(--control-md) font-semibold" aria-hidden>
             {current.name}
           </span>
         </div>
