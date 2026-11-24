@@ -23,6 +23,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/imessage/bluebubbles"
 )
 
@@ -36,6 +37,15 @@ type Client struct {
 
 	// privateAPI is whether the server's Private API helper was running when last asked.
 	privateAPI atomic.Bool
+
+	// acker waits for bridgev2's real outcome for each new message (nil in unit tests).
+	acker *handled.Acker
+	// failures counts, per message GUID, the catch-ups that couldn't hand it over, so one
+	// message bridgev2 never takes holds catch-up back only so many times.
+	failLock sync.Mutex
+	failures map[string]int
+	// take, in tests, stands in for handing a message to bridgev2 (handleNewMessage).
+	take func(*bluebubbles.Message) bool
 
 	runLock sync.Mutex
 	stop    context.CancelFunc
@@ -62,7 +72,11 @@ var (
 )
 
 func newClient(c *Connector, login *bridgev2.UserLogin) *Client {
-	client := &Client{conn: c, login: login}
+	client := &Client{conn: c, login: login, failures: map[string]int{}}
+	if c.bridge != nil {
+		// The bridge's logger, not the login's.
+		client.acker = handled.NewAcker(c.bridge.BackgroundCtx, c.bridge.Log.With().Str("component", "imessage ack").Logger())
+	}
 	if meta, ok := login.Metadata.(*LoginMetadata); ok && meta.ServerURL != "" {
 		client.bb, _ = bluebubbles.New(meta.ServerURL, meta.Password, c.allow)
 	}
@@ -368,11 +382,44 @@ func (c *Client) catchUp(ctx context.Context, connectedAt time.Time) error {
 	return nil
 }
 
+// errNotTaken is a catch-up in which bridgev2 couldn't take a message: the time synced up to
+// stays, and the next catch-up fetches it again.
+var errNotTaken = errors.New("imessage: a caught-up message couldn't be bridged")
+
+// maxAttempts is how many catch-ups a message bridgev2 won't take holds back. Past that it is
+// left, and logged, so one message can't keep a login from ever catching up.
+const maxAttempts = 3
+
+// handOver hands a caught-up message over, and says whether catching up must stop short of
+// it: bridgev2 couldn't take it, and hasn't failed it maxAttempts times yet.
+func (c *Client) handOver(ctx context.Context, msg *bluebubbles.Message) (holdBack bool) {
+	take := c.handleNewMessage
+	if c.take != nil {
+		take = c.take
+	}
+	ok := take(msg)
+	c.failLock.Lock()
+	defer c.failLock.Unlock()
+	if ok {
+		delete(c.failures, msg.GUID)
+		return false
+	}
+	c.failures[msg.GUID]++
+	if c.failures[msg.GUID] < maxAttempts {
+		return true
+	}
+	delete(c.failures, msg.GUID)
+	zerolog.Ctx(ctx).Error().Int("attempts", maxAttempts).Msg("A message couldn't be bridged after repeated catch-ups; leaving it")
+	return false
+}
+
 // catchUpSince hands over every message created at or after after (Unix ms), oldest first.
-// Ones already bridged are recognized by their GUIDs. It fails, and the time synced up to
-// stays, only if the Mac can't be asked.
+// Ones already bridged are recognized by their GUIDs. It fails, so the time synced up to
+// stays, if the Mac can't be asked or bridgev2 couldn't take a message (handOver).
 func (c *Client) catchUpSince(ctx context.Context, after int64) error {
-	for offset := 0; offset < maxCatchUp; {
+	notTaken := false
+	offset := 0
+	for offset < maxCatchUp {
 		page, err := c.bb.MessagesSince(ctx, after, offset, messagePage)
 		if err != nil {
 			return err
@@ -386,14 +433,21 @@ func (c *Client) catchUpSince(ctx context.Context, after int64) error {
 				}
 				continue
 			}
-			c.handleNewMessage(msg)
+			if c.handOver(ctx, msg) {
+				notTaken = true
+			}
 		}
 		if len(page) < messagePage {
-			return nil
+			break
 		}
 		offset += len(page)
 	}
-	zerolog.Ctx(ctx).Warn().Int("messages", maxCatchUp).Msg("Caught up as far as one catch-up goes; older missed messages are left to history")
+	if offset >= maxCatchUp {
+		zerolog.Ctx(ctx).Warn().Int("messages", maxCatchUp).Msg("Caught up as far as one catch-up goes; older missed messages are left to history")
+	}
+	if notTaken {
+		return errNotTaken
+	}
 	return nil
 }
 

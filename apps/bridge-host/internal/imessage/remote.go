@@ -77,7 +77,7 @@ func (c *Client) handleNewMessage(msg *bluebubbles.Message) bool {
 		return true
 	}
 	at := time.UnixMilli(msg.DateCreated)
-	res := c.login.QueueRemoteEvent(&simplevent.Message[*bluebubbles.Message]{
+	evt := &simplevent.Message[*bluebubbles.Message]{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventMessage,
 			PortalKey:    c.portalKey(chatGUID),
@@ -89,8 +89,18 @@ func (c *Client) handleNewMessage(msg *bluebubbles.Message) bool {
 		ID:                 networkid.MessageID(msg.GUID),
 		Data:               msg,
 		ConvertMessageFunc: c.convertMessage,
-	})
-	return res.Success || res.Ignored
+	}
+	queue := func() bool {
+		res := c.login.QueueRemoteEvent(evt)
+		return res.Success || res.Ignored
+	}
+	if c.acker == nil {
+		return queue()
+	}
+	// bridgev2 may stop waiting on a slow handler and say it succeeded; the acker waits for
+	// the real outcome. A message only partly journaled is then undone by the bridge host, so
+	// fetching it again brings it in whole rather than as a duplicate of its first part.
+	return c.acker.Handle(msg, queue)
 }
 
 // handleUpdatedMessage bridges what changed about a message: unsent, edited, or, for the

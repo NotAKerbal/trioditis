@@ -10,7 +10,9 @@ import (
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/simplevent"
 
+	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/handled"
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/imessage/bluebubbles"
 )
 
@@ -19,6 +21,19 @@ type Connector struct {
 	bridge *bridgev2.Bridge
 	// allow says which addresses a Mac can be at: the public internet alone if nil.
 	allow bluebubbles.AddressPolicy
+}
+
+// The bridge host watches how bridgev2's handling of each new message really ends (package
+// handled): which of its parts were journaled, and whether it all succeeded, also after
+// bridgev2 has stopped waiting on a slow handler. A message is known by the BlueBubbles message
+// it was made from.
+func init() {
+	handled.AddKey(func(remote any) any {
+		if evt, ok := remote.(*simplevent.Message[*bluebubbles.Message]); ok && evt.Type == bridgev2.RemoteEventMessage {
+			return evt.Data
+		}
+		return nil
+	})
 }
 
 // NewConnector makes the connector, reaching Macs only where allow allows.

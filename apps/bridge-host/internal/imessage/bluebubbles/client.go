@@ -124,7 +124,7 @@ func (e *Error) kind() string {
 	switch {
 	case !e.FromServer:
 		return "not BlueBubbles' answer"
-	case e.Failed != nil:
+	case e.MarkedFailed():
 		return "message failed"
 	case e.NeedsPrivateAPI():
 		return "needs the Private API"
@@ -159,9 +159,23 @@ var privateAPIRefusals = []string{
 
 // NeedsPrivateAPI says the request needs the Private API, which isn't switched on or whose
 // helper isn't running in Messages, or a newer macOS: the server refused it without trying.
+// Most routes report that as an iMessage Error; chat/new lets it reach the server's generic
+// handler, which reports a Server Error with the same words (chatInterface.ts, errorMiddleware.ts).
 func (e *Error) NeedsPrivateAPI() bool {
-	return e.FromServer && e.Status == http.StatusInternalServerError && e.Type == "iMessage Error" &&
-		slices.Contains(privateAPIRefusals, e.Detail)
+	return e.FromServer && e.Status == http.StatusInternalServerError &&
+		(e.Type == "iMessage Error" || e.Type == "Server Error") && slices.Contains(privateAPIRefusals, e.Detail)
+}
+
+// markedFailed is what the text and multipart routes answer when Messages marked the sent
+// message failed: they throw the failure with its message, then catch their own throw and
+// throw it again without the message (messageRouter.ts, sendText and sendMultipart).
+const markedFailed = "[500] Message sent with an error. See attached message"
+
+// MarkedFailed says Messages took the message and marked it failed: it didn't go, and
+// Messages won't send it on its own.
+func (e *Error) MarkedFailed() bool {
+	return e.Failed != nil || e.FromServer && e.Status == http.StatusInternalServerError &&
+		e.Type == "iMessage Error" && e.Detail == markedFailed
 }
 
 // Certain says the request certainly had no effect beyond what the error says: the server
@@ -175,7 +189,7 @@ func (e *Error) Certain() bool {
 	switch {
 	case e.Status == http.StatusBadRequest && e.Type == "Validation Error":
 		return true
-	case e.Unauthorized(), e.Throttled(), e.NotFound(), e.NeedsPrivateAPI(), e.Failed != nil:
+	case e.Unauthorized(), e.Throttled(), e.NotFound(), e.NeedsPrivateAPI(), e.MarkedFailed():
 		return true
 	}
 	return false
@@ -221,16 +235,12 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, q
 	resp, err := hc.Do(req)
 	if err != nil {
 		// The URL carries the password: never let it into an error that might be logged.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return nil, fmt.Errorf("bluebubbles: %s %s: %w", method, path, urlErr.Err)
-		}
-		return nil, err
+		return nil, transport(err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return nil, fmt.Errorf("bluebubbles: reading the answer to %s %s: %w", method, path, err)
+		return nil, transport(err)
 	}
 	var env envelope
 	if jsonErr := json.Unmarshal(data, &env); jsonErr != nil || resp.StatusCode >= 300 {
@@ -251,7 +261,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, q
 	}
 	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
 		if err = json.Unmarshal(env.Data, out); err != nil {
-			return nil, fmt.Errorf("bluebubbles: reading the answer to %s %s: %w", method, path, err)
+			return nil, errUnreadable
 		}
 	}
 	return &env, nil
@@ -574,11 +584,7 @@ func (c *Client) Download(ctx context.Context, path string) (io.ReadCloser, stri
 	hc.Timeout = downloadTimeout
 	resp, err := hc.Do(req)
 	if err != nil {
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return nil, "", fmt.Errorf("bluebubbles: downloading: %w", urlErr.Err)
-		}
-		return nil, "", err
+		return nil, "", transport(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

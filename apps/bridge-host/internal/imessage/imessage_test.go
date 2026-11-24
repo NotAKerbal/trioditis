@@ -328,3 +328,61 @@ func TestWithoutPrivateAPI(t *testing.T) {
 		t.Errorf("no GUID: %v", err)
 	}
 }
+
+// The server answers a tapback with its message without checking whether Messages marked it
+// failed; the connector checks.
+func TestTapbackAnswerChecked(t *testing.T) {
+	mac := &recordingMac{privateAPI: true, sendAnswer: `{"status":200,"data":{"guid":"TB","error":22}}`}
+	c := testClient(t, mac.server(t))
+	msg := &bridgev2.MatrixReaction{
+		MatrixEventBase: bridgev2.MatrixEventBase[*event.ReactionEventContent]{Portal: portal("any;+;chat1")},
+		TargetMessage:   &database.Message{ID: "G"},
+		PreHandleResp:   &bridgev2.MatrixReactionPreResponse{Emoji: "❤️"},
+	}
+	if _, err := c.HandleMatrixReaction(context.Background(), msg); !errors.Is(err, errMarkedFailed) {
+		t.Errorf("a failed tapback: %v", err)
+	}
+	mac.lock.Lock()
+	mac.sendAnswer = `{"status":200,"data":{"guid":"TB2"}}`
+	mac.lock.Unlock()
+	if _, err := c.HandleMatrixReaction(context.Background(), msg); err != nil {
+		t.Errorf("a tapback that went: %v", err)
+	}
+	if last := mac.lastBody(); last["reaction"] != "love" || last["selectedMessageGuid"] != "G" {
+		t.Errorf("tapback body %v", last)
+	}
+}
+
+// A catch-up in which bridgev2 couldn't take a message fails, so the time synced up to stays
+// and the next one fetches it again; after maxAttempts the message is left, so it can't hold
+// the login back for good.
+func TestCatchUpHoldsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":200,"data":[
+			{"guid":"A","text":"a","dateCreated":1,"chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}},
+			{"guid":"B","text":"b","dateCreated":2,"chats":[{"guid":"iMessage;-;+15550001111"}],"handle":{"address":"+15550001111"}}
+		]}`))
+	}))
+	defer srv.Close()
+	c := testClient(t, srv)
+	c.failures = map[string]int{}
+	var taken []string
+	c.take = func(m *bluebubbles.Message) bool {
+		taken = append(taken, m.GUID)
+		return m.GUID != "A"
+	}
+	ctx := context.Background()
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		if err := c.catchUpSince(ctx, 0); !errors.Is(err, errNotTaken) {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+	}
+	if err := c.catchUpSince(ctx, 0); err != nil {
+		t.Fatalf("the last attempt: %v", err)
+	}
+	// Every message is handed over each time; the one after the failure isn't held up.
+	if len(taken) != 2*maxAttempts || taken[1] != "B" {
+		t.Errorf("handed over %v", taken)
+	}
+}

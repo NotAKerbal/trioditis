@@ -86,8 +86,9 @@ func sendError(err error) error {
 // notSent says a request failed before any of it was written: its connection was refused,
 // or was never made.
 func notSent(err error) bool {
-	if errors.Is(err, bluebubbles.ErrAddressRefused) {
-		return true
+	var tErr *bluebubbles.TransportError
+	if errors.As(err, &tErr) {
+		return tErr.NotSent()
 	}
 	var opErr *net.OpError
 	return errors.As(err, &opErr) && opErr.Op == "dial"
@@ -333,8 +334,13 @@ func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixR
 	} else if chat == "" {
 		return nil, errUnsupported
 	}
-	if _, err = c.bb.React(ctx, chat, string(msg.TargetMessage.ID), tapbackName(msg.PreHandleResp.Emoji)); err != nil {
+	sent, err := c.bb.React(ctx, chat, string(msg.TargetMessage.ID), tapbackName(msg.PreHandleResp.Emoji))
+	if err != nil {
 		return nil, sendError(err)
+	}
+	// The server answers with the tapback's message without looking at its error code.
+	if _, err = sentMessage(sent); err != nil {
+		return nil, err
 	}
 	return &database.Reaction{}, nil
 }
@@ -356,8 +362,12 @@ func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.M
 	} else if chat == "" {
 		return errUnsupported
 	}
-	if _, err = c.bb.React(ctx, chat, string(msg.TargetReaction.MessageID), "-"+name); err != nil {
+	sent, err := c.bb.React(ctx, chat, string(msg.TargetReaction.MessageID), "-"+name)
+	if err != nil {
 		return sendError(err)
+	}
+	if _, err = sentMessage(sent); err != nil {
+		return err
 	}
 	return nil
 }

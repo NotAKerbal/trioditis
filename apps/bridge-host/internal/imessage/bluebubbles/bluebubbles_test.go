@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -187,6 +188,12 @@ func TestSendOutcomes(t *testing.T) {
 		{"envelope with another status", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 400, `{"status":500,"error":{"type":"Validation Error","message":"x"}}`)
 		}, false, false, false},
+		{"marked failed, rethrown without its message", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 500, `{"status":500,"message":"Message Send Error","error":{"type":"iMessage Error","message":"[500] Message sent with an error. See attached message"}}`)
+		}, true, false, true},
+		{"helper refused by chat/new", func(w http.ResponseWriter, r *http.Request) {
+			reply(w, 500, `{"status":500,"message":"An unhandled error has occurred!","error":{"type":"Server Error","message":"iMessage Private API Helper is not connected!"}}`)
+		}, true, true, false},
 		{"what a proxy writes into the type", func(w http.ResponseWriter, r *http.Request) {
 			reply(w, 500, `{"status":500,"error":{"type":"hi from the person pw","message":"boom"}}`)
 		}, false, false, false},
@@ -203,8 +210,8 @@ func TestSendOutcomes(t *testing.T) {
 		if n := posts.Load(); n != 1 {
 			t.Errorf("%s: posted %d times, want once", tc.name, n)
 		}
-		if bbErr.Certain() != tc.certain || bbErr.NeedsPrivateAPI() != tc.needsP || (bbErr.Failed != nil) != tc.failed {
-			t.Errorf("%s: certain %v, needs Private API %v, failed %v", tc.name, bbErr.Certain(), bbErr.NeedsPrivateAPI(), bbErr.Failed != nil)
+		if bbErr.Certain() != tc.certain || bbErr.NeedsPrivateAPI() != tc.needsP || bbErr.MarkedFailed() != tc.failed {
+			t.Errorf("%s: certain %v, needs Private API %v, failed %v", tc.name, bbErr.Certain(), bbErr.NeedsPrivateAPI(), bbErr.MarkedFailed())
 		}
 		if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "hi from") {
 			t.Errorf("%s: the error quotes the server or the password: %v", tc.name, err)
@@ -333,5 +340,47 @@ func TestUnsent(t *testing.T) {
 		if got := tc.msg.Unsent(); got != tc.want {
 			t.Errorf("%s: %v", name, got)
 		}
+	}
+}
+
+// What comes back over a broken connection can be anything, the person's words included, and
+// the request's address carries the password: neither reaches an error's text.
+func TestTransportErrorsSayFixedWords(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			_, _ = conn.Read(buf)
+			_, _ = conn.Write([]byte("HTTP/1.1 2x0 meet me at noon\r\n\r\n"))
+			_ = conn.Close()
+		}
+	}()
+	c, err := New("http://"+ln.Addr().String(), "s3cret", allowAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.SendText(context.Background(), TextMessage{ChatGUID: "c", TempGUID: "t", Message: "meet me at noon", Method: MethodPrivateAPI})
+	var tErr *TransportError
+	if !errors.As(err, &tErr) || tErr.NotSent() {
+		t.Fatalf("got %v, want a transport error after sending", err)
+	}
+	if strings.Contains(err.Error(), "noon") || strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("the error quotes what came back or the password: %v", err)
+	}
+
+	// A connection that never opens sent nothing.
+	addr := ln.Addr().String()
+	ln.Close()
+	_, err = c.SendText(context.Background(), TextMessage{ChatGUID: "c", TempGUID: "t", Message: "x", Method: MethodPrivateAPI})
+	if !errors.As(err, &tErr) || !tErr.NotSent() || strings.Contains(err.Error(), addr) {
+		t.Errorf("a refused connection: %v", err)
 	}
 }

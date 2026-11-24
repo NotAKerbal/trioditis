@@ -5,12 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
-
-	"net/url"
-	"strings"
 
 	"github.com/coder/websocket"
 )
@@ -43,7 +39,7 @@ func (c *Client) Listen(ctx context.Context, onConnected func(), onEvent func(Ev
 	cancelDial()
 	if err != nil {
 		// The socket's URL carries the password, and the library's error can quote it.
-		return fmt.Errorf("bluebubbles: connecting the socket: %w", redactURL(err, c.password))
+		return transport(err)
 	}
 	defer conn.CloseNow()
 	// Attachments travel over HTTP, so a frame is an event's JSON; a message with a long text
@@ -53,17 +49,17 @@ func (c *Client) Listen(ctx context.Context, onConnected func(), onEvent func(Ev
 	// Engine.IO opens with its settings: how often the server pings, and how long it waits.
 	open, err := readFrame(ctx, conn, handshakeTimeout)
 	if err != nil {
-		return fmt.Errorf("bluebubbles: reading the socket handshake: %w", err)
+		return transport(err)
 	}
 	if len(open) == 0 || open[0] != '0' {
-		return fmt.Errorf("bluebubbles: unexpected socket handshake")
+		return errUnreadable
 	}
 	var settings struct {
 		PingInterval int `json:"pingInterval"`
 		PingTimeout  int `json:"pingTimeout"`
 	}
 	if err = json.Unmarshal(open[1:], &settings); err != nil {
-		return fmt.Errorf("bluebubbles: reading the socket handshake: %w", err)
+		return transport(err)
 	}
 	// A connection that has gone quiet past a ping and its grace is gone, even if TCP hasn't
 	// noticed: wait that long for each frame before giving up on it.
@@ -72,20 +68,21 @@ func (c *Client) Listen(ctx context.Context, onConnected func(), onEvent func(Ev
 		silence = defaultSilence
 	}
 	if err = conn.Write(ctx, websocket.MessageText, []byte("40")); err != nil {
-		return fmt.Errorf("bluebubbles: joining the socket: %w", err)
+		return transport(err)
 	}
 
 	connected := false
 	for {
 		frame, err := readFrame(ctx, conn, silence)
 		if err != nil {
-			return fmt.Errorf("bluebubbles: socket: %w", err)
+			// A close carries the server's reason, which can say anything.
+			return transport(err)
 		}
 		switch {
 		case bytes.Equal(frame, []byte("2")):
 			// The server's ping; it closes a connection that doesn't answer.
 			if err = conn.Write(ctx, websocket.MessageText, []byte("3")); err != nil {
-				return fmt.Errorf("bluebubbles: answering the socket's ping: %w", err)
+				return transport(err)
 			}
 		case bytes.HasPrefix(frame, []byte("40")):
 			if !connected {
@@ -111,18 +108,6 @@ const (
 	handshakeTimeout = 30 * time.Second
 	defaultSilence   = 90 * time.Second
 )
-
-// redactURL is err with the password taken out of what it says, keeping what it wraps for
-// errors.Is: an address the dialler refused must still read as one.
-func redactURL(err error, password string) error {
-	if password == "" || !strings.Contains(err.Error(), url.QueryEscape(password)) && !strings.Contains(err.Error(), password) {
-		return err
-	}
-	if errors.Is(err, ErrAddressRefused) {
-		return ErrAddressRefused
-	}
-	return errors.New("the connection failed")
-}
 
 func readFrame(ctx context.Context, conn *websocket.Conn, wait time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, wait)
