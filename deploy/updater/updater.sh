@@ -60,14 +60,6 @@ load_settings() {
   # Its own subdirectory, the only place it removes old backups from, so backups an operator keeps
   # in UPDATE_BACKUP_DIR are never touched.
   backup_dir=$backup_dir/updater-backups
-  # Where it checks a new version out to build its images before the server stops: its own
-  # directory in the operator's state directory, outside the checkout (image builds copy that).
-  prebuild_dir=${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}/.local/state/trioditis/$project/prebuild
-  # What the installer builds the images with, so the build beforehand makes the same ones: the
-  # networks the last install bridged, and the Debian snapshot. (A guess that's wrong only costs
-  # the installer that image's build, never a wrong image: the installer always builds its own.)
-  networks=$(printf '%s\n' "$text" | env_value TRIODITIS_NETWORKS)
-  debian_snapshot=$(printf '%s\n' "$text" | env_value DEBIAN_SNAPSHOT)
 }
 
 # agent ARGS: runs updater-agent.mjs on the server's network, from the bundle's Node image.
@@ -116,7 +108,7 @@ load_state() {
       pending_phase) [[ "$value" =~ ^(build|backup|install|rollback)$ ]] || continue ;;
       pending_branch) [[ "$value" =~ ^(main|dev)$ ]] || continue ;;
       pending_backup) [[ "$value" =~ ^/[A-Za-z0-9._/@+=,%~-]+$ ]] && [[ ! "$value" =~ (^|/)\.\.(/|$) ]] || continue ;;
-      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed)$ ]] || continue ;;
+      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed|unbuilt)$ ]] || continue ;;
       auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
       *) continue ;;
     esac
@@ -254,8 +246,6 @@ run_install() {
   # Its output goes to the journal, which is no place for the admin setup link.
   "$root/deploy/install/install.sh" --no-setup-link 2>&1 | tee "$output" >&2
   status=${PIPESTATUS[0]}
-  # The installer has built its own images by now, from the cache the build beforehand left.
-  drop_prebuild
   if [ "$status" != 0 ]; then
     install_error=$(sed 's/\x1b\[[0-9;]*m//g' "$output" | grep -a '^error: ' | tail -1 | cut -c8-308)
     [ -n "$install_error" ] || install_error="The installer stopped (exit $status)."
@@ -275,39 +265,48 @@ last_error() {
 
 # prebuild COMMIT: builds COMMIT's images while the server keeps running, so that once the
 # backup has stopped it, the installer's own build finds every step in Docker's build cache and
-# the server is down for minutes less. It checks the commit out into $prebuild_dir (a clone
-# sharing this checkout's objects) and runs that version's deploy/install/build-images.sh with
-# this install's settings, tagging the images `prebuild`, never the tags the server runs, so
-# nothing running changes; the tags stay until the installer has built (an image that loses
-# its last tag is exported again from the cache, which takes a while), then drop_prebuild
-# removes them. On failure, `prebuild_error` says why. A version without the script is
-# built by its installer alone, as before.
+# the server is down for minutes less. It checks the commit out into a new temporary directory
+# (a clone sharing this checkout's objects, outside the checkout, which image builds copy) and
+# runs that version's deploy/install/build-images.sh with what the installer will build with,
+# read from deploy/.env now, under the lock: Signal's library unless INSTALL_NETWORKS leaves
+# Signal out, and DEBIAN_SNAPSHOT. The images are tagged `prebuild`, never the tags the server
+# runs, so nothing running changes; the tags stay until the update is over (an image that
+# loses its last tag is exported again from the cache, which takes a while), then conclude
+# drops them. On failure, `prebuild_error` says why. A version without the script is built by
+# its installer alone, as before.
 prebuild() {
-  local output status options=()
+  local tree text networks output status options=()
   prebuild_error=''
   drop_prebuild
-  rm -rf -- "$prebuild_dir"
-  if ! { (umask 077 && mkdir -p "$(dirname "$prebuild_dir")") &&
-    git clone --quiet --shared --no-checkout "$root" "$prebuild_dir" &&
-    git -C "$prebuild_dir" checkout --quiet --detach "$1"; } >/dev/null 2>&1; then
-    rm -rf -- "$prebuild_dir"
+  if ! env_raw_clean "$env_file" || ! text=$(cat "$env_file"); then
+    prebuild_error="Couldn't read deploy/.env."
+    return 1
+  fi
+  networks=$(printf '%s\n' "$text" | env_value INSTALL_NETWORKS)
+  case ",${networks:-all}," in *,all,* | *,signal,*) options+=(--with-signal) ;; esac
+  if ! tree=$(mktemp -d "${TMPDIR:-/tmp}/trioditis-prebuild-XXXXXX"); then
+    prebuild_error="Couldn't make a directory to build ${1:0:7} in."
+    return 1
+  fi
+  if ! { git clone --quiet --shared --no-checkout "$root" "$tree/checkout" &&
+    git -C "$tree/checkout" checkout --quiet --detach "$1"; } >/dev/null 2>&1; then
+    rm -rf -- "$tree"
     prebuild_error="Couldn't check ${1:0:7} out to build it."
     return 1
   fi
-  if [ ! -x "$prebuild_dir/deploy/install/build-images.sh" ]; then
-    rm -rf -- "$prebuild_dir"
+  if [ ! -x "$tree/checkout/deploy/install/build-images.sh" ]; then
+    rm -rf -- "$tree"
     return 0
   fi
-  [[ ",$networks," != *,signal,* ]] || options+=(--with-signal)
   log "Building ${1:0:7}'s images while the server keeps running."
   output=$(mktemp)
-  "$prebuild_dir/deploy/install/build-images.sh" --project "$project" --tag prebuild --version "$1" \
-    --debian-snapshot "$debian_snapshot" "${options[@]}" >"$output" 2>&1
+  "$tree/checkout/deploy/install/build-images.sh" --project "$project" --tag prebuild --version "$1" \
+    --debian-snapshot "$(printf '%s\n' "$text" | env_value DEBIAN_SNAPSHOT)" "${options[@]}" >"$output" 2>&1
   status=$?
   cat "$output" >&2
   [ "$status" = 0 ] || prebuild_error=$(last_error "$output")
   rm -f "$output"
-  rm -rf -- "$prebuild_dir"
+  rm -rf -- "$tree"
   [ "$status" = 0 ]
 }
 
@@ -437,12 +436,13 @@ update() {
   pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=build
   pending_branch='' pending_backup=''
   save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
+  # Over like any other update (conclude), so its report is kept until the backend has it.
   if ! prebuild "$target"; then
-    drop_prebuild
-    pending_target='' pending_previous='' pending_request='' pending_phase=''
-    save_state
+    failure_detail=$prebuild_error
+    conclude unbuilt
+    describe_current
+    report_done
     release_lock
-    outcome failed "${target:0:7} didn't build, so the server kept running and nothing was installed: $prebuild_error"
     return
   fi
   # Then a backup: if the update fails, going back restores it, data and settings, rather
@@ -577,6 +577,7 @@ stop_server() {
 # conclude RESULT: the update in progress is over (updated, back on the previous commit, or
 # stuck: going back failed too); kept as done_* until the backend has the report.
 conclude() {
+  drop_prebuild
   done_request=$pending_request done_result=$1 done_target=$pending_target done_previous=$pending_previous
   pending_target='' pending_previous='' pending_request='' pending_phase='' pending_branch='' pending_backup=''
   save_state
@@ -599,6 +600,7 @@ report_done() {
       installed_notes=$(release_notes "$done_previous" "$done_target")
       ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
+    unbuilt) outcome failed "$target didn't build, so the server kept running and nothing was installed${detail:-.}" ;;
     resumed) outcome failed "The update to $target was cut off before anything was installed. The server is still on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
@@ -621,8 +623,6 @@ recover() {
   if [ "$pending_phase" = build ]; then
     log "The update to $pending_target was cut off while building it; the server kept running."
     take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
-    drop_prebuild
-    rm -rf -- "$prebuild_dir"
     conclude resumed
     describe_current
     report_done
@@ -643,7 +643,6 @@ recover() {
       release_lock
       return 1
     fi
-    drop_prebuild
     conclude resumed
     describe_current
     report_done

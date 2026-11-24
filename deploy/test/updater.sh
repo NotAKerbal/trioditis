@@ -76,7 +76,7 @@ git -C "$work/checkout" config grep.column true
 mkdir -p "$work/checkout/deploy/updater" "$work/checkout/deploy/scripts"
 cp "$repo/deploy/updater/updater.sh" "$work/checkout/deploy/updater/"
 cp "$repo/deploy/scripts/env.sh" "$work/checkout/deploy/scripts/"
-printf 'COMPOSE_PROJECT_NAME=trioditis-test\nUPDATER_SECRET=test-secret\nUPDATE_BACKUP_DIR=%s\nTRIODITIS_NETWORKS=whatsapp,signal\nDEBIAN_SNAPSHOT=20260101T000000Z\n' "$work/backups" >"$work/checkout/deploy/.env"
+printf 'COMPOSE_PROJECT_NAME=trioditis-test\nUPDATER_SECRET=test-secret\nUPDATE_BACKUP_DIR=%s\nINSTALL_NETWORKS=whatsapp,signal\nDEBIAN_SNAPSHOT=20260101T000000Z\n' "$work/backups" >"$work/checkout/deploy/.env"
 # A stub deploy/trioditis: a backup makes a directory with a backup.info (failing while
 # $UPDATER_TEST_LOG.backup-fails exists), and a restore records what it restored and, as the
 # real one does, runs the installer (failing first while $UPDATER_TEST_LOG.restore-fails exists).
@@ -128,8 +128,9 @@ case " $* " in
     [ "${UPDATER_CLAIM_CHANNEL:-}" != nightly ] || [ ! -e "$REPORT_LOG.stable" ] || exit 1
     # Admins turned automatic updates off after the updater began one.
     [ "${UPDATER_CLAIM_AUTO:-0}" != 1 ] || [ ! -e "$REPORT_LOG.manual" ] || exit 1
-    # The backend out of reach, for one test.
+    # The backend out of reach, for one test; or only once the request is claimed, for another.
     [ ! -e "$REPORT_LOG.down" ] || exit 1
+    [ ! -e "$REPORT_LOG.down-after-claim" ] || [ -n "${UPDATER_CLAIM:-}" ] || exit 1
     echo "$UPDATER_STATE|$UPDATER_MESSAGE|$UPDATER_DONE|$UPDATER_CURRENT|$UPDATER_LATEST|$UPDATER_BEHIND|$UPDATER_AHEAD|$UPDATER_SECRET" >>"$REPORT_LOG"
     if [ -n "${UPDATER_INSTALLED_TO:-}" ]; then
       printf '%s %s\n%s\n' "$UPDATER_INSTALLED_FROM" "$UPDATER_INSTALLED_TO" "$UPDATER_INSTALLED_NOTES" >>"$REPORT_LOG.installed"
@@ -158,8 +159,8 @@ run() {
   : >"$work/installs.restores"
   : >"$work/installs.builds"
   : >"$work/installs.sequence"
-  rm -f "$work/reports.prebuilt"
-  HOME=$work/home bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
+  mkdir -p "$work/tmp"
+  TMPDIR=$work/tmp bash -c '. "$1/deploy/updater/updater.sh"; init || exit 9; BACKOFF_SECONDS=0; done_id=${TEST_REQUEST:-req1}; shift; "$@" 2>/dev/null; echo "$outcome_state|$outcome_message"' \
     updater "$work/checkout" "$@" >"$work/out" 2>&1 || true
 }
 head_is() { [ "$(git -C "$work/checkout" rev-parse HEAD)" = "$1" ]; }
@@ -174,9 +175,27 @@ run update nightly
 rm -f "$work/installs.build-fails"
 head_is "$c1" && [ ! -s "$work/installs" ] && [ ! -s "$work/installs.backups" ] && [ ! -s "$work/installs.server" ] &&
   grep -q "^failed|${c2%"${c2#???????}"} didn't build, so the server kept running and nothing was installed: The web image broke.$" "$work/out" &&
+  grep -q "^failed|${c2%"${c2#???????}"} didn't build.*|req1|" "$work/reports" &&
   grep -qx 'pending_target=' "$work/checkout/deploy/.updater-state" && grep -qx 'failed_target=' "$work/checkout/deploy/.updater-state" &&
+  grep -qx 'done_request=' "$work/checkout/deploy/.updater-state" && [ -z "$(ls -A "$work/tmp")" ] &&
   check ok "a version that doesn't build is called off before the backup, the server left running, and says why" ||
   check fail "a version that doesn't build is called off before the backup, the server left running, and says why ($(cat "$work/out" "$work/installs.sequence"))"
+
+# The same, with the backend out of reach for its report: the request stays over, kept until
+# the report gets through, rather than claimed again.
+touch "$work/installs.build-fails"
+: >"$work/reports.down-after-claim"
+run update nightly
+rm -f "$work/installs.build-fails" "$work/reports.down-after-claim"
+grep -qx 'done_request=req1' "$work/checkout/deploy/.updater-state" && grep -qx 'done_result=unbuilt' "$work/checkout/deploy/.updater-state" &&
+  grep -qx 'pending_target=' "$work/checkout/deploy/.updater-state" &&
+  check ok "a build that failed, its report not through, is kept as over until the backend has it" ||
+  check fail "a build that failed, its report not through, is kept as over until the backend has it ($(cat "$work/checkout/deploy/.updater-state"))"
+run report_done
+grep -q "^failed|${c2%"${c2#???????}"} didn't build, so the server kept running and nothing was installed.|req1|" "$work/reports" &&
+  grep -qx 'done_request=' "$work/checkout/deploy/.updater-state" && [ ! -s "$work/installs.builds" ] &&
+  check ok "and is reported once it can be, building nothing again" ||
+  check fail "and is reported once it can be, building nothing again ($(cat "$work/reports"))"
 
 # A backup that fails: nothing installs.
 touch "$work/installs.backup-fails"
@@ -202,7 +221,7 @@ head_is "$c2" && [ "$(cat "$work/installs")" = "installed $c2" ] &&
   check ok "it builds the new version's images first, with that version's build and the install's settings" ||
   check fail "it builds the new version's images first, with that version's build and the install's settings ($(cat "$work/installs.builds"))"
 [ "$(cat "$work/installs.sequence" | tr '\n' ' ')" = "build backup install drop trioditis-test/node:prebuild " ] &&
-  [ ! -e "$work/home/.local/state/trioditis/trioditis-test/prebuild" ] &&
+  [ -z "$(ls -A "$work/tmp")" ] &&
   check ok "then backs up and installs, and only then drops the images it built and its checkout" ||
   check fail "then backs up and installs, and only then drops the images it built and its checkout ($(cat "$work/installs.sequence"))"
 [ "$(cat "$work/installs.backups")" = "backup $work/backups/updater-backups stopped lock=held" ] &&
@@ -294,14 +313,14 @@ rm -f "$state"
 # starts nothing, and reports the request done without counting the target as failed.
 git_ -C "$work/checkout" checkout -q --detach "$c2"
 printf 'pending_target=%s\npending_previous=%s\npending_request=req11\npending_phase=build\n' "$c3" "$c2" >"$state"
-mkdir -p "$work/home/.local/state/trioditis/trioditis-test/prebuild"
+touch "$work/reports.prebuilt"
 run recover
 head_is "$c2" && [ ! -s "$work/installs" ] && [ ! -s "$work/installs.server" ] &&
-  [ ! -e "$work/home/.local/state/trioditis/trioditis-test/prebuild" ] &&
+  grep -qx 'drop trioditis-test/node:prebuild' "$work/installs.sequence" &&
   grep -q "^failed|The update to ${c3%"${c3#???????}"} was cut off before anything was installed.*|req11|" "$work/reports" &&
   grep -qx 'pending_target=' "$state" && grep -qx 'failed_target=' "$state" &&
-  check ok "an update cut off while building starts nothing, drops its checkout, and reports the request done" ||
-  check fail "an update cut off while building starts nothing, drops its checkout, and reports the request done ($(cat "$work/reports" "$work/installs.server" "$state"))"
+  check ok "an update cut off while building starts nothing, drops what it built, and reports the request done" ||
+  check fail "an update cut off while building starts nothing, drops what it built, and reports the request done ($(cat "$work/reports" "$work/installs.server" "$state"))"
 rm -f "$state"
 
 # From c1, with dev at c3: a request cancelled before the update claimed it, and a lock held

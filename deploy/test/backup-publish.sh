@@ -20,6 +20,12 @@
 # shellcheck source=deploy/test/lib.sh
 . "$(dirname "$0")/lib.sh"
 make_install "backup publishes whole or not at all"
+# A git checkout at the version deploy/.env says is installed, as an install is.
+printf 'deploy/.env*\ndeploy/.operation.lock\ndeploy/.last-backup\n*.plain\nout\nenv.*\nsecrets.*\n' >"$root/.gitignore"
+git -C "$root" init -q
+git -C "$root" add -A
+git -C "$root" -c user.name=test -c user.email=test@example.com commit -qm one
+echo "TRIODITIS_VERSION=$(git -C "$root" rev-parse HEAD)" >>"$root/deploy/.env"
 bk=$(private_value BRIDGE_PRIVATE_KEY)
 ak=$(private_value AGENT_ACCESS_PRIVATE_KEY)
 
@@ -81,6 +87,21 @@ decrypt "$backup/archive.enc" | docker run --rm --log-driver none -i --entrypoin
   check ok "the archive holds no key, and its manifest says when and which Postgres" ||
   check fail "the archive holds no key, and its manifest says when and which Postgres"
 [ "$(entries | wc -l)" = 1 ] && check ok "nothing else is left in the directory" || check fail "nothing else is left in the directory"
+
+# Installed from another commit than the checkout's (pulled, the installer not run yet): that
+# version's restore reads only gzip, so the archive is gzip, format 2.
+cp "$root/deploy/.env" "$root/env.installed"
+sed -i 's/^TRIODITIS_VERSION=.*/TRIODITIS_VERSION=0000000000000000000000000000000000000001/' "$root/deploy/.env"
+older_backups=$(mktemp -d)
+trioditis backup "$older_backups" >"$root/out" 2>&1 && status=0 || status=$?
+cp "$root/env.installed" "$root/deploy/.env"
+older=$(find "$older_backups" -mindepth 1 -maxdepth 1 -type d | head -1)
+[ "$status" = 0 ] && grep -qx 'format=2' "$older/backup.info" &&
+  BACKUP_KEY=$(private_value BACKUP_KEY) decrypt "$older/archive.enc" | docker run --rm --log-driver none -i --entrypoint sh "$tool" -c \
+    'mkdir /x && tar -xzf - -C /x && test -f /x/trioditis-backup.manifest' &&
+  check ok "installed from another commit, it writes a gzip archive, format 2" ||
+  { check fail "installed from another commit, it writes a gzip archive, format 2"; cat "$root/out" >&2; }
+rm -rf "$older_backups"
 
 # A destination inside the checkout is refused before anything is made there.
 trioditis backup "$root/deploy/not-here/backups" >"$root/out" 2>&1 && status=0 || status=$?
