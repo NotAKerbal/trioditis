@@ -54,8 +54,9 @@ http://127.0.0.1:8090 {
 	}
 
 	# People's encrypted pictures and files, which the gateway fetches from the bridge host that
-	# has them once it has checked the request's media token. The app decrypts them
-	# (docs/architecture/client-api.md, Media).
+	# has them once it has checked the request's media token, and files the app encrypted to
+	# send, which it passes to the bridge host that will send them. Only ciphertext goes either
+	# way (docs/architecture/client-api.md, Media).
 	handle /media/* {
 		reverse_proxy gateway:8602
 	}

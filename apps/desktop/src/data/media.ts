@@ -1,6 +1,6 @@
 import { api } from '@trioditis/backend/api'
-import type { Attachment, Network } from '@trioditis/core'
-import { decryptMedia } from '@trioditis/crypto'
+import type { Attachment, MessageType, Network } from '@trioditis/core'
+import { decryptMedia, encryptMedia, toBase64Url } from '@trioditis/crypto'
 import { useEffect, useRef, useState } from 'react'
 import { retryDelay } from '~/features/shell/retry-delay.ts'
 import { convex } from '~/lib/convex.ts'
@@ -19,6 +19,8 @@ const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp
 const AUTO_LOAD_BYTES = 25 * 1024 * 1024
 /** Video and sound larger than this can only be saved, not played here. */
 const PLAYABLE_BYTES = 50 * 1024 * 1024
+/** The largest file that can be sent: what the gateway and bridge host take, less the tag. */
+export const MAX_SEND_BYTES = 100 * 1024 * 1024
 /** Decrypted files kept, by total size, before the oldest are let go. */
 const KEPT_BYTES = 200 * 1024 * 1024
 /** After a picture fails by itself, it's tried again after these waits. */
@@ -265,4 +267,111 @@ export function useMedia(
       ? state
       : { state: wanted ? 'loading' : 'idle' }
   return { ...shown, load: () => setAsked((n) => n + 1) } as MediaState & { load: () => void }
+}
+
+// Sending: a file is encrypted here with its own key, as received ones are, and its ciphertext
+// given to the gateway (PUT /media/<mediaId>) for the bridge host that will send it, under an
+// upload token Convex signs for the chat. The key goes only in the sealed send that follows.
+
+const uploadTokens = new Map<string, Promise<Token & { askedAt: number }>>()
+/**
+ * An upload token is used for a few files sent together, not kept for long: it names the host
+ * running the chat's account when it was asked for, and another host may take the account over.
+ */
+const UPLOAD_TOKEN_REUSE_MS = 30_000
+
+function uploadTokenFor(chatId: string, stale?: string): Promise<Token & { askedAt: number }> {
+  const held = uploadTokens.get(chatId)
+  const ask = () => {
+    const askedAt = Date.now()
+    const asked = convex.mutation(api.media.upload, { chatId: chatId as never }).then(
+      (t) => ({ ...t, askedAt }),
+      (error: unknown) => {
+        if (uploadTokens.get(chatId) === asked) uploadTokens.delete(chatId)
+        throw isTransient(error) ? new ServerBusy('The server is busy.') : error
+      },
+    )
+    uploadTokens.set(chatId, asked)
+    return asked
+  }
+  if (!held) return ask()
+  return held.then(
+    (t) =>
+      t.token !== stale && Date.now() - t.askedAt < UPLOAD_TOKEN_REUSE_MS && t.expiresAt - Date.now() > TOKEN_MARGIN_MS
+        ? t
+        : ask(),
+    () => ask(),
+  )
+}
+
+/** What kind of message a file goes as. */
+export function messageTypeOf(mime: string): MessageType {
+  const type = mime.toLowerCase()
+  if (IMAGE_TYPES.has(type)) return 'image'
+  if (/^video\/[a-z0-9.+-]+$/.test(type)) return 'video'
+  if (/^audio\/[a-z0-9.+-]+$/.test(type)) return 'audio'
+  return 'file'
+}
+
+/** A picture's size in pixels, for the network to lay it out before it loads; none if it won't decode. */
+async function dimensions(file: Blob): Promise<{ width?: number; height?: number }> {
+  if (typeof createImageBitmap !== 'function') return {}
+  try {
+    const bitmap = await createImageBitmap(file)
+    const size = { width: bitmap.width, height: bitmap.height }
+    bitmap.close()
+    return size
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Encrypts a file and gives its ciphertext to the bridge host that runs `chatId`'s account,
+ * returning the attachment for its sealed send.
+ */
+export async function uploadFile(userId: string, chatId: string, file: File): Promise<Attachment> {
+  if (file.size > MAX_SEND_BYTES) throw new Error(`${file.name || 'That file'} is over 100 MB.`)
+  const mime = file.type || 'application/octet-stream'
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const mediaId = toBase64Url(crypto.getRandomValues(new Uint8Array(16)))
+  const { ciphertext, key, nonce } = encryptMedia(bytes, userId, mediaId)
+  let { token } = await uploadTokenFor(chatId)
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(`/media/${encodeURIComponent(mediaId)}`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' },
+      body: ciphertext as Uint8Array<ArrayBuffer>,
+      cache: 'no-store',
+    })
+    // The ID is 128 random bits made here, so after a try whose answer was lost, finding it in
+    // use means that try kept it.
+    if (response.status === 201 || (response.status === 409 && attempt > 0)) break
+    if (response.status === 413) throw new Error(`${file.name || 'That file'} is too large to send.`)
+    const busy = response.status >= 502 && response.status <= 504
+    if (attempt >= 2 || (!busy && response.status !== 401)) {
+      if (busy) throw new ServerBusy('The server is busy.')
+      throw new Error(`The file couldn’t be sent (${response.status}).`)
+    }
+    // A put is never half-kept: the same ID is either all there (201) or not at all, so trying
+    // again with it is safe.
+    if (response.status === 401) ({ token } = await uploadTokenFor(chatId, token))
+    else await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
+  }
+  const type = messageTypeOf(mime)
+  const attachment: Attachment = {
+    mediaId,
+    mime,
+    size: file.size,
+    ...(file.name ? { name: file.name } : {}),
+    key,
+    nonce,
+    ...(type === 'image' ? await dimensions(file) : {}),
+  }
+  // The sender's own picture shows at once, from what they picked, rather than fetched back.
+  if (loadsByItself(attachment)) {
+    const ready = `data:${mime.toLowerCase()};base64,${base64(bytes)}`
+    keep(`${userId}/${mediaId}`, { url: Promise.resolve(ready), ready, size: file.size })
+  }
+  return attachment
 }

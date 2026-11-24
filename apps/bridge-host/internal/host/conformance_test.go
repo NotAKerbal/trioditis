@@ -1273,6 +1273,50 @@ func TestConformance(t *testing.T) {
 		gw.waitFor(t, "sent", statusOf("cm-file", protocol.StatusSent))
 	})
 
+	t.Run("a file a client puts is sent, and fetched back only by its owner", func(t *testing.T) {
+		data := []byte("a picture from the composer")
+		const mediaID = "clientPutMedia_0123456789"
+		enc, err := seal.EncryptMedia(data, "alice", mediaID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put := func(userID string) int {
+			req, _ := http.NewRequest(http.MethodPut, "http://"+h.host.Addr()+"/v1/media/"+mediaID, bytes.NewReader(enc.Ciphertext))
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			req.Header.Set("X-Trioditis-User-Id", userID)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			return resp.StatusCode
+		}
+		if status := put("alice"); status != http.StatusCreated {
+			t.Fatalf("put: %d", status)
+		}
+		if status := put("alice"); status != http.StatusConflict {
+			t.Fatalf("put again: %d, want 409", status)
+		}
+		att := protocol.Attachment{MediaID: mediaID, Mime: "image/png", Size: len(data), Name: "shot.png", Key: enc.Key, Nonce: enc.Nonce}
+		h.mustCommand(protocol.Command{
+			CommandID: nextCommandID(), Type: protocol.CommandSend, UserID: "alice", LoginID: aliceLogin, PortalID: portalID,
+			ClientMessageID: "cm-put", NotAfter: time.Now().Add(time.Hour).UnixMilli(), Sealed: h.sealForBridge("alice", "cm-put", protocol.MessagePlaintext{
+				Type: "image", Body: "shot.png", Attachments: []protocol.Attachment{att},
+			}),
+		})
+		gw.waitFor(t, "sent", statusOf("cm-put", protocol.StatusSent))
+		status, ct := h.media(mediaID, "alice")
+		if status != http.StatusOK {
+			t.Fatalf("alice fetching her sent file: %d", status)
+		}
+		if got, err := seal.DecryptMedia(ct, enc.Key, enc.Nonce, "alice", mediaID); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("alice's sent file opens to %q, %v", got, err)
+		}
+		if status, _ = h.media(mediaID, "bob"); status != http.StatusNotFound {
+			t.Fatalf("bob fetching alice's sent file: %d, want 404", status)
+		}
+	})
+
 	t.Run("journal resends after partial acks, failures and conflicts", func(t *testing.T) {
 		gw.lock.Lock()
 		gw.ackShort, gw.failNext = 1, 2

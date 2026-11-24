@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { hasOutgoingFiles } from '~/features/chat/outgoing-files.ts'
 import {
   adoptDraft,
   allDrafts,
@@ -192,7 +193,8 @@ export function useKeepUnsent() {
     }
     const keep = (event: BeforeUnloadEvent) => {
       flush()
-      if (sendsInFlight() || ((!storage || unsaved.size > 0) && hasDrafts())) event.preventDefault()
+      if (sendsInFlight() || hasOutgoingFiles() || ((!storage || unsaved.size > 0) && hasDrafts()))
+        event.preventDefault()
     }
     const onHidden = () => {
       if (document.visibilityState === 'hidden') flush()

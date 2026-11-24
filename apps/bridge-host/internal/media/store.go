@@ -15,6 +15,7 @@
 package media
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -49,9 +50,11 @@ type upload struct {
 	copies  map[string]protocol.Attachment // per owner user ID
 }
 
+// registered is one send's file: its own entry, under an ID made for the send, so two sends
+// naming the same media ID never read each other's file or key.
 type registered struct {
-	owner, key, nonce string
-	expires           time.Time
+	mediaID, owner, key, nonce string
+	expires                    time.Time
 }
 
 // Store is the encrypted media store.
@@ -61,14 +64,23 @@ type Store struct {
 	lock       sync.Mutex
 	uploads    map[string]*upload
 	registered map[string]*registered
+	budget     *budget
 }
+
+// SendBudget is how many bytes the files of sends being sent may hold in memory at once,
+// their ciphertext and plaintext both: a few large files, so many sends of them at once can't
+// run the bridge host out of memory. A send waits for its share (Reserve).
+const SendBudget = 512 << 20
 
 // New opens a store in dir, creating it if needed.
 func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir, uploads: make(map[string]*upload), registered: make(map[string]*registered)}, nil
+	return &Store{
+		dir: dir, uploads: make(map[string]*upload), registered: make(map[string]*registered),
+		budget: newBudget(SendBudget),
+	}, nil
 }
 
 func randomID() string {
@@ -178,16 +190,96 @@ func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*pro
 	return &att, nil
 }
 
+// MaxClientFile is the largest ciphertext a client may put here to send: a 100 MiB file and its
+// 16-byte tag. That's about what the networks take as a document, and still small enough to
+// hold in memory while it's sent.
+const MaxClientFile = 100<<20 + 16
+
+// ErrExists is a put under a media ID already in use. Nothing is replaced.
+var ErrExists = errors.New("media: a file with that ID exists")
+
+// ErrTooLarge is a put of more than MaxClientFile bytes.
+var ErrTooLarge = errors.New("media: file is too large")
+
+// Put writes the ciphertext of a file a client encrypted for its owner, to send. It goes in
+// the owner's directory, so only they can fetch it (Open) or have it read for their send
+// (Register). It is written in full under another name first, so a send never reads half of
+// one, and a media ID already used is refused rather than replaced.
+func (s *Store) Put(mediaID, ownerUserID string, r io.Reader) error {
+	if !validID(mediaID) || ownerUserID == "" {
+		return ErrUnavailable
+	}
+	dir := s.ownerDir(ownerUserID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("media: failed to make the owner's directory: %w", err)
+	}
+	final := filepath.Join(dir, mediaID)
+	if _, err := os.Lstat(final); err == nil {
+		return ErrExists
+	}
+	tmp, err := os.OpenFile(filepath.Join(dir, ".put-"+randomID()), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("media: failed to make the file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	n, err := io.Copy(tmp, io.LimitReader(r, MaxClientFile+1))
+	if err == nil && n > MaxClientFile {
+		err = ErrTooLarge
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// A link never replaces what's there, so two puts of one ID can't both land.
+	if err = os.Link(tmp.Name(), final); errors.Is(err, os.ErrExist) {
+		return ErrExists
+	}
+	return err
+}
+
 // Register makes a client-encrypted file readable for a while, for an outbound send whose
-// sealed plaintext carried its key. It returns the content URI to give the connector.
+// sealed plaintext carried its key. It returns the content URI to give the connector: one of
+// its own, which reads only this owner's file with this key.
 func (s *Store) Register(att protocol.Attachment, ownerUserID string, ttl time.Duration) (id.ContentURIString, error) {
 	if _, ok := ParseContentURI(ContentURI(att.MediaID)); !ok {
 		return "", fmt.Errorf("media: invalid media ID")
 	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.registered[att.MediaID] = &registered{owner: ownerUserID, key: att.Key, nonce: att.Nonce, expires: time.Now().Add(ttl)}
-	return ContentURI(att.MediaID), nil
+	s.sweepLocked(time.Now())
+	regID := randomID()
+	s.registered[regID] = &registered{mediaID: att.MediaID, owner: ownerUserID, key: att.Key, nonce: att.Nonce, expires: time.Now().Add(ttl)}
+	return ContentURI(regID), nil
+}
+
+// Reserve waits for a send's file to have its share of SendBudget, and returns how to give it
+// back once the send is done with the file. A file already in memory (a connector's upload)
+// needs none.
+func (s *Store) Reserve(ctx context.Context, uri id.ContentURIString) (func(), error) {
+	regID, ok := ParseContentURI(uri)
+	if !ok {
+		return func() {}, nil
+	}
+	s.lock.Lock()
+	reg, isRegistered := s.registered[regID]
+	s.lock.Unlock()
+	if !isRegistered {
+		return func() {}, nil
+	}
+	info, err := os.Lstat(filepath.Join(s.ownerDir(reg.owner), reg.mediaID))
+	if errors.Is(err, os.ErrNotExist) {
+		info, err = os.Lstat(s.path(reg.mediaID))
+	}
+	if err != nil {
+		// Nothing to read: Read says so.
+		return func() {}, nil
+	}
+	return s.budget.acquire(ctx, 2*info.Size())
 }
 
 // Read returns a file's plaintext: an upload still in memory, or a registered file
@@ -214,7 +306,7 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 	}
 	var key, nonce, owner string
 	if isRegistered {
-		key, nonce, owner = reg.key, reg.nonce, reg.owner
+		mediaID, key, nonce, owner = reg.mediaID, reg.key, reg.nonce, reg.owner
 	}
 	s.lock.Unlock()
 	if isUpload {
@@ -222,7 +314,13 @@ func (s *Store) Read(uri id.ContentURIString) ([]byte, error) {
 	} else if !isRegistered {
 		return nil, ErrUnavailable
 	}
-	ct, err := readNoFollow(s.path(mediaID))
+	// A file the client put is in its owner's directory (Put); one from before that, in the
+	// store's own. Either way it opens only with the owner's key and associated data. The ID
+	// is safe in a path: ParseContentURI refuses one with a separator or a dot.
+	ct, err := readNoFollow(filepath.Join(s.ownerDir(owner), mediaID))
+	if errors.Is(err, os.ErrNotExist) {
+		ct, err = readNoFollow(s.path(mediaID))
+	}
 	if err != nil {
 		return nil, ErrUnavailable
 	}
@@ -281,4 +379,46 @@ func readNoFollow(path string) ([]byte, error) {
 
 func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+}
+
+// budget is a count of bytes that waiters take a share of and give back.
+type budget struct {
+	lock  sync.Mutex
+	total int64
+	free  int64
+	freed chan struct{}
+}
+
+func newBudget(total int64) *budget {
+	return &budget{total: total, free: total, freed: make(chan struct{})}
+}
+
+// acquire waits until n bytes are free, or ctx ends. A share larger than the whole budget
+// waits for all of it, so one file never goes over by more than itself.
+func (b *budget) acquire(ctx context.Context, n int64) (func(), error) {
+	n = min(n, b.total)
+	for {
+		b.lock.Lock()
+		if b.free >= n {
+			b.free -= n
+			b.lock.Unlock()
+			var once sync.Once
+			return func() { once.Do(func() { b.give(n) }) }, nil
+		}
+		freed := b.freed
+		b.lock.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-freed:
+		}
+	}
+}
+
+func (b *budget) give(n int64) {
+	b.lock.Lock()
+	b.free += n
+	close(b.freed)
+	b.freed = make(chan struct{})
+	b.lock.Unlock()
 }
