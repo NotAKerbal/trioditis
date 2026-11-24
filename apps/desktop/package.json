@@ -36,6 +36,8 @@
     "better-auth": "1.7.25",
     "convex": "1.50.0",
     "convex-helpers": "0.1.135",
+    "emojibase-data": "18.0.0",
+    "frimousse": "0.4.0",
     "lucide-react": "1.70.0",
     "qrcode.react": "4.2.0",
     "react": "19.3.1",

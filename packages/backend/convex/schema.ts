@@ -481,6 +481,11 @@ export default defineSchema({
     sealedEdit: v.optional(envelope),
     editEventId: v.optional(v.string()),
     editedAt: v.optional(v.number()),
+    /**
+     * How many edits of it have arrived, for networks that cap them (NETWORK_INFO `maxEdits`).
+     * Counted from when Trioditis began counting: an older message's earlier edits aren't in it.
+     */
+    edits: v.optional(v.number()),
     redactedAt: v.optional(v.number()),
     /** The bridge host flagged it as mentioning the person. */
     mentionsMe: v.optional(v.boolean()),

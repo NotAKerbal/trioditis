@@ -24,6 +24,27 @@ Every network carries a visible maturity label (`stable`, `beta`, or `experiment
 | [X](/networks/twitter/)                 | `twitter`   | **Experimental** | Legacy DMs + encrypted X Chat wired with HTTP/2 transport test; awaiting live verification                        | Sign in on x.com + X Chat PIN               | Yes      |
 | [Bluesky](/networks/bluesky/)           | `bluesky`   | **Experimental** | Text-only DMs wired with no-retry transport guard; 5s polling; awaiting live verification                         | App password                                | No       |
 
+### Editing and deleting your messages
+
+What each connector allows for your own messages, and for how long after sending. The app offers Edit and Delete only within these limits.
+
+| Network         | Edit       | Delete                            |
+| --------------- | ---------- | --------------------------------- |
+| WhatsApp        | 15 minutes | For everyone, 48 hours            |
+| Signal          | 24 hours   | For everyone, 24 hours            |
+| Google Messages | No         | Only from your phone, any time    |
+| Google Voice    | No         | No                                |
+| Telegram        | 48 hours   | For everyone, any time            |
+| Messenger       | No         | No                                |
+| Instagram       | No         | No                                |
+| Slack           | Any time   | For everyone, any time            |
+| GroupMe         | No         | For everyone, any time            |
+| LinkedIn        | 60 minutes | For everyone, 60 minutes          |
+| X               | No         | For everyone in X Chat; else, you |
+| Bluesky         | No         | No                                |
+
+Signal allows 10 edits of a message, and the app stops offering Edit at that count. Messenger and Instagram can edit and delete, but their connector can report an edit or deletion as done when the network refused it or never confirmed it, so the app doesn't offer either yet. GroupMe's connector keeps an edit's new text unsealed in the bridge database, and X can only edit its encrypted chats, which the app can't tell apart, so neither offers editing. A Slack workspace can turn editing or deleting off, or limit it; the app can't see that, and says so when Slack refuses.
+
 ### Not yet supported
 
 - **Discord:** `mautrix-discord` still uses the legacy bridge framework rather than `bridgev2`. Discord will join once its `bridgev2` migration lands.

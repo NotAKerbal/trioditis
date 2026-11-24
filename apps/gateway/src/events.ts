@@ -2,7 +2,7 @@ import type { BridgeEvent, BridgePressure } from '@trioditis/core/bridge-protoco
 import { NETWORKS, type Network } from '@trioditis/core'
 import { convexToJson, type Value } from 'convex/values'
 import { isEnvelope } from '@trioditis/backend/envelope'
-import { bridgeEvent } from '@trioditis/backend/validators'
+import { BRIDGE_EVENT_TYPES, bridgeEvent } from '@trioditis/backend/validators'
 import type { Backend } from './backend.ts'
 import { conforms } from './shape.ts'
 
@@ -99,24 +99,7 @@ function sendable(event: unknown) {
   return sealed === undefined || isEnvelope(sealed)
 }
 
-const EVENT_TYPES: ReadonlySet<string> = new Set([
-  'message',
-  'edit',
-  'reaction',
-  'reactionRemove',
-  'redaction',
-  'receipt',
-  'typing',
-  'chat',
-  'contact',
-  'contactIdentifiers',
-  'chatCollage',
-  'chatStarted',
-  'loginState',
-  'loginStep',
-  'sendStatus',
-  'backfillDone',
-])
+const EVENT_TYPES: ReadonlySet<string> = new Set(BRIDGE_EVENT_TYPES)
 
 /** The event's type for quarantine: a known type, or `unknown`, never what the event says. */
 function typeOf(event: BridgeEvent) {

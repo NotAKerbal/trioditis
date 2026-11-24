@@ -257,6 +257,16 @@ func TestGMessagesSendIsPostedOnce(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a deletion is posted once", func(t *testing.T) {
+		srv := newGoogleServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+		cli := newRelayClient(srv)
+		if _, err := cli.DeleteMessage(context.Background(), "1"); err == nil {
+			t.Fatal("an ambiguous deletion was reported as done")
+		}
+		if n := srv.total(); n != 1 {
+			t.Fatalf("the deletion reached the relay %d times (%v), want once", n, srv.requests)
+		}
+	})
 	t.Run("other requests keep their retries", func(t *testing.T) {
 		srv := newGoogleServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
 		cli := newRelayClient(srv)
@@ -441,5 +451,82 @@ func TestGMessagesDescribeLoginErrorOddShapes(t *testing.T) {
 		fmt.Errorf("failed to fetch config: %w", events.RequestError{HTTP: &events.HTTPError{Resp: &http.Response{StatusCode: 500}}}),
 	} {
 		describeGMessages(t, fmt.Errorf("%w: %w", gmessages.ErrPairStartUnknown, err))
+	}
+}
+
+// roundTripFunc is a transport that answers every request itself.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// A reply from Google that sets or removes one of the sign-in cookies libgm sends is logged
+// by the cookies' names, the endpoint and the status, never their values; other cookies and
+// replies that set none aren't logged.
+func TestGMessagesLogsSignInCookieChanges(t *testing.T) {
+	var buf bytes.Buffer
+	gm := &gmessagesConnector{log: zerolog.New(&buf)}
+	var setCookies []string
+	transport := gm.WrapHTTPTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+		for _, c := range setCookies {
+			header.Add("Set-Cookie", c)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: http.NoBody, Request: req}, nil
+	}))
+	post := func(raw string) {
+		req, _ := http.NewRequest(http.MethodPost, raw, strings.NewReader(""))
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	setCookies = []string{
+		"SID=new-sid-secret; Domain=.google.com; Path=/",
+		"OSID=; Max-Age=0; Domain=messages.google.com",
+		"__Secure-1PSIDTS=old-secret; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+		"NID=other-secret; Domain=.google.com",
+	}
+	post("https://instantmessaging-pa.clients6.google.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/ReceiveMessages")
+	var got struct {
+		Msg      string   `json:"message"`
+		Changed  []string `json:"changed"`
+		Removed  []string `json:"removed"`
+		Endpoint string   `json:"http_endpoint"`
+		Status   int      `json:"http_status"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, buf.String())
+	}
+	if got.Msg != "Google changed sign-in cookies" || !slices.Equal(got.Changed, []string{"SID"}) ||
+		!slices.Equal(got.Removed, []string{"OSID", "__Secure-1PSIDTS"}) || got.Endpoint != "ReceiveMessages" || got.Status != 200 {
+		t.Fatalf("got %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "secret") || strings.Contains(buf.String(), "NID") {
+		t.Fatalf("logged a value or another cookie: %s", buf.String())
+	}
+
+	buf.Reset()
+	setCookies = []string{"NID=other; Domain=.google.com"}
+	post("https://messages.google.com/web/config")
+	setCookies = nil
+	post("https://instantmessaging-pa.clients6.google.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage")
+	if buf.Len() != 0 {
+		t.Fatalf("logged replies that changed no sign-in cookie: %s", buf.String())
+	}
+}
+
+// A Google account's relay endpoints have names in the log like the others.
+func TestGMessagesNamesGoogleAccountEndpoints(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://instantmessaging-pa.clients6.google.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/SendMessage":     "SendMessage",
+		"https://instantmessaging-pa.clients6.google.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/ReceiveMessages": "ReceiveMessages",
+		"https://instantmessaging-pa.clients6.google.com/$rpc/google.internal.communications.instantmessaging.v1.Messaging/AckMessages":     "AckMessages",
+	} {
+		req, _ := http.NewRequest(http.MethodPost, raw, nil)
+		if got := gmessagesEndpoint(&http.Response{Request: req}); got != want {
+			t.Errorf("%s: got %q, want %q", raw, got, want)
+		}
 	}
 }

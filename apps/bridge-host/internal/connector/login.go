@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
@@ -42,6 +43,11 @@ type loginSession struct {
 	done      bool
 	// browser is the current cookie step's sign-in browser, once someone opens it.
 	browser *signin.Browser
+	// stepAt is when the current step was reported, and cookieFields the names of the cookies
+	// the last cookie step was given, never their values: a failed login's log says how long
+	// after its last step it failed and what it was signed in with.
+	stepAt       time.Time
+	cookieFields []string
 }
 
 func randomStepID() string {
@@ -170,7 +176,10 @@ func (c *Connector) handleLoginSubmit(ctx context.Context, cmd *protocol.Command
 }
 
 // submitInput hands a step's input to the network and moves the login on with what it
-// answers. The input is a credential: it is cleared once used. decoded says its cookies are
+// answers. The input is a credential: this copy is cleared as it is handed over. The network gets
+// a copy of its own, because a connector may keep the map it is given: mautrix-gmessages uses
+// it as its cookie jar for the rest of the login, and clearing it under the connector left the
+// request finishing Google pairing with no cookies (a 401). decoded says its cookies are
 // already percent-decoded, as the sign-in browser's are.
 func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]string, decoded bool) {
 	var next *bridgev2.LoginStep
@@ -182,7 +191,7 @@ func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]st
 			err = errors.New("login process doesn't accept input")
 			break
 		}
-		next, err = proc.SubmitUserInput(s.ctx, input)
+		next, err = proc.SubmitUserInput(s.ctx, handOver(input))
 	case bridgev2.LoginStepTypeCookies:
 		proc, ok := s.process.(bridgev2.LoginProcessCookies)
 		if !ok {
@@ -195,13 +204,25 @@ func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]st
 		if !decoded {
 			decodeCookies(step.CookiesParams, input)
 		}
-		next, err = proc.SubmitCookies(s.ctx, input)
+		fields := declaredCookieFields(step.CookiesParams, input)
+		s.lock.Lock()
+		s.cookieFields = fields
+		s.lock.Unlock()
+		next, err = proc.SubmitCookies(s.ctx, handOver(input))
 	default:
 		err = errors.New("the current login step doesn't take input")
 	}
-	// The input is a credential; drop the only copy as soon as it's used.
+	// Input no step took is still a credential.
 	clear(input)
 	s.advance(next, err)
+}
+
+// handOver gives a connector its own copy of a step's input and clears this one first, so the
+// host holds no credential while the connector works with it.
+func handOver(input map[string]string) map[string]string {
+	out := maps.Clone(input)
+	clear(input)
+	return out
 }
 
 func (c *Connector) handleLoginCancel(ctx context.Context, cmd *protocol.Command, check bool) error {
@@ -317,6 +338,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		// The last step's browser has nothing more to do.
 		s.closeBrowser()
 	}
+	stepAt, cookieFields := s.stepAt, s.cookieFields
+	s.stepAt = time.Now()
 	s.lock.Unlock()
 	if err != nil {
 		s.c.forgetLogin(s.id)
@@ -331,7 +354,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		emitErr := s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
 		// Only what the error is made of is logged, never its text: a connector's error text can
 		// quote what the person typed. The person sees a code.
-		s.c.describeLoginError(log.Warn(), err).Msg("Login failed")
+		evt := describeLoginAttempt(log.Warn(), time.Since(stepAt), stepAt.IsZero(), cookieFields)
+		s.c.describeLoginError(evt, err).Msg("Login failed")
 		if emitErr != nil {
 			log.Err(emitErr).Msg("Failed to report login error")
 		}
@@ -408,6 +432,36 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			s.advance(next, err)
 		}()
 	}
+}
+
+// declaredCookieFields are the IDs of the step's cookie fields that input has a value for,
+// sorted. Only the step's own IDs are named: a pasted submission can carry any key, and a key
+// that isn't one of them could be anything the person pasted.
+func declaredCookieFields(params *bridgev2.LoginCookiesParams, input map[string]string) []string {
+	if params == nil {
+		return nil
+	}
+	var fields []string
+	for _, f := range params.Fields {
+		if input[f.ID] != "" && !slices.Contains(fields, f.ID) {
+			fields = append(fields, f.ID)
+		}
+	}
+	slices.Sort(fields)
+	return fields
+}
+
+// describeLoginAttempt adds to a failed login's log how long after its last step it failed
+// (unless it failed before reporting one) and the names of the cookies it was given, which
+// together tell a sign-in that went stale from one that was never complete.
+func describeLoginAttempt(evt *zerolog.Event, sinceStep time.Duration, noStep bool, cookieFields []string) *zerolog.Event {
+	if !noStep {
+		evt = evt.Float64("since_last_step_seconds", sinceStep.Round(100*time.Millisecond).Seconds())
+	}
+	if len(cookieFields) > 0 {
+		evt = evt.Strs("cookie_fields", cookieFields)
+	}
+	return evt
 }
 
 // DisplayLifetime is how long a QR or pairing code is shown without the bridge host saying it

@@ -1,27 +1,23 @@
 import type { Id } from '@trioditis/backend/dataModel'
 import type { ContactPlaintext, Network } from '@trioditis/core'
 import { Button } from '@trioditis/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from '@trioditis/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { cn } from '@trioditis/ui/lib/utils'
-import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, Reply, SmilePlus } from 'lucide-react'
+import { AlertCircle, ArrowDown, Check, CheckCheck, Clock, MoreHorizontal, Pencil, Reply, Trash2 } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { messageTime } from '~/data/format.ts'
 import { captionOf, summarize } from '~/data/last-message.ts'
 import { isImage } from '~/data/media.ts'
 import type { Message, Reaction } from '~/data/messages.ts'
-import { sameKey, shownKey } from '~/data/reaction-toggle.ts'
+import { shownKey } from '~/data/reaction-toggle.ts'
 import { formatWhen } from '~/data/snooze.ts'
 import { networkName } from '~/data/chats.ts'
 import { Attachments, MediaAvatar } from './attachments.tsx'
 import { LinkCards } from './link-card.tsx'
 import { cardReplacesText, linkCards } from './link-preview.ts'
 import { isBigEmoji, linkParts, sameRun, sameTime } from './message-text.ts'
+import { ReactionPicker } from './reaction-picker.tsx'
 import type { SendAgainState } from './send-again.ts'
 
 export interface ScheduledItem {
@@ -76,6 +72,13 @@ interface MessageListProps {
   onReply: (m: Message) => void
   /** Adds the person's reaction with this key, or takes it away if it's theirs already. */
   onReact: (m: Message, key: string) => void
+  /** Whether the person can change this message's text now, and delete it (their own, on a network that can). */
+  canEdit: (m: Message) => boolean
+  canDelete: (m: Message) => boolean
+  /** Puts the message's text in the composer to change. */
+  onEdit: (m: Message) => void
+  /** Asks to delete the message, then does. */
+  onDelete: (m: Message) => void
   /** Makes the next attempt to send it again (send-again.ts). */
   onSendAgain: (m: Message) => void
   /** Where sending it again stands for this row's chain, and whether another attempt may be made. */
@@ -255,7 +258,9 @@ export function MessageList(props: MessageListProps) {
           const settled = m.delivery === undefined || SETTLED.has(m.delivery)
           // Delivery once per run of the person's own, at its end; a message still going, edited or
           // in trouble shows its own.
-          const meta = (m.self && (last || !settled)) || m.edited ? <Meta m={m} /> : null
+          const meta = (m.self && (last || !settled)) || m.edited || m.deleting ? <Meta m={m} /> : null
+          const editable = props.canEdit(m)
+          const deletable = props.canDelete(m)
           const reacted = reactions.get(m.id)
           // In a group, someone else's run starts with their name and ends beside their avatar.
           const fromOther = props.group && !m.self
@@ -338,12 +343,15 @@ export function MessageList(props: MessageListProps) {
                 <div
                   data-message-id={m.id}
                   className={cn(
-                    // Always leaving room beside it for its actions (4.5rem), however narrow the pane,
-                    // and in a group for the avatar's gutter (2.25rem) too.
+                    // Always leaving room beside it for its actions (4.5rem; 6.5rem for the person's
+                    // own, which have a third), however narrow the pane, and in a group for the
+                    // avatar's gutter (2.25rem) too.
                     'group relative flex w-fit flex-col',
                     fromOther
                       ? 'max-w-[min(78%,38rem,calc(100%-6.75rem))]'
-                      : 'max-w-[min(78%,38rem,calc(100%-4.5rem))]',
+                      : m.self
+                        ? 'max-w-[min(78%,38rem,calc(100%-6.5rem))]'
+                        : 'max-w-[min(78%,38rem,calc(100%-4.5rem))]',
                     m.self ? 'ml-auto items-end' : 'items-start',
                   )}
                 >
@@ -359,6 +367,7 @@ export function MessageList(props: MessageListProps) {
                       m.deleted && 'bg-transparent text-subtle-foreground italic shadow-[0_0_0_1px_var(--border)]',
                       big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
                       bare && 'bg-transparent p-0 shadow-none',
+                      m.deleting && 'opacity-60',
                     )}
                   >
                     {quoted || m.replyTo ? (
@@ -444,7 +453,7 @@ export function MessageList(props: MessageListProps) {
                       onDiscard={props.onDiscard}
                     />
                   ) : null}
-                  {!m.pending && !m.deleted ? (
+                  {!m.pending && !m.deleted && !m.deleting ? (
                     // Beside the bubble, nearest first, on the side away from its sender.
                     <div
                       className={cn(
@@ -466,6 +475,14 @@ export function MessageList(props: MessageListProps) {
                         <ReactionPicker
                           mine={(reacted ?? []).filter((r) => r.mine).map((r) => r.key)}
                           onPick={(key) => props.onReact(m, key)}
+                          triggerClassName={ACTION}
+                        />
+                      ) : null}
+                      {editable || deletable ? (
+                        <MessageMenu
+                          self={m.self}
+                          onEdit={editable ? () => props.onEdit(m) : undefined}
+                          onDelete={deletable ? () => props.onDelete(m) : undefined}
                         />
                       ) : null}
                     </div>
@@ -614,34 +631,55 @@ function CancelledRow({
 const ACTION =
   'flex size-7 items-center justify-center rounded-full bg-surface text-muted-foreground opacity-0 shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] group-focus-within:opacity-100 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100'
 
-const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
-
-/** A few reactions to pick from; one the person has given already is checked, and takes it away. */
-function ReactionPicker({ mine, onPick }: { mine: string[]; onPick: (key: string) => void }) {
+/**
+ * A message's other actions. The one chosen runs once the menu has closed, so focus goes where it
+ * takes it (the composer, for Edit), and a dialog it opens isn't opened under the closing menu.
+ */
+function MessageMenu({
+  self,
+  onEdit,
+  onDelete,
+}: {
+  self: boolean
+  onEdit: (() => void) | undefined
+  onDelete: (() => void) | undefined
+}) {
+  const chosen = useRef<(() => void) | null>(null)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           variant="bare"
           type="button"
-          aria-label="React"
-          title="React"
+          aria-label="More"
+          title="More"
           className={cn(ACTION, 'data-[state=open]:text-foreground data-[state=open]:opacity-100')}
         >
-          <SmilePlus className="size-[15px]" />
+          <MoreHorizontal className="size-[15px]" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="top" className="flex min-w-0 gap-0.5 p-1">
-        {QUICK_REACTIONS.map((key) => (
-          <DropdownMenuCheckboxItem
-            key={key}
-            checked={mine.some((k) => sameKey(k, key))}
-            onSelect={() => onPick(key)}
-            className="size-9 justify-center px-0 text-xl"
-          >
-            {key}
-          </DropdownMenuCheckboxItem>
-        ))}
+      <DropdownMenuContent
+        side="top"
+        align={self ? 'end' : 'start'}
+        className="min-w-[160px]"
+        onCloseAutoFocus={(e) => {
+          const run = chosen.current
+          chosen.current = null
+          if (!run) return
+          e.preventDefault()
+          run()
+        }}
+      >
+        {onEdit ? (
+          <DropdownMenuItem onSelect={() => (chosen.current = onEdit)}>
+            <Pencil /> Edit
+          </DropdownMenuItem>
+        ) : null}
+        {onDelete ? (
+          <DropdownMenuItem className="text-danger [&_svg]:text-danger" onSelect={() => (chosen.current = onDelete)}>
+            <Trash2 /> Delete
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -662,12 +700,16 @@ function Linked({ text }: { text: string }) {
 
 const SETTLED = new Set<Message['delivery']>(['sent', 'delivered', 'read'])
 
-/** Edited and, for the person's own, its delivery state (client-api.md, Sending). */
+/** Edited and, for the person's own, its delivery state (client-api.md, Sending), or an edit or deletion on its way. */
 function Meta({ m }: { m: Message }) {
   return (
     <span className="inline-flex items-center gap-1 text-[11px] leading-none whitespace-nowrap not-italic">
       {m.edited ? 'edited' : null}
-      {m.self ? <DeliveryIcon delivery={m.delivery} /> : null}
+      {m.editing || m.deleting ? (
+        <Clock className="size-3" aria-label={m.deleting ? 'Deleting' : 'Saving edit'} />
+      ) : m.self ? (
+        <DeliveryIcon delivery={m.delivery} />
+      ) : null}
     </span>
   )
 }

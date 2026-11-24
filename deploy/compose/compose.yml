@@ -104,6 +104,8 @@ services:
       retries: 30
 
   # One-shot: sets the deployment's environment and deploys the functions, on every `up`.
+  # The installer builds every image with deploy/install/build-images.sh, which says what
+  # these `build:` sections say; change both together.
   functions:
     build:
       context: ../..

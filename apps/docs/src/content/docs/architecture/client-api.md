@@ -179,6 +179,13 @@ await convex.mutation(api.messages.send, {
 
 Delivery states shown for the member's own messages: `queued`, `claimed`, `submitted`, `sent`, `delivered`, `read`, `failed`, and `unknown`. Messages in `failed` or `unknown` can be discarded with `messages.discardSend({ clientMessageId })` or explicitly resent with a fresh `clientMessageId`.
 
+### Editing and deleting
+
+A member can change the text of their own messages, and delete them, on networks that allow it. `NETWORK_INFO[network].edit` and `.delete` (from `@trioditis/core`, also in `networks.list`) say whether, for how long after sending (`maxAgeMs`, null for no limit), and how many edits a message may have where the app counts them (`maxEdits`, counted in each message's `edits`). `delete.forEveryone` is false where the network only removes it from the member's own account (Google Messages), and `'depends'` where that varies by chat (X: everyone in its encrypted chats). The backend refuses anything outside these, and someone else's message.
+
+- **Edit:** seal the new plaintext (`{ type: 'text', body }`) to the bridge key only, kind `outbound`, object ID a fresh `clientMessageId`, and call `messages.edit({ chatId, messageId, clientMessageId, forBridge })`. Nothing else is stored until the bridge host's `edit` echo, which carries the member's sealed copy; `messages.list` then shows it as the latest edit. `messages.editStates({ clientMessageIds })` (up to 100) says where each edit stands, with the send delivery states. An edit that hasn't reached the network within 30 minutes isn't sent (`failed`), and one that may or may not have been made is `unknown`: it is never sent again on its own. An edit with no files of its own changed only a picture's or file's caption: show the original's files with it. Only plain text is edited from Trioditis: the bridge host refuses an edit carrying a file, formatting (`html`) or another kind of message, and the app doesn't offer one on a message with a file or formatting. The echo of an edit or deletion is taken from the bridge host the command went to even if the login has since moved to another host, as a send's is.
+- **Delete:** `messages.remove({ chatId, messageId })`. The `redaction` echo marks the message deleted; until then nothing changes. One that hasn't reached the bridge host within 10 minutes isn't made, and the bridge host reports no failure, so the app stops showing it as being deleted after 30 seconds and says the network hasn't confirmed it.
+
 ### Media
 
 Pictures and files are fetched and sent through the gateway's `/media/<mediaId>`, as ciphertext only. A file's key and nonce travel only inside sealed message plaintext ([Media encryption](/security/sealing/#media-encryption)).

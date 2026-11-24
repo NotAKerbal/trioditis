@@ -79,7 +79,7 @@ func init() {
 			// The capabilities are the connector's shared value, and one process runs one
 			// connector, so changing them here changes them for this process only.
 			gm.GetCapabilities().OutgoingMessageTimeouts = nil
-			return &gmessagesConnector{gm}, nil
+			return &gmessagesConnector{GMConnector: gm}, nil
 		},
 	})
 }
@@ -94,6 +94,8 @@ func init() {
 // every optional interface it implements.
 type gmessagesConnector struct {
 	*gmessages.GMConnector
+	// log is the bridge's, once Init has run, for what the HTTP transport notices.
+	log zerolog.Logger
 }
 
 var (
@@ -101,8 +103,49 @@ var (
 	_ connector.LoginErrorDescriber  = (*gmessagesConnector)(nil)
 )
 
+func (gm *gmessagesConnector) Init(br *bridgev2.Bridge) {
+	gm.GMConnector.Init(br)
+	gm.log = br.Log.With().Str("component", "gmessages cookies").Logger()
+}
+
 func (gm *gmessagesConnector) WrapHTTPTransport(next http.RoundTripper) http.RoundTripper {
-	return &gmessagesSendOnce{next: next}
+	return &gmessagesSendOnce{next: next, log: gm.log}
+}
+
+// gmessagesSignInCookies are the cookies a Google account login hands libgm (the connector's
+// cookie step). libgm copies whatever Google sets in a reply over its own copy, a removal as
+// an empty value, and sends that from then on; Google answering 401 just after a reply that
+// changed one would show it. Only their names are logged, never values.
+var gmessagesSignInCookies = map[string]bool{
+	"SID": true, "HSID": true, "SSID": true, "APISID": true, "SAPISID": true, "OSID": true,
+	"__Secure-1PSIDTS": true,
+}
+
+// noteSignInCookies logs which sign-in cookies a reply from Google sets or removes.
+func noteSignInCookies(log zerolog.Logger, resp *http.Response) {
+	var changed, removed []string
+	now := time.Now()
+	for _, ck := range resp.Cookies() {
+		if !gmessagesSignInCookies[ck.Name] {
+			continue
+		}
+		if ck.MaxAge < 0 || ck.Value == "" || (!ck.Expires.IsZero() && ck.Expires.Before(now)) {
+			if !slices.Contains(removed, ck.Name) {
+				removed = append(removed, ck.Name)
+			}
+		} else if !slices.Contains(changed, ck.Name) {
+			changed = append(changed, ck.Name)
+		}
+	}
+	if len(changed) == 0 && len(removed) == 0 {
+		return
+	}
+	log.Info().
+		Strs("changed", changed).
+		Strs("removed", removed).
+		Str("http_endpoint", gmessagesEndpoint(resp)).
+		Int("http_status", resp.StatusCode).
+		Msg("Google changed sign-in cookies")
 }
 
 // gmessagesLoginSteps names libgm's steps by the start its errors give them, for the ones a
@@ -167,6 +210,7 @@ var gmessagesEndpoints = func() map[string]string {
 		util.ConfigURL, util.GoogleAuthenticationURL, util.GoogleTimesourceURL, util.UploadMediaURL,
 		util.RegisterPhoneRelayURL, util.RefreshPhoneRelayURL, util.GetWebEncryptionKeyURL,
 		util.RevokeRelayPairingURL, util.ReceiveMessagesURL, util.SendMessageURL, util.AckMessagesURL,
+		util.ReceiveMessagesURLGoogle, util.SendMessageURLGoogle, util.AckMessagesURLGoogle,
 		util.SignInGaiaURL, util.RegisterRefreshURL,
 	} {
 		u, err := url.Parse(raw)
@@ -299,6 +343,7 @@ const gmessagesFrameLimit = 1 << 20
 // in libgm and reported as uncertain by the connector, so it is passed on unchanged.
 type gmessagesSendOnce struct {
 	next http.RoundTripper
+	log  zerolog.Logger
 }
 
 // CloseIdleConnections passes libgm's clean-up on disconnect (http.Client's
@@ -320,9 +365,16 @@ func (t *gmessagesSendOnce) RoundTrip(req *http.Request) (*http.Response, error)
 		next = http.DefaultTransport
 	}
 	if !gmessagesIsSend(req) {
-		return next.RoundTrip(req)
+		resp, err := next.RoundTrip(req)
+		if resp != nil {
+			noteSignInCookies(t.log, resp)
+		}
+		return resp, err
 	}
 	resp, err := next.RoundTrip(req)
+	if resp != nil {
+		noteSignInCookies(t.log, resp)
+	}
 	if err != nil || resp.StatusCode < 300 || (resp.StatusCode >= 400 && resp.StatusCode < 500) {
 		return resp, err
 	}
@@ -336,7 +388,8 @@ func (t *gmessagesSendOnce) RoundTrip(req *http.Request) (*http.Response, error)
 		WithSendNotice(true)
 }
 
-// gmessagesIsSend reports whether req posts a SEND_MESSAGE request to the relay. The action
+// gmessagesIsSend reports whether req posts a SEND_MESSAGE or DELETE_MESSAGE request to the
+// relay: a deletion is posted once too, so one whose answer was lost isn't made again. The action
 // is in the clear in the frame (OutgoingRPCData.Action); only its payload is encrypted. A
 // relay post whose action can't be read, or reads as none, is treated as a send, so a change
 // in the frame's format can only take retries away, never add a resend.
@@ -362,5 +415,6 @@ func gmessagesIsSend(req *http.Request) bool {
 		return true
 	}
 	action := rpc.GetAction()
-	return action == gmproto.ActionType_SEND_MESSAGE || action == gmproto.ActionType_UNSPECIFIED
+	return action == gmproto.ActionType_SEND_MESSAGE || action == gmproto.ActionType_DELETE_MESSAGE ||
+		action == gmproto.ActionType_UNSPECIFIED
 }

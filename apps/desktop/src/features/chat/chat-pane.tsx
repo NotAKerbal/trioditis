@@ -10,6 +10,7 @@ import {
   DropdownMenuTrail,
   DropdownMenuTrigger,
 } from '@trioditis/ui/dropdown-menu'
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@trioditis/ui/dialog'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
@@ -45,6 +46,7 @@ import { accountLabels } from '~/data/account-label.ts'
 import { composerBlocked } from '~/data/bridge-ready.ts'
 import { useSettled } from '~/data/chat-content.ts'
 import { useContactProfiles, useContactsAcross } from '~/data/contacts.ts'
+import { canDeleteMessage, canEditMessage, useMessageChanges } from '~/data/edits.ts'
 import {
   cardIndex,
   cardOfChat,
@@ -66,11 +68,13 @@ import {
   type Message,
 } from '~/data/messages.ts'
 import { getDraft, setDraftReply, setDraftText, useDraft } from '~/data/drafts.ts'
+import { noBridgeKey } from '~/data/outbox.ts'
 import { useOutbox } from '~/data/use-outbox.ts'
 import { formatWhen, snoozeOptions } from '~/data/snooze.ts'
 import { LoadError, RetryBoundary } from '~/features/shell/retry-boundary.tsx'
 import { SyncBar, useConnected } from '~/features/shell/sync-bar.tsx'
 import { errorMessage } from '~/lib/errors.ts'
+import { sealEdit } from '~/lib/sealed.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Composer } from './composer.tsx'
 import { addFiles, draggingFiles, removeFile, useOutgoingFiles } from './outgoing-files.ts'
@@ -205,6 +209,7 @@ function OpenChat({
   readStates: Map<string, ReadOnOpen>
   chosen: { current: ChatId | null }
 }) {
+  const session = useSession()
   const actions = useChatActions()
   // The person's direct chats on other networks, shown with this one as one conversation.
   const together = chatIds.length > 1 && chatIds.includes(chat.id)
@@ -281,8 +286,50 @@ function OpenChat({
   // Scheduled messages whose cancel is on its way: Cancel is off for them meanwhile.
   const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set())
   const bridge = useBridge()
+  const bridgeKey = bridge.key
   // Sending, scheduling and sending again (outbox.ts): this pane only says what came of them.
   const outbox = useOutbox(bridge)
+  // The person's edits and deletions, shown at once over what the server says (edits.ts).
+  const changes = useMessageChanges(
+    messages,
+    useCallback(
+      (text: string, clientMessageId: string) =>
+        bridgeKey ? sealEdit(text, clientMessageId, session.userId, bridgeKey) : null,
+      [bridgeKey, session.userId],
+    ),
+    useCallback(
+      ({ kind, how }: { kind: 'edit' | 'delete'; how: 'failed' | 'unknown' | 'unconfirmed' }) =>
+        toast(
+          kind === 'delete'
+            ? `${network} hasn’t confirmed that deletion yet.`
+            : how === 'failed'
+              ? 'That edit wasn’t saved.'
+              : `${network} didn’t confirm that edit. It may not have been saved.`,
+        ),
+      [network],
+    ),
+    useCallback(
+      (e: unknown, kind: 'edit' | 'delete') =>
+        toast(errorMessage(e, kind === 'edit' ? 'That edit couldn’t be saved.' : 'That message couldn’t be deleted.')),
+      [],
+    ),
+  )
+  const networkOfMessage = (m: Message) => networkOfChat.get(m.chatId) ?? chat.network
+  // The message whose text is in the composer to change, and that text.
+  const [editing, setEditing] = useState<{ message: Message; text: string } | null>(null)
+  const startEdit = (m: Message) => setEditing({ message: m, text: m.body?.body ?? '' })
+  const saveEdit = () => {
+    if (!editing) return
+    const { message, text } = editing
+    if (!text.trim()) return
+    // Unchanged, there's nothing to send.
+    if (text === message.body?.body) return setEditing(null)
+    if (!bridgeKey) return toast(noBridgeKey(bridge.status))
+    if (changes.edit(message, text)) setEditing(null)
+  }
+  // The message the person chose to delete, while they confirm.
+  const [deleting, setDeleting] = useState<Message | null>(null)
+  const deleteLimit = deleting ? NETWORK_INFO[networkOfMessage(deleting)]?.delete : undefined
   const { discard, cancelScheduled, forgetScheduled, sendScheduledNow } = useSendMutations()
   // Which of a conversation's chats a message goes by: the one chosen last (in the composer, or
   // by replying to a message in it), or the one a profile's Message or Open came here to send on;
@@ -684,7 +731,7 @@ function OpenChat({
         <MessageList
           network={chat.network}
           networkOf={merged ? (m) => networkOfChat.get(m.chatId) ?? chat.network : undefined}
-          messages={messages}
+          messages={changes.messages}
           loading={held}
           reactions={reactions}
           group={group}
@@ -702,6 +749,10 @@ function OpenChat({
           onLoadMore={loadMore}
           onReply={setReplyTo}
           onReact={(m, key) => toggleReaction(m.id, key)}
+          canEdit={(m) => canEditMessage(m, networkOfMessage(m), Date.now())}
+          canDelete={(m) => canDeleteMessage(m, networkOfMessage(m), Date.now())}
+          onEdit={startEdit}
+          onDelete={setDeleting}
           onSendAgain={(m) =>
             void outbox.sendAgain(m, m.clientMessageId ? retryStates.get(m.clientMessageId) : undefined).then(said)
           }
@@ -766,17 +817,64 @@ function OpenChat({
                 }
               : undefined
           }
-          draft={draft}
-          onDraft={setDraft}
+          draft={editing ? editing.text : draft}
+          onDraft={editing ? (text) => setEditing({ ...editing, text }) : setDraft}
           files={files}
           onAddFiles={attach}
           onRemoveFile={(id) => removeFile(draftId, id)}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
-          onSend={() => void onSend()}
+          onSend={editing ? saveEdit : () => void onSend()}
           onSchedule={(at) => void onSchedule(at)}
-          disabled={lost ? 'Choose where to send this.' : composerBlocked(sendChat.row, bridge.status)}
+          disabled={
+            // An edit goes on its message's own chat, whichever one the composer sends on.
+            editing
+              ? composerBlocked((members.find((c) => c.id === editing.message.chatId) ?? chat).row, bridge.status)
+              : lost
+                ? 'Choose where to send this.'
+                : composerBlocked(sendChat.row, bridge.status)
+          }
+          editing={editing ? { onCancel: () => setEditing(null) } : null}
+          onEditLast={() => {
+            const now = Date.now()
+            const last = [...changes.messages].reverse().find((m) => m.self && !m.pending)
+            if (last && canEditMessage(last, networkOfMessage(last), now)) startEdit(last)
+          }}
         />
+        <Dialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
+          <DialogContent className="w-[min(400px,calc(100vw-32px))] p-6">
+            <DialogTitle className="text-md">
+              {deleteLimit?.forEveryone === false
+                ? 'Delete for you?'
+                : deleteLimit?.forEveryone === 'depends'
+                  ? 'Delete message?'
+                  : 'Delete for everyone?'}
+            </DialogTitle>
+            {deleteLimit?.forEveryone === false ? (
+              <DialogDescription className="mt-2 text-sm">Others in the chat may still have it.</DialogDescription>
+            ) : deleteLimit?.forEveryone === 'depends' ? (
+              <DialogDescription className="mt-2 text-sm">
+                It’s deleted for everyone in an encrypted chat, and only for you in others.
+              </DialogDescription>
+            ) : (
+              <DialogDescription className="sr-only">It’s deleted for everyone in the chat.</DialogDescription>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <DialogClose asChild>
+                <Button variant="ghost">Cancel</Button>
+              </DialogClose>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  if (deleting) changes.remove(deleting)
+                  setDeleting(null)
+                }}
+              >
+                Delete
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </main>
       {/* Opening a chat marks it read, as does a new message while it's open and on screen: each
           of a conversation's chats once its messages are shown (a quieter one's may be from before
@@ -823,6 +921,7 @@ function replyStub(eventId: string, chatId: ChatId): Message {
     at: 0,
     body: null,
     edited: false,
+    edits: 0,
     deleted: false,
     replyTo: undefined,
     clientMessageId: undefined,

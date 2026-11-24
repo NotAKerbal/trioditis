@@ -97,7 +97,8 @@ for name in $( {
 done
 compose() { (cd "$here/compose" && docker compose --env-file "$env_source" -p "$project" "$@"); }
 
-# The archive tool: the bundle's pinned Alpine-based image, which has tar and gzip.
+# The archive tool: the bundle's pinned Alpine-based image, which has tar (and gzip, for
+# reading backups from before archives were left uncompressed).
 tool=alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
 # Written last into every archive, so an archive cut short anywhere has none. It lists each
 # volume with its number of entries and bytes, for a restore to check its extraction against.
@@ -254,6 +255,16 @@ case "${1:-}" in
     # When the backup's data stops changing: taken before the server stops, so it's never later.
     created=$(date +%s)
     version=$(value_in TRIODITIS_VERSION "$env_text")
+    # Uncompressed (format 3) only when the installed version is this checkout's commit: a backup
+    # names the installed version, and a restore checks that version out and restores with its
+    # own deploy/trioditis, which reads only gzip if it's from before format 3 (as after a
+    # `git pull` the installer hasn't run for yet). Then it's gzip, format 2, as before.
+    checkout_commit=$(git -C "$here/.." rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)
+    if [ -n "$version" ] && [ "$version" = "$checkout_commit" ]; then
+      format=3 compress=''
+    else
+      format=2 compress=z
+    fi
     # Everything the backup writes is the caller's alone.
     umask 077
     # Real paths, so a symlink can't lead the backup into the checkout: resolved and checked
@@ -377,11 +388,16 @@ case "${1:-}" in
     # from which version, and the Postgres major version its data is for, for a restore to
     # check. The archive goes straight into the encryption, so it never reaches the disk in
     # the clear; each half's exit status is checked, the archive's through a file.
+    # It isn't compressed (format 3, above): the volumes are mostly sealed content and media,
+    # which gzip barely shrinks (about 0.1%), at busybox gzip's ~23 MB/s, slower than reading the
+    # archive back, which a restore does four times. backup.info says which format, so a restore
+    # knows; older backups (format 2 and before) are gzip.
     archived="$work/.archived"
     # shellcheck disable=SC2086 # $mounts is a list of -v options
     {
       docker run --rm --init --name "$worker" --log-driver none $mounts \
         -e MEMBERS="$members" -e MANIFEST="$manifest" -e CREATED="$created" -e VERSION="${version:-unknown}" -e ID="$id" \
+        -e COMPRESS="$compress" \
         -e PGDATA_DIR="./${project}_postgres" \
         --entrypoint sh "$tool" -c '
           trap "kill \$tar_pid 2>/dev/null; exit 130" INT TERM
@@ -398,7 +414,7 @@ case "${1:-}" in
               echo "volume ${volume#./} $entries $bytes"
             done
           } >"$MANIFEST"
-          tar -czf - $MEMBERS "./$MANIFEST" & tar_pid=$!
+          tar -c${COMPRESS}f - $MEMBERS "./$MANIFEST" & tar_pid=$!
           wait "$tar_pid"'
       echo "$?" >"$archived"
     } | crypt encrypt "$backup_key" "$id/archive" "$worker-crypt" >"$work/archive.enc" ||
@@ -468,7 +484,7 @@ case "${1:-}" in
     crypt encrypt "$backup_key" "$id/settings" "$worker-crypt" <"$plain/secrets.env" >"$work/secrets.env.enc" ||
       { echo "Couldn't encrypt secrets.env. Nothing was published." >&2; exit 1; }
     rm -f "$plain/secrets.env"
-    printf 'format=2\nid=%s\nproject=%s\nversion=%s\ncreated=%s\n' "$id" "$project" "${version:-unknown}" "$created" >"$work/backup.info"
+    printf 'format=%s\nid=%s\nproject=%s\nversion=%s\ncreated=%s\n' "$format" "$id" "$project" "${version:-unknown}" "$created" >"$work/backup.info"
 
     # The name is reserved with mkdir, which fails if anything (a file, a directory, a link) is
     # there; then the private directory is renamed onto that empty one in one step, so the
@@ -596,8 +612,22 @@ case "${1:-}" in
     restore_label() { docker volume inspect -f '{{index .Labels "trioditis.restore"}}' "$1" 2>/dev/null; }
     # Whether VOLUME is one the run this one carries on from made.
     resumed_volume() { [ -n "$resume_id" ] && [ "$(restore_label "$1")" = "$resume_id" ]; }
-    # stream DIR: the backup's archive, decrypted, on stdout.
+    # stream DIR: the backup's archive, decrypted and uncompressed, on stdout, as a plain tar.
+    # Busybox tar can't tell gzip from tar on a pipe, so an older backup's gzip (any before
+    # format=3, encrypted or not) is undone here, and every reader takes a plain tar. Each
+    # half's exit status counts, the source's through a file.
     stream() {
+      if [ "$encrypted" = 1 ] && grep -qx 'format=3' "$1/backup.info" 2>/dev/null; then
+        stream_source "$1"
+        return
+      fi
+      # A fresh status for each pass, so an earlier pass's can't stand in for this one's.
+      rm -f "$work/stream-source"
+      { stream_source "$1"; echo "$?" >"$work/stream-source"; } |
+        docker run --rm -i --sig-proxy=false --log-driver none --entrypoint gzip "$tool" -dc || return 1
+      [ "$(cat "$work/stream-source" 2>/dev/null)" = 0 ]
+    }
+    stream_source() {
       if [ "$encrypted" = 1 ]; then
         stream_id=$(backup_id "$1") || return 1
         crypt decrypt "$backup_key" "${stream_id:+$stream_id/archive}" <"$1/archive.enc"
@@ -684,7 +714,7 @@ case "${1:-}" in
     # shellcheck disable=SC2016 # expanded in the container
     manifest_text=$( { stream "$source_dir"; echo "$?" >"$work/read"; } |
       docker run --rm -i --sig-proxy=false --log-driver none --entrypoint sh "$tool" -c \
-        'mkdir /out && tar -xzf - -C /out "./$1" && cat "/out/$1"' sh "$manifest") && [ "$(cat "$work/read")" = 0 ] ||
+        'mkdir /out && tar -xf - -C /out "./$1" && cat "/out/$1"' sh "$manifest") && [ "$(cat "$work/read")" = 0 ] ||
       refuse "Couldn't read the backup's archive: it's damaged, cut short, or not this install's."
     printf '%s\n' "$manifest_text" | head -1 | grep -qxE 'trioditis-backup [12]' || refuse "The backup's archive has no manifest backup wrote."
     volumes=$(printf '%s\n' "$manifest_text" | sed -n 's/^volume \([^ ]*\) [0-9]* [0-9]*$/\1/p')
@@ -700,7 +730,7 @@ case "${1:-}" in
     # shellcheck disable=SC2016 # expanded in the container
     stray=$( { stream "$source_dir"; echo "$?" >"$work/read"; } |
       docker run --rm -i --sig-proxy=false --log-driver none -e VOLUMES="$volumes" -e MANIFEST="$manifest" \
-        --entrypoint sh "$tool" -c 'tar -tzf - | awk -v volumes="$VOLUMES" -v manifest="./$MANIFEST" "
+        --entrypoint sh "$tool" -c 'tar -tf - | awk -v volumes="$VOLUMES" -v manifest="./$MANIFEST" "
           BEGIN { n = split(volumes, list, \" \"); for (i = 1; i <= n; i++) known[\"./\" list[i]] = 1 }
           { name = \$0; sub(/\/\$/, \"\", name) }
           name == manifest { next }
@@ -730,7 +760,7 @@ case "${1:-}" in
       # shellcheck disable=SC2016 # expanded in the container
       backup_pg=$( { stream "$source_dir"; echo "$?" >"$work/read"; } |
         docker run --rm -i --sig-proxy=false --log-driver none --entrypoint sh "$tool" -c \
-          'tar -xzOf - "./$1/PG_VERSION"' sh "${project}_postgres") && [ "$(cat "$work/read")" = 0 ] &&
+          'tar -xOf - "./$1/PG_VERSION"' sh "${project}_postgres") && [ "$(cat "$work/read")" = 0 ] &&
         printf '%s\n' "$backup_pg" | grep -qxE '[0-9]+' ||
         refuse "Couldn't read which Postgres version the backup's database is from."
     fi
@@ -827,7 +857,7 @@ case "${1:-}" in
           umask 000
           cd /volumes
           for volume in $VOLUMES; do find "./$volume" -mindepth 1 -delete; done
-          tar -xzf -
+          tar -xf -
           for volume in $VOLUMES; do
             entries=$(find "./$volume" | wc -l)
             bytes=$(find "./$volume" -type f -exec stat -c %s {} + | awk "{ s += \$1 } END { print s + 0 }")
@@ -846,7 +876,7 @@ case "${1:-}" in
       backup_key=$(value_in BACKUP_KEY "$env_text")
       back_manifest=$( { stream "$recovery"; echo "$?" >"$work/read"; } |
         docker run --rm -i --sig-proxy=false --log-driver none --entrypoint sh "$tool" -c \
-          'mkdir /out && tar -xzf - -C /out "./$1" && cat "/out/$1"' sh "$manifest") && [ "$(cat "$work/read")" = 0 ] &&
+          'mkdir /out && tar -xf - -C /out "./$1" && cat "/out/$1"' sh "$manifest") && [ "$(cat "$work/read")" = 0 ] &&
         back_volumes=$(printf '%s\n' "$back_manifest" | sed -n 's/^volume \([^ ]*\) [0-9]* [0-9]*$/\1/p') &&
         load "$recovery" "$back_volumes" "$back_manifest" ||
         { echo "Putting it back failed too: deploy/trioditis restore $recovery tries again. Until then nothing that sends starts." >&2; exit 1; }

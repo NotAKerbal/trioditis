@@ -63,14 +63,33 @@ var (
 )
 
 func (s *SignalClient) sendMessage(ctx context.Context, portalID networkid.PortalID, content *signalpb.Content) error {
+	_, err := s.sendMessageTo(ctx, portalID, content)
+	return err
+}
+
+// Trioditis: sendChange sends an edit or a deletion, which isn't reported done when it reached
+// only some of a group's members: those who missed it still see the old text, or the message
+// itself, so it is uncertain, the host records it as unknown (an edit) or not done (a deletion,
+// whose stored copy is then kept), and nothing is sent again to those who have it.
+func (s *SignalClient) sendChange(ctx context.Context, portalID networkid.PortalID, content *signalpb.Content) error {
+	partial, err := s.sendMessageTo(ctx, portalID, content)
+	if err == nil && partial {
+		return fmt.Errorf("%w: sent to only some members of the Signal group", signalmeow.ErrSendUncertain)
+	}
+	return err
+}
+
+// Trioditis: sendMessageTo is upstream's sendMessage, also saying whether a group send reached
+// only some of its members.
+func (s *SignalClient) sendMessageTo(ctx context.Context, portalID networkid.PortalID, content *signalpb.Content) (partial bool, err error) {
 	userID, groupID, err := signalid.ParsePortalID(portalID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if groupID != "" {
 		result, err := s.Client.SendGroupMessage(ctx, groupID, content)
 		if err != nil {
-			return err
+			return false, err
 		}
 		totalRecipients := len(result.FailedToSendTo) + len(result.SuccessfullySentTo)
 		log := zerolog.Ctx(ctx).With().
@@ -82,26 +101,27 @@ func (s *SignalClient) sendMessage(ctx context.Context, portalID networkid.Porta
 			log.Debug().Msg("No successes or failures - Probably sent to myself")
 		} else if len(result.SuccessfullySentTo) == 0 {
 			log.Error().Msg("Failed to send event to all members of Signal group")
-			return fmt.Errorf("failed to send to any members of Signal group: %w", result.FailureError())
+			return false, fmt.Errorf("failed to send to any members of Signal group: %w", result.FailureError())
 		} else if len(result.SuccessfullySentTo) < totalRecipients {
 			if len(result.FailedToSendTo) > 0 {
 				log.Warn().Msg("Failed to send event to some members of Signal group")
 			} else {
 				log.Warn().Msg("Only sent event to some members of Signal group")
 			}
+			return true, nil
 		} else {
 			log.Debug().Msg("Sent event to all members of Signal group")
 		}
-		return nil
+		return false, nil
 	} else {
 		res := s.Client.SendMessage(ctx, userID, content)
 		if !res.WasSuccessful {
 			if res.Error != nil {
-				return res.Error
+				return false, res.Error
 			}
-			return errors.New("failed to send message")
+			return false, errors.New("failed to send message")
 		}
-		return nil
+		return false, nil
 	}
 }
 
@@ -232,7 +252,7 @@ func (s *SignalClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.Matri
 	}
 	ts := getTimestampForEvent(msg.InputTransactionID, msg.Event, msg.OrigSender)
 	converted.Timestamp = &ts
-	err = s.sendMessage(ctx, msg.Portal.ID, signalmeow.WrapEditMessage(&signalpb.EditMessage{
+	err = s.sendChange(ctx, msg.Portal.ID, signalmeow.WrapEditMessage(&signalpb.EditMessage{
 		TargetSentTimestamp: proto.Uint64(targetSentTimestamp),
 		DataMessage:         converted,
 	}))
@@ -352,7 +372,7 @@ func (s *SignalClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridg
 			TargetSentTimestamp:   proto.Uint64(targetSentTimestamp),
 		}
 	}
-	err = s.sendMessage(ctx, msg.Portal.ID, signalmeow.WrapDataMessage(dm))
+	err = s.sendChange(ctx, msg.Portal.ID, signalmeow.WrapDataMessage(dm))
 	return wrapSendError(err)
 }
 

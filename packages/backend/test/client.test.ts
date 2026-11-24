@@ -403,6 +403,164 @@ describe('reacting', () => {
   })
 })
 
+describe('editing and deleting', () => {
+  const messageIdOf = async (t: T, eventId: string) =>
+    await t.run(
+      async (ctx) =>
+        (await ctx.db
+          .query('messages')
+          .filter((q) => q.eq(q.field('eventId'), eventId))
+          .first())!._id,
+    )
+  const MINUTE = 60 * 1000
+  const mine = { sender: { self: true } }
+
+  it('refuses a message that isn’t the person’s own, never reached the network, is deleted, or is elsewhere', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const other = await aChat(t, 'user_a', 'q')
+    const now = Date.now()
+    await aMessage(t, chatId, 'net_theirs', now)
+    await aMessage(t, chatId, `pending:${id(1)}`, now, mine)
+    await aMessage(t, chatId, 'net_gone', now, { ...mine, redactedAt: now, sealed: undefined })
+    await aMessage(t, other, 'net_other', now, mine)
+    for (const eventId of ['net_theirs', `pending:${id(1)}`, 'net_gone', 'net_other']) {
+      const messageId = await messageIdOf(t, eventId)
+      await expect(
+        a.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(2), forBridge: sealed('e') }),
+      ).rejects.toThrow(/can’t be edited/)
+      await expect(a.mutation(api.messages.remove, { chatId, messageId })).rejects.toThrow(/can’t be deleted/)
+    }
+    expect(await t.run(async (ctx) => await ctx.db.query('outbox').collect())).toHaveLength(0)
+  })
+
+  it('keeps to each network’s time limits', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const chatId = await aChat(t, 'user_a', 'p')
+    const now = Date.now()
+    // WhatsApp edits for 15 minutes and deletes for 48 hours.
+    await aMessage(t, chatId, 'net_recent', now - 14 * MINUTE, mine)
+    await aMessage(t, chatId, 'net_hour', now - 60 * MINUTE, mine)
+    await aMessage(t, chatId, 'net_old', now - 49 * 60 * MINUTE, mine)
+    const recent = await messageIdOf(t, 'net_recent')
+    const hour = await messageIdOf(t, 'net_hour')
+    const old = await messageIdOf(t, 'net_old')
+    await a.mutation(api.messages.edit, { chatId, messageId: recent, clientMessageId: id(1), forBridge: sealed('e') })
+    await expect(
+      a.mutation(api.messages.edit, { chatId, messageId: hour, clientMessageId: id(2), forBridge: sealed('e') }),
+    ).rejects.toThrow(/too late to edit that message on WhatsApp/)
+    await a.mutation(api.messages.remove, { chatId, messageId: hour })
+    await expect(a.mutation(api.messages.remove, { chatId, messageId: old })).rejects.toThrow(
+      /too late to delete that message on WhatsApp/,
+    )
+    // Slack has no limit; Telegram edits for 48 hours and deletes any time.
+    const slack = await aChat(t, 'user_a', 's', { network: 'slack' })
+    await aMessage(t, slack, 'net_s', now - 400 * 24 * 60 * MINUTE, { ...mine, network: 'slack' })
+    const ancient = await messageIdOf(t, 'net_s')
+    await a.mutation(api.messages.edit, {
+      chatId: slack,
+      messageId: ancient,
+      clientMessageId: id(3),
+      forBridge: sealed('e'),
+    })
+    await a.mutation(api.messages.remove, { chatId: slack, messageId: ancient })
+    const telegram = await aChat(t, 'user_a', 't', { network: 'telegram' })
+    await aMessage(t, telegram, 'net_t', now - 49 * 60 * MINUTE, { ...mine, network: 'telegram' })
+    const twoDays = await messageIdOf(t, 'net_t')
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId: telegram,
+        messageId: twoDays,
+        clientMessageId: id(4),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/too late to edit that message on Telegram/)
+    await a.mutation(api.messages.remove, { chatId: telegram, messageId: twoDays })
+    const commands = await t.run(async (ctx) => await ctx.db.query('outbox').collect())
+    expect(commands.map((c) => c.payload.type)).toEqual(['edit', 'redact', 'edit', 'redact', 'redact'])
+  })
+
+  it('stops at a network’s cap on edits, counting each edit that arrives', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    // Signal allows ten edits of a message.
+    const chatId = await aChat(t, 'user_a', 'p', { network: 'signal' })
+    await aMessage(t, chatId, 'net_nine', Date.now(), { ...mine, network: 'signal', edits: 9 })
+    await aMessage(t, chatId, 'net_ten', Date.now(), { ...mine, network: 'signal', edits: 10 })
+    const nine = await messageIdOf(t, 'net_nine')
+    await a.mutation(api.messages.edit, { chatId, messageId: nine, clientMessageId: id(1), forBridge: sealed('e') })
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId,
+        messageId: await messageIdOf(t, 'net_ten'),
+        clientMessageId: id(2),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/Signal doesn’t allow that message to be edited again/)
+  })
+
+  it('refuses a network that can’t, an ID or edit that isn’t valid, and someone else’s chat', async () => {
+    const t = setup()
+    const a = await signIn(t, 'user_a')
+    const b = await signIn(t, 'user_b')
+    const chatId = await aChat(t, 'user_a', 'p')
+    await aMessage(t, chatId, 'net_1', Date.now(), mine)
+    const messageId = await messageIdOf(t, 'net_1')
+    for (const clientMessageId of ['short', 'has space in it ok', `rt_${'x'.repeat(20)}`]) {
+      await expect(
+        a.mutation(api.messages.edit, { chatId, messageId, clientMessageId, forBridge: sealed('e') }),
+      ).rejects.toThrow(/message ID isn’t valid/)
+    }
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId,
+        messageId,
+        clientMessageId: id(1),
+        forBridge: { ...sealed('e'), ct: 'A'.repeat(90_000) },
+      }),
+    ).rejects.toThrow(/isn’t sealed, or is too long/)
+    await expect(
+      b.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(2), forBridge: sealed('e') }),
+    ).rejects.toThrow(/doesn’t exist/)
+    await expect(b.mutation(api.messages.remove, { chatId, messageId })).rejects.toThrow(/doesn’t exist/)
+    // Google Voice can do neither; Google Messages can delete (for the person only) but not edit.
+    const voice = await aChat(t, 'user_a', 'v', { network: 'gvoice' })
+    await aMessage(t, voice, 'net_v', Date.now(), { ...mine, network: 'gvoice' })
+    const voiceMessage = await messageIdOf(t, 'net_v')
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId: voice,
+        messageId: voiceMessage,
+        clientMessageId: id(3),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/Google Voice can’t edit messages/)
+    await expect(a.mutation(api.messages.remove, { chatId: voice, messageId: voiceMessage })).rejects.toThrow(
+      /Google Voice can’t delete messages/,
+    )
+    const sms = await aChat(t, 'user_a', 's', { network: 'gmessages' })
+    await aMessage(t, sms, 'net_s', Date.now(), { ...mine, network: 'gmessages' })
+    const smsMessage = await messageIdOf(t, 'net_s')
+    await expect(
+      a.mutation(api.messages.edit, {
+        chatId: sms,
+        messageId: smsMessage,
+        clientMessageId: id(4),
+        forBridge: sealed('e'),
+      }),
+    ).rejects.toThrow(/Google Messages can’t edit messages/)
+    await a.mutation(api.messages.remove, { chatId: sms, messageId: smsMessage })
+    // Only the person's own edits' states are told.
+    await a.mutation(api.messages.edit, { chatId, messageId, clientMessageId: id(5), forBridge: sealed('e') })
+    expect(await b.query(api.messages.editStates, { clientMessageIds: [id(5)] })).toEqual([])
+    expect(await a.query(api.messages.editStates, { clientMessageIds: [id(5), id(6)] })).toEqual([
+      { clientMessageId: id(5), delivery: 'queued' },
+    ])
+  })
+})
+
 describe('the person’s own reaction on a busy message', () => {
   it('comes back past the first 100, so it can be taken away', async () => {
     const t = setup()

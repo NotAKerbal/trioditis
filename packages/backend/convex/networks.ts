@@ -35,6 +35,14 @@ export const list = query({
       flows: v.array(flow),
       termsRisk: v.boolean(),
       reactions: v.boolean(),
+      edit: v.union(v.null(), v.object({ maxAgeMs: v.union(v.null(), v.number()), maxEdits: v.optional(v.number()) })),
+      delete: v.union(
+        v.null(),
+        v.object({
+          forEveryone: v.union(v.boolean(), v.literal('depends')),
+          maxAgeMs: v.union(v.null(), v.number()),
+        }),
+      ),
     }),
   ),
   handler: async (ctx) => {

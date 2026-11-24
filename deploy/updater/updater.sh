@@ -6,9 +6,10 @@
 # It learns the admins' choices (the release channel, whether updates install on their own)
 # and requests from the backend, through deploy/scripts/updater-agent.mjs in a one-off
 # container on the server's network, and reports back the same way. It fetches the channel's
-# branch from this checkout's git remote, and to update, backs the server up (an update that
-# can't is called off), moves the checkout's local branch of that name to the branch's newest
-# commit and runs the installer, which restarts only what changed. It only ever moves forward:
+# branch from this checkout's git remote, and to update, builds the new commit's images while
+# the server keeps running (one that doesn't build is called off), backs the server up (an update
+# that can't is called off), moves the checkout's local branch of that name to the branch's newest
+# commit and runs the installer, which builds from the cache and restarts only what changed. It only ever moves forward:
 # a commit the branch doesn't have, or local changes, and it stays where it is. If the
 # installer fails, it goes back to the commit it was on and restores that backup, data and
 # settings, since the failed version's migrations and database images may have changed the
@@ -104,10 +105,10 @@ load_state() {
       pending_target | pending_previous | done_target | done_previous | failed_target)
         [[ "$value" =~ ^[0-9a-f]{40}$ ]] || continue ;;
       pending_request | done_request) [[ "$value" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue ;;
-      pending_phase) [[ "$value" =~ ^(backup|install|rollback)$ ]] || continue ;;
+      pending_phase) [[ "$value" =~ ^(build|backup|install|rollback)$ ]] || continue ;;
       pending_branch) [[ "$value" =~ ^(main|dev)$ ]] || continue ;;
       pending_backup) [[ "$value" =~ ^/[A-Za-z0-9._/@+=,%~-]+$ ]] && [[ ! "$value" =~ (^|/)\.\.(/|$) ]] || continue ;;
-      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed)$ ]] || continue ;;
+      done_result) [[ "$value" =~ ^(updated|back|stuck|resumed|unbuilt)$ ]] || continue ;;
       auto_day) [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue ;;
       *) continue ;;
     esac
@@ -262,6 +263,62 @@ last_error() {
   printf '%s' "$line"
 }
 
+# prebuild COMMIT: builds COMMIT's images while the server keeps running, so that once the
+# backup has stopped it, the installer's own build finds every step in Docker's build cache and
+# the server is down for minutes less. It checks the commit out into a new temporary directory
+# (a clone sharing this checkout's objects, outside the checkout, which image builds copy) and
+# runs that version's deploy/install/build-images.sh with what the installer will build with,
+# read from deploy/.env now, under the lock: Signal's library unless INSTALL_NETWORKS leaves
+# Signal out, and DEBIAN_SNAPSHOT. The images are tagged `prebuild`, never the tags the server
+# runs, so nothing running changes; the tags stay until the update is over (an image that
+# loses its last tag is exported again from the cache, which takes a while), then conclude
+# drops them. On failure, `prebuild_error` says why. A version without the script is built by
+# its installer alone, as before.
+prebuild() {
+  local tree text networks output status options=()
+  prebuild_error=''
+  drop_prebuild
+  if ! env_raw_clean "$env_file" || ! text=$(cat "$env_file"); then
+    prebuild_error="Couldn't read deploy/.env."
+    return 1
+  fi
+  networks=$(printf '%s\n' "$text" | env_value INSTALL_NETWORKS)
+  case ",${networks:-all}," in *,all,* | *,signal,*) options+=(--with-signal) ;; esac
+  if ! tree=$(mktemp -d "${TMPDIR:-/tmp}/trioditis-prebuild-XXXXXX"); then
+    prebuild_error="Couldn't make a directory to build ${1:0:7} in."
+    return 1
+  fi
+  if ! { git clone --quiet --shared --no-checkout "$root" "$tree/checkout" &&
+    git -C "$tree/checkout" checkout --quiet --detach "$1"; } >/dev/null 2>&1; then
+    rm -rf -- "$tree"
+    prebuild_error="Couldn't check ${1:0:7} out to build it."
+    return 1
+  fi
+  if [ ! -x "$tree/checkout/deploy/install/build-images.sh" ]; then
+    rm -rf -- "$tree"
+    return 0
+  fi
+  log "Building ${1:0:7}'s images while the server keeps running."
+  output=$(mktemp)
+  "$tree/checkout/deploy/install/build-images.sh" --project "$project" --tag prebuild --version "$1" \
+    --debian-snapshot "$(printf '%s\n' "$text" | env_value DEBIAN_SNAPSHOT)" "${options[@]}" >"$output" 2>&1
+  status=$?
+  cat "$output" >&2
+  [ "$status" = 0 ] || prebuild_error=$(last_error "$output")
+  rm -f "$output"
+  rm -rf -- "$tree"
+  [ "$status" = 0 ]
+}
+
+# drop_prebuild: removes the `prebuild` tags prebuild left (only the tags: an image the server
+# or the installer's build also has stays).
+drop_prebuild() {
+  local images
+  images=$(docker image ls --format '{{.Repository}}:{{.Tag}}' --filter "reference=$project/*:prebuild" 2>/dev/null) || return 0
+  # shellcheck disable=SC2086 # one image per word
+  [ -z "$images" ] || docker image rm $images >/dev/null 2>&1 || log "Couldn't remove the images built beforehand: $images"
+}
+
 # take_backup: backs the server up with deploy/trioditis backup into $backup_dir, holding the
 # lock (which it's handed), and leaves it stopped (--keep-stopped), so nothing it does before the
 # new version is up and checked can be lost by going back to the backup; then keeps the newest
@@ -371,15 +428,39 @@ update() {
     outcome idle "The update didn't start: it was cancelled, the channel or automatic updates changed, or the server couldn't be reached."
     return
   fi
-  # A backup first: if the update fails, going back restores it, data and settings, rather
+  # The new version's images first, while the server still runs (prebuild): the installer then
+  # builds them from the cache, after the backup has stopped the server. A version that doesn't
+  # build is called off here, with nothing stopped, rather than found out with the server down
+  # and then rolled back. Saved first, so an updater cut off meanwhile reports the request over
+  # (recover).
+  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=build
+  pending_branch='' pending_backup=''
+  save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
+  # Over like any other update (conclude), so its report is kept until the backend has it.
+  if ! prebuild "$target"; then
+    failure_detail=$prebuild_error
+    conclude unbuilt
+    describe_current
+    report_done
+    release_lock
+    return
+  fi
+  # Then a backup: if the update fails, going back restores it, data and settings, rather
   # than running older code on data the new version's migrations or database images may have
   # changed. No backup, no update. The backup phase is saved first: the backup stops the server,
   # and if the updater is cut off before the install starts, its next start finds the server
   # stopped with nothing installed, and starts it again (recover).
-  pending_target=$target pending_previous=$previous pending_request=$done_id pending_phase=backup
-  pending_branch='' pending_backup=''
-  save_state || { release_lock; outcome failed "Couldn't save the updater's state on the server."; return; }
+  pending_phase=backup
+  if ! save_state; then
+    drop_prebuild
+    pending_target='' pending_previous='' pending_request='' pending_phase=''
+    save_state
+    release_lock
+    outcome failed "Couldn't save the updater's state on the server."
+    return
+  fi
   if ! take_backup; then
+    drop_prebuild
     pending_target='' pending_previous='' pending_request='' pending_phase=''
     save_state
     release_lock
@@ -398,6 +479,7 @@ update() {
   if ! save_state; then
     # The backup left the server stopped; with nothing installed, it starts again as it was.
     "$root/deploy/trioditis" start >&2 || log "Couldn't start the server again."
+    drop_prebuild
     release_lock
     outcome failed "Couldn't save the updater's state on the server."
     return
@@ -495,6 +577,7 @@ stop_server() {
 # conclude RESULT: the update in progress is over (updated, back on the previous commit, or
 # stuck: going back failed too); kept as done_* until the backend has the report.
 conclude() {
+  drop_prebuild
   done_request=$pending_request done_result=$1 done_target=$pending_target done_previous=$pending_previous
   pending_target='' pending_previous='' pending_request='' pending_phase='' pending_branch='' pending_backup=''
   save_state
@@ -517,7 +600,8 @@ report_done() {
       installed_notes=$(release_notes "$done_previous" "$done_target")
       ;;
     back) outcome failed "The update to $target failed${detail:-.} The server is back on $previous." ;;
-    resumed) outcome failed "The update to $target was cut off while the server was being backed up, before anything was installed. The server is still on $previous." ;;
+    unbuilt) outcome failed "$target didn't build, so the server kept running and nothing was installed${detail:-.}" ;;
+    resumed) outcome failed "The update to $target was cut off before anything was installed. The server is still on $previous." ;;
     stuck) outcome failed "The update to $target failed${detail:-.} Going back to $previous failed too${back:-.} The updater's log on the server has the details." ;;
   esac
   if UPDATER_INSTALLED_FROM=$installed_from UPDATER_INSTALLED_TO=$installed_to \
@@ -534,6 +618,17 @@ report_done() {
 # on its own.
 recover() {
   [ -n "$pending_target" ] && [ -n "$pending_previous" ] || return 0
+  # Cut off while building the new version's images: nothing was stopped or installed. What it
+  # built goes, and the request is reported done; the target isn't counted as failed.
+  if [ "$pending_phase" = build ]; then
+    log "The update to $pending_target was cut off while building it; the server kept running."
+    take_lock 3600 || { release_lock; log "The install's lock is held; trying again later."; return 1; }
+    conclude resumed
+    describe_current
+    report_done
+    release_lock
+    return 0
+  fi
   # Cut off while backing up, before the checkout moved: nothing was installed, and the backup
   # may have left the server stopped. It starts again as it was, and the request is reported
   # done; the target isn't counted as failed.

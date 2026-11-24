@@ -14,7 +14,8 @@
     "dev": "convex dev --tail-logs disable",
     "codegen": "convex codegen",
     "typecheck": "tsc --noEmit -p convex",
-    "test": "vitest run"
+    "test": "vitest run",
+    "protocol-schema": "node --experimental-strip-types scripts/write-protocol-schema.ts"
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.25",

@@ -11,7 +11,7 @@ import {
 } from '@trioditis/ui/dropdown-menu'
 import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { Textarea } from '@trioditis/ui/textarea'
-import { CircleHelp, Clock, FileIcon, Loader2, Reply, SendHorizontal, X } from 'lucide-react'
+import { Check, CircleHelp, Clock, FileIcon, Loader2, Pencil, Reply, SendHorizontal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { networkName } from '~/data/chats.ts'
 import type { Message } from '~/data/messages.ts'
@@ -43,6 +43,13 @@ interface ComposerProps {
   onSend: () => void
   onSchedule: (sendAt: number) => void
   disabled: string | null
+  /**
+   * Changing one of the person's messages: the box holds its text (`draft`), and sending saves
+   * the edit. The draft, its reply and files wait meanwhile.
+   */
+  editing?: { onCancel: () => void } | null
+  /** Up in an empty box: edit the person's latest message that can be. */
+  onEditLast?: (() => void) | undefined
 }
 
 export function Composer({
@@ -59,11 +66,21 @@ export function Composer({
   onSend,
   onSchedule,
   disabled,
+  editing,
+  onEditLast,
 }: ComposerProps) {
   const input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     if (replyTo) input.current?.focus()
   }, [replyTo])
+  // Into the box, at the end of the text, when an edit starts.
+  const isEditing = !!editing
+  useEffect(() => {
+    const el = input.current
+    if (!isEditing || !el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [isEditing])
   // Grow with the text, up to a few lines.
   useEffect(() => {
     const el = input.current
@@ -72,11 +89,19 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
   }, [draft])
 
-  const empty = !draft.trim() && files.length === 0
-  const sending = files.some((f) => f.sending)
+  const empty = !draft.trim() && (isEditing || files.length === 0)
+  const sending = !isEditing && files.some((f) => f.sending)
   return (
     <div className="mx-3.5 mb-3.5 shrink-0 rounded-[14px] bg-surface shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] focus-within:shadow-[0_0_0_1px_var(--accent-ring),0_0_0_4px_var(--accent-soft)]">
-      {replyTo ? (
+      {editing ? (
+        <div className="mx-2 mt-2 flex items-center gap-2 rounded-[9px] bg-surface-2 py-1 pr-1 pl-2.5 text-sm text-muted-foreground">
+          <Pencil className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">Editing</span>
+          <Button variant="ghost" size="icon-sm" aria-label="Cancel edit" onClick={editing.onCancel}>
+            <X className="size-3.5" />
+          </Button>
+        </div>
+      ) : replyTo ? (
         <div className="mx-2 mt-2 flex items-center gap-2 rounded-[9px] bg-surface-2 py-1 pr-1 pl-2.5 text-sm text-muted-foreground">
           <Reply className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate border-l-[3px] border-primary pl-2">
@@ -88,7 +113,7 @@ export function Composer({
           </Button>
         </div>
       ) : null}
-      {files.length ? (
+      {files.length && !editing ? (
         <ul aria-label="Files to send" className="mx-2 mt-2 flex gap-2 overflow-x-auto pb-1">
           {files.map((f) => (
             <li
@@ -128,7 +153,7 @@ export function Composer({
       {/* The placeholder says why too, but it's gone once there's text. */}
       {disabled && draft.length > 0 ? <p className="mx-3 mt-2 text-sm text-subtle-foreground">{disabled}</p> : null}
       <div className="flex items-end gap-1 p-1.5">
-        {via ? (
+        {via && !editing ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -165,6 +190,8 @@ export function Composer({
           aria-label="Message"
           onChange={(e) => onDraft(e.target.value)}
           onPaste={(e) => {
+            // An edit changes only the text.
+            if (editing) return
             const pasted = pastedFiles(e.clipboardData)
             if (!pasted.length) return
             e.preventDefault()
@@ -175,41 +202,55 @@ export function Composer({
               e.preventDefault()
               if (!empty && !sending) onSend()
             }
-            if (e.key === 'Escape' && replyTo) onCancelReply()
+            if (e.key === 'Escape' && editing) editing.onCancel()
+            else if (e.key === 'Escape' && replyTo) onCancelReply()
+            if (
+              e.key === 'ArrowUp' &&
+              !draft &&
+              !files.length &&
+              !editing &&
+              onEditLast &&
+              !e.nativeEvent.isComposing
+            ) {
+              e.preventDefault()
+              onEditLast()
+            }
           }}
           className="max-h-40 min-h-[38px] flex-1 px-2 py-2"
         />
-        <DropdownMenu key={destination}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Schedule for later"
-              title={files.length ? 'Files can’t be scheduled yet' : 'Schedule for later'}
-              disabled={empty || files.length > 0 || !!disabled}
-            >
-              <Clock className="size-[18px]" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" side="top">
-            <DropdownMenuLabel>Send later</DropdownMenuLabel>
-            {snoozeOptions().map((o) => (
-              <DropdownMenuItem key={o.label} onSelect={() => onSchedule(o.until)}>
-                <Clock /> {o.label}
-                <DropdownMenuTrail>{formatWhen(o.until)}</DropdownMenuTrail>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {editing ? null : (
+          <DropdownMenu key={destination}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Schedule for later"
+                title={files.length ? 'Files can’t be scheduled yet' : 'Schedule for later'}
+                disabled={empty || files.length > 0 || !!disabled}
+              >
+                <Clock className="size-[18px]" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" side="top">
+              <DropdownMenuLabel>Send later</DropdownMenuLabel>
+              {snoozeOptions().map((o) => (
+                <DropdownMenuItem key={o.label} onSelect={() => onSchedule(o.until)}>
+                  <Clock /> {o.label}
+                  <DropdownMenuTrail>{formatWhen(o.until)}</DropdownMenuTrail>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <Button
           variant="primary"
           size="icon"
-          aria-label="Send"
-          title="Send (Enter)"
+          aria-label={editing ? 'Save edit' : 'Send'}
+          title={editing ? 'Save (Enter)' : 'Send (Enter)'}
           disabled={empty || sending || !!disabled}
           onClick={onSend}
         >
-          <SendHorizontal className="size-[17px]" />
+          {editing ? <Check className="size-[17px]" /> : <SendHorizontal className="size-[17px]" />}
         </Button>
       </div>
     </div>

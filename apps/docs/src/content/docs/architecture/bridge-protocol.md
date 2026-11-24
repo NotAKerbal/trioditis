@@ -77,6 +77,15 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 | `sendStatus`     | `clientMessageId`, `status`, `eventId?`, `error?`                                                                                  | `submitted`, `sent`, `delivered`, `read`, `failed`, `unknown`                                                                                                                                                                                                                                                          |
 | `backfillDone`   | `portalId`, `direction`, `more`                                                                                                    | History import progress                                                                                                                                                                                                                                                                                                |
 
+### One schema for both sides
+
+The backend's `bridgeEvent` validator (`packages/backend/convex/validators.ts`) is the one description of these events, with `MAX_SEALED_BYTES` beside it for each type's sealed limit. `pnpm --filter @trioditis/backend protocol-schema` writes it out for the bridge host:
+
+- `apps/bridge-host/internal/protocol/events.json`, each type's required and optional fields, the values its fixed-set fields may take (statuses, error codes, kinds) and its sealed limit, which the bridge host embeds. It writes and validates every event by it, and its tests check that the statuses, error codes and login step types it declares are exactly these.
+- `apps/bridge-host/internal/protocol/testdata/event-vectors.json`, example events the backend must accept and refuse, with every choice of every field that has several, and the validator itself. The gateway's tests check them against the validator. The bridge host's tests check that it sends every valid one back unchanged and never sends an invalid one.
+
+A test fails while either file is older than the validator, and the backend doesn't compile while `@trioditis/core`'s `BridgeEvent` type differs from the validator's. So a field added on one side alone fails CI on the other.
+
 ## Commands: gateway → bridge host
 
 `POST /v1/commands`
@@ -96,19 +105,19 @@ Every event includes `seq`, `type`, `userId`, `loginId`, and `at` (ms):
 - **Size caps:** Sealed messages/edits in events max 256 KiB (auto-truncated with `truncated: true`); chat/contact metadata and collages max 8 KiB; client outbound sends and login input max 64 KiB; login steps max 64 KiB; `hostId` max 64 chars.
 - **Deadlines:** Sends carry `notAfter` (24 hours); reactions and their removals carry `notAfter` (10 minutes); login commands expire after 10 minutes (`expired`). Payloads are deleted from the host as soon as execution finishes.
 
-| Type                | Fields                                                                             | Outcome event                                    |
-| ------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `send`              | `portalId`, `clientMessageId`, `sealed` (`outbound`), `notAfter`, `replyTo?`       | `sendStatus`, then echoed `message`              |
-| `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed` (`outbound`), `notAfter?` | `sendStatus`, then `edit`                        |
-| `react` / `unreact` | `portalId`, `targetEventId`, `key`, `notAfter?`                                    | `reaction` / `reactionRemove`                    |
-| `redact`            | `portalId`, `targetEventId`                                                        | `redaction`                                      |
-| `markRead`          | `portalId`, `upToEventId`                                                          | none                                             |
-| `typing`            | `portalId`, `typing`                                                               | none                                             |
-| `loginStart`        | `loginSessionId`, `network`, `flowId?`                                             | `loginStep`                                      |
-| `loginSubmit`       | `loginSessionId`, `stepId`, `sealed` (`outbound`, `<loginSessionId>/<stepId>`)     | `loginStep`                                      |
-| `loginCancel`       | `loginSessionId`                                                                   | `loginStep` (`cancelled`)                        |
-| `logout`            | —                                                                                  | `loginState` (`LOGGED_OUT`)                      |
-| `backfill`          | `portalId`, `beforeEventId?`, `limit` (1–500)                                      | `historical: true` messages, then `backfillDone` |
+| Type                | Fields                                                                                              | Outcome event                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `send`              | `portalId`, `clientMessageId`, `sealed` (`outbound`), `notAfter`, `replyTo?`                        | `sendStatus`, then echoed `message`              |
+| `edit`              | `portalId`, `targetEventId`, `clientMessageId`, `sealed` (`outbound`, plain text only), `notAfter?` | `sendStatus`, then `edit`                        |
+| `react` / `unreact` | `portalId`, `targetEventId`, `key`, `notAfter?`                                                     | `reaction` / `reactionRemove`                    |
+| `redact`            | `portalId`, `targetEventId`                                                                         | `redaction`                                      |
+| `markRead`          | `portalId`, `upToEventId`                                                                           | none                                             |
+| `typing`            | `portalId`, `typing`                                                                                | none                                             |
+| `loginStart`        | `loginSessionId`, `network`, `flowId?`                                                              | `loginStep`                                      |
+| `loginSubmit`       | `loginSessionId`, `stepId`, `sealed` (`outbound`, `<loginSessionId>/<stepId>`)                      | `loginStep`                                      |
+| `loginCancel`       | `loginSessionId`                                                                                    | `loginStep` (`cancelled`)                        |
+| `logout`            | —                                                                                                   | `loginState` (`LOGGED_OUT`)                      |
+| `backfill`          | `portalId`, `beforeEventId?`, `limit` (1–500)                                                       | `historical: true` messages, then `backfillDone` |
 
 ### Send delivery rules
 
