@@ -10,7 +10,15 @@ import { commandPayload as payloadOf, deletePayload } from './lib/outbox'
 import { bridgedNetworks } from './lib/networks'
 import { browserStepOpen } from './logins'
 import { sendScheduled } from './scheduled'
-import { bridgeEvent, bridgePressure, commandPayload, envelope, errorCode, network } from './validators'
+import {
+  BRIDGE_EVENT_TYPES,
+  bridgeEvent,
+  bridgePressure,
+  commandPayload,
+  envelope,
+  errorCode,
+  network,
+} from './validators'
 
 // The functions the gateway (apps/gateway) calls. Each takes the gateway's shared secret,
 // GATEWAY_SECRET, so only the gateway can call them. See docs/architecture/bridge-protocol.md.
@@ -49,24 +57,7 @@ const TEARDOWN = new Set(['logout', 'loginCancel'])
  */
 const MAX_LOOKUPS = 3_000
 
-const EVENT_TYPES = new Set([
-  'message',
-  'edit',
-  'reaction',
-  'reactionRemove',
-  'redaction',
-  'receipt',
-  'typing',
-  'chat',
-  'contact',
-  'contactIdentifiers',
-  'chatCollage',
-  'chatStarted',
-  'loginState',
-  'loginStep',
-  'sendStatus',
-  'backfillDone',
-])
+const EVENT_TYPES: ReadonlySet<string> = new Set(BRIDGE_EVENT_TYPES)
 
 function assertGateway(secret: string) {
   const expected = process.env.GATEWAY_SECRET
