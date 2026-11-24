@@ -1,0 +1,1 @@
+Improved: When adding a Google Messages account fails after the emoji step, the server's log now says how long after that step it failed, which sign-in cookies were used, and whether Google changed any of them, by name only, never their values.

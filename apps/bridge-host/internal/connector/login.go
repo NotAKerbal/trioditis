@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/ids"
@@ -42,6 +43,11 @@ type loginSession struct {
 	done      bool
 	// browser is the current cookie step's sign-in browser, once someone opens it.
 	browser *signin.Browser
+	// stepAt is when the current step was reported, and cookieFields the names of the cookies
+	// the last cookie step was given, never their values: a failed login's log says how long
+	// after its last step it failed and what it was signed in with.
+	stepAt       time.Time
+	cookieFields []string
 }
 
 func randomStepID() string {
@@ -195,6 +201,10 @@ func (s *loginSession) submitInput(step *bridgev2.LoginStep, input map[string]st
 		if !decoded {
 			decodeCookies(step.CookiesParams, input)
 		}
+		fields := slices.Sorted(maps.Keys(input))
+		s.lock.Lock()
+		s.cookieFields = fields
+		s.lock.Unlock()
 		next, err = proc.SubmitCookies(s.ctx, input)
 	default:
 		err = errors.New("the current login step doesn't take input")
@@ -317,6 +327,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		// The last step's browser has nothing more to do.
 		s.closeBrowser()
 	}
+	stepAt, cookieFields := s.stepAt, s.cookieFields
+	s.stepAt = time.Now()
 	s.lock.Unlock()
 	if err != nil {
 		s.c.forgetLogin(s.id)
@@ -331,7 +343,8 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		emitErr := s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
 		// Only what the error is made of is logged, never its text: a connector's error text can
 		// quote what the person typed. The person sees a code.
-		s.c.describeLoginError(log.Warn(), err).Msg("Login failed")
+		evt := describeLoginAttempt(log.Warn(), time.Since(stepAt), stepAt.IsZero(), cookieFields)
+		s.c.describeLoginError(evt, err).Msg("Login failed")
 		if emitErr != nil {
 			log.Err(emitErr).Msg("Failed to report login error")
 		}
@@ -408,6 +421,19 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 			s.advance(next, err)
 		}()
 	}
+}
+
+// describeLoginAttempt adds to a failed login's log how long after its last step it failed
+// (unless it failed before reporting one) and the names of the cookies it was given, which
+// together tell a sign-in that went stale from one that was never complete.
+func describeLoginAttempt(evt *zerolog.Event, sinceStep time.Duration, noStep bool, cookieFields []string) *zerolog.Event {
+	if !noStep {
+		evt = evt.Float64("since_last_step_seconds", sinceStep.Round(100*time.Millisecond).Seconds())
+	}
+	if len(cookieFields) > 0 {
+		evt = evt.Strs("cookie_fields", cookieFields)
+	}
+	return evt
 }
 
 // DisplayLifetime is how long a QR or pairing code is shown without the bridge host saying it

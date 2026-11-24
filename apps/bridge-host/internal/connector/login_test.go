@@ -1,9 +1,15 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 
 	"github.com/NotAKerbal/trioditis/apps/bridge-host/internal/protocol"
@@ -45,5 +51,29 @@ func TestPasteAfterBrowserIsDropped(t *testing.T) {
 	cmd := &protocol.Command{Type: protocol.CommandLoginSubmit, LoginSessionID: "login-1", StepID: "step-1", UserID: "u"}
 	if err := c.handleLoginSubmit(context.Background(), cmd, false); err != nil {
 		t.Fatalf("a paste after the browser: %v", err)
+	}
+}
+
+// A failed login's log says how long after its last step it failed and which cookies it was
+// given, by name only.
+func TestDescribeLoginAttempt(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+	describeLoginAttempt(log.Warn(), 1234*time.Millisecond, false, []string{"OSID", "SID"}).Msg("Login failed")
+	var got struct {
+		Since   float64  `json:"since_last_step_seconds"`
+		Cookies []string `json:"cookie_fields"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Since != 1.2 || !slices.Equal(got.Cookies, []string{"OSID", "SID"}) {
+		t.Fatalf("got %s", buf.String())
+	}
+
+	buf.Reset()
+	describeLoginAttempt(log.Warn(), 0, true, nil).Msg("Login failed")
+	if strings.Contains(buf.String(), "since_last_step_seconds") || strings.Contains(buf.String(), "cookie_fields") {
+		t.Fatalf("a login that failed before any step or cookies logged them: %s", buf.String())
 	}
 }
