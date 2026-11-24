@@ -30,7 +30,7 @@ import { Disclosure, Group, Heading, Loading, Setting } from './layout.tsx'
 
 const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
 
-/** Admin settings → Updates: the release channel, automatic updates, and updating now. */
+/** Settings → Admin → Updates: the release channel, automatic updates, and updating now. */
 export function Updates() {
   const { data: status, isError } = useQuery(convexQuery(api.updates.status, {}))
   return (

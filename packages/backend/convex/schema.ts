@@ -655,7 +655,7 @@ export default defineSchema({
 
   /**
    * How each bridge host's deliveries are going, as it last said, written at most every 30
-   * seconds (gateway.ingest), for Admin settings → Server health. Counts and times only.
+   * seconds (gateway.ingest), for Settings → Admin → Server health. Counts and times only.
    */
   bridgePressure: defineTable({
     hostId: v.string(),
@@ -673,7 +673,7 @@ export default defineSchema({
 
   /**
    * The server timing its own answer to a small query, once a minute (health.probe): the last
-   * hour's, in one row, for Admin settings → Server health.
+   * hour's, in one row, for Settings → Admin → Server health.
    */
   serverProbes: defineTable({
     samples: v.array(v.object({ at: v.number(), ms: v.number(), ok: v.boolean() })),

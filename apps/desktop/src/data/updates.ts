@@ -2,7 +2,7 @@ import type { api } from '@trioditis/backend/api'
 import type { FunctionReturnType } from 'convex/server'
 import { listTime } from './format.ts'
 
-// What Admin settings → Updates shows, worked out from updates.status. The updater on the server
+// What Settings → Admin → Updates shows, worked out from updates.status. The updater on the server
 // does the work and reports in; see docs/deploy.md, Updates.
 
 export type UpdateStatus = FunctionReturnType<typeof api.updates.status>

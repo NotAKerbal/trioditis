@@ -62,7 +62,7 @@ function State({ say, warn }: { say: string; warn: boolean }) {
 }
 
 /**
- * Admin settings → Server health: whether the server is keeping up. The server times a small
+ * Settings → Admin → Server health: whether the server is keeping up. The server times a small
  * query of its own once a minute, each bridge host says how its deliveries are going, and this
  * device counts its own calls that failed. Times and counts only.
  */

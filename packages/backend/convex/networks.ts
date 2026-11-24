@@ -134,7 +134,7 @@ async function liveAccounts(ctx: QueryCtx, name: Network) {
 }
 
 /**
- * Every network Trioditis knows, for Admin settings → Networks: whether an admin installed it,
+ * Every network Trioditis knows, for Settings → Admin → Networks: whether an admin installed it,
  * whether this server runs its bridge host (`bridged`; one it doesn't can't be installed, and
  * the operator adds it with the installer) and whether that is online, and how many accounts
  * are connected to it, everyone's together. Never whose they are.

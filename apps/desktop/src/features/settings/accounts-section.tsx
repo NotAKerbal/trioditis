@@ -240,7 +240,7 @@ export function Accounts({ connect }: { connect: boolean }) {
         {open && networks && networks.length === 0 ? (
           <p className="px-4 py-3 text-sm text-muted-foreground">
             {session.role === 'admin'
-              ? 'No networks are installed yet. Install them in Admin settings → Networks.'
+              ? 'No networks are installed yet. Install them in Settings → Admin → Networks.'
               : 'No networks are installed yet. An admin installs them.'}
           </p>
         ) : null}

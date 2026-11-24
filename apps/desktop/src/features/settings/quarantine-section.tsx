@@ -27,7 +27,7 @@ const REASONS: Record<string, string> = {
 const time = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
 /**
- * Admin settings → Networks: events from bridge hosts the server couldn't apply and skipped,
+ * Settings → Admin → Networks: events from bridge hosts the server couldn't apply and skipped,
  * so the rest still came through. Only what kind each was and why: never its content. Shows
  * nothing while there are none.
  */

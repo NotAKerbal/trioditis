@@ -22,7 +22,7 @@ WhatsApp is Trioditis's primary and most mature network:
 
 ## How to connect
 
-1. In Trioditis, ensure WhatsApp is installed under **Admin settings → Networks**.
+1. In Trioditis, ensure WhatsApp is installed under **Settings → Admin → Networks**.
 2. Open **Settings → Accounts → WhatsApp** and pick either flow:
    - **Scan a QR code (`qr`):** Open WhatsApp on your phone → **Settings → Linked devices → Link a device** and scan the QR code.
    - **Pairing code (`phone`):** Enter your phone number in international format and type the pairing code displayed in Trioditis into WhatsApp on your phone.

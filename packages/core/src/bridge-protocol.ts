@@ -251,7 +251,7 @@ export interface EventBatch {
   events: BridgeEvent[]
   /** The last heartbeat of a host that is shutting down: it is offline from now. */
   stopping?: boolean
-  /** How the host's deliveries are going, for Admin settings → Server health. Counts only. */
+  /** How the host's deliveries are going, for Settings → Admin → Server health. Counts only. */
   pressure?: BridgePressure
 }
 
