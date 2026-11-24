@@ -15,7 +15,7 @@ Google Messages bridges SMS, MMS, and RCS through the Google Messages app on an 
 
 ## Implementation status
 
-- **Implemented:** Google cookie login flow (via sign-in browser or manual cookie paste) + phone emoji verification, `aggressive_reconnect` (automatically reclaims session if Messages for web is opened elsewhere), single-send HTTP transport guard (`gmessagesSendOnce`) + disabled upstream `FAILURE_2`/`FAILURE_3` auto-retries so ambiguous SMS/RCS sends always settle as `unknown`, 3-minute send timeout with 1-hour late-echo window, SMS/MMS/RCS messaging, RCS reactions/replies, media up to 100 MiB, and backward backfill.
+- **Implemented:** Google cookie login flow (via sign-in browser or manual cookie paste) + phone emoji verification, `aggressive_reconnect` (automatically reclaims session if Messages for web is opened elsewhere), single-send HTTP transport guard (`gmessagesSendOnce`, sends and deletions) + disabled upstream `FAILURE_2`/`FAILURE_3` auto-retries so ambiguous SMS/RCS sends always settle as `unknown`, 3-minute send timeout with 1-hour late-echo window, SMS/MMS/RCS messaging, RCS reactions/replies, media up to 100 MiB, and backward backfill.
 - **Remaining before Stable:** Live end-to-end verification and a week on the canary ledger with a real Android phone.
 
 ## How to connect

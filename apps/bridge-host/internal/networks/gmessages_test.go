@@ -257,6 +257,16 @@ func TestGMessagesSendIsPostedOnce(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a deletion is posted once", func(t *testing.T) {
+		srv := newGoogleServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+		cli := newRelayClient(srv)
+		if _, err := cli.DeleteMessage(context.Background(), "1"); err == nil {
+			t.Fatal("an ambiguous deletion was reported as done")
+		}
+		if n := srv.total(); n != 1 {
+			t.Fatalf("the deletion reached the relay %d times (%v), want once", n, srv.requests)
+		}
+	})
 	t.Run("other requests keep their retries", func(t *testing.T) {
 		srv := newGoogleServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) })
 		cli := newRelayClient(srv)

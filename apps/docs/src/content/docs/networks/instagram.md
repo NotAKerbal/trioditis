@@ -15,7 +15,7 @@ Instagram bridges one-to-one and group direct messages through `go.mau.fi/mautri
 
 ## Implementation status
 
-- **Implemented:** `instagram.com` cookie login (via sign-in browser or manual cookie paste), DMs and groups, replies, edits, reactions, media and shared posts/reels, recent history on first inbox page, and shared `GlobalLogger` filtering stripping raw decoder payloads.
+- **Implemented:** `instagram.com` cookie login (via sign-in browser or manual cookie paste), DMs and groups, replies, edits, deletions, reactions, media and shared posts/reels, sends, edits, deletions and reactions posted once (`instagramWritesOnce` turns off messagix's retries for those GraphQL mutations, so an ambiguous outcome settles as `unknown`—verified by `TestInstagramWritesGoOnce` and `TestInstagramEditAndUnsendAreNotRepeated`), recent history on first inbox page, and shared `GlobalLogger` filtering stripping raw decoder payloads.
 - **Remaining:** Live end-to-end account verification.
 
 ## How to connect
