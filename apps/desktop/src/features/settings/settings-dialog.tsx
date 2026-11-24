@@ -194,8 +194,9 @@ function Panel({
       </nav>
       <div
         className={cn(
-          // Isolated, so the phone's header stacks under the window's close button, not over it.
-          'relative isolate min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4',
+          // Isolated, so the phone's header stacks under the window's close button, not over it; its
+          // scroll padding keeps a focused control from scrolling under that header.
+          'relative isolate min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:scroll-pt-14 max-md:px-4',
           list && 'max-md:hidden',
         )}
       >
