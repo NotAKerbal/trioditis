@@ -41,15 +41,17 @@ export function Shell() {
 
   const select = (id: string | undefined) => void navigate({ search: (s) => ({ ...s, chat: id }) })
   // `connect` opens Accounts with its networks showing; any other way there drops it. `list` (the
-  // gear, or Settings in the menu) opens a phone's settings at the list of sections; anything else
-  // opens its section.
-  const [settingsList, setSettingsList] = useState(false)
-  const openSettings = (section: SettingsSection | undefined, how?: 'connect' | 'list') => {
-    setSettingsList(how === 'list')
+  // gear, or Settings in the menu) has a phone show the list of sections; anything else shows the
+  // section. Both are in the URL, so the back button brings back what was showing.
+  const openSettings = (section: SettingsSection | undefined, how?: 'connect' | 'list') =>
     void navigate({
-      search: (s) => ({ ...s, settings: section, connect: how === 'connect' ? (true as const) : undefined }),
+      search: (s) => ({
+        ...s,
+        settings: section,
+        connect: how === 'connect' ? (true as const) : undefined,
+        list: how === 'list' ? (true as const) : undefined,
+      }),
     })
-  }
   const openPeople = (people: PeopleView | undefined) => void navigate({ search: (s) => ({ ...s, people }) })
   const [newChat, setNewChat] = useState(false)
   // A chat just started opens at once, though its row may not be in the list yet.
@@ -192,8 +194,8 @@ export function Shell() {
       <SettingsDialog
         section={search.settings}
         connect={!!search.connect}
-        startAtList={settingsList}
-        onSectionChange={(section) => openSettings(section)}
+        list={!!search.list}
+        onSectionChange={openSettings}
       />
       <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />
       <NewChatDialog open={newChat} onOpenChange={setNewChat} onStarted={openStarted} />

@@ -90,15 +90,15 @@ const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
 export function SettingsDialog({
   section,
   connect,
-  startAtList,
+  list,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
   /** Opened to connect a network: Accounts shows the networks at once. */
   connect: boolean
-  /** Opened as settings in general (the gear): a phone shows the list of sections first. */
-  startAtList: boolean
-  onSectionChange: (s: SettingsSection | undefined) => void
+  /** A phone shows the list of sections rather than the section. A wider window shows both. */
+  list: boolean
+  onSectionChange: (s: SettingsSection | undefined, how?: 'list') => void
 }) {
   return (
     <Dialog open={!!section} onOpenChange={(open) => !open && onSectionChange(undefined)}>
@@ -108,23 +108,23 @@ export function SettingsDialog({
         className="flex h-[620px] w-[min(900px,calc(100vw-32px))] max-md:top-0 max-md:left-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none"
         aria-describedby={undefined}
       >
-        <Panel section={section} connect={connect} startAtList={startAtList} onSectionChange={onSectionChange} />
+        <Panel section={section} connect={connect} list={list} onSectionChange={onSectionChange} />
       </DialogContent>
     </Dialog>
   )
 }
 
-/** What the open dialog shows. It's mounted afresh each time the dialog opens. */
+/** What the open dialog shows. */
 function Panel({
   section,
   connect,
-  startAtList,
+  list,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
   connect: boolean
-  startAtList: boolean
-  onSectionChange: (s: SettingsSection) => void
+  list: boolean
+  onSectionChange: (s: SettingsSection, how?: 'list') => void
 }) {
   const session = useSession()
   const isAdmin = session.role === 'admin'
@@ -134,22 +134,24 @@ function Panel({
   const sections = SETTINGS_SECTIONS.filter((s) => isAdminSection(s) === admin)
   const current = sections.find((s) => s.id === section) ?? sections[0]!
   const other = SETTINGS_SECTIONS.find((s) => isAdminSection(s) !== admin)!
-  // Whether a phone shows the list of sections rather than the open one. A wider window shows both.
-  const [listing, setListing] = useState(startAtList)
   const currentItem = useRef<HTMLButtonElement>(null)
   const back = useRef<HTMLButtonElement>(null)
-  /** Moves focus to what's now shown, when the control that had it went with what's now hidden. */
+  /**
+   * On a phone the list and the section take turns on screen: once the control that had focus has
+   * gone with the one now hidden (or focus has dropped to the page), focus moves to the one shown.
+   */
   const follow = (to: RefObject<HTMLElement | null>) =>
     requestAnimationFrame(() => {
       const focused = document.activeElement
-      if (!(focused instanceof HTMLElement) || !focused.checkVisibility()) to.current?.focus()
+      const lost = !(focused instanceof HTMLElement) || focused === document.body || !focused.checkVisibility()
+      if (lost && to.current?.checkVisibility()) to.current.focus()
     })
   return (
     <>
       <nav
         className={cn(
           'w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px] max-md:w-full max-md:overflow-y-auto max-md:border-r-0 md:flex',
-          listing ? 'flex' : 'hidden',
+          list ? 'flex' : 'hidden',
         )}
         aria-label="Settings sections"
       >
@@ -162,13 +164,14 @@ function Panel({
             type="button"
             aria-current={s.id === current.id ? 'page' : undefined}
             onClick={() => {
-              setListing(false)
+              // Choosing the open section again changes nothing, so a list it opened stays as it is;
+              // on a phone it shows that section.
+              if (s.id === current.id && !list) return
+              onSectionChange(s.id)
               follow(back)
-              // Choosing the open section again changes nothing, so a list it opened stays as it is.
-              if (s.id !== current.id) onSectionChange(s.id)
             }}
             className={cn(
-              'flex h-[34px] shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 [&_svg]:size-4',
+              'flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 max-md:shrink-0 [&_svg]:size-4',
               s.id === current.id &&
                 'bg-surface font-semibold text-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] max-md:bg-transparent max-md:font-medium max-md:shadow-none',
             )}
@@ -181,8 +184,8 @@ function Panel({
           <Button
             variant="bare"
             type="button"
-            onClick={() => onSectionChange(other.id)}
-            className="mt-auto flex h-[34px] shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 [&_svg]:size-4"
+            onClick={() => onSectionChange(other.id, 'list')}
+            className="mt-auto flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 max-md:shrink-0 [&_svg]:size-4"
           >
             {admin ? <SettingsIcon /> : <ShieldCheck />}
             {admin ? 'Your settings' : 'Admin settings'}
@@ -190,10 +193,7 @@ function Panel({
         ) : null}
       </nav>
       <div
-        className={cn(
-          'relative min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4',
-          listing && 'max-md:hidden',
-        )}
+        className={cn('relative min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4', list && 'max-md:hidden')}
       >
         {/* On a phone the list isn't beside the section, so the section names itself. */}
         <div className="absolute top-4 right-14 left-2 flex items-center gap-1 md:hidden">
@@ -203,7 +203,7 @@ function Panel({
             size="icon"
             aria-label={admin ? 'Admin settings' : 'Settings'}
             onClick={() => {
-              setListing(true)
+              onSectionChange(current.id, 'list')
               follow(currentItem)
             }}
           >

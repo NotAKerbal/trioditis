@@ -9,7 +9,7 @@ import { SETTINGS_SECTIONS, type SettingsSection } from '~/features/settings/set
 export const Route = createFileRoute('/')({
   validateSearch: (
     search: Record<string, unknown>,
-  ): { chat?: string; settings?: SettingsSection; connect?: true; people?: PeopleView } => ({
+  ): { chat?: string; settings?: SettingsSection; connect?: true; list?: true; people?: PeopleView } => ({
     ...(typeof search.chat === 'string' ? { chat: search.chat } : {}),
     ...(SETTINGS_SECTIONS.some((s) => s.id === search.settings)
       ? { settings: search.settings as SettingsSection }
@@ -17,6 +17,10 @@ export const Route = createFileRoute('/')({
     // Only Accounts reads it, so it goes nowhere else (a chat opened later doesn't carry it along).
     ...(search.settings === 'accounts' && (search.connect === true || search.connect === 'true')
       ? { connect: true as const }
+      : {}),
+    // A phone shows the list of settings sections rather than the section.
+    ...(typeof search.settings === 'string' && (search.list === true || search.list === 'true')
+      ? { list: true as const }
       : {}),
     ...(isPeopleView(search.people) ? { people: search.people } : {}),
   }),
