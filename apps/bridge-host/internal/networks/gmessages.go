@@ -388,7 +388,8 @@ func (t *gmessagesSendOnce) RoundTrip(req *http.Request) (*http.Response, error)
 		WithSendNotice(true)
 }
 
-// gmessagesIsSend reports whether req posts a SEND_MESSAGE request to the relay. The action
+// gmessagesIsSend reports whether req posts a SEND_MESSAGE or DELETE_MESSAGE request to the
+// relay: a deletion is posted once too, so one whose answer was lost isn't made again. The action
 // is in the clear in the frame (OutgoingRPCData.Action); only its payload is encrypted. A
 // relay post whose action can't be read, or reads as none, is treated as a send, so a change
 // in the frame's format can only take retries away, never add a resend.
@@ -414,5 +415,6 @@ func gmessagesIsSend(req *http.Request) bool {
 		return true
 	}
 	action := rpc.GetAction()
-	return action == gmproto.ActionType_SEND_MESSAGE || action == gmproto.ActionType_UNSPECIFIED
+	return action == gmproto.ActionType_SEND_MESSAGE || action == gmproto.ActionType_DELETE_MESSAGE ||
+		action == gmproto.ActionType_UNSPECIFIED
 }

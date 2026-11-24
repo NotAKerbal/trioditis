@@ -15,7 +15,7 @@ LinkedIn bridges one-to-one and group conversations through `go.mau.fi/mautrix-l
 
 ## Implementation status
 
-- **Implemented:** `linkedin.com` cookie login (via sign-in browser or manual header paste), clean contact names without `" (LinkedIn)"` suffix, single-send HTTP transport guard (`linkedinSendOnce` prevents `linkedingo` from retrying message sends or reaction toggles on connection errors, 5xx, or redirects—verified by `TestLinkedInSendIsNotRepeated` and `TestLinkedInReactionIsNotRepeated`), DMs and groups, replies, edits, reactions, deletions, and media up to 20 MiB.
+- **Implemented:** `linkedin.com` cookie login (via sign-in browser or manual header paste), clean contact names without `" (LinkedIn)"` suffix, single-send HTTP transport guard (`linkedinSendOnce` prevents `linkedingo` from retrying message sends, edits, deletions (recalls) or reaction toggles on connection errors, 5xx, or redirects—verified by `TestLinkedInSendIsNotRepeated`, `TestLinkedInEditAndRecallAreNotRepeated` and `TestLinkedInReactionIsNotRepeated`), DMs and groups, replies, edits, reactions, deletions, and media up to 20 MiB.
 - **Remaining:** Live end-to-end verification with a real LinkedIn account.
 
 ## How to connect

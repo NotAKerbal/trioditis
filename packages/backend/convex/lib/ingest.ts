@@ -276,9 +276,14 @@ async function applyMessage(ctx: MutationCtx, event: Extract<BridgeEventDoc, { t
 async function applyEdit(ctx: MutationCtx, event: Extract<BridgeEventDoc, { type: 'edit' }>, network: Network) {
   const message = await targetMessage(ctx, event.userId, network, event.targetEventId)
   // A deleted message stays deleted, whatever edit arrives after.
-  if (message.redactedAt !== undefined) return
-  if (message.editedAt !== undefined && message.editedAt >= event.networkTs) return
-  const edit = { sealedEdit: event.sealed, editEventId: event.eventId, editedAt: event.networkTs }
+  if (message.redactedAt !== undefined || message.editEventId === event.eventId) return
+  // Every edit counts toward a network's cap, one arriving out of order too.
+  const edits = (message.edits ?? 0) + 1
+  if (message.editedAt !== undefined && message.editedAt >= event.networkTs) {
+    await ctx.db.patch(message._id, { edits })
+    return
+  }
+  const edit = { sealedEdit: event.sealed, editEventId: event.eventId, editedAt: event.networkTs, edits }
   await ctx.db.patch(message._id, edit)
   await noteChanged(ctx, { ...message, ...edit })
 }
@@ -853,6 +858,47 @@ function hasOversizedId(event: BridgeEventDoc) {
   ]
   return ids.some((id) => typeof id === 'string' && id.length > MAX_ID_LENGTH)
 }
+/** How many of a chat's latest commands in each state a deletion's echo is looked for among. */
+const RECENT_COMMANDS = 50
+
+/**
+ * Whether the event is the echo of the person's own edit or deletion, made from Trioditis by
+ * the reporting host: an edit's names its command (`clientMessageId`); a deletion's is matched to
+ * one of the chat's latest deletions handed to that host, which it can only follow closely.
+ */
+async function echoesOwnCommand(ctx: MutationCtx, event: BridgeEventDoc, origin: Origin) {
+  if (event.type === 'edit') {
+    if (!('self' in event.sender) || !event.clientMessageId) return false
+    const command = charge(ctx, await findOutboxSend(ctx, event.userId, event.clientMessageId))
+    return (
+      command?.payload.type === 'edit' &&
+      command.payload.targetEventId === event.targetEventId &&
+      command.network === origin.network &&
+      command.hostId === origin.hostId
+    )
+  }
+  if (event.type !== 'redaction' || !('self' in event.sender)) return false
+  const chat = await findChat(ctx, event.userId, origin.network, event.portalId)
+  if (!chat) return false
+  for (const state of ['claimed', 'dispatched'] as const) {
+    const recent = await ctx.db
+      .query('outbox')
+      .withIndex('by_chat', (q) => q.eq('chatId', chat._id).eq('state', state))
+      .order('desc')
+      .take(RECENT_COMMANDS)
+    for (const command of recent) charge(ctx, command)
+    const made = recent.some(
+      (c) =>
+        c.payload.type === 'redact' &&
+        c.payload.targetEventId === event.targetEventId &&
+        c.network === origin.network &&
+        c.hostId === origin.hostId,
+    )
+    if (made) return true
+  }
+  return false
+}
+
 /**
  * Whether `origin` may speak for the event's login: once a host is running a login, events
  * for it from any other host are refused. (A login moves hosts only through a newer
@@ -869,6 +915,9 @@ async function assertLoginOwner(ctx: MutationCtx, event: BridgeEventDoc, origin:
     const send = await findOutboxSend(ctx, event.userId, event.clientMessageId)
     if (send) return
   }
+  // So is the echo of an edit or deletion made from Trioditis: the host it went to made it, and
+  // its echo is what shows it, whichever host runs the login by the time it arrives.
+  if (await echoesOwnCommand(ctx, event, origin)) return
   const loginId = event.loginId
   const account = await ctx.db
     .query('networkAccounts')

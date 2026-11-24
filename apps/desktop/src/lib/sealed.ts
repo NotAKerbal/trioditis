@@ -78,6 +78,19 @@ export function sealMessage(
   return { forBridge, copy }
 }
 
+/**
+ * Seals an edit's new text for the bridge host only (kind `outbound`), as messages.edit takes it:
+ * the person's copy comes back sealed with the bridge host's echo.
+ */
+export function sealEdit(text: string, clientMessageId: string, ownerUserId: string, bridgePublicKey: string) {
+  const edit: MessagePlaintext = { type: 'text', body: text }
+  return sealJson(edit, [{ publicKey: fromBase64Url(bridgePublicKey) }], {
+    kind: 'outbound',
+    ownerUserId,
+    objectId: clientMessageId,
+  })
+}
+
 /** `sealMessage` for plain text. */
 export function sealText(
   text: string,
