@@ -90,7 +90,7 @@ jobs:
       - run: pnpm test
       - run: pnpm test:scripts
       # The web app and the docs site: neither is otherwise built before it merges, since
-      # Vercel builds previews only on request.
+      # Vercel deploys only dev from Git and builds previews only on request.
       - run: pnpm build
       - run: node scripts/release-notes.mjs check
       # A pull request's checkout is its merge into the base branch, whose first parent is the

@@ -4,7 +4,13 @@
   "installCommand": "pnpm install --frozen-lockfile --filter @trioditis/docs...",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "ignoreCommand": "if [ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git cat-file -e \"$VERCEL_GIT_PREVIOUS_SHA^{commit}\" 2>/dev/null && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- . ../../package.json ../../pnpm-lock.yaml ../../pnpm-workspace.yaml; then exit 0; else exit 1; fi",
+  "ignoreCommand": "node ../../scripts/vercel-ignore.mjs docs",
+  "git": {
+    "deploymentEnabled": {
+      "**": false,
+      "dev": true
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
