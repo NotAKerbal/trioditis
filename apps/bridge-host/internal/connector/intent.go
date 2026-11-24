@@ -1133,7 +1133,7 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 			// No copy of it is left (rather than one that couldn't be made for this person just
 			// now): the picture is fetched from the network again, which sends it to everyone who
 			// has the contact.
-			if !c.hasAvatarCopy(ctx, avatarURL) {
+			if has, err := c.hasAvatarCopy(ctx, avatarURL); err == nil && !has {
 				c.queueAvatarRepair(ghost)
 			}
 		}

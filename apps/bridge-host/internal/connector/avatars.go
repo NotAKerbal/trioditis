@@ -112,67 +112,76 @@ func (c *Connector) putAvatarRef(ctx context.Context, ownerUserID string, uri id
 }
 
 // copyKeptAvatar makes the owner a copy of an avatar from the bridge host's own, or nil if it
-// has none it can use.
+// has none it can use. A kept copy found corrupt is forgotten and made again from someone's copy
+// (keptAvatar), once.
 func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString, ownerUserID string) *protocol.Attachment {
-	kept := c.keptAvatar(ctx, uri)
-	if kept == nil {
-		return nil
-	}
-	att, err := c.Media.CopyKept(*kept, ownerUserID)
-	if errors.Is(err, media.ErrCorrupt) {
-		// Forgotten, so the contact's picture is fetched again (markAvatarStale).
-		c.Log.Warn().Msg("An avatar's kept copy is corrupt; it's fetched again")
-		if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Forgetting an avatar's corrupt kept copy failed")
+	for range 2 {
+		kept, err := c.keptAvatar(ctx, uri)
+		if err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's kept copy failed")
+			return nil
+		} else if kept == nil {
+			return nil
 		}
-		return nil
-	} else if err != nil {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Copying an avatar's kept copy failed")
-		return nil
+		att, err := c.Media.CopyKept(*kept, ownerUserID)
+		if errors.Is(err, media.ErrCorrupt) {
+			c.Log.Warn().Msg("An avatar's kept copy is corrupt; it's made again")
+			if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
+				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Forgetting an avatar's corrupt kept copy failed")
+				return nil
+			}
+			continue
+		} else if err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Copying an avatar's kept copy failed")
+			return nil
+		}
+		return att
 	}
-	return att
+	return nil
 }
 
-// keptAvatar is the reference to the bridge host's own copy of an avatar, or nil if it has none
-// it can use. One that was never kept (an avatar from before copies were kept), or whose file is
-// gone, is made again from the copy of anyone who was sent the avatar (recoverKeptAvatar).
-func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) *protocol.Attachment {
+// keptAvatar is the reference to the bridge host's own copy of an avatar. One that was never kept
+// (an avatar from before copies were kept), or whose file is gone, is made again from the copy of
+// anyone who was sent the avatar (recoverKeptAvatar). Nil with no error means there's no usable
+// copy anywhere; an error, that it couldn't be told for now (a read or a write failed).
+func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) (*protocol.Attachment, error) {
 	sealed, err := c.Store.KeptAvatar(ctx, string(uri))
 	if errors.Is(err, store.ErrNotFound) {
 		return c.recoverKeptAvatar(ctx, uri)
 	} else if err != nil {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's kept copy failed")
-		return nil
+		return nil, err
 	}
 	var kept protocol.Attachment
 	if err = seal.OpenJSON(sealed, c.BridgeKey, keptAvatarContext(uri), &kept); err != nil {
 		// Sealed to an earlier bridge key, as anyone's reference to it would be.
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's kept copy couldn't be opened")
-		return nil
+		return nil, nil
 	}
 	if !c.Media.HasKept(kept) {
 		if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Forgetting an avatar's missing kept copy failed")
-			return nil
+			return nil, err
 		}
 		return c.recoverKeptAvatar(ctx, uri)
 	}
-	return &kept
+	return &kept, nil
 }
 
 // recoverKeptAvatar makes the bridge host's own copy of an avatar again from a copy someone was
 // sent, whose reference the host keeps (sealed to its own key), so a person who meets the contact
-// now gets the picture without asking the network for it again. Nil if nobody has a copy it can
-// read.
-func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIString) *protocol.Attachment {
+// now gets the picture without asking the network for it again. Nil with no error if nobody has a
+// copy it can read; an error if one may be readable but reading or keeping it failed.
+func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIString) (*protocol.Attachment, error) {
 	owners, err := c.Store.AvatarRefOwners(ctx, string(uri))
 	if err != nil {
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's references failed")
-		return nil
+		return nil, err
 	}
+	var failed error
 	for _, owner := range owners {
 		sealed, err := c.Store.AvatarRef(ctx, owner, string(uri))
-		if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		} else if err != nil {
+			failed = err
 			continue
 		}
 		var ref protocol.Attachment
@@ -180,7 +189,10 @@ func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIStri
 			continue
 		}
 		kept, err := c.Media.KeepCopy(ref, owner)
-		if err != nil {
+		if errors.Is(err, media.ErrUnavailable) || errors.Is(err, media.ErrCorrupt) {
+			continue
+		} else if err != nil {
+			failed = err
 			continue
 		}
 		var keptSealed *seal.Envelope
@@ -188,17 +200,21 @@ func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIStri
 			err = c.Store.PutKeptAvatar(ctx, string(uri), keptSealed)
 		}
 		if err != nil {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping a copy of an avatar failed")
-			return nil
+			return nil, err
 		}
-		return kept
+		return kept, nil
 	}
-	return nil
+	return nil, failed
 }
 
-// hasAvatarCopy reports whether the host can still make someone a copy of an avatar.
-func (c *Connector) hasAvatarCopy(ctx context.Context, uri id.ContentURIString) bool {
-	return c.Media.Available(uri) || c.keptAvatar(ctx, uri) != nil
+// hasAvatarCopy reports whether the host can still make someone a copy of an avatar. An error
+// means it couldn't be told for now.
+func (c *Connector) hasAvatarCopy(ctx context.Context, uri id.ContentURIString) (bool, error) {
+	if c.Media.Available(uri) {
+		return true, nil
+	}
+	kept, err := c.keptAvatar(ctx, uri)
+	return kept != nil, err
 }
 
 // repairState is where a contact is in the repair queue.
@@ -394,7 +410,13 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 		if _, ours := media.ParseContentURI(uri); !ours {
 			return false
 		}
-		if c.hasAvatarCopy(ctx, uri) {
+		has, hasErr := c.hasAvatarCopy(ctx, uri)
+		if hasErr != nil {
+			// Only a picture nobody has a copy of is fetched again: a network that won't show it
+			// to the login that sees the contact next (WhatsApp) would take it away from everyone.
+			err = hasErr
+			return false
+		} else if has {
 			err = c.sendAvatarToContactsWithout(ctx, g, uri)
 			return false
 		}

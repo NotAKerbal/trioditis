@@ -42,7 +42,7 @@ const UploadTTL = 10 * time.Minute
 
 var ErrUnavailable = errors.New("media: file is not available")
 
-// ErrCorrupt is a kept copy (Keep) whose file doesn't decrypt: it can never make a copy again.
+// ErrCorrupt is a copy whose file doesn't decrypt: it can never make a copy again.
 var ErrCorrupt = errors.New("media: kept copy is corrupt")
 
 type upload struct {
@@ -267,16 +267,20 @@ func (s *Store) KeepCopy(att protocol.Attachment, ownerUserID string) (*protocol
 		return nil, ErrUnavailable
 	}
 	// In the owner's directory, or for a copy made before owners had directories, the store's own.
+	// A copy that isn't there is ErrUnavailable, and one that doesn't decrypt ErrCorrupt; any
+	// other error (reading, or writing the new copy) may not happen again.
 	ct, err := readNoFollow(filepath.Join(s.ownerDir(ownerUserID), att.MediaID))
 	if errors.Is(err, os.ErrNotExist) {
 		ct, err = readNoFollow(s.path(att.MediaID))
 	}
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrUnavailable
+	} else if err != nil {
+		return nil, fmt.Errorf("media: failed to read the copy: %w", err)
 	}
 	data, err := seal.DecryptMedia(ct, att.Key, att.Nonce, ownerUserID, att.MediaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	}
 	defer clear(data)
 	return s.writeCopy(s.keptDir(), KeptOwner, data, att.Name, att.Mime)
