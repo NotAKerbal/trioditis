@@ -415,8 +415,8 @@ func (c *Connector) repairContactAvatar(ctx context.Context, ghostID networkid.U
 		}
 		has, hasErr := c.hasAvatarCopy(ctx, uri)
 		if hasErr != nil {
-			// Only a picture nobody has a copy of is fetched again: a network that won't show it
-			// to the login that sees the contact next (WhatsApp) would take it away from everyone.
+			// Only a picture nobody has a copy of is fetched again: a login the network won't show
+			// it to could take it away from everyone.
 			err = hasErr
 			return false
 		} else if has {
@@ -476,7 +476,7 @@ func (c *Connector) sendAvatarToContactsWithout(ctx context.Context, g *bridgev2
 // markAvatarStale makes bridgev2 fetch a contact's picture again, and says whether it changed
 // anything. bridgev2 downloads a picture again only once it has forgotten which one it has, and
 // refreshes a contact whose avatar isn't set the next time it sees them (a message or a reaction
-// from them; WhatsApp in its next background resync), through the login that saw them. So which
+// from them), through the login that saw them. So which
 // picture it has is forgotten, and saved with the contact; the content URI stays until a new one
 // replaces it, so a failed download leaves the contact to be found again. The new upload is kept
 // and sent to everyone who has the contact (ghostProfileChanged). Called under the contact's lock.

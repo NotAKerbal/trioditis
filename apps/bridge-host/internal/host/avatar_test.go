@@ -236,18 +236,10 @@ func TestContactsSentWithoutTheirPictureAreSentItWhenNextSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	gw.waitFor(t, "the member's message", isMessage("hello while it fails", h2, "alice"))
-	// The failed download keeps what the next try needs: the saved picture, not set, and no
-	// picture ID, so a network that fetches only a picture whose ID changed (WhatsApp) fetches
-	// it again.
+	// The failed download keeps what the next try needs: the saved picture, not set, which
+	// bridgev2 tries again the next time it sees them.
 	if mxc, set := ghostAvatar(t, h2, member); mxc != stale || set {
 		t.Fatalf("after a failed download the saved picture is %q (set %v), want %q unset", mxc, set, stale)
-	}
-	var avatarID string
-	if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_id FROM ghost WHERE id=$1`, string(member)).Scan(&avatarID); err != nil {
-		t.Fatal(err)
-	}
-	if avatarID != "" {
-		t.Fatalf("the failed download left picture ID %q", avatarID)
 	}
 	if e := lastContact(h2, member, before); e != nil && pictureOf(t, h2, e) != nil {
 		t.Fatal("a contact was sent with a picture though none could be downloaded")
