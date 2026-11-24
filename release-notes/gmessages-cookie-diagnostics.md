@@ -1,2 +1,2 @@
-Fixed: Adding a Google Messages account with a Google sign-in failed just after the emoji step. The server was dropping the sign-in it had just handed to Google Messages, so the last step of pairing went out signed out.
-Improved: When adding a Google Messages account fails, the server's log now says how long after the last step it failed, which sign-in cookies were used, and whether Google changed any of them, by name only, never their values.
+Fixed: Adding a Google Messages account with a Google sign-in failed right after the emoji step, because the server dropped the sign-in before pairing finished.
+Improved: When adding a Google Messages account fails, the server's log says how long after the last step it failed and which sign-in cookies were used or changed, by name only.
