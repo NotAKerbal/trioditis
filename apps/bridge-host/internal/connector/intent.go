@@ -622,6 +622,9 @@ func (in *Intent) DownloadMedia(ctx context.Context, uri id.ContentURIString, fi
 	if file != nil {
 		uri = file.URL
 	}
+	if err := in.c.reserveMedia(ctx, uri); err != nil {
+		return nil, err
+	}
 	return in.c.Media.Read(uri)
 }
 

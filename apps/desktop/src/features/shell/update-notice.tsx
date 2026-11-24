@@ -2,6 +2,7 @@ import { Button } from '@trioditis/ui/button'
 import { useEffect, useState } from 'react'
 import { useServerInfo } from '~/data/chats.ts'
 import { hasDrafts } from '~/data/drafts.ts'
+import { hasOutgoingFiles } from '~/features/chat/outgoing-files.ts'
 import { buildOutdated } from '~/data/updates.ts'
 
 // After the server is updated, open pages move to the new web app by themselves. The server's
@@ -100,6 +101,7 @@ export function UpdateNotice() {
       if (
         document.visibilityState === 'hidden' &&
         !hasDrafts() &&
+        !hasOutgoingFiles() &&
         !settingsOpen &&
         !pageBusy() &&
         reloadedFor() !== next

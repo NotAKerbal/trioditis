@@ -179,6 +179,15 @@ await convex.mutation(api.messages.send, {
 
 Delivery states shown for the member's own messages: `queued`, `claimed`, `submitted`, `sent`, `delivered`, `read`, `failed`, and `unknown`. Messages in `failed` or `unknown` can be discarded with `messages.discardSend({ clientMessageId })` or explicitly resent with a fresh `clientMessageId`.
 
+### Media
+
+Pictures and files are fetched and sent through the gateway's `/media/<mediaId>`, as ciphertext only. A file's key and nonce travel only inside sealed message plaintext ([Media encryption](/security/sealing/#media-encryption)).
+
+- **Fetching:** `api.media.access({ network })` returns a token naming the person and that network's bridge hosts. `GET /media/<mediaId>` with `Authorization: Bearer <token>` returns the ciphertext; the bridge host gives a file only to its owner. Decrypt it with `decryptMedia`.
+- **Sending:** `api.media.upload({ chatId })` returns a token signed for uploads, naming only the bridge host that runs the chat's account, which is where its send will go. Make a media ID of 16 random bytes (base64url), encrypt the file with `encryptMedia(bytes, userId, mediaId)`, and `PUT /media/<mediaId>` the ciphertext with that token and a `Content-Length`. `201` means the bridge host has it; `409`, that the ID is in use (after a retry whose answer was lost, that's the same file); `413`, that it's over 100 MiB. Then send a message whose plaintext carries the attachment (`mediaId`, `mime`, `size`, `name`, `key`, `nonce`, and a picture's `width` and `height`), with `body` its caption or, without one, its name. A send carries at most one attachment, so several files are several sends. The person's own copy names the same file, which they fetch like any other.
+
+A file kept for a send stays on the bridge host, under its owner, so their copy of the message keeps showing it. Should the account move to another bridge host between the upload and the send (one host taking over from another), the new host doesn't have the file and the send fails rather than going without it; sending the file again from the composer uploads it to the new host (the app reuses an upload token for 30 seconds at most). The bridge host reads a send's file only within a memory budget shared by all sends (`media.SendBudget`), so a send may wait for others' files to go first.
+
 ### Scheduled sends
 
 `scheduled.create`, `scheduled.list`, `scheduled.copies` (max 20 at once), `scheduled.cancel`, and `scheduled.sendNow` allow up to 500 scheduled messages per member, up to 365 days ahead.

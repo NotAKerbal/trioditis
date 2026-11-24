@@ -971,6 +971,9 @@ func errorType(err error) string {
 		return "devtools"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
+	case errors.Is(err, context.Canceled):
+		// The browser was closed while it started: its login was cancelled or moved on.
+		return "closed"
 	default:
 		return "connection"
 	}

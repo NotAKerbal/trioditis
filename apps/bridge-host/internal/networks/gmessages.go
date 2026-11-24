@@ -6,11 +6,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 	_ "unsafe" // for go:linkname, below
 
+	"github.com/rs/zerolog"
 	gmessages "go.mau.fi/mautrix-gmessages/pkg/connector"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm"
+	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/util"
 	"go.mau.fi/util/pblite"
@@ -90,10 +96,179 @@ type gmessagesConnector struct {
 	*gmessages.GMConnector
 }
 
-var _ connector.HTTPTransportWrapper = (*gmessagesConnector)(nil)
+var (
+	_ connector.HTTPTransportWrapper = (*gmessagesConnector)(nil)
+	_ connector.LoginErrorDescriber  = (*gmessagesConnector)(nil)
+)
 
 func (gm *gmessagesConnector) WrapHTTPTransport(next http.RoundTripper) http.RoundTripper {
 	return &gmessagesSendOnce{next: next}
+}
+
+// gmessagesLoginSteps names libgm's steps by the start its errors give them, for the ones a
+// Google account login goes through before the phone shows its emoji and after.
+var gmessagesLoginSteps = []struct{ prefix, step string }{
+	{"failed to fetch config: ", "fetch_config"},
+	{"failed to prepare gaia pairing: ", "find_phone"},
+	{"failed to parse destination UUID: ", "find_phone"},
+	{"failed to prepare pairing payloads: ", "prepare_pairing"},
+	{"failed to send client init: ", "send_client_init"},
+	{"error processing server init: ", "server_init"},
+	{"failed to send client finish: ", "send_client_finish"},
+}
+
+// gmessagesLoginCodes are the codes of the connector's own login errors, which replace
+// libgm's for the failures it knows: a name for each and the part of the login it ends.
+// "start_pairing" is everything before the phone shows the emoji, "finish_pairing" after.
+var gmessagesLoginCodes = map[string]struct{ name, step string }{
+	gmessages.ErrPairNoDevices.ErrCode:          {"no_devices_found", "start_pairing"},
+	gmessages.ErrPairPhoneNotFound.ErrCode:      {"phone_not_found", "start_pairing"},
+	gmessages.ErrPairPhoneInactive.ErrCode:      {"phone_inactive", "start_pairing"},
+	gmessages.ErrPairPhoneNotResponding.ErrCode: {"phone_not_responding", "start_pairing"},
+	gmessages.ErrPairCallerNoPermission.ErrCode: {"account_cant_pair", "start_pairing"},
+	gmessages.ErrPairIncorrectEmoji.ErrCode:     {"incorrect_emoji", "finish_pairing"},
+	gmessages.ErrPairCancelled.ErrCode:          {"pairing_cancelled", "finish_pairing"},
+	gmessages.ErrPairTimeout.ErrCode:            {"pairing_timeout", "finish_pairing"},
+}
+
+// gmessagesUnknownLogin are the connector's catch-all login errors, which share M_UNKNOWN and
+// differ only in their (constant) message, which gets Google's error number appended to it.
+var gmessagesUnknownLogin = []struct {
+	err        bridgev2.RespError
+	name, step string
+}{
+	{gmessages.ErrPairStartUnknown, "pair_start_unknown", "start_pairing"},
+	{gmessages.ErrPairWaitUnknown, "pair_wait_unknown", "finish_pairing"},
+}
+
+// gmessagesLibgmErrors are libgm's own errors a login can end in, by a name for the log.
+var gmessagesLibgmErrors = []struct {
+	err  error
+	name string
+}{
+	{libgm.ErrNoCookies, "no_cookies"},
+	{libgm.ErrNoDevicesFound, "no_devices_found"},
+	{libgm.ErrPhoneNotFound, "phone_not_found"},
+	{libgm.ErrPhoneInactive, "phone_inactive"},
+	{libgm.ErrPairingInitTimeout, "pairing_init_timeout"},
+	{libgm.ErrHadMultipleDevices, "multiple_devices"},
+	{libgm.ErrIncorrectEmoji, "incorrect_emoji"},
+	{libgm.ErrPairingCancelled, "pairing_cancelled"},
+	{libgm.ErrPairingTimeout, "pairing_timeout"},
+	{libgm.ErrPhoneNotResponding, "phone_not_responding"},
+	{libgm.ErrConnectionClosed, "connection_closed"},
+}
+
+// gmessagesEndpoints names the endpoints libgm calls by host and path. Anything else, such as
+// where a redirect ended up, is logged as "other": a path can carry an account's details.
+var gmessagesEndpoints = func() map[string]string {
+	names := map[string]string{}
+	for _, raw := range []string{
+		util.ConfigURL, util.GoogleAuthenticationURL, util.GoogleTimesourceURL, util.UploadMediaURL,
+		util.RegisterPhoneRelayURL, util.RefreshPhoneRelayURL, util.GetWebEncryptionKeyURL,
+		util.RevokeRelayPairingURL, util.ReceiveMessagesURL, util.SendMessageURL, util.AckMessagesURL,
+		util.SignInGaiaURL, util.RegisterRefreshURL,
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		names[u.Host+u.Path] = path.Base(u.Path)
+	}
+	return names
+}()
+
+func gmessagesEndpoint(resp *http.Response) string {
+	if resp.Request == nil || resp.Request.URL == nil {
+		return ""
+	}
+	if name, ok := gmessagesEndpoints[resp.Request.URL.Host+resp.Request.URL.Path]; ok {
+		return name
+	}
+	return "other"
+}
+
+// DescribeLoginError says which step a failed login stopped at, the connector's and libgm's
+// names for the failure, and Google's HTTP status, endpoint and error number. Google's error
+// message and response body are left out: they are Google's words about the person's account.
+// It reads only fields and constant messages: libgm's errors' Error methods dereference
+// pointers an odd error may not have.
+func (gm *gmessagesConnector) DescribeLoginError(evt *zerolog.Event, err error) {
+	var steps, names []string
+	add := func(list []string, value string) []string {
+		if value == "" || slices.Contains(list, value) {
+			return list
+		}
+		return append(list, value)
+	}
+	googleType, status, endpoint := int64(0), 0, ""
+	httpSeen := func(h *events.HTTPError) {
+		if h != nil && h.Resp != nil && status == 0 {
+			status, endpoint = h.Resp.StatusCode, gmessagesEndpoint(h.Resp)
+		}
+	}
+	requestSeen := func(r *events.RequestError) {
+		if r == nil {
+			return
+		}
+		if r.Data != nil && googleType == 0 {
+			googleType = r.Data.GetType()
+		}
+		httpSeen(r.HTTP)
+	}
+	connector.WalkErrors(err, func(e error) {
+		switch typed := e.(type) {
+		case events.RequestError:
+			requestSeen(&typed)
+		case *events.RequestError:
+			requestSeen(typed)
+		case events.HTTPError:
+			httpSeen(&typed)
+		case *events.HTTPError:
+			httpSeen(typed)
+		case bridgev2.RespError:
+			if known, ok := gmessagesLoginCodes[typed.ErrCode]; ok {
+				names, steps = add(names, known.name), add(steps, known.step)
+			}
+			for _, unknown := range gmessagesUnknownLogin {
+				if typed.ErrCode == unknown.err.ErrCode && strings.HasPrefix(typed.Err, unknown.err.Err) {
+					names, steps = add(names, unknown.name), add(steps, unknown.step)
+				}
+			}
+		}
+		// fmt's wrappers keep their message as made, so reading it dereferences nothing. It is
+		// matched against libgm's constant starts, never logged.
+		if kind := fmt.Sprintf("%T", e); kind == "*fmt.wrapError" || kind == "*fmt.wrapErrors" {
+			text := e.Error()
+			for _, s := range gmessagesLoginSteps {
+				if strings.HasPrefix(text, s.prefix) {
+					steps = add(steps, s.step)
+					break
+				}
+			}
+		}
+		for _, k := range gmessagesLibgmErrors {
+			// Sentinels are pointers, so this compares identity and never a struct's fields.
+			if e == k.err {
+				names = add(names, k.name)
+			}
+		}
+	})
+	if len(steps) > 0 {
+		evt.Strs("gm_steps", steps)
+	}
+	if len(names) > 0 {
+		evt.Strs("gm_errors", names)
+	}
+	if googleType != 0 {
+		evt.Int64("google_error_type", googleType)
+	}
+	if status != 0 {
+		evt.Int("http_status", status)
+		if endpoint != "" {
+			evt.Str("http_endpoint", endpoint)
+		}
+	}
 }
 
 // gmessagesRelayURLs are the relay endpoints every request to the phone is posted to, with

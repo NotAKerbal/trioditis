@@ -67,8 +67,8 @@ export function QuarantineSection() {
       </Disclosure>
       {open
         ? data.items.map((row) => (
-            <div key={row._id} className="flex min-h-[52px] items-center gap-3 px-4 py-2">
-              <div className="min-w-0 flex-1">
+            <div key={row._id} className="flex min-h-[52px] flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
+              <div className="min-w-0 flex-[1_1_10rem]">
                 <div className="font-semibold">{REASONS[row.reason] ?? row.reason}</div>
                 <div className="text-sm text-muted-foreground">
                   {row.type} · {row.hostId} #{row.seq} · {time.format(row.at)}

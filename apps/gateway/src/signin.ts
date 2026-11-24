@@ -43,7 +43,7 @@ export interface SigninOptions {
   log?: (message: string) => void
   maxConnections?: number
   handshakeTimeoutMs?: number
-  /** Serves GET /media/<mediaId> on the same listener (media.ts). */
+  /** Serves GET and PUT /media/<mediaId> on the same listener (media.ts). */
   media?: ReturnType<typeof createMediaHandler>
 }
 
