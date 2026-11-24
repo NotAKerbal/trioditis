@@ -68,6 +68,7 @@ type Network struct {
 	delay         atomic.Int64
 	counter       atomic.Int64
 	reactions     atomic.Int64
+	brokenPics    atomic.Bool
 	maxReactions  atomic.Int32
 
 	lock     sync.Mutex
@@ -262,7 +263,7 @@ func (n *Network) SetPicture(ctx context.Context, userID networkid.UserID, data 
 		delete(n.pictures, userID)
 	}
 	n.lock.Unlock()
-	avatar := pictureAvatar(data)
+	avatar := n.pictureAvatar(data)
 	if avatar == nil {
 		avatar = &bridgev2.Avatar{ID: "", Remove: true}
 	}
@@ -278,14 +279,22 @@ func (n *Network) KnowPicture(userID networkid.UserID, data []byte) {
 	n.pictures[userID] = data
 }
 
+// BreakPictures makes downloading a picture fail, as a network's media server can, or work again.
+func (n *Network) BreakPictures(broken bool) { n.brokenPics.Store(broken) }
+
 // pictureAvatar is a picture as the network gives it to bridgev2, or nil for none.
-func pictureAvatar(data []byte) *bridgev2.Avatar {
+func (n *Network) pictureAvatar(data []byte) *bridgev2.Avatar {
 	if data == nil {
 		return nil
 	}
 	return &bridgev2.Avatar{
-		ID:  networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
-		Get: func(context.Context) ([]byte, error) { return data, nil },
+		ID: networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
+		Get: func(context.Context) ([]byte, error) {
+			if n.brokenPics.Load() {
+				return nil, errors.New("testnet: the picture couldn't be downloaded")
+			}
+			return data, nil
+		},
 	}
 }
 
@@ -305,7 +314,7 @@ func (c *Client) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridg
 	picture := c.n.pictures[ghost.ID]
 	c.n.lock.Unlock()
 	// A user's picture (SetPicture) comes with them, as from a real network.
-	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"testnet:" + string(ghost.ID)}, Avatar: pictureAvatar(picture)}, nil
+	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"testnet:" + string(ghost.ID)}, Avatar: c.n.pictureAvatar(picture)}, nil
 }
 
 func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {

@@ -901,13 +901,17 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	if kind == "" {
 		kind = "group"
 	}
+	var newAvatar *protocol.Attachment
 	if avatarURL != "" {
-		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
+		att, known := c.avatarFor(ctx, avatarURL, o.userID)
+		if att != nil {
 			plain.Avatar = att
+			if !known {
+				newAvatar = att
+			}
 		} else {
-			// The avatar exists but neither its upload nor a kept reference is left (an avatar
-			// from before references were kept). Saying so keeps clients from taking a name
-			// change as the avatar's removal.
+			// The avatar exists but no copy of it is left (an avatar from before copies were
+			// kept). Saying so keeps clients from taking a name change as the avatar's removal.
 			plain.AvatarUnchanged = true
 		}
 	}
@@ -942,6 +946,9 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	evt.IsRequest = state
 	if err = c.emit(ctx, evt); err != nil {
 		return err
+	}
+	if newAvatar != nil {
+		c.putAvatarRef(ctx, o.userID, avatarURL, newAvatar)
 	}
 	sent()
 	return nil
@@ -1092,6 +1099,8 @@ func numbersRoom(userID, loginID string) string { return "numbers:" + userID + "
 
 func contactRoom(userID string) string { return "contacts:" + userID }
 
+// emitContact sends a ghost's profile to the person, with the name and avatar given or else
+// the saved ones.
 func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.UserID, name *string, avatar *id.ContentURIString) error {
 	var plain protocol.ContactPlaintext
 	var avatarURL id.ContentURIString
@@ -1111,14 +1120,29 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	if avatar != nil {
 		avatarURL = *avatar
 	}
+	var newAvatar *protocol.Attachment
 	if avatarURL != "" {
-		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
+		att, known := c.avatarFor(ctx, avatarURL, o.userID)
+		if att != nil {
 			plain.Avatar = att
+			if !known {
+				newAvatar = att
+			}
 		} else {
 			plain.AvatarUnchanged = true
+			// No copy of it is left: the picture is fetched from the network again, which sends
+			// it to everyone who has the contact.
+			c.queueAvatarRepair(ghost)
 		}
 	}
-	return c.emitContactProfile(ctx, o, ghost, plain)
+	if err = c.emitContactProfile(ctx, o, ghost, plain); err != nil {
+		return err
+	}
+	// Recorded once it's sent, so a person who has the reference was sent the avatar.
+	if newAvatar != nil {
+		c.putAvatarRef(ctx, o.userID, avatarURL, newAvatar)
+	}
+	return nil
 }
 
 // emitContactProfile seals a contact's profile and sends it to the person.

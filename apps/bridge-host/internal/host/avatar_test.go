@@ -75,9 +75,63 @@ func TestAContactMetAfterTheirPictureWasUploadedComesWithIt(t *testing.T) {
 	}
 }
 
-// A database from before the bridge host kept its own copies has contacts that went out without
-// their picture. Once, each such contact's picture is fetched from the network again and sent.
-func TestContactsSentWithoutTheirPictureAreSentItOnce(t *testing.T) {
+// lastSeq is the newest event's sequence number so far.
+func (g *fakeGateway) lastSeq() int64 {
+	var seq int64
+	for _, e := range g.snapshot() {
+		seq = max(seq, e.Seq)
+	}
+	return seq
+}
+
+// lastContact is the newest of alice's contact events for a member after seq, or nil.
+func lastContact(h *harness, member networkid.UserID, after int64) *protocol.Event {
+	var last *protocol.Event
+	for _, e := range h.gw.snapshot() {
+		if e.Seq > after && isContactOf(h, member)(e) {
+			last = e
+		}
+	}
+	return last
+}
+
+// waitForPicture waits until a contact event for member after seq carries want.
+func waitForPicture(t *testing.T, h *harness, member networkid.UserID, after int64, want []byte) *protocol.Event {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if e := lastContact(h, member, after); e != nil && bytes.Equal(pictureOf(t, h, e), want) {
+			return e
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no contact for %s after %d came with the picture", member, after)
+	return nil
+}
+
+// oldHost starts a host over dir as one from before kept copies: none of the pictures uploaded
+// so far has one. The network knows the member's picture, as a real one does after a restart.
+func oldHost(t *testing.T, dir string, gw *fakeGateway, member networkid.UserID, picture []byte) *harness {
+	t.Helper()
+	ctx := context.Background()
+	h := buildHost(t, dir, gw)
+	if err := h.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.host.DB.Exec(ctx, `DELETE FROM trioditis_avatar_kept`); err != nil {
+		t.Fatal(err)
+	}
+	h.net.KnowPicture(member, picture)
+	h.host.Connector.AvatarRepairPace = time.Millisecond
+	if err := h.host.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// A contact whose picture was uploaded before the bridge host kept copies, first met afterwards,
+// is sent at once without it, and then with it, once fetched from the network again.
+func TestAContactWithNoCopyOfTheirPictureLeftIsSentItOnceFetchedAgain(t *testing.T) {
 	dir := t.TempDir()
 	gw := newFakeGateway(t, "alice")
 	h := startHost(t, dir, gw)
@@ -91,54 +145,88 @@ func TestContactsSentWithoutTheirPictureAreSentItOnce(t *testing.T) {
 	}
 	h.host.Stop()
 
-	// As a database from before: no kept copies.
-	h2 := buildHost(t, dir, gw)
-	if err := h2.host.Store.Upgrade(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_avatar_kept`); err != nil {
-		t.Fatal(err)
-	}
-	h2.net.KnowPicture(member, picture)
-	if err := h2.host.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h2 := oldHost(t, dir, gw, member, picture)
 	defer h2.host.Stop()
-	<-h2.host.postStart
 	if err := h2.net.Incoming("alice-testnet", chat, member, "old-1", "hello from before", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	gw.waitFor(t, "the member's message", isMessage("hello from before", h2, "alice"))
-	without := gw.waitFor(t, "the member's contact", isContactOf(h2, member))
-	if got := pictureOf(t, h2, without); got != nil {
+	first := gw.waitFor(t, "the member's contact", isContactOf(h2, member))
+	if got := pictureOf(t, h2, first); got != nil {
 		t.Fatalf("the contact came with a picture, %q, though none could be sent then", got)
 	}
+	waitForPicture(t, h2, member, first.Seq, picture)
+}
 
-	// The next start's pass, as on a database that hasn't had it.
-	if _, err := h2.host.DB.Exec(ctx, `DELETE FROM trioditis_secret WHERE name='repaired_contact_avatars'`); err != nil {
+// At start, a person who was sent a contact without their picture (a database from before kept
+// copies) is sent it, once it's fetched again. A failed download leaves the contact to be tried
+// again, and sends nothing wrong meanwhile.
+func TestContactsSentWithoutTheirPictureAreSentItAtStart(t *testing.T) {
+	dir := t.TempDir()
+	gw := newFakeGateway(t, "alice")
+	h := startHost(t, dir, gw)
+	h.login("alice", "alice-testnet")
+	ctx := context.Background()
+	const chat = networkid.PortalID("crowd-start")
+	member := testconnector.CrowdMember(chat, 1)
+	picture := []byte("a picture sent at the next start")
+	if err := h.net.SetPicture(ctx, member, picture); err != nil {
 		t.Fatal(err)
 	}
+	if err := h.net.Incoming("alice-testnet", chat, member, "s-1", "hello", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	gw.waitFor(t, "the member's message", isMessage("hello", h, "alice"))
+	gw.waitFor(t, "the member's contact", isContactOf(h, member))
+	h.host.Stop()
+
+	// As if alice had been sent the contact without it: no copy of hers, nor the host's. The
+	// network's media server fails at first.
+	h2 := buildHost(t, dir, gw)
+	if err := h2.host.Store.Upgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"trioditis_avatar_kept", "trioditis_avatar_ref"} {
+		if _, err := h2.host.DB.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stale string
+	if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_mxc FROM ghost WHERE id=$1`, string(member)).Scan(&stale); err != nil || stale == "" {
+		t.Fatalf("the member has no picture saved: %q %v", stale, err)
+	}
+	h2.net.KnowPicture(member, picture)
+	h2.net.BreakPictures(true)
 	h2.host.Connector.AvatarRepairPace = time.Millisecond
-	if err := h2.host.Connector.RepairContactAvatars(ctx); err != nil {
+	before := gw.lastSeq()
+	if err := h2.host.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	isMember := isContactOf(h2, member)
-	repaired := gw.waitFor(t, "the member's contact with their picture", func(e *protocol.Event) bool {
-		return isMember(e) && e.Seq > without.Seq
-	})
-	if got := pictureOf(t, h2, repaired); !bytes.Equal(got, picture) {
-		t.Fatalf("the contact was sent again with picture %q, want %q", got, picture)
+	// The failed download keeps what the next try needs: the saved picture, marked not set.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var mxc string
+		var set bool
+		if err := h2.host.DB.QueryRow(ctx, `SELECT avatar_mxc, avatar_set FROM ghost WHERE id=$1`, string(member)).Scan(&mxc, &set); err != nil {
+			t.Fatal(err)
+		}
+		if !set {
+			if mxc != stale {
+				t.Fatalf("the failed download replaced the saved picture %q with %q", stale, mxc)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the picture wasn't fetched again")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if done, err := h2.host.Store.RepairedContactAvatars(ctx); err != nil || !done {
-		t.Fatalf("not marked done: %v %v", done, err)
+	if e := lastContact(h2, member, before); e != nil && pictureOf(t, h2, e) != nil {
+		t.Fatal("a contact was sent with a picture though none could be downloaded")
 	}
-	// Once is enough: the next start sends nothing again.
-	before := gw.count(isMember)
-	if err := h2.host.Connector.RepairContactAvatars(ctx); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(200 * time.Millisecond)
-	if n := gw.count(isMember); n != before {
-		t.Fatalf("the contact was sent again (%d events, was %d)", n, before)
-	}
+	h2.host.Stop()
+
+	h3 := oldHost(t, dir, gw, member, picture)
+	defer h3.host.Stop()
+	waitForPicture(t, h3, member, before, picture)
 }

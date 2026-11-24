@@ -158,6 +158,18 @@ func (s *Store) Upload(data []byte, name, mime string) id.ContentURIString {
 	return ContentURI(mediaID)
 }
 
+// Available reports whether an upload is still in memory.
+func (s *Store) Available(uri id.ContentURIString) bool {
+	mediaID, ok := ParseContentURI(uri)
+	if !ok {
+		return false
+	}
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	up, ok := s.uploads[mediaID]
+	return ok && !time.Now().After(up.expires)
+}
+
 // AttachmentFor encrypts a copy of an upload for ownerUserID and returns the attachment
 // to put in the sealed plaintext. Repeated calls for the same owner reuse the copy.
 func (s *Store) AttachmentFor(uri id.ContentURIString, ownerUserID string) (*protocol.Attachment, error) {

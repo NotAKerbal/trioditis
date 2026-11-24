@@ -50,25 +50,3 @@ func (s *Store) SetDescribedDirectChats(ctx context.Context) error {
 		describedDirectChatsName)
 	return err
 }
-
-// repairedContactAvatarsName marks that the contacts sent without their picture, because it
-// was uploaded too long before, have been sent it (Connector.RepairContactAvatars).
-const repairedContactAvatarsName = "repaired_contact_avatars"
-
-// RepairedContactAvatars reports whether RepairContactAvatars has finished on this database.
-func (s *Store) RepairedContactAvatars(ctx context.Context) (bool, error) {
-	var value string
-	err := s.DB.QueryRow(ctx, `SELECT value FROM trioditis_secret WHERE name=$1`, repairedContactAvatarsName).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-// SetRepairedContactAvatars records that RepairContactAvatars has finished on this database.
-func (s *Store) SetRepairedContactAvatars(ctx context.Context) error {
-	_, err := s.DB.Exec(ctx,
-		`INSERT INTO trioditis_secret (name, value) VALUES ($1, '1') ON CONFLICT (name) DO NOTHING`,
-		repairedContactAvatarsName)
-	return err
-}

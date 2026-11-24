@@ -114,9 +114,11 @@ func TestAnAttachmentThatCantBeStoredIsKeptAsFailed(t *testing.T) {
 }
 
 // An avatar's upload expires in minutes; a metadata change after that still carries the
-// avatar, from the reference kept when it was first attached.
+// avatar: the person's own copy once they were sent it, and before that, a copy made from the
+// bridge host's.
 func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
-	store, err := media.New(t.TempDir())
+	dir := t.TempDir()
+	store, err := media.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,23 +130,27 @@ func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
 	c.Media, c.BridgeKey = store, bridgeKey
 	ctx := context.Background()
 	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
-	first := c.avatarFor(ctx, uri, "alice")
-	if first == nil || first.MediaID == "" {
+	first, known := c.avatarFor(ctx, uri, "alice")
+	if first == nil || first.MediaID == "" || known {
 		t.Fatal("the avatar wasn't attached while its upload lived")
 	}
-	// A host restart loses every upload: a new store with the same files on disk.
-	c.Media, err = media.New(t.TempDir())
+	// Recorded once the metadata carrying it was sent.
+	c.putAvatarRef(ctx, "alice", uri, first)
+	// A host restart loses every upload: a new store over the same files.
+	c.Media, err = media.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again := c.avatarFor(ctx, uri, "alice")
-	if again == nil || *again != *first {
+	again, known := c.avatarFor(ctx, uri, "alice")
+	if again == nil || *again != *first || !known {
 		t.Fatalf("the kept reference wasn't attached again: %+v, want %+v", again, first)
 	}
-	if other := c.avatarFor(ctx, uri, "bob"); other != nil {
-		t.Fatal("one person's avatar copy went to another")
+	// Someone new gets a copy of their own, made from the host's.
+	other, known := c.avatarFor(ctx, uri, "bob")
+	if other == nil || known || other.MediaID == first.MediaID || other.Key == first.Key {
+		t.Fatalf("bob's copy: %+v", other)
 	}
-	// The kept reference is sealed to the bridge key, never stored readable.
+	// The kept references are sealed to the bridge key, never stored readable.
 	kept, err := c.Store.AvatarRef(ctx, "alice", string(uri))
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +159,7 @@ func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
 		t.Fatalf("the reference isn't a sealed envelope: %+v", kept)
 	}
 	c.BridgeKey, _ = seal.GenerateKeyPair()
-	if c.avatarFor(ctx, uri, "alice") != nil {
+	if att, _ := c.avatarFor(ctx, uri, "alice"); att != nil {
 		t.Fatal("a reference sealed to another key must not open")
 	}
 }

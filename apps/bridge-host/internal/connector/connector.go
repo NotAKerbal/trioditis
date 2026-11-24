@@ -56,8 +56,8 @@ type Options struct {
 	// DescribeSettle is how long DescribeDirectChats lets changes it may have raced settle
 	// before checking them; five seconds if zero.
 	DescribeSettle time.Duration
-	// AvatarRepairPace is how long RepairContactAvatars waits between asking the network for
-	// one contact's picture and the next; a second if zero.
+	// AvatarRepairPace is how long RunAvatarRepairs waits between asking the network for one
+	// contact's picture and the next; a second if zero.
 	AvatarRepairPace time.Duration
 }
 
@@ -103,6 +103,8 @@ type Connector struct {
 	// saves it, and never older after.
 	pictures sync.Map
 	wake     chan struct{}
+	// repairs holds the contacts whose picture is to be fetched again (RunAvatarRepairs).
+	repairs avatarRepairs
 }
 
 var (
