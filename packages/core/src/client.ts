@@ -140,10 +140,11 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     ],
     termsRisk: true,
     reactions: true,
-    // Five edits at most; bridgev2 counts them and refuses a sixth, which the app reports. The
-    // app doesn't count them itself: the connector can report one edit twice.
-    edit: { maxAgeMs: 15 * MINUTE },
-    delete: { forEveryone: true, maxAgeMs: null },
+    // mautrix-meta can report an edit or a deletion done that the network refused or didn't
+    // confirm (it doesn't check the answer), and a deletion it reports clears the stored copy, so
+    // neither is offered until the bridge host checks those answers itself.
+    edit: null,
+    delete: null,
   },
   instagram: {
     network: 'instagram',
@@ -153,10 +154,11 @@ export const NETWORK_INFO: Record<Network, NetworkInfo> = {
     flows: [{ id: 'instagram', kind: 'cookies', name: 'Sign in on instagram.com' }],
     termsRisk: true,
     reactions: true,
-    // Five edits at most; bridgev2 counts them and refuses a sixth, which the app reports. The
-    // app doesn't count them itself: the connector can report one edit twice.
-    edit: { maxAgeMs: 15 * MINUTE },
-    delete: { forEveryone: true, maxAgeMs: null },
+    // mautrix-meta can report an edit or a deletion done that the network refused or didn't
+    // confirm (it doesn't check the answer), and a deletion it reports clears the stored copy, so
+    // neither is offered until the bridge host checks those answers itself.
+    edit: null,
+    delete: null,
   },
   discord: {
     network: 'discord',

@@ -83,6 +83,11 @@ describe('which messages can be edited or deleted', () => {
     expect(canDeleteMessage(message('a', { at: NOW - 49 * 60 * MINUTE }), 'whatsapp', NOW)).toBe(false)
     expect(canDeleteMessage(message('a', { at: 0 }), 'gmessages', NOW)).toBe(true)
     expect(canDeleteMessage(message('a'), 'gvoice', NOW)).toBe(false)
+    // mautrix-meta doesn't check Messenger's or Instagram's answer to an edit or a deletion.
+    for (const network of ['meta', 'instagram'] as const) {
+      expect(canEditMessage(message('a'), network, NOW)).toBe(false)
+      expect(canDeleteMessage(message('a'), network, NOW)).toBe(false)
+    }
     expect(canDeleteMessage(message('a', { self: false, ghostId: 'g' }), 'whatsapp', NOW)).toBe(false)
   })
 })

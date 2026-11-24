@@ -35,15 +35,15 @@ What each connector allows for your own messages, and for how long after sending
 | Google Messages | No         | Only from your phone, any time    |
 | Google Voice    | No         | No                                |
 | Telegram        | 48 hours   | For everyone, any time            |
-| Messenger       | 15 minutes | For everyone, any time            |
-| Instagram       | 15 minutes | For everyone, any time            |
+| Messenger       | No         | No                                |
+| Instagram       | No         | No                                |
 | Slack           | Any time   | For everyone, any time            |
 | GroupMe         | No         | For everyone, any time            |
 | LinkedIn        | 60 minutes | For everyone, 60 minutes          |
 | X               | No         | For everyone in X Chat; else, you |
 | Bluesky         | No         | No                                |
 
-Signal allows 10 edits of a message, and the app stops offering Edit at that count. Messenger and Instagram allow 5; the app doesn't count them itself (Messenger can report one edit twice), so a sixth is refused and the app says it wasn't saved. GroupMe's connector keeps an edit's new text unsealed in the bridge database, and X can only edit its encrypted chats, which the app can't tell apart, so neither offers editing. A Slack workspace can turn editing or deleting off, or limit it; the app can't see that, and says so when Slack refuses.
+Signal allows 10 edits of a message, and the app stops offering Edit at that count. Messenger and Instagram can edit and delete, but their connector can report an edit or deletion as done when the network refused it or never confirmed it, so the app doesn't offer either yet. GroupMe's connector keeps an edit's new text unsealed in the bridge database, and X can only edit its encrypted chats, which the app can't tell apart, so neither offers editing. A Slack workspace can turn editing or deleting off, or limit it; the app can't see that, and says so when Slack refuses.
 
 ### Not yet supported
 
