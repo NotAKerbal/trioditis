@@ -904,6 +904,11 @@ func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*
 	return s.envelope(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI)
 }
 
+// AvatarRefOwners lists the people whose copy of an avatar has a kept reference.
+func (s *Store) AvatarRefOwners(ctx context.Context, avatarURI string) ([]string, error) {
+	return s.strings(ctx, `SELECT owner_user_id FROM trioditis_avatar_ref WHERE avatar_uri=$1`, avatarURI)
+}
+
 // PutKeptAvatar keeps the sealed reference to the bridge host's own copy of an avatar. The
 // first one stays, as with PutAvatarRef.
 func (s *Store) PutKeptAvatar(ctx context.Context, avatarURI string, sealed *seal.Envelope) error {

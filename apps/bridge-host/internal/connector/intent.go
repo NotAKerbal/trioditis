@@ -1130,9 +1130,12 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 			}
 		} else {
 			plain.AvatarUnchanged = true
-			// No copy of it is left: the picture is fetched from the network again, which sends
-			// it to everyone who has the contact.
-			c.queueAvatarRepair(ghost)
+			// No copy of it is left (rather than one that couldn't be made for this person just
+			// now): the picture is fetched from the network again, which sends it to everyone who
+			// has the contact.
+			if !c.hasAvatarCopy(ctx, avatarURL) {
+				c.queueAvatarRepair(ghost)
+			}
 		}
 	}
 	if err = c.emitContactProfile(ctx, o, ghost, plain); err != nil {

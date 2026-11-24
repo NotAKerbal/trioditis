@@ -260,6 +260,28 @@ func (s *Store) CopyKept(kept protocol.Attachment, ownerUserID string) (*protoco
 	return s.writeCopy(s.ownerDir(ownerUserID), ownerUserID, data, kept.Name, kept.Mime)
 }
 
+// KeepCopy makes the bridge host's own copy (as Keep does) from a copy made for ownerUserID,
+// once the upload is gone. The plaintext is only ever in memory.
+func (s *Store) KeepCopy(att protocol.Attachment, ownerUserID string) (*protocol.Attachment, error) {
+	if !validID(att.MediaID) || ownerUserID == "" {
+		return nil, ErrUnavailable
+	}
+	// In the owner's directory, or for a copy made before owners had directories, the store's own.
+	ct, err := readNoFollow(filepath.Join(s.ownerDir(ownerUserID), att.MediaID))
+	if errors.Is(err, os.ErrNotExist) {
+		ct, err = readNoFollow(s.path(att.MediaID))
+	}
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	data, err := seal.DecryptMedia(ct, att.Key, att.Nonce, ownerUserID, att.MediaID)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(data)
+	return s.writeCopy(s.keptDir(), KeptOwner, data, att.Name, att.Mime)
+}
+
 // writeCopy encrypts data for ownerUserID under a new media ID and writes the ciphertext in dir.
 func (s *Store) writeCopy(dir, ownerUserID string, data []byte, name, mime string) (*protocol.Attachment, error) {
 	copyID := randomID()

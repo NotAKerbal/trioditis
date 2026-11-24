@@ -134,24 +134,66 @@ func (c *Connector) copyKeptAvatar(ctx context.Context, uri id.ContentURIString,
 }
 
 // keptAvatar is the reference to the bridge host's own copy of an avatar, or nil if it has none
-// it can use: none was kept, it was sealed to an earlier bridge key, or its file is gone.
+// it can use. One that was never kept (an avatar from before copies were kept), or whose file is
+// gone, is made again from the copy of anyone who was sent the avatar (recoverKeptAvatar).
 func (c *Connector) keptAvatar(ctx context.Context, uri id.ContentURIString) *protocol.Attachment {
 	sealed, err := c.Store.KeptAvatar(ctx, string(uri))
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
+		return c.recoverKeptAvatar(ctx, uri)
 	} else if err != nil {
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's kept copy failed")
 		return nil
 	}
 	var kept protocol.Attachment
 	if err = seal.OpenJSON(sealed, c.BridgeKey, keptAvatarContext(uri), &kept); err != nil {
+		// Sealed to an earlier bridge key, as anyone's reference to it would be.
 		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's kept copy couldn't be opened")
 		return nil
 	}
 	if !c.Media.HasKept(kept) {
-		return nil
+		if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Forgetting an avatar's missing kept copy failed")
+			return nil
+		}
+		return c.recoverKeptAvatar(ctx, uri)
 	}
 	return &kept
+}
+
+// recoverKeptAvatar makes the bridge host's own copy of an avatar again from a copy someone was
+// sent, whose reference the host keeps (sealed to its own key), so a person who meets the contact
+// now gets the picture without asking the network for it again. Nil if nobody has a copy it can
+// read.
+func (c *Connector) recoverKeptAvatar(ctx context.Context, uri id.ContentURIString) *protocol.Attachment {
+	owners, err := c.Store.AvatarRefOwners(ctx, string(uri))
+	if err != nil {
+		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's references failed")
+		return nil
+	}
+	for _, owner := range owners {
+		sealed, err := c.Store.AvatarRef(ctx, owner, string(uri))
+		if err != nil {
+			continue
+		}
+		var ref protocol.Attachment
+		if err = seal.OpenJSON(sealed, c.BridgeKey, avatarRefContext(owner, uri), &ref); err != nil {
+			continue
+		}
+		kept, err := c.Media.KeepCopy(ref, owner)
+		if err != nil {
+			continue
+		}
+		var keptSealed *seal.Envelope
+		if keptSealed, err = seal.SealJSON(kept, []seal.PublicKey{c.BridgeKey.Public}, keptAvatarContext(uri)); err == nil {
+			err = c.Store.PutKeptAvatar(ctx, string(uri), keptSealed)
+		}
+		if err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping a copy of an avatar failed")
+			return nil
+		}
+		return kept
+	}
+	return nil
 }
 
 // hasAvatarCopy reports whether the host can still make someone a copy of an avatar.
@@ -159,17 +201,28 @@ func (c *Connector) hasAvatarCopy(ctx context.Context, uri id.ContentURIString) 
 	return c.Media.Available(uri) || c.keptAvatar(ctx, uri) != nil
 }
 
-// avatarRepairs is the queue of contacts whose picture is to be fetched again.
+// repairState is where a contact is in the repair queue.
+type repairState int
+
+const (
+	repairQueued       repairState = iota + 1
+	repairRunning                  // being repaired
+	repairRunningAgain             // being repaired, and asked for again meanwhile
+)
+
+// avatarRepairs is the queue of contacts whose picture is to be repaired. A contact is in it, or
+// being repaired, at most once: one asked for again while being repaired goes back in once that's
+// done, so one contact can't take every worker.
 type avatarRepairs struct {
-	lock   sync.Mutex
-	queue  []networkid.UserID
-	queued map[networkid.UserID]bool
-	wake   chan struct{}
+	lock  sync.Mutex
+	queue []networkid.UserID
+	state map[networkid.UserID]repairState
+	wake  chan struct{}
 }
 
 func (r *avatarRepairs) init() {
-	if r.queued == nil {
-		r.queued, r.wake = make(map[networkid.UserID]bool), make(chan struct{}, 1)
+	if r.state == nil {
+		r.state, r.wake = make(map[networkid.UserID]repairState), make(chan struct{}, 1)
 	}
 }
 
@@ -180,21 +233,28 @@ func (r *avatarRepairs) wakeChan() chan struct{} {
 	return r.wake
 }
 
-// queueAvatarRepair asks for a contact's picture to be fetched again. It can't be done here:
-// this may be called while bridgev2 updates the contact, holding its lock.
+// enqueueLocked puts a contact in the queue and wakes the worker. r.lock is held.
+func (r *avatarRepairs) enqueueLocked(ghost networkid.UserID) {
+	r.state[ghost] = repairQueued
+	r.queue = append(r.queue, ghost)
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// queueAvatarRepair asks for a contact's picture to be repaired. It can't be done here: this may
+// be called while bridgev2 updates the contact, holding its lock.
 func (c *Connector) queueAvatarRepair(ghost networkid.UserID) {
 	r := &c.repairs
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	r.init()
-	if r.queued[ghost] {
-		return
-	}
-	r.queued[ghost] = true
-	r.queue = append(r.queue, ghost)
-	select {
-	case r.wake <- struct{}{}:
-	default:
+	switch r.state[ghost] {
+	case 0:
+		r.enqueueLocked(ghost)
+	case repairRunning:
+		r.state[ghost] = repairRunningAgain
 	}
 }
 
@@ -207,8 +267,20 @@ func (c *Connector) nextAvatarRepair() (networkid.UserID, bool) {
 	}
 	ghost := r.queue[0]
 	r.queue = r.queue[1:]
-	delete(r.queued, ghost)
+	r.state[ghost] = repairRunning
 	return ghost, true
+}
+
+// avatarRepairDone ends a contact's repair, and queues it again if it was asked for meanwhile.
+func (c *Connector) avatarRepairDone(ghost networkid.UserID) {
+	r := &c.repairs
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	if r.state[ghost] == repairRunningAgain {
+		r.enqueueLocked(ghost)
+	} else {
+		delete(r.state, ghost)
+	}
 }
 
 // avatarRepairWorkers is how many contacts are repaired at once: one whose lock a network holds
@@ -243,6 +315,7 @@ func (c *Connector) RunAvatarRepairs(ctx context.Context) {
 		}
 		go func() {
 			defer func() { <-workers }()
+			defer c.avatarRepairDone(ghost)
 			if err := c.repairContactAvatar(ctx, ghost); err != nil && ctx.Err() == nil {
 				c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Repairing a contact's picture failed; it's tried again at the next start")
 			}
