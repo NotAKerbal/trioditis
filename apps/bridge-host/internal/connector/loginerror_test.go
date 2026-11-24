@@ -14,10 +14,10 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 )
 
-// A failed login's log line lists what its error is made of, in errors.Is order, with the
-// mautrix codes among them, and none of the error's text.
+// A failed login's log line lists what its error is made of, in errors.Is order, and none of
+// the error's text or codes, which can come from a server.
 func TestDescribeLoginError(t *testing.T) {
-	start := bridgev2.RespError(mautrix.MUnknown.WithMessage("Failed to start login"))
+	start := bridgev2.RespError(mautrix.RespError{ErrCode: "someone@example.com", Err: "Failed to start login"})
 	inner := errors.New("what the person typed")
 	err := fmt.Errorf("%w: %w", start, fmt.Errorf("failed to fetch config: %w", inner))
 
@@ -25,13 +25,13 @@ func TestDescribeLoginError(t *testing.T) {
 	log := zerolog.New(&buf)
 	(&Connector{}).describeLoginError(log.Warn(), err).Msg("Login failed")
 
-	if bytes.Contains(buf.Bytes(), []byte("typed")) || bytes.Contains(buf.Bytes(), []byte("Failed to start")) {
+	if bytes.Contains(buf.Bytes(), []byte("typed")) || bytes.Contains(buf.Bytes(), []byte("Failed to start")) ||
+		bytes.Contains(buf.Bytes(), []byte("example.com")) {
 		t.Fatalf("the log line has the error's text: %s", buf.String())
 	}
 	var line struct {
 		Type  string   `json:"error_type"`
 		Chain []string `json:"error_chain"`
-		Codes []string `json:"error_codes"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
 		t.Fatal(err)
@@ -42,9 +42,6 @@ func TestDescribeLoginError(t *testing.T) {
 	want := []string{"*fmt.wrapErrors", "bridgev2.RespError", "*fmt.wrapError", "*errors.errorString"}
 	if !slices.Equal(line.Chain, want) {
 		t.Errorf("error_chain: got %v, want %v", line.Chain, want)
-	}
-	if !slices.Equal(line.Codes, []string{"M_UNKNOWN"}) {
-		t.Errorf("error_codes: %v", line.Codes)
 	}
 }
 

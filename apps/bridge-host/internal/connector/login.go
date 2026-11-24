@@ -323,14 +323,16 @@ func (s *loginSession) advance(step *bridgev2.LoginStep, err error) {
 		if !s.finish() {
 			return
 		}
-		// Only what the error is made of is logged, never its text: a connector's error text can
-		// quote what the person typed. The person sees a code.
-		s.c.describeLoginError(log.Warn(), err).Msg("Login failed")
 		code := protocol.ErrLoginFailed
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = protocol.ErrTimeout
 		}
-		if emitErr := s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code}); emitErr != nil {
+		// The person is told first, so looking into the error for the log can't hold that up.
+		emitErr := s.end(&protocol.LoginStep{StepID: randomStepID(), Type: protocol.StepError, Error: code})
+		// Only what the error is made of is logged, never its text: a connector's error text can
+		// quote what the person typed. The person sees a code.
+		s.c.describeLoginError(log.Warn(), err).Msg("Login failed")
+		if emitErr != nil {
 			log.Err(emitErr).Msg("Failed to report login error")
 		}
 		return
