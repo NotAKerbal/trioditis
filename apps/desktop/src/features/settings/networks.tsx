@@ -110,9 +110,9 @@ export function Networks() {
       .join(' · ')
     return (
       <div key={entry.network} className="px-4 py-3">
-        <div className="flex min-h-9 items-center gap-3">
+        <div className="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-2">
           <NetworkBadge network={entry.network} label={entry.name} size={26} />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-[1_1_10rem]">
             <div className="font-semibold">{entry.name}</div>
             {status ? (
               <div

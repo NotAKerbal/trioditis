@@ -25,6 +25,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useAction, useMutation } from 'convex/react'
 import {
   Activity,
+  ArrowLeft,
   Bell,
   Bot,
   Contact,
@@ -89,12 +90,41 @@ const isAdminSection = (s: (typeof SETTINGS_SECTIONS)[number]) => 'admin' in s
 export function SettingsDialog({
   section,
   connect,
+  startAtList,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
   /** Opened to connect a network: Accounts shows the networks at once. */
   connect: boolean
+  /** Opened as settings in general (the gear): a phone shows the list of sections first. */
+  startAtList: boolean
   onSectionChange: (s: SettingsSection | undefined) => void
+}) {
+  return (
+    <Dialog open={!!section} onOpenChange={(open) => !open && onSectionChange(undefined)}>
+      {/* A phone has no room for the list beside a section, nor around a window: it takes the
+          whole screen and shows the list or the section. */}
+      <DialogContent
+        className="flex h-[620px] w-[min(900px,calc(100vw-32px))] max-md:top-0 max-md:left-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none"
+        aria-describedby={undefined}
+      >
+        <Panel section={section} connect={connect} startAtList={startAtList} onSectionChange={onSectionChange} />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** What the open dialog shows. It's mounted afresh each time the dialog opens. */
+function Panel({
+  section,
+  connect,
+  startAtList,
+  onSectionChange,
+}: {
+  section: SettingsSection | undefined
+  connect: boolean
+  startAtList: boolean
+  onSectionChange: (s: SettingsSection) => void
 }) {
   const session = useSession()
   const isAdmin = session.role === 'admin'
@@ -104,69 +134,108 @@ export function SettingsDialog({
   const sections = SETTINGS_SECTIONS.filter((s) => isAdminSection(s) === admin)
   const current = sections.find((s) => s.id === section) ?? sections[0]!
   const other = SETTINGS_SECTIONS.find((s) => isAdminSection(s) !== admin)!
+  // Whether a phone shows the list of sections rather than the open one. A wider window shows both.
+  const [listing, setListing] = useState(startAtList)
+  const currentItem = useRef<HTMLButtonElement>(null)
+  const back = useRef<HTMLButtonElement>(null)
+  /** Moves focus to what's now shown, when the control that had it went with what's now hidden. */
+  const follow = (to: RefObject<HTMLElement | null>) =>
+    requestAnimationFrame(() => {
+      const focused = document.activeElement
+      if (!(focused instanceof HTMLElement) || !focused.checkVisibility()) to.current?.focus()
+    })
   return (
-    <Dialog open={!!section} onOpenChange={(open) => !open && onSectionChange(undefined)}>
-      <DialogContent className="flex h-[620px] w-[min(900px,calc(100vw-32px))]" aria-describedby={undefined}>
-        <nav
-          className="flex w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px]"
-          aria-label="Settings sections"
-        >
-          <DialogTitle className="mx-2 mb-3.5 text-md">{admin ? 'Admin settings' : 'Settings'}</DialogTitle>
-          {sections.map((s) => (
-            <Button
-              variant="bare"
-              key={s.id}
-              type="button"
-              aria-current={s.id === current.id ? 'page' : undefined}
+    <>
+      <nav
+        className={cn(
+          'w-[220px] shrink-0 flex-col gap-0.5 border-r border-border bg-rail px-2.5 py-[18px] max-md:w-full max-md:overflow-y-auto max-md:border-r-0 md:flex',
+          listing ? 'flex' : 'hidden',
+        )}
+        aria-label="Settings sections"
+      >
+        <DialogTitle className="mx-2 mb-3.5 text-md">{admin ? 'Admin settings' : 'Settings'}</DialogTitle>
+        {sections.map((s) => (
+          <Button
+            variant="bare"
+            key={s.id}
+            ref={s.id === current.id ? currentItem : undefined}
+            type="button"
+            aria-current={s.id === current.id ? 'page' : undefined}
+            onClick={() => {
+              setListing(false)
+              follow(back)
               // Choosing the open section again changes nothing, so a list it opened stays as it is.
-              onClick={() => s.id !== current.id && onSectionChange(s.id)}
-              className={cn(
-                'flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4',
-                s.id === current.id &&
-                  'bg-surface font-semibold text-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)]',
-              )}
-            >
-              {s.icon}
-              {s.name}
-            </Button>
-          ))}
-          {isAdmin ? (
-            <Button
-              variant="bare"
-              type="button"
-              onClick={() => onSectionChange(other.id)}
-              className="mt-auto flex h-[34px] items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground [&_svg]:size-4"
-            >
-              {admin ? <SettingsIcon /> : <ShieldCheck />}
-              {admin ? 'Your settings' : 'Admin settings'}
-            </Button>
-          ) : null}
-        </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7">
-          {current.id === 'appearance' ? (
-            <Appearance />
-          ) : current.id === 'notifications' ? (
-            <Notifications />
-          ) : current.id === 'accounts' ? (
-            <Accounts connect={connect} />
-          ) : current.id === 'agents' ? (
-            <Agents />
-          ) : current.id === 'networks' ? (
-            <Networks />
-          ) : current.id === 'members' ? (
-            <Members />
-          ) : current.id === 'contacts' ? (
-            <Contacts />
-          ) : current.id === 'updates' ? (
-            <Updates />
-          ) : current.id === 'health' ? (
-            <ServerHealth />
-          ) : (
-            <Keys />
-          )}
+              if (s.id !== current.id) onSectionChange(s.id)
+            }}
+            className={cn(
+              'flex h-[34px] shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 [&_svg]:size-4',
+              s.id === current.id &&
+                'bg-surface font-semibold text-foreground shadow-[0_0_0_1px_var(--border),var(--elevation-sm)] max-md:bg-transparent max-md:font-medium max-md:shadow-none',
+            )}
+          >
+            {s.icon}
+            {s.name}
+          </Button>
+        ))}
+        {isAdmin ? (
+          <Button
+            variant="bare"
+            type="button"
+            onClick={() => onSectionChange(other.id)}
+            className="mt-auto flex h-[34px] shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium text-muted-foreground hover:bg-rail-hover hover:text-foreground max-md:h-11 [&_svg]:size-4"
+          >
+            {admin ? <SettingsIcon /> : <ShieldCheck />}
+            {admin ? 'Your settings' : 'Admin settings'}
+          </Button>
+        ) : null}
+      </nav>
+      <div
+        className={cn(
+          'relative min-w-0 flex-1 overflow-y-auto px-7 pt-14 pb-7 max-md:px-4',
+          listing && 'max-md:hidden',
+        )}
+      >
+        {/* On a phone the list isn't beside the section, so the section names itself. */}
+        <div className="absolute top-4 right-14 left-2 flex items-center gap-1 md:hidden">
+          <Button
+            ref={back}
+            variant="ghost"
+            size="icon"
+            aria-label={admin ? 'Admin settings' : 'Settings'}
+            onClick={() => {
+              setListing(true)
+              follow(currentItem)
+            }}
+          >
+            <ArrowLeft className="size-[18px]" />
+          </Button>
+          <span className="truncate font-semibold" aria-hidden>
+            {current.name}
+          </span>
         </div>
-      </DialogContent>
-    </Dialog>
+        {current.id === 'appearance' ? (
+          <Appearance />
+        ) : current.id === 'notifications' ? (
+          <Notifications />
+        ) : current.id === 'accounts' ? (
+          <Accounts connect={connect} />
+        ) : current.id === 'agents' ? (
+          <Agents />
+        ) : current.id === 'networks' ? (
+          <Networks />
+        ) : current.id === 'members' ? (
+          <Members />
+        ) : current.id === 'contacts' ? (
+          <Contacts />
+        ) : current.id === 'updates' ? (
+          <Updates />
+        ) : current.id === 'health' ? (
+          <ServerHealth />
+        ) : (
+          <Keys />
+        )}
+      </div>
+    </>
   )
 }
 
@@ -636,8 +705,8 @@ function Passkeys({ backups }: { backups: PasskeyBackup[] | undefined }) {
   const row = (credentialId: string, title: string, detail: string, registeredHere: boolean) => {
     const unlocks = backupOf.has(credentialId)
     return (
-      <div key={credentialId} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
-        <div className="min-w-0 flex-1">
+      <div key={credentialId} className="flex min-h-[60px] flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+        <div className="min-w-0 flex-[1_1_10rem]">
           <div className="truncate font-semibold">{title}</div>
           <div className="text-sm text-muted-foreground">
             {detail}

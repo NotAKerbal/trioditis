@@ -106,8 +106,8 @@ function PersonRow({ person }: { person: Person }) {
 
   return (
     <div className="px-4 py-3">
-      <div className="flex min-h-9 items-center gap-3">
-        <div className="min-w-0 flex-1">
+      <div className="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="min-w-0 flex-[1_1_10rem]">
           <div className="truncate font-semibold">
             {person.name ?? person.email ?? 'Unknown account'}
             {person.you ? <span className="font-normal text-muted-foreground"> (you)</span> : null}
@@ -225,8 +225,8 @@ function Cleanup() {
   return (
     <Group title="Disconnecting removed people">
       {left.map((row) => (
-        <div key={row.userId} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
-          <div className="min-w-0 flex-1">
+        <div key={row.userId} className="flex min-h-[60px] flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+          <div className="min-w-0 flex-[1_1_10rem]">
             <div className="truncate font-semibold">{row.email ?? 'Removed account'}</div>
             <div className="text-sm text-muted-foreground">
               {row.failed
@@ -398,8 +398,8 @@ function Invitations({ closed, demo }: { closed: boolean; demo: boolean }) {
         </div>
       ) : null}
       {invitations.results.map((inv) => (
-        <div key={inv._id} className="flex min-h-[60px] items-center gap-3 px-4 py-3">
-          <div className="min-w-0 flex-1">
+        <div key={inv._id} className="flex min-h-[60px] flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+          <div className="min-w-0 flex-[1_1_10rem]">
             <div className="truncate font-semibold">{inv.email}</div>
             <div className="text-sm text-muted-foreground">
               {inv.role === 'admin' ? 'Admin' : 'Member'} · {inv.expiresAt < Date.now() ? 'Expired' : 'Waiting'}
