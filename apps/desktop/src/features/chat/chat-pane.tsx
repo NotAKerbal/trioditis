@@ -1,5 +1,5 @@
 import type { Id } from '@trioditis/backend/dataModel'
-import { NETWORK_INFO } from '@trioditis/core'
+import { NETWORK_INFO, type Attachment } from '@trioditis/core'
 import { Button } from '@trioditis/ui/button'
 import {
   DropdownMenu,
@@ -488,62 +488,65 @@ function OpenChat({
     const ids = outgoing.map((f) => f.id)
     if (outgoing.some((f) => f.sending)) return
     setSending(to, ids, true)
-    // The text, when there is any, is taken as a send of its own would be, under a send ID of
-    // its own with the first file: the same draft sent as text alone, from another tab, is a
-    // different message, so neither is taken for the other. A reply alone is taken too, so it
-    // goes with the first file and nothing else. Should the page go between the server taking
-    // that send and this tab hearing so, the text comes back as a draft without its file (files
-    // are only ever in memory), and sending it then sends the text again: the person sees the
-    // file and its caption in the chat first.
-    const taken = takeForSend<Message>(to, (t) => sendIdOfTaken({ ...t, text: `${t.text}\n${fileKey(outgoing[0]!)}` }))
+    // The text, when there is any, is taken as a send of its own would be, under the same send
+    // ID: sent again from another tab, or after a reload brought it back without its file
+    // (files are only ever in memory), it's the same send to the server, so it never goes twice.
+    // A reply alone is taken too, so it goes with the first file and nothing else.
+    const taken = takeForSend<Message>(to, sendIdOfTaken)
     const reply = taken ? taken.reply : getDraft<Message>(to).reply
     if (!taken && reply) setDraftReply(to, null)
+    const keepLeft = () =>
+      setSending(
+        to,
+        ids.filter((id) => filesOf(to).some((left) => left.id === id)),
+        false,
+      )
     let first = true
     await whileSending(async () => {
       for (const f of outgoing) {
-        const caption = first ? taken?.text : undefined
-        const clientMessageId = first && taken ? taken.clientMessageId : newClientId()
-        const replyTo = first ? replyIn(reply, to) : undefined
-        let outcome: Awaited<ReturnType<typeof send>>
-        try {
-          const attachment = await uploadFile(session.userId, to, f.file)
-          // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
-          const message: MessagePlaintext = {
-            type: messageTypeOf(attachment.mime),
-            body: caption || attachment.name || 'File',
-            attachments: [attachment],
+        let caption = first ? taken?.text : undefined
+        let clientMessageId = first && taken ? taken.clientMessageId : newClientId()
+        let replyTo = first ? replyIn(reply, to) : undefined
+        let attachment: Attachment | undefined
+        for (;;) {
+          let outcome: Awaited<ReturnType<typeof send>>
+          try {
+            attachment ??= await uploadFile(session.userId, to, f.file)
+            // With no caption the body is the file's name, as bridgev2 expects; it isn't shown twice.
+            const message: MessagePlaintext = {
+              type: messageTypeOf(attachment.mime),
+              body: caption || attachment.name || 'File',
+              attachments: [attachment],
+            }
+            const sealed = sealMessage(
+              message,
+              clientMessageId,
+              session.userId,
+              session.keyPair.publicKey,
+              bridgePublicKey,
+            )
+            outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
+          } catch (e) {
+            // Refused (a mutation that fails never ran), or never sent: nothing of it went.
+            if (first && taken) {
+              restoreDraft(to, taken.text, taken.reply, taken.id)
+              endSend(taken.clientMessageId, false)
+            } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
+            keepLeft()
+            toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
+            return
           }
-          const sealed = sealMessage(
-            message,
-            clientMessageId,
-            session.userId,
-            session.keyPair.publicKey,
-            bridgePublicKey,
-          )
-          outcome = await send({ chatId: to, clientMessageId, ...sealed, ...(replyTo ? { replyTo } : {}) })
-        } catch (e) {
-          if (first && taken) {
-            restoreDraft(to, taken.text, taken.reply, taken.id)
-            endSend(taken.clientMessageId, false)
-          } else if (first && reply && !getDraft<Message>(to).reply) setDraftReply(to, reply)
-          setSending(
-            to,
-            ids.filter((id) => filesOf(to).some((left) => left.id === id)),
-            false,
-          )
-          toast(errorMessage(e, `${f.file.name || 'A file'} couldn’t be sent.`))
-          return
-        }
-        const used = outcome === 'queued' ? null : outcome
-        if (first && taken) settle(to, taken, used)
-        // Its send ID was used already, by a send that never went: the file stays to send again.
-        if (used && usedOutcome(used).action === 'again') {
-          setSending(
-            to,
-            ids.filter((id) => filesOf(to).some((left) => left.id === id)),
-            false,
-          )
-          return
+          const used = outcome === 'queued' ? null : outcome
+          if (first && taken) settle(to, taken, used)
+          if (!used) break
+          // The send ID was used already, by a send that never went: the text is back in the
+          // composer (settle), and the files stay to send again.
+          if (usedOutcome(used).action === 'again') return keepLeft()
+          // The text went, or may have, from another tab or before a reload: this tab's send
+          // with it never ran, so the file goes by itself, as a message of its own.
+          caption = undefined
+          replyTo = undefined
+          clientMessageId = newClientId()
         }
         removeFile(to, f.id)
         first = false
@@ -1066,9 +1069,3 @@ const replyIn = (reply: Message | null, chatId: ChatId) =>
 
 const sendIdOfTaken = (t: { id: string; text: string; reply: Message | null }) =>
   draftSendId(t.id, t.text, t.reply?.eventId)
-
-/**
- * What tells a file apart for a draft's send ID: its place in this composer, made at random when
- * it was added, so two files alike in name, size and date are still two sends.
- */
-const fileKey = (file: OutgoingFile) => `\u0000file\n${file.id}`

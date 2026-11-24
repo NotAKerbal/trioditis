@@ -440,7 +440,9 @@ func (c *Connector) reserveMedia(ctx context.Context, uri id.ContentURIString) e
 	pending.lock.Lock()
 	pending.stopWait = nil
 	if pending.released {
-		// Given up on while it waited: nothing is left to give it back later.
+		// Given up on while it waited: nothing is left to give it back later. Its file is
+		// never read, so it never went.
+		pending.refusedLate = true
 		pending.lock.Unlock()
 		giveBack()
 		return errTransmitDeadline
