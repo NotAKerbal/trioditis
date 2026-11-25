@@ -208,8 +208,15 @@ export function MessageList(props: MessageListProps) {
     const row = scroller.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
     const bubble = row?.firstElementChild
     if (!row || !(bubble instanceof HTMLElement)) return
+    // The person chose where to look: an earlier page still on its way mustn't put the view back
+    // where it was, and a render before the first scroll event mustn't pin it to the bottom.
+    before.current = null
+    atBottom.current = false
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
     row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
+    // Focus goes with the view, so the next Tab carries on from the original, not the reply.
+    bubble.tabIndex = -1
+    bubble.focus({ preventScroll: true })
     const ring = getComputedStyle(bubble).getPropertyValue('--accent-ring').trim()
     bubble.animate(
       [
@@ -395,9 +402,16 @@ export function MessageList(props: MessageListProps) {
                   >
                     {quoted || m.replyTo ? (
                       <ReplyQuote
-                        self={m.self}
+                        // A deleted message of the person's own has no coloured bubble behind it.
+                        self={m.self && !m.deleted}
                         author={quoted ? authorOf(quoted) : undefined}
-                        text={(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
+                        text={
+                          !quoted
+                            ? 'An earlier message'
+                            : quoted.deleted
+                              ? 'Message deleted'
+                              : (quoted.body && summarize(quoted.body)) || 'A message that can’t be shown here'
+                        }
                         onOpen={quoted ? () => showMessage(quoted) : undefined}
                       />
                     ) : null}
@@ -683,12 +697,14 @@ function ReplyQuote(props: {
           )}
         </span>
       </span>
-      <span className="line-clamp-2 text-sm opacity-85">{props.text}</span>
+      <span className="line-clamp-2 text-sm">{props.text}</span>
     </>
   )
+  // On the person's own bubble the tint darkens it in light and lightens it in dark, away from its
+  // text, so the quote keeps the bubble's contrast.
   const look = cn(
     '-mx-1 mt-px mb-1.5 flex max-w-[calc(100%+0.5rem)] flex-col gap-0.5 rounded-[10px] border-l-[3px] py-1 pr-2.5 pl-2 text-left whitespace-normal',
-    props.self ? 'border-primary-foreground/70 bg-primary-foreground/15' : 'border-primary bg-foreground/[0.06]',
+    props.self ? 'border-primary-foreground/70 bg-foreground/15' : 'border-primary bg-foreground/[0.06]',
   )
   return props.onOpen ? (
     <Button
@@ -699,7 +715,7 @@ function ReplyQuote(props: {
       className={cn(
         look,
         'cursor-pointer transition-colors',
-        props.self ? 'hover:bg-primary-foreground/25' : 'hover:bg-foreground/10',
+        props.self ? 'hover:bg-foreground/25' : 'hover:bg-foreground/10',
       )}
     >
       {content}
