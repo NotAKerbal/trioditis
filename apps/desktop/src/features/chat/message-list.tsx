@@ -62,6 +62,8 @@ interface MessageListProps {
   onOpenSender?: ((ghostId: string, name: string, opener: HTMLElement) => void) | undefined
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
+  /** Outside a group, the other person's name: who a reply to one of their messages quotes. */
+  peerName?: string | undefined
   scheduled: ScheduledItem[]
   cancelled: CancelledItem[]
   typing: number
@@ -110,6 +112,9 @@ export function MessageList(props: MessageListProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
+  // While a reply's jump to the message it quotes is scrolling: whether it ends at the bottom.
+  // Its first steps can still be near the bottom, and the list mustn't pin there meanwhile.
+  const jump = useRef<{ bottom: boolean } | null>(null)
   // Far enough up that getting back to the newest message takes a button.
   const [away, setAway] = useState(false)
   // Whether this chat opened with nothing to show yet. The list is remade for each chat.
@@ -179,7 +184,7 @@ export function MessageList(props: MessageListProps) {
     const el = scroller.current
     if (!el) return
     const onScroll = () => {
-      atBottom.current = fromBottom(el) < 40
+      atBottom.current = jump.current ? jump.current.bottom : fromBottom(el) < 40
       setAway(fromBottom(el) > 300)
     }
     el.addEventListener('scroll', onScroll)
@@ -196,6 +201,53 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
+  const authorOf = (m: Message) => {
+    if (m.self) return 'You'
+    const profile = m.ghostId ? props.senders.get(m.ghostId) : undefined
+    return profile?.name || profile?.handle || props.peerName
+  }
+  // Brings the message a reply quotes into view and outlines it a moment, so the eye finds it.
+  const showMessage = (target: Message) => {
+    const el = scroller.current
+    const row = el?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
+    const bubble = row?.querySelector('[data-bubble]')
+    if (!el || !row || !(bubble instanceof HTMLElement)) return
+    // The person chose where to look: an earlier page still on its way mustn't put the view back
+    // where it was. Where the row will be centred decides, before the first scroll event, whether
+    // the list still follows new messages: a render meanwhile mustn't pull it back to the bottom,
+    // and a jump that doesn't move it from there mustn't stop it following.
+    before.current = null
+    const box = el.getBoundingClientRect()
+    const at = row.getBoundingClientRect()
+    const most = el.scrollHeight - el.clientHeight
+    const landing = Math.min(most, Math.max(0, el.scrollTop + at.top + at.height / 2 - (box.top + el.clientHeight / 2)))
+    const going = { bottom: most - landing < 40 }
+    jump.current = going
+    atBottom.current = going.bottom
+    // Once it's there (or the person scrolled over it), where the list is decides again. Not
+    // every browser says when a scroll ends, and a jump that doesn't move says nothing: a timer too.
+    const arrived = () => {
+      if (jump.current !== going) return
+      jump.current = null
+      atBottom.current = fromBottom(el) < 40
+      setAway(fromBottom(el) > 300)
+    }
+    el.addEventListener('scrollend', arrived, { once: true })
+    setTimeout(arrived, 1500)
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches
+    row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
+    // Focus goes with the view, so the next Tab carries on from the original, not the reply.
+    bubble.tabIndex = -1
+    bubble.focus({ preventScroll: true })
+    const ring = getComputedStyle(bubble).getPropertyValue('--accent-ring').trim()
+    bubble.animate(
+      [
+        { outline: `3px solid ${ring}`, outlineOffset: '2px' },
+        { outline: '3px solid transparent', outlineOffset: '2px' },
+      ],
+      { duration: 1800, easing: 'ease-in', delay: still ? 0 : 250 },
+    )
+  }
   // Held back until what goes with them has come too (useSettled), so they show at once.
   const shownMessages = props.loading ? [] : messages
   const shownScheduled = props.loading ? [] : scheduled
@@ -209,8 +261,9 @@ export function MessageList(props: MessageListProps) {
         ref={scroller}
         // Pictures load as they come near this scroller's view (attachments.tsx).
         data-scroll-root
+        // Its own stacking context, so a reply bubble raised over its quote stays under Jump to latest.
         className={cn(
-          'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
+          'isolate min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
           // Messages that had to be fetched ease in; a chat shown from the cache is just there.
           openedLoading && !props.loading && 'animate-fade-in motion-reduce:animate-none',
         )}
@@ -245,6 +298,23 @@ export function MessageList(props: MessageListProps) {
           const via = props.networkOf && (!prev || props.networkOf(prev) !== network) ? network : undefined
           const canReact = typeof props.canReact === 'function' ? props.canReact(m) : props.canReact
           const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
+          const reply =
+            quoted || m.replyTo
+              ? {
+                  end: m.self,
+                  // A deleted message has no filled bubble to tuck the quote behind.
+                  tucked: !m.deleted,
+                  author: quoted ? authorOf(quoted) : undefined,
+                  text: !quoted
+                    ? 'An earlier message'
+                    : quoted.deleted
+                      ? 'Message deleted'
+                      : quoted.body
+                        ? summarize(quoted.body) || 'A message'
+                        : 'A message that can’t be shown here',
+                  onOpen: quoted ? () => showMessage(quoted) : undefined,
+                }
+              : null
           const files = (!m.deleted && m.body?.attachments) || []
           const text = m.body ? captionOf(m.body) : ''
           const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
@@ -355,7 +425,9 @@ export function MessageList(props: MessageListProps) {
                     m.self ? 'ml-auto items-end' : 'items-start',
                   )}
                 >
+                  {reply ? <ReplyQuote {...reply} /> : null}
                   <div
+                    data-bubble
                     title={fullTime(m.at)}
                     className={cn(
                       'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
@@ -368,13 +440,10 @@ export function MessageList(props: MessageListProps) {
                       big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
                       bare && 'bg-transparent p-0 shadow-none',
                       m.deleting && 'opacity-60',
+                      // Over the foot of the quote it answers.
+                      reply && !m.deleted && 'z-[1]',
                     )}
                   >
-                    {quoted || m.replyTo ? (
-                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-90">
-                        {(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
-                      </span>
-                    ) : null}
                     {m.deleted ? (
                       'Message deleted'
                     ) : m.body ? (
@@ -624,6 +693,66 @@ function CancelledRow({
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * The message a reply answers, above its bubble: who wrote it, then how it begins in a faded
+ * bubble of its own, its foot tucked behind the reply. When that message is loaded the whole
+ * quote is a button that goes to it.
+ */
+function ReplyQuote(props: {
+  end: boolean
+  tucked: boolean
+  author: string | undefined
+  text: string
+  onOpen?: (() => void) | undefined
+}) {
+  const content = (
+    <>
+      <span className="flex min-w-0 items-center gap-1 px-3 text-xs font-medium text-subtle-foreground">
+        <Reply aria-hidden className="size-3 shrink-0" />
+        <span className="truncate">
+          {props.author ? (
+            <>
+              <span className="sr-only">Reply to </span>
+              {props.author}
+            </>
+          ) : (
+            'Reply'
+          )}
+        </span>
+      </span>
+      <span
+        className={cn(
+          'max-w-full rounded-[18px] bg-surface px-3 pt-[6px] text-sm leading-[1.35] text-muted-foreground shadow-[0_0_0_1px_var(--border)] transition-colors',
+          props.tucked ? '-mb-3.5 pb-5' : 'mb-1 pb-[6px]',
+          props.onOpen && 'group-hover/quote:text-foreground',
+        )}
+      >
+        {/* Clamped inside the padding, so a third line can't show in it. */}
+        <span className="line-clamp-2 [overflow-wrap:anywhere]">{props.text}</span>
+      </span>
+    </>
+  )
+  const look = cn(
+    'group/quote flex max-w-full flex-col gap-0.5 text-left whitespace-normal',
+    props.end ? 'items-end' : 'items-start',
+  )
+  return props.onOpen ? (
+    <Button
+      variant="bare"
+      type="button"
+      title="Go to message"
+      onClick={props.onOpen}
+      // The reply covers the foot of the focus ring, as it does the quote; the rest of it shows, and
+      // raising the quote instead would cover the reply's first line.
+      className={cn(look, 'rounded-[14px]')}
+    >
+      {content}
+    </Button>
+  ) : (
+    <span className={look}>{content}</span>
   )
 }
 
