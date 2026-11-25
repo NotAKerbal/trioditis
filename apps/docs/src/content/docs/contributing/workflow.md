@@ -101,6 +101,14 @@ git push origin v0.1.0
 
 Pushing a `v<version>` tag triggers `.github/workflows/desktop-release.yml`, building native installers on macOS (Apple Silicon and Intel, ad-hoc signed), Windows (`x64`), and Linux (`AppImage` and `.deb`) and publishing them with SHA-256 checksums to GitHub Releases. Pre-release tags (such as `v0.2.0-beta.1`) publish as GitHub prereleases without moving the `releases/latest` download links. Note that `electron-builder.yml` packages only the Electron shell and server picker—the web app comes directly from your Trioditis server.
 
+## The websites
+
+[trioditis.app](https://trioditis.app) (`apps/site`) and [docs.trioditis.app](https://docs.trioditis.app) (`apps/docs`) are two Vercel projects in `notakerbals-projects`, `trioditis-site` and `trioditis-docs`. Each has its folder as its **Root Directory** and `dev` as its production branch, so a merge to `dev` publishes it. Nothing else deploys from Git: each folder's `vercel.json` turns off deployments from every other branch (`git.deploymentEnabled`), and Vercel builds a preview only when someone asks for one.
+
+Each `vercel.json` also sets the **Ignored Build Step**, `scripts/vercel-ignore.mjs`, which skips a commit when git shows that nothing the site is built from changed since its last successful deployment: the site's own folder, `.vercelignore` and `.gitattributes`, plus the install's files for the docs. Keep its lists in step with anything a site starts reading from outside its folder. Vercel fails a deployment whose step exits with anything but 0 (skip) or 1 (build), so the script builds whenever it can't tell, and the command around it turns any other way Node can end into a build too. That includes the usual case after a run of skipped commits: Vercel clones only the last few commits, and the last deployed one has fallen out of the clone.
+
+The step's command lives only in `vercel.json`; leave the project's own **Ignored Build Step** setting empty, so the two can't disagree. A site whose folder is missing from a commit fails that deployment outright ("The specified Root Directory does not exist"), which is why the docs project's first three Git deployments, made before `apps/docs` reached `dev`, failed. Move or rename a site's folder only with its project's **Root Directory** in the same change.
+
 ## Repository layout
 
 ```

@@ -10,10 +10,11 @@ python3 -m http.server --directory apps/site
 ```
 
 It deploys as its own Vercel project, `trioditis-site` in `notakerbals-projects`, with **Root
-Directory** set to `apps/site`; `vercel.json`
-here holds its headers, and skips a deploy only when git shows nothing in this folder changed
-since the last one. It isn't part of
-the web app's deployment (the root `vercel.json`).
+Directory** set to `apps/site` and production branch `dev`. `vercel.json` here holds its headers,
+deploys only `dev` from Git, and skips a commit only when git shows nothing in this folder changed
+since the last deploy (`scripts/vercel-ignore.mjs site`). See
+[The websites](../docs/src/content/docs/contributing/workflow.md#the-websites). It isn't part of the
+web app's deployment (the root `vercel.json`).
 
 The download page (`download/`, served at `/download`) links to the latest release's installers by
 file name; `download.js` puts a button for the visitor's own system at the top.
