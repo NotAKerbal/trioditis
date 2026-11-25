@@ -60,7 +60,8 @@ export function Shell() {
   const firstRun = useFirstRun()
   const [firstLogin, setFirstLogin] = useState<Login | null>(null)
   // The guide's control that opened Settings, for focus to come back to when it closes. Once
-  // installing a network has replaced it, the guide's first control stands in for it.
+  // installing a network has replaced it, the guide's first control stands in for it; once the
+  // first account has connected and the guide has gone, the Settings button, which always stays.
   const guideOpener = useRef<HTMLElement | null>(null)
   const fromGuide = () => {
     guideOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -70,10 +71,9 @@ export function Shell() {
     guideOpener.current = null
     if (!opener) return null
     if (opener.isConnected && opener.checkVisibility()) return opener
-    return (
-      [...document.querySelectorAll<HTMLElement>('[data-first-network] button')].find((b) => b.checkVisibility()) ??
-      null
-    )
+    const visible = (selector: string) =>
+      [...document.querySelectorAll<HTMLElement>(selector)].find((el) => el.checkVisibility()) ?? null
+    return visible('[data-first-network] button') ?? visible('[data-settings-button]')
   }
   const firstNetwork = firstRun ? (
     <FirstNetwork
