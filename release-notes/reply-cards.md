@@ -1,1 +1,1 @@
-Improved: A reply shows who it answers in a card at the top of its bubble. Click the card to go to the original message, which is outlined for a moment.
+Improved: A reply shows the message it answers just above its bubble, with who wrote it. Click it to go to the original message, which is outlined for a moment.

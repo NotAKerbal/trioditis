@@ -210,7 +210,7 @@ export function MessageList(props: MessageListProps) {
   const showMessage = (target: Message) => {
     const el = scroller.current
     const row = el?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
-    const bubble = row?.firstElementChild
+    const bubble = row?.querySelector('[data-bubble]')
     if (!el || !row || !(bubble instanceof HTMLElement)) return
     // The person chose where to look: an earlier page still on its way mustn't put the view back
     // where it was. Where the row will be centred decides, before the first scroll event, whether
@@ -297,6 +297,23 @@ export function MessageList(props: MessageListProps) {
           const via = props.networkOf && (!prev || props.networkOf(prev) !== network) ? network : undefined
           const canReact = typeof props.canReact === 'function' ? props.canReact(m) : props.canReact
           const quoted = m.replyTo ? byEvent.get(m.replyTo) : undefined
+          const reply =
+            quoted || m.replyTo
+              ? {
+                  end: m.self,
+                  // A deleted message has no filled bubble to tuck the quote behind.
+                  tucked: !m.deleted,
+                  author: quoted ? authorOf(quoted) : undefined,
+                  text: !quoted
+                    ? 'An earlier message'
+                    : quoted.deleted
+                      ? 'Message deleted'
+                      : quoted.body
+                        ? summarize(quoted.body) || 'A message'
+                        : 'A message that can’t be shown here',
+                  onOpen: quoted ? () => showMessage(quoted) : undefined,
+                }
+              : null
           const files = (!m.deleted && m.body?.attachments) || []
           const text = m.body ? captionOf(m.body) : ''
           const big = !m.deleted && !quoted && !m.replyTo && !files.length && isBigEmoji(text)
@@ -407,7 +424,9 @@ export function MessageList(props: MessageListProps) {
                     m.self ? 'ml-auto items-end' : 'items-start',
                   )}
                 >
+                  {reply ? <ReplyQuote {...reply} /> : null}
                   <div
+                    data-bubble
                     title={fullTime(m.at)}
                     className={cn(
                       'relative rounded-[18px] px-3 py-[7px] leading-[1.42] whitespace-pre-wrap [overflow-wrap:anywhere]',
@@ -420,25 +439,10 @@ export function MessageList(props: MessageListProps) {
                       big && 'bg-transparent px-1 text-[2.5rem] leading-tight text-foreground shadow-none',
                       bare && 'bg-transparent p-0 shadow-none',
                       m.deleting && 'opacity-60',
+                      // Over the foot of the quote it answers.
+                      reply && !m.deleted && 'z-[1]',
                     )}
                   >
-                    {quoted || m.replyTo ? (
-                      <ReplyQuote
-                        // A deleted message of the person's own has no coloured bubble behind it.
-                        self={m.self && !m.deleted}
-                        author={quoted ? authorOf(quoted) : undefined}
-                        text={
-                          !quoted
-                            ? 'An earlier message'
-                            : quoted.deleted
-                              ? 'Message deleted'
-                              : quoted.body
-                                ? summarize(quoted.body) || 'A message'
-                                : 'A message that can’t be shown here'
-                        }
-                        onOpen={quoted ? () => showMessage(quoted) : undefined}
-                      />
-                    ) : null}
                     {m.deleted ? (
                       'Message deleted'
                     ) : m.body ? (
@@ -692,23 +696,20 @@ function CancelledRow({
 }
 
 /**
- * The message a reply answers, at the top of its bubble: who wrote it and how it begins. When
- * that message is loaded the whole card is a button that goes to it.
+ * The message a reply answers, above its bubble: who wrote it, then how it begins in a faded
+ * bubble of its own, its foot tucked behind the reply. When that message is loaded the whole
+ * quote is a button that goes to it.
  */
 function ReplyQuote(props: {
-  self: boolean
+  end: boolean
+  tucked: boolean
   author: string | undefined
   text: string
   onOpen?: (() => void) | undefined
 }) {
   const content = (
     <>
-      <span
-        className={cn(
-          'flex min-w-0 items-center gap-1 text-xs font-semibold',
-          props.self ? 'text-primary-foreground' : 'text-primary-ink',
-        )}
-      >
+      <span className="flex min-w-0 items-center gap-1 px-3 text-xs font-medium text-subtle-foreground">
         <Reply aria-hidden className="size-3 shrink-0" />
         <span className="truncate">
           {props.author ? (
@@ -721,27 +722,24 @@ function ReplyQuote(props: {
           )}
         </span>
       </span>
-      <span className="line-clamp-2 text-sm">{props.text}</span>
+      <span
+        className={cn(
+          'max-w-full rounded-[18px] bg-surface px-3 pt-[6px] text-sm leading-[1.35] text-muted-foreground shadow-[0_0_0_1px_var(--border)] transition-colors',
+          props.tucked ? '-mb-3.5 pb-5' : 'mb-1 pb-[6px]',
+          props.onOpen && 'group-hover/quote:text-foreground',
+        )}
+      >
+        {/* Clamped inside the padding, so a third line can't show in it. */}
+        <span className="line-clamp-2">{props.text}</span>
+      </span>
     </>
   )
-  // On the person's own bubble the tint darkens it in light and lightens it in dark, away from its
-  // text, so the quote keeps the bubble's contrast.
   const look = cn(
-    '-mx-1 mt-px mb-1.5 flex max-w-[calc(100%+0.5rem)] flex-col gap-0.5 rounded-[10px] border-l-[3px] py-1 pr-2.5 pl-2 text-left whitespace-normal',
-    props.self ? 'border-primary-foreground/70 bg-foreground/15' : 'border-primary bg-foreground/[0.06]',
+    'group/quote flex max-w-full flex-col gap-0.5 text-left whitespace-normal',
+    props.end ? 'items-end' : 'items-start',
   )
   return props.onOpen ? (
-    <Button
-      variant="bare"
-      type="button"
-      title="Go to message"
-      onClick={props.onOpen}
-      className={cn(
-        look,
-        'cursor-pointer transition-colors',
-        props.self ? 'hover:bg-foreground/25' : 'hover:bg-foreground/10',
-      )}
-    >
+    <Button variant="bare" type="button" title="Go to message" onClick={props.onOpen} className={look}>
       {content}
     </Button>
   ) : (
