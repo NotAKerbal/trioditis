@@ -261,8 +261,9 @@ export function MessageList(props: MessageListProps) {
         ref={scroller}
         // Pictures load as they come near this scroller's view (attachments.tsx).
         data-scroll-root
+        // Its own stacking context, so a reply bubble raised over its quote stays under Jump to latest.
         className={cn(
-          'min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
+          'isolate min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-3',
           // Messages that had to be fetched ease in; a chat shown from the cache is just there.
           openedLoading && !props.loading && 'animate-fade-in motion-reduce:animate-none',
         )}
@@ -730,7 +731,7 @@ function ReplyQuote(props: {
         )}
       >
         {/* Clamped inside the padding, so a third line can't show in it. */}
-        <span className="line-clamp-2">{props.text}</span>
+        <span className="line-clamp-2 [overflow-wrap:anywhere]">{props.text}</span>
       </span>
     </>
   )
@@ -739,7 +740,15 @@ function ReplyQuote(props: {
     props.end ? 'items-end' : 'items-start',
   )
   return props.onOpen ? (
-    <Button variant="bare" type="button" title="Go to message" onClick={props.onOpen} className={look}>
+    <Button
+      variant="bare"
+      type="button"
+      title="Go to message"
+      onClick={props.onOpen}
+      // The reply covers the foot of the focus ring, as it does the quote; the rest of it shows, and
+      // raising the quote instead would cover the reply's first line.
+      className={cn(look, 'rounded-[14px]')}
+    >
       {content}
     </Button>
   ) : (
