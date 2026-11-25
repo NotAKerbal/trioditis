@@ -112,6 +112,9 @@ export function MessageList(props: MessageListProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const top = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
+  // While a reply's jump to the message it quotes is scrolling: whether it ends at the bottom.
+  // Its first steps can still be near the bottom, and the list mustn't pin there meanwhile.
+  const jump = useRef<{ bottom: boolean } | null>(null)
   // Far enough up that getting back to the newest message takes a button.
   const [away, setAway] = useState(false)
   // Whether this chat opened with nothing to show yet. The list is remade for each chat.
@@ -181,7 +184,7 @@ export function MessageList(props: MessageListProps) {
     const el = scroller.current
     if (!el) return
     const onScroll = () => {
-      atBottom.current = fromBottom(el) < 40
+      atBottom.current = jump.current ? jump.current.bottom : fromBottom(el) < 40
       setAway(fromBottom(el) > 300)
     }
     el.addEventListener('scroll', onScroll)
@@ -218,7 +221,19 @@ export function MessageList(props: MessageListProps) {
     const at = row.getBoundingClientRect()
     const most = el.scrollHeight - el.clientHeight
     const landing = Math.min(most, Math.max(0, el.scrollTop + at.top + at.height / 2 - (box.top + el.clientHeight / 2)))
-    atBottom.current = most - landing < 40
+    const going = { bottom: most - landing < 40 }
+    jump.current = going
+    atBottom.current = going.bottom
+    // Once it's there (or the person scrolled over it), where the list is decides again. Not
+    // every browser says when a scroll ends, and a jump that doesn't move says nothing: a timer too.
+    const arrived = () => {
+      if (jump.current !== going) return
+      jump.current = null
+      atBottom.current = fromBottom(el) < 40
+      setAway(fromBottom(el) > 300)
+    }
+    el.addEventListener('scrollend', arrived, { once: true })
+    setTimeout(arrived, 1500)
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
     row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
     // Focus goes with the view, so the next Tab carries on from the original, not the reply.
