@@ -205,13 +205,20 @@ export function MessageList(props: MessageListProps) {
   }
   // Brings the message a reply quotes into view and outlines it a moment, so the eye finds it.
   const showMessage = (target: Message) => {
-    const row = scroller.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
+    const el = scroller.current
+    const row = el?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
     const bubble = row?.firstElementChild
-    if (!row || !(bubble instanceof HTMLElement)) return
+    if (!el || !row || !(bubble instanceof HTMLElement)) return
     // The person chose where to look: an earlier page still on its way mustn't put the view back
-    // where it was, and a render before the first scroll event mustn't pin it to the bottom.
+    // where it was. Where the row will be centred decides, before the first scroll event, whether
+    // the list still follows new messages: a render meanwhile mustn't pull it back to the bottom,
+    // and a jump that doesn't move it from there mustn't stop it following.
     before.current = null
-    atBottom.current = false
+    const box = el.getBoundingClientRect()
+    const at = row.getBoundingClientRect()
+    const most = el.scrollHeight - el.clientHeight
+    const landing = Math.min(most, Math.max(0, el.scrollTop + at.top + at.height / 2 - (box.top + el.clientHeight / 2)))
+    atBottom.current = most - landing < 40
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
     row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
     // Focus goes with the view, so the next Tab carries on from the original, not the reply.
@@ -410,7 +417,9 @@ export function MessageList(props: MessageListProps) {
                             ? 'An earlier message'
                             : quoted.deleted
                               ? 'Message deleted'
-                              : (quoted.body && summarize(quoted.body)) || 'A message that can’t be shown here'
+                              : quoted.body
+                                ? summarize(quoted.body) || 'A message'
+                                : 'A message that can’t be shown here'
                         }
                         onOpen={quoted ? () => showMessage(quoted) : undefined}
                       />
