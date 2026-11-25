@@ -62,6 +62,8 @@ interface MessageListProps {
   onOpenSender?: ((ghostId: string, name: string, opener: HTMLElement) => void) | undefined
   /** Senders' opened profiles, by ghost ID (contacts.ts). */
   senders: Map<string, ContactPlaintext>
+  /** Outside a group, the other person's name: who a reply to one of their messages quotes. */
+  peerName?: string | undefined
   scheduled: ScheduledItem[]
   cancelled: CancelledItem[]
   typing: number
@@ -196,6 +198,27 @@ export function MessageList(props: MessageListProps) {
   }, [])
 
   const byEvent = new Map(messages.map((m) => [m.eventId, m]))
+  const authorOf = (m: Message) => {
+    if (m.self) return 'You'
+    const profile = m.ghostId ? props.senders.get(m.ghostId) : undefined
+    return profile?.name || profile?.handle || props.peerName
+  }
+  // Brings the message a reply quotes into view and outlines it a moment, so the eye finds it.
+  const showMessage = (target: Message) => {
+    const row = scroller.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(target.id)}"]`)
+    const bubble = row?.firstElementChild
+    if (!row || !(bubble instanceof HTMLElement)) return
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches
+    row.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
+    const ring = getComputedStyle(bubble).getPropertyValue('--accent-ring').trim()
+    bubble.animate(
+      [
+        { outline: `3px solid ${ring}`, outlineOffset: '2px' },
+        { outline: '3px solid transparent', outlineOffset: '2px' },
+      ],
+      { duration: 1800, easing: 'ease-in', delay: still ? 0 : 250 },
+    )
+  }
   // Held back until what goes with them has come too (useSettled), so they show at once.
   const shownMessages = props.loading ? [] : messages
   const shownScheduled = props.loading ? [] : scheduled
@@ -371,9 +394,12 @@ export function MessageList(props: MessageListProps) {
                     )}
                   >
                     {quoted || m.replyTo ? (
-                      <span className="mb-1 block border-l-[3px] border-current pl-2 text-sm opacity-90">
-                        {(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
-                      </span>
+                      <ReplyQuote
+                        self={m.self}
+                        author={quoted ? authorOf(quoted) : undefined}
+                        text={(quoted?.body && summarize(quoted.body)) || 'An earlier message'}
+                        onOpen={quoted ? () => showMessage(quoted) : undefined}
+                      />
                     ) : null}
                     {m.deleted ? (
                       'Message deleted'
@@ -624,6 +650,62 @@ function CancelledRow({
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * The message a reply answers, at the top of its bubble: who wrote it and how it begins. When
+ * that message is loaded the whole card is a button that goes to it.
+ */
+function ReplyQuote(props: {
+  self: boolean
+  author: string | undefined
+  text: string
+  onOpen?: (() => void) | undefined
+}) {
+  const content = (
+    <>
+      <span
+        className={cn(
+          'flex min-w-0 items-center gap-1 text-xs font-semibold',
+          props.self ? 'text-primary-foreground' : 'text-primary-ink',
+        )}
+      >
+        <Reply aria-hidden className="size-3 shrink-0" />
+        <span className="truncate">
+          {props.author ? (
+            <>
+              <span className="sr-only">Reply to </span>
+              {props.author}
+            </>
+          ) : (
+            'Reply'
+          )}
+        </span>
+      </span>
+      <span className="line-clamp-2 text-sm opacity-85">{props.text}</span>
+    </>
+  )
+  const look = cn(
+    '-mx-1 mt-px mb-1.5 flex max-w-[calc(100%+0.5rem)] flex-col gap-0.5 rounded-[10px] border-l-[3px] py-1 pr-2.5 pl-2 text-left whitespace-normal',
+    props.self ? 'border-primary-foreground/70 bg-primary-foreground/15' : 'border-primary bg-foreground/[0.06]',
+  )
+  return props.onOpen ? (
+    <Button
+      variant="bare"
+      type="button"
+      title="Go to message"
+      onClick={props.onOpen}
+      className={cn(
+        look,
+        'cursor-pointer transition-colors',
+        props.self ? 'hover:bg-primary-foreground/25' : 'hover:bg-foreground/10',
+      )}
+    >
+      {content}
+    </Button>
+  ) : (
+    <span className={look}>{content}</span>
   )
 }
 

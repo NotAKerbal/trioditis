@@ -737,6 +737,7 @@ function OpenChat({
           group={group}
           canReact={(m) => NETWORK_INFO[networkOfChat.get(m.chatId) ?? chat.network]?.reactions === true}
           senders={senders}
+          peerName={group ? undefined : name}
           onOpenSender={(ghostId, sender, from) => {
             opener.current = from
             setPanel({ kind: 'person', contact: { network: chat.network, ghostId }, name: sender })
