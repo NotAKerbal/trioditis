@@ -773,7 +773,11 @@ var startTargets = map[string]struct{ contact, phone, username bool }{
 	"slack":     {contact: true},
 	"linkedin":  {contact: true},
 	"twitter":   {username: true},
-	"testnet":   {contact: true, phone: true, username: true},
+	// A username on iMessage is an Apple ID's email address. The connector takes a number or
+	// an address as it is, without asking the Mac (Messages makes the chat when its first
+	// message goes); the chat's key is the address, as every iMessage direct chat's is.
+	"imessage": {contact: true, phone: true, username: true},
+	"testnet":  {contact: true, phone: true, username: true},
 }
 
 // A phone number is 7 to 15 digits once its formatting is taken off (E.164 allows at most 15).
@@ -851,11 +855,13 @@ func normalPhone(raw string) string {
 var usernamePatterns = map[string]*regexp.Regexp{
 	"signal":  regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{2,31}\.[0-9]{2,9}$`),
 	"twitter": regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`),
-	"testnet": regexp.MustCompile(`^[a-z][a-z0-9-]*$`),
+	// An email address, as an Apple ID is one.
+	"imessage": regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`),
+	"testnet":  regexp.MustCompile(`^[a-z][a-z0-9-]*$`),
 }
 
 // internationalOnly are the networks that take a phone number only with its country code.
-var internationalOnly = map[string]bool{"signal": true}
+var internationalOnly = map[string]bool{"signal": true, "imessage": true}
 
 // countryCodeFirst are the networks that read a number without + as international anyway
 // (mautrix-whatsapp prefixes the digits with +). A number starting with 0 there is written the

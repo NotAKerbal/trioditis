@@ -163,7 +163,7 @@ export function normalPhone(raw: string): string | null {
 }
 
 /** Networks whose connectors find someone by number only with its country code. Mirrors the bridge host's internationalOnly. */
-export const PHONE_NEEDS_COUNTRY_CODE: readonly Network[] = ['signal']
+export const PHONE_NEEDS_COUNTRY_CODE: readonly Network[] = ['signal', 'imessage']
 
 /** Networks that read a number without `+` as international. Mirrors the bridge host's countryCodeFirst. */
 export const PHONE_COUNTRY_CODE_FIRST: readonly Network[] = ['whatsapp']

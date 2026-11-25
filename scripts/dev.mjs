@@ -72,6 +72,7 @@ const NETWORKS = [
   'linkedin',
   'twitter',
   'bluesky',
+  'imessage',
 ]
 
 const args = process.argv.slice(2)

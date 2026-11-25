@@ -314,6 +314,9 @@ h3 {
 .bluesky {
   --net: #1185fe;
 }
+.imessage {
+  --net: #34da50;
+}
 
 @media (prefers-color-scheme: dark) {
   /* Slack's and X's marks are too dark to see on the dark page. */

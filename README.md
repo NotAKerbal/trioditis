@@ -9,9 +9,9 @@ _"Of the three roads": a crossroads for all of your conversations._
 
 Trioditis is an open-source, self-hosted universal messaging hub: one fast, cohesive app for
 WhatsApp, Signal, Google Messages, Google Voice, Telegram, Messenger, Instagram, Slack, GroupMe,
-LinkedIn, X, and Bluesky, running on a server you own. Host an instance for yourself or your
-household and invite the people you message with—stored messages, attachments, chat names, and
-contacts are sealed to each person's own keys.
+LinkedIn, X, Bluesky, and iMessage (through a Mac), running on a server you own. Host an
+instance for yourself or your household and invite the people you message with—stored
+messages, attachments, chat names, and contacts are sealed to each person's own keys.
 
 **[trioditis.app](https://trioditis.app)** · **[Documentation](https://docs.trioditis.app)**
 
@@ -78,7 +78,7 @@ pnpm docs:dev
 
 - **[Getting Started](https://docs.trioditis.app/getting-started/introduction/)** — Overview, principles, and quickstart
 - **[Self-Hosting](https://docs.trioditis.app/self-hosting/installation/)** — Installation modes, Proxmox, auto-updates, backups & restore
-- **[Networks](https://docs.trioditis.app/networks/)** — Per-network guides, implementation status, and known limits for all 12 networks
+- **[Networks](https://docs.trioditis.app/networks/)** — Per-network guides, implementation status, and known limits for all 13 networks
 - **[Security & Sealed Storage](https://docs.trioditis.app/security/overview/)** — Threat model and Sealing v1 cryptographic spec
 - **[Architecture](https://docs.trioditis.app/architecture/overview/)** — System overview, Bridge Protocol v1, Client API, Sign-in Browser, Bridge Host internals
 - **[Contributing & Brand](https://docs.trioditis.app/contributing/local-development/)** — Local dev, checks, Brand Guide, and Roadmap

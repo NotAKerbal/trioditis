@@ -80,4 +80,4 @@ Trioditis is built in clear phases, each gated by explicit acceptance criteria r
 - **On-device search at scale:** Measuring SQLite FTS5 index size and query latency across multi-year message histories on phones.
 - **Bridge host topology:** Evaluating one process per network (current) vs. one per user per network for stronger tenant isolation.
 - **Discord:** Tracking or contributing to upstream's `bridgev2` migration.
-- **Later features:** Cross-network contact merging, scheduled message expansion, and optional macOS iMessage companion.
+- **Later features:** Cross-network contact merging and scheduled message expansion.

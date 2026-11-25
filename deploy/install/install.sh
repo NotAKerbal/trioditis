@@ -43,7 +43,7 @@ Options (each one is kept for later reruns):
                        The networks this server runs a bridge host for, which admins can then
                        install in the app (Settings → Admin → Networks). Comma-separated:
                        whatsapp, signal, gmessages, gvoice, telegram, meta, instagram, slack,
-                       groupme, linkedin, twitter, bluesky; or all (the default; Telegram
+                       groupme, linkedin, twitter, bluesky, imessage; or all (the default; Telegram
                        only with its API ID and hash). Fewer suit a small machine
   --trusted-proxies <ranges>
                        With --public-url: the addresses Caddy takes X-Forwarded-* headers
@@ -329,7 +329,7 @@ if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$por
 fi
 port=$((10#$port))
 
-supported_networks=(whatsapp signal gmessages gvoice telegram meta instagram slack groupme linkedin twitter bluesky)
+supported_networks=(whatsapp signal gmessages gvoice telegram meta instagram slack groupme linkedin twitter bluesky imessage)
 if [ "$networks" = all ]; then
   network_list=("${supported_networks[@]}")
 else

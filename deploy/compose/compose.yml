@@ -327,6 +327,22 @@ services:
     volumes:
       - bridge-bluesky:/data
 
+  # iMessage reaches each person's own Mac, running BlueBubbles Server, at the address they
+  # give when they connect. Public addresses only, unless the operator lists the private
+  # ranges Macs may be on, such as a home network or a tailnet (docs/networks/imessage.md).
+  bridge-imessage:
+    <<: *bridge-host
+    profiles: [imessage]
+    environment:
+      <<: *bridge-env
+      IMESSAGE_MAC_NETWORKS: ${IMESSAGE_MAC_NETWORKS:-}
+      BRIDGE_EGRESS_DENY: ${BRIDGE_EGRESS_DENY:-}
+      BRIDGE_NETWORK: imessage
+      BRIDGE_HOST_ID: imessage-1
+      BRIDGE_DATABASE_URI: postgres://trioditis:${POSTGRES_PASSWORD}@postgres:5432/bridge_imessage?sslmode=disable
+    volumes:
+      - bridge-imessage:/data
+
   # The sign-in browser: a Chromium for each login that signs in on a network's website. It
   # holds no secret but its own token and is only on the signin network, which has no way out
   # but the bridge hosts' egress proxies; the bridge hosts refuse it everything else.
@@ -417,5 +433,6 @@ volumes:
   bridge-linkedin:
   bridge-twitter:
   bridge-bluesky:
+  bridge-imessage:
   caddy-data:
   caddy-config:

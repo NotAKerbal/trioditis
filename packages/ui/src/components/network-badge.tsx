@@ -3,7 +3,8 @@ import type * as React from 'react'
 import { cn } from '../lib/utils.ts'
 
 // Each network's mark, white on its colour. The marks are Simple Icons' (simpleicons.org,
-// CC0-1.0; Slack's and LinkedIn's from its 9.x releases, before they were withdrawn). Google
+// CC0-1.0; Slack's and LinkedIn's from its 9.x releases, before they were withdrawn, and
+// iMessage's from 13.21). Google
 // Voice has none there, so its mark is a speech bubble with a handset, from Material Design
 // Icons' `message` and `phone` (pictogrammers.com, Apache-2.0). The names and marks are their
 // owners' trademarks, shown only to say which network a chat is on.
@@ -33,6 +34,8 @@ const MARKS: Record<string, string> = {
     'M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z',
   bluesky:
     'M5.202 2.857C7.954 4.922 10.913 9.11 12 11.358c1.087-2.247 4.046-6.436 6.798-8.501C20.783 1.366 24 .213 24 3.883c0 .732-.42 6.156-.667 7.037-.856 3.061-3.978 3.842-6.755 3.37 4.854.826 6.089 3.562 3.422 6.299-5.065 5.196-7.28-1.304-7.847-2.97-.104-.305-.152-.448-.153-.327 0-.121-.05.022-.153.327-.568 1.666-2.782 8.166-7.847 2.97-2.667-2.737-1.432-5.473 3.422-6.3-2.777.473-5.899-.308-6.755-3.369C.42 10.04 0 4.615 0 3.883c0-3.67 3.217-2.517 5.202-1.026',
+  imessage:
+    'M5.285 0A5.273 5.273 0 0 0 0 5.285v13.43A5.273 5.273 0 0 0 5.285 24h13.43A5.273 5.273 0 0 0 24 18.715V5.285A5.273 5.273 0 0 0 18.715 0ZM12 4.154a8.809 7.337 0 0 1 8.809 7.338A8.809 7.337 0 0 1 12 18.828a8.809 7.337 0 0 1-2.492-.303A8.656 7.337 0 0 1 5.93 19.93a9.929 7.337 0 0 0 1.54-2.155 8.809 7.337 0 0 1-4.279-6.283A8.809 7.337 0 0 1 12 4.154',
 }
 
 const GVOICE_BUBBLE = 'M20,2H4A2,2 0 0,0 2,4V22L6,18H20A2,2 0 0,0 22,16V4C22,2.89 21.1,2 20,2Z'
@@ -54,6 +57,7 @@ const TILE: Record<string, string> = {
   linkedin: 'bg-net-linkedin',
   twitter: 'bg-net-twitter',
   bluesky: 'bg-net-bluesky',
+  imessage: 'bg-net-imessage',
   agents: 'bg-net-agents',
 }
 

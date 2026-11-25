@@ -113,7 +113,7 @@ The step's command lives only in `vercel.json`; leave the project's own **Ignore
 
 ```
 apps/
-  bridge-host/    Go: bridgev2 MatrixConnector, 12 connectors, sealing, journal, login-browser
+  bridge-host/    Go: bridgev2 MatrixConnector, 13 connectors, sealing, journal, login-browser
   desktop/        Web & Electron desktop app (Vite + TanStack Router/Query)
   docs/           Astro Starlight documentation site (all project docs live in src/content/docs/)
   gateway/        Node: bridge host ↔ Convex pipeline & sign-in browser proxy

@@ -225,17 +225,17 @@ install || true
 # Every network gets a bridge host by default, but Telegram only with its credentials: all
 # leaves it out, with a note, rather than stopping. What's bridged is what the backend may
 # offer (TRIODITIS_NETWORKS) and the profiles Compose runs.
-all_but_telegram=whatsapp,signal,gmessages,gvoice,meta,instagram,slack,groupme,linkedin,twitter,bluesky
+all_but_telegram=whatsapp,signal,gmessages,gvoice,meta,instagram,slack,groupme,linkedin,twitter,bluesky,imessage
 checkout
 install || true
 [ "$(value INSTALL_NETWORKS)" = all ] && [ "$(value TRIODITIS_NETWORKS)" = "$all_but_telegram" ] &&
   [ "$(value COMPOSE_PROFILES)" = "$all_but_telegram" ] && grep -q "Leaving Telegram out" "$work/out" &&
   check ok "by default every network but Telegram (without its credentials) is bridged" ||
   { check fail "by default every network but Telegram (without its credentials) is bridged"; grep -E '^(INSTALL_NETWORKS|TRIODITIS_NETWORKS)=' "$work/checkout/deploy/.env" >&2; }
-[ "$(value BRIDGE_HOSTS | tr ',' '\n' | wc -l)" = 11 ] && value BRIDGE_HOSTS | tr ',' '\n' | grep -qx 'bluesky-1=http://bridge-bluesky:8611' &&
+[ "$(value BRIDGE_HOSTS | tr ',' '\n' | wc -l)" = 12 ] && value BRIDGE_HOSTS | tr ',' '\n' | grep -qx 'bluesky-1=http://bridge-bluesky:8611' &&
   check ok "each with its bridge host" || check fail "each with its bridge host ($(value BRIDGE_HOSTS))"
 install --telegram-api-id 1234567 --telegram-api-hash 0123456789abcdef0123456789abcdef || true
-[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal,gmessages,gvoice,telegram,meta,instagram,slack,groupme,linkedin,twitter,bluesky ] &&
+[ "$(value TRIODITIS_NETWORKS)" = whatsapp,signal,gmessages,gvoice,telegram,meta,instagram,slack,groupme,linkedin,twitter,bluesky,imessage ] &&
   ! grep -q "Leaving Telegram out" "$work/out" && check ok "and Telegram too once its credentials are given" ||
   check fail "and Telegram too once its credentials are given ($(value TRIODITIS_NETWORKS))"
 
