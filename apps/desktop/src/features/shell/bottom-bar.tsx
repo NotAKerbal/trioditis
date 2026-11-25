@@ -150,7 +150,13 @@ export function BottomBar({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings('appearance', 'list')}>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Settings"
+        data-settings-button
+        onClick={() => openSettings('appearance', 'list')}
+      >
         <Settings className="size-[18px]" />
       </Button>
     </>

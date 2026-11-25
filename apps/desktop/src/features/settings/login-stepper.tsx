@@ -118,6 +118,10 @@ export function LoginStepper({
       },
     )
   }
+  // The control that opened the stepper has gone with the list it was in, so focus goes to the
+  // stepper's title, where a keyboard or screen reader carries on.
+  const title = useRef<HTMLHeadingElement>(null)
+  useEffect(() => title.current?.focus({ preventScroll: true }), [])
   // Start once when the stepper opens (StrictMode runs effects twice in development).
   useEffect(() => {
     if (started.current) return
@@ -233,7 +237,7 @@ export function LoginStepper({
           <ArrowLeft className="size-[18px]" />
         </Button>
         <NetworkBadge network={network} label={networkName(network)} size={26} />
-        <h2 className="text-lg font-bold">
+        <h2 ref={title} tabIndex={-1} className="text-lg font-bold outline-none">
           {reconnect ? `Reconnect ${reconnect}` : `Connect ${networkName(network)}`}
         </h2>
       </div>

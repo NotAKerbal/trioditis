@@ -9,10 +9,12 @@ import { isShownNow } from '~/features/chat/read-while-open.tsx'
 import { WarmChats, WarmPeople } from '~/features/chat/warm-chats.tsx'
 import { NewChatDialog } from '~/features/people/new-chat-dialog.tsx'
 import { PeopleDialog, type PeopleView } from '~/features/people/people-dialog.tsx'
+import type { Login } from '~/features/settings/connect-list.tsx'
 import { SettingsDialog, type SettingsSection } from '~/features/settings/settings-dialog.tsx'
 import { authClient } from '~/lib/auth-client.ts'
 import { useSession } from '~/lib/session.tsx'
 import { BottomBar } from './bottom-bar.tsx'
+import { FirstNetwork, useFirstRun } from './first-network.tsx'
 import { useKeepUnsent } from './keep-unsent.ts'
 import { useMessageNotifications } from './notifications.ts'
 import { Sidebar, SidebarFrame, type SidebarAction } from './sidebar.tsx'
@@ -53,6 +55,39 @@ export function Shell() {
       }),
     })
   const openPeople = (people: PeopleView | undefined) => void navigate({ search: (s) => ({ ...s, people }) })
+  // Someone with no account yet is shown the networks to connect (first-network.tsx). The one they
+  // choose waits here until Accounts has started its login.
+  const firstRun = useFirstRun()
+  const [firstLogin, setFirstLogin] = useState<Login | null>(null)
+  // The guide's control that opened Settings, for focus to come back to when it closes. Once
+  // installing a network has replaced it, the guide's first control stands in for it; once the
+  // first account has connected and the guide has gone, the Settings button, which always stays.
+  const guideOpener = useRef<HTMLElement | null>(null)
+  const fromGuide = () => {
+    guideOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  const backToGuide = () => {
+    const opener = guideOpener.current
+    guideOpener.current = null
+    if (!opener) return null
+    if (opener.isConnected && opener.checkVisibility()) return opener
+    const visible = (selector: string) =>
+      [...document.querySelectorAll<HTMLElement>(selector)].find((el) => el.checkVisibility()) ?? null
+    return visible('[data-first-network] button') ?? visible('[data-settings-button]')
+  }
+  const firstNetwork = firstRun ? (
+    <FirstNetwork
+      onChoose={(login) => {
+        fromGuide()
+        setFirstLogin(login)
+        openSettings('accounts', 'connect')
+      }}
+      onInstall={() => {
+        fromGuide()
+        openSettings('networks')
+      }}
+    />
+  ) : null
   const [newChat, setNewChat] = useState(false)
   // A chat just started opens at once, though its row may not be in the list yet.
   // From a profile's Message or Open too: its pane then sends on that chat (conversations.ts).
@@ -178,23 +213,34 @@ export function Shell() {
               shownRef={shownRef}
               contextRef={sidebarContext}
               chatsRef={chatsById}
+              firstNetwork={firstNetwork}
             />
           )}
         </RetryBoundary>
       </SidebarFrame>
-      <ChatPane
-        chatId={selectedId as ChatId | undefined}
-        chatIds={openIds as ChatId[]}
-        onGone={() => select(undefined)}
-        onBack={() => select(undefined)}
-        act={act}
-        onOpenPerson={(personKey) => openPeople(`p:${personKey}`)}
-        onOpenChat={openStarted}
-      />
+      {firstNetwork && !selectedId ? (
+        // Where "No chat open" would be; a phone shows the list instead, and the guide in it.
+        <main className="flex min-w-0 flex-1 overflow-y-auto bg-surface px-6 py-10 max-md:hidden">
+          <div className="m-auto w-full">{firstNetwork}</div>
+        </main>
+      ) : (
+        <ChatPane
+          chatId={selectedId as ChatId | undefined}
+          chatIds={openIds as ChatId[]}
+          onGone={() => select(undefined)}
+          onBack={() => select(undefined)}
+          act={act}
+          onOpenPerson={(personKey) => openPeople(`p:${personKey}`)}
+          onOpenChat={openStarted}
+        />
+      )}
       <SettingsDialog
         section={search.settings}
         connect={!!search.connect}
         list={!!search.list}
+        start={firstLogin}
+        onStarted={() => setFirstLogin(null)}
+        returnFocus={backToGuide}
         onSectionChange={openSettings}
       />
       <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />

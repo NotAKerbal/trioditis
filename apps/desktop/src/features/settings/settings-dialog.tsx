@@ -56,6 +56,7 @@ import { proveKey } from '~/lib/proof.ts'
 import { useSession } from '~/lib/session.tsx'
 import { Accounts } from './accounts-section.tsx'
 import { Agents } from './agents-section.tsx'
+import type { Login } from './connect-list.tsx'
 import { Contacts } from './contacts-section.tsx'
 import { Group, Heading, Setting } from './layout.tsx'
 import { ServerHealth } from './health-section.tsx'
@@ -89,6 +90,9 @@ export function SettingsDialog({
   section,
   connect,
   list,
+  start,
+  onStarted,
+  returnFocus,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
@@ -96,6 +100,14 @@ export function SettingsDialog({
   connect: boolean
   /** A phone shows the list of sections rather than the section. A wider window shows both. */
   list: boolean
+  /** A login chosen in the first-run guide, for Accounts to start; `onStarted` once it has. */
+  start: Login | null
+  onStarted: () => void
+  /**
+   * Where focus goes when the dialog closes, if somewhere. Opened from the URL, the dialog has no
+   * trigger of its own to give it back to.
+   */
+  returnFocus?: () => HTMLElement | null
   onSectionChange: (s: SettingsSection | undefined, how?: 'list') => void
 }) {
   return (
@@ -105,8 +117,21 @@ export function SettingsDialog({
       <DialogContent
         className="flex h-[620px] w-[min(900px,calc(100vw-32px))] max-md:top-0 max-md:left-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none"
         aria-describedby={undefined}
+        onCloseAutoFocus={(e) => {
+          const to = returnFocus?.()
+          if (!to) return
+          e.preventDefault()
+          to.focus()
+        }}
       >
-        <Panel section={section} connect={connect} list={list} onSectionChange={onSectionChange} />
+        <Panel
+          section={section}
+          connect={connect}
+          list={list}
+          start={start}
+          onStarted={onStarted}
+          onSectionChange={onSectionChange}
+        />
       </DialogContent>
     </Dialog>
   )
@@ -117,11 +142,15 @@ function Panel({
   section,
   connect,
   list,
+  start,
+  onStarted,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
   connect: boolean
   list: boolean
+  start: Login | null
+  onStarted: () => void
   onSectionChange: (s: SettingsSection, how?: 'list') => void
 }) {
   const session = useSession()
@@ -233,7 +262,15 @@ function Panel({
         ) : current.id === 'notifications' ? (
           <Notifications />
         ) : current.id === 'accounts' ? (
-          <Accounts connect={connect} />
+          <Accounts
+            connect={connect}
+            start={start}
+            onStarted={onStarted}
+            onInstall={() => {
+              onSectionChange('networks')
+              follow(back)
+            }}
+          />
         ) : current.id === 'agents' ? (
           <Agents />
         ) : current.id === 'networks' ? (
