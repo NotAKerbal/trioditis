@@ -68,11 +68,13 @@ type Network struct {
 	delay         atomic.Int64
 	counter       atomic.Int64
 	reactions     atomic.Int64
+	brokenPics    atomic.Bool
 	maxReactions  atomic.Int32
 
-	lock    sync.Mutex
-	sent    []Sent
-	history map[networkid.PortalID][]HistoryMessage
+	lock     sync.Mutex
+	sent     []Sent
+	history  map[networkid.PortalID][]HistoryMessage
+	pictures map[networkid.UserID][]byte
 }
 
 var (
@@ -80,7 +82,7 @@ var (
 )
 
 func New() *Network {
-	return &Network{history: make(map[networkid.PortalID][]HistoryMessage)}
+	return &Network{history: make(map[networkid.PortalID][]HistoryMessage), pictures: make(map[networkid.UserID][]byte)}
 }
 
 func (n *Network) SetSendMode(mode SendMode) { n.mode.Store(int32(mode)) }
@@ -254,15 +256,46 @@ func (n *Network) SetPicture(ctx context.Context, userID networkid.UserID, data 
 	if err != nil {
 		return err
 	}
-	avatar := &bridgev2.Avatar{ID: "", Remove: true}
+	n.lock.Lock()
 	if data != nil {
-		avatar = &bridgev2.Avatar{
-			ID:  networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
-			Get: func(context.Context) ([]byte, error) { return data, nil },
-		}
+		n.pictures[userID] = data
+	} else {
+		delete(n.pictures, userID)
+	}
+	n.lock.Unlock()
+	avatar := n.pictureAvatar(data)
+	if avatar == nil {
+		avatar = &bridgev2.Avatar{ID: "", Remove: true}
 	}
 	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{Avatar: avatar})
 	return nil
+}
+
+// KnowPicture makes the network say a user has a picture when asked (GetUserInfo), without
+// telling bridgev2: as a network does after a restart.
+func (n *Network) KnowPicture(userID networkid.UserID, data []byte) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	n.pictures[userID] = data
+}
+
+// BreakPictures makes downloading a picture fail, as a network's media server can, or work again.
+func (n *Network) BreakPictures(broken bool) { n.brokenPics.Store(broken) }
+
+// pictureAvatar is a picture as the network gives it to bridgev2, or nil for none.
+func (n *Network) pictureAvatar(data []byte) *bridgev2.Avatar {
+	if data == nil {
+		return nil
+	}
+	return &bridgev2.Avatar{
+		ID: networkid.AvatarID(fmt.Sprintf("pic-%x", sha256.Sum256(data))),
+		Get: func(context.Context) ([]byte, error) {
+			if n.brokenPics.Load() {
+				return nil, errors.New("testnet: the picture couldn't be downloaded")
+			}
+			return data, nil
+		},
+	}
 }
 
 // DisplayName is the name the test connector gives a user: their ID with a capital letter, so
@@ -277,7 +310,11 @@ func DisplayName(userID networkid.UserID) string {
 
 func (c *Client) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	name := DisplayName(ghost.ID)
-	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"testnet:" + string(ghost.ID)}}, nil
+	c.n.lock.Lock()
+	picture := c.n.pictures[ghost.ID]
+	c.n.lock.Unlock()
+	// A user's picture (SetPicture) comes with them, as from a real network.
+	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{"testnet:" + string(ghost.ID)}, Avatar: c.n.pictureAvatar(picture)}, nil
 }
 
 func (c *Client) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {

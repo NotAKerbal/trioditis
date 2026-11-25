@@ -145,6 +145,18 @@ var upgrades = dbutil.BuildUpgradeTable().
 			`CREATE TABLE trioditis_collage (room_id TEXT PRIMARY KEY, ghosts TEXT NOT NULL)`,
 		})
 	}).
+	WithRaw(10, 11, 0, "Kept avatar copies", dbutil.TxnModeOn, func(ctx context.Context, db *dbutil.Database) error {
+		// The bridge host's own copy of each avatar, so a person who meets a contact long after
+		// the contact's picture was uploaded still gets it (media.Store.Keep). Its reference is
+		// sealed to the bridge key, like a kept avatar reference.
+		// And which contacts each person was sent with which avatar (ghost Matrix IDs, as
+		// trioditis_member keeps them): a person's copy of an avatar is one per content URI,
+		// but a person's aliases on a network (WhatsApp's phone number and LID) share one.
+		return execAll(ctx, db, []string{
+			`CREATE TABLE trioditis_avatar_kept (avatar_uri TEXT PRIMARY KEY, sealed TEXT NOT NULL)`,
+			`CREATE TABLE trioditis_avatar_sent (owner_user_id TEXT NOT NULL, mxid TEXT NOT NULL, avatar_uri TEXT NOT NULL, PRIMARY KEY (owner_user_id, mxid, avatar_uri))`,
+		})
+	}).
 	Finish()
 
 // InflightMessage names a message by its login and network message ID, as bridgev2 keeps it.
@@ -893,8 +905,74 @@ func (s *Store) PutAvatarRef(ctx context.Context, ownerUserID, avatarURI string,
 
 // AvatarRef is the sealed reference PutAvatarRef kept, or ErrNotFound.
 func (s *Store) AvatarRef(ctx context.Context, ownerUserID, avatarURI string) (*seal.Envelope, error) {
+	return s.envelope(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI)
+}
+
+// AvatarRefOwners lists the people whose copy of an avatar has a kept reference.
+func (s *Store) AvatarRefOwners(ctx context.Context, avatarURI string) ([]string, error) {
+	return s.strings(ctx, `SELECT owner_user_id FROM trioditis_avatar_ref WHERE avatar_uri=$1`, avatarURI)
+}
+
+// PutKeptAvatar keeps the sealed reference to the bridge host's own copy of an avatar. The
+// first one stays, as with PutAvatarRef.
+func (s *Store) PutKeptAvatar(ctx context.Context, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_kept (avatar_uri, sealed) VALUES ($1, $2) ON CONFLICT (avatar_uri) DO NOTHING`,
+		avatarURI, string(payload))
+	return err
+}
+
+// ReplaceKeptAvatar keeps the sealed reference to the bridge host's own copy of an avatar in
+// place of one that can't be used.
+func (s *Store) ReplaceKeptAvatar(ctx context.Context, avatarURI string, sealed *seal.Envelope) error {
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_kept (avatar_uri, sealed) VALUES ($1, $2) ON CONFLICT (avatar_uri) DO UPDATE SET sealed=excluded.sealed`,
+		avatarURI, string(payload))
+	return err
+}
+
+// DeleteKeptAvatar forgets the bridge host's copy of an avatar, one that can't be used.
+func (s *Store) DeleteKeptAvatar(ctx context.Context, avatarURI string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)
+	return err
+}
+
+// KeptAvatar is the sealed reference PutKeptAvatar kept, or ErrNotFound.
+func (s *Store) KeptAvatar(ctx context.Context, avatarURI string) (*seal.Envelope, error) {
+	return s.envelope(ctx, `SELECT sealed FROM trioditis_avatar_kept WHERE avatar_uri=$1`, avatarURI)
+}
+
+// PutAvatarSent records that a person was sent a contact (mxid) with an avatar.
+func (s *Store) PutAvatarSent(ctx context.Context, ownerUserID, mxid, avatarURI string) error {
+	_, err := s.DB.Exec(ctx,
+		`INSERT INTO trioditis_avatar_sent (owner_user_id, mxid, avatar_uri) VALUES ($1, $2, $3) ON CONFLICT (owner_user_id, mxid, avatar_uri) DO NOTHING`,
+		ownerUserID, mxid, avatarURI)
+	return err
+}
+
+// AvatarSent reports whether a person was sent a contact (mxid) with an avatar.
+func (s *Store) AvatarSent(ctx context.Context, ownerUserID, mxid, avatarURI string) (bool, error) {
+	var n int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM trioditis_avatar_sent WHERE owner_user_id=$1 AND mxid=$2 AND avatar_uri=$3`, ownerUserID, mxid, avatarURI).Scan(&n)
+	return n > 0, err
+}
+
+// ContactRooms lists the rooms that record whose profiles each person has been sent.
+func (s *Store) ContactRooms(ctx context.Context) ([]string, error) {
+	return s.strings(ctx, `SELECT DISTINCT room_id FROM trioditis_member WHERE room_id LIKE 'contacts:%'`)
+}
+
+func (s *Store) envelope(ctx context.Context, query string, args ...any) (*seal.Envelope, error) {
 	var payload string
-	err := s.DB.QueryRow(ctx, `SELECT sealed FROM trioditis_avatar_ref WHERE owner_user_id=$1 AND avatar_uri=$2`, ownerUserID, avatarURI).Scan(&payload)
+	err := s.DB.QueryRow(ctx, query, args...).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {

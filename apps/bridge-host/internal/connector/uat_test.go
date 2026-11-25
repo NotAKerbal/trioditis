@@ -2,6 +2,9 @@ package connector
 
 import (
 	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -114,9 +117,11 @@ func TestAnAttachmentThatCantBeStoredIsKeptAsFailed(t *testing.T) {
 }
 
 // An avatar's upload expires in minutes; a metadata change after that still carries the
-// avatar, from the reference kept when it was first attached.
+// avatar: the person's own copy once they were sent it, and before that, a copy made from the
+// bridge host's.
 func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
-	store, err := media.New(t.TempDir())
+	dir := t.TempDir()
+	store, err := media.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,23 +133,27 @@ func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
 	c.Media, c.BridgeKey = store, bridgeKey
 	ctx := context.Background()
 	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
-	first := c.avatarFor(ctx, uri, "alice")
-	if first == nil || first.MediaID == "" {
+	first, known := c.avatarFor(ctx, uri, "alice")
+	if first == nil || first.MediaID == "" || known {
 		t.Fatal("the avatar wasn't attached while its upload lived")
 	}
-	// A host restart loses every upload: a new store with the same files on disk.
-	c.Media, err = media.New(t.TempDir())
+	// Recorded once the metadata carrying it was sent.
+	c.putAvatarRef(ctx, "alice", uri, first)
+	// A host restart loses every upload: a new store over the same files.
+	c.Media, err = media.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again := c.avatarFor(ctx, uri, "alice")
-	if again == nil || *again != *first {
+	again, known := c.avatarFor(ctx, uri, "alice")
+	if again == nil || *again != *first || !known {
 		t.Fatalf("the kept reference wasn't attached again: %+v, want %+v", again, first)
 	}
-	if other := c.avatarFor(ctx, uri, "bob"); other != nil {
-		t.Fatal("one person's avatar copy went to another")
+	// Someone new gets a copy of their own, made from the host's.
+	other, known := c.avatarFor(ctx, uri, "bob")
+	if other == nil || known || other.MediaID == first.MediaID || other.Key == first.Key {
+		t.Fatalf("bob's copy: %+v", other)
 	}
-	// The kept reference is sealed to the bridge key, never stored readable.
+	// The kept references are sealed to the bridge key, never stored readable.
 	kept, err := c.Store.AvatarRef(ctx, "alice", string(uri))
 	if err != nil {
 		t.Fatal(err)
@@ -153,8 +162,216 @@ func TestAnAvatarIsAttachedAgainAfterItsUploadIsGone(t *testing.T) {
 		t.Fatalf("the reference isn't a sealed envelope: %+v", kept)
 	}
 	c.BridgeKey, _ = seal.GenerateKeyPair()
-	if c.avatarFor(ctx, uri, "alice") != nil {
+	if att, _ := c.avatarFor(ctx, uri, "alice"); att != nil {
 		t.Fatal("a reference sealed to another key must not open")
+	}
+}
+
+// A kept copy whose file doesn't decrypt is forgotten, so the contact's picture is fetched again
+// rather than taken as one the host still has.
+func TestACorruptKeptAvatarIsForgotten(t *testing.T) {
+	dir := t.TempDir()
+	store, err := media.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConnector(t)
+	if c.BridgeKey, err = seal.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	c.Media = store
+	ctx := context.Background()
+	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
+	c.keepAvatar(ctx, uri)
+	if c.Media, err = media.New(dir); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("the kept copy wasn't kept: %v", err)
+	}
+	files, err := os.ReadDir(filepath.Join(dir, "kept"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("kept files: %v %v", files, err)
+	}
+	if err = os.Truncate(filepath.Join(dir, "kept", files[0].Name()), 3); err != nil {
+		t.Fatal(err)
+	}
+	if att, _ := c.avatarFor(ctx, uri, "bob"); att != nil {
+		t.Fatal("a corrupt kept copy made a copy")
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); has || err != nil {
+		t.Fatalf("a corrupt kept copy still counts: %v", err)
+	}
+}
+
+// An avatar from before the host kept its own copies, once its upload is gone, still reaches
+// someone new if anyone was sent it: the host's copy is made again from theirs, with no need to
+// ask the network.
+func TestAnAvatarSomeoneHasIsRecoveredForSomeoneNew(t *testing.T) {
+	dir := t.TempDir()
+	store, err := media.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConnector(t)
+	if c.BridgeKey, err = seal.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	c.Media = store
+	ctx := context.Background()
+	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
+	alice, _ := c.avatarFor(ctx, uri, "alice")
+	if alice == nil {
+		t.Fatal("alice's copy wasn't made")
+	}
+	c.putAvatarRef(ctx, "alice", uri, alice)
+	// As before kept copies: none, and the upload is gone.
+	if err = c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
+		t.Fatal(err)
+	}
+	if c.Media, err = media.New(dir); err != nil {
+		t.Fatal(err)
+	}
+	bob, known := c.avatarFor(ctx, uri, "bob")
+	if bob == nil || known || bob.MediaID == alice.MediaID {
+		t.Fatalf("bob's copy: %+v", bob)
+	}
+	f, err := c.Media.Open(bob.MediaID, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	ct, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := seal.DecryptMedia(ct, bob.Key, bob.Nonce, "bob", bob.MediaID); err != nil || string(got) != "avatar" {
+		t.Fatalf("bob's copy opened to %q, %v", got, err)
+	}
+	if _, err = c.Store.KeptAvatar(ctx, string(uri)); err != nil {
+		t.Fatalf("the host's copy wasn't kept again: %v", err)
+	}
+}
+
+// avatarSetup is a connector over a media store in dir with an avatar alice was sent, its upload
+// since gone (a new store over the same files).
+func avatarSetup(t *testing.T, dir string) (*Connector, id.ContentURIString) {
+	t.Helper()
+	store, err := media.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConnector(t)
+	if c.BridgeKey, err = seal.GenerateKeyPair(); err != nil {
+		t.Fatal(err)
+	}
+	c.Media = store
+	ctx := context.Background()
+	uri := store.Upload([]byte("avatar"), "avatar.jpg", "image/jpeg")
+	alice, _ := c.avatarFor(ctx, uri, "alice")
+	if alice == nil {
+		t.Fatal("alice's copy wasn't made")
+	}
+	c.putAvatarRef(ctx, "alice", uri, alice)
+	if c.Media, err = media.New(dir); err != nil {
+		t.Fatal(err)
+	}
+	return c, uri
+}
+
+// A corrupt kept copy is made again from alice's, and bob gets the picture in the same go.
+func TestACorruptKeptAvatarIsMadeAgainForWhoNeedsIt(t *testing.T) {
+	dir := t.TempDir()
+	c, uri := avatarSetup(t, dir)
+	files, err := os.ReadDir(filepath.Join(dir, "kept"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("kept files: %v %v", files, err)
+	}
+	if err = os.Truncate(filepath.Join(dir, "kept", files[0].Name()), 3); err != nil {
+		t.Fatal(err)
+	}
+	if bob, _ := c.avatarFor(context.Background(), uri, "bob"); bob == nil {
+		t.Fatal("bob didn't get the picture alice has")
+	}
+}
+
+// When alice's copy may be readable but keeping the host's copy fails, that's said, so the
+// contact isn't taken for one nobody has a picture of (and fetched again, which a network could
+// turn into removing it from alice too).
+func TestAFailedRecoveryIsntTakenForNoCopy(t *testing.T) {
+	dir := t.TempDir()
+	c, uri := avatarSetup(t, dir)
+	ctx := context.Background()
+	if err := c.Store.DeleteKeptAvatar(ctx, string(uri)); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(dir, "kept")
+	if err := os.Chmod(kept, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(kept, 0o700) })
+	if has, err := c.hasAvatarCopy(ctx, uri); err == nil {
+		t.Fatalf("a failed write was taken as no copy (has %v)", has)
+	}
+	if err := os.Chmod(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("the copy wasn't made again once it could be: %v %v", has, err)
+	}
+}
+
+// A kept copy whose reference can't be opened (damaged, or sealed to another key) is made again
+// from alice's copy, in its place, rather than taken for no copy at all.
+func TestAnUnopenableKeptAvatarIsMadeAgainFromSomeonesCopy(t *testing.T) {
+	c, uri := avatarSetup(t, t.TempDir())
+	ctx := context.Background()
+	otherKey, err := seal.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := seal.SealJSON(protocol.Attachment{MediaID: "nothing"}, []seal.PublicKey{otherKey.Public}, keptAvatarContext(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Store.ReplaceKeptAvatar(ctx, string(uri), bad); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("alice's copy wasn't used: %v %v", has, err)
+	}
+	if kept, err := c.keptAvatar(ctx, uri); kept == nil || err != nil {
+		t.Fatalf("the remade copy wasn't kept in its place: %v", err)
+	}
+}
+
+// A kept copy that can't be looked at for now (a permission or I/O error) isn't forgotten: the
+// key to it would be lost, and the picture taken for one nobody has.
+func TestAKeptAvatarThatCantBeLookedAtIsKept(t *testing.T) {
+	dir := t.TempDir()
+	c, uri := avatarSetup(t, dir)
+	ctx := context.Background()
+	before, err := c.Store.KeptAvatar(ctx, string(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(dir, "kept")
+	if err = os.Chmod(kept, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(kept, 0o700) })
+	if has, err := c.hasAvatarCopy(ctx, uri); err == nil {
+		t.Fatalf("an unreadable kept copy was taken as known (has %v)", has)
+	}
+	if err = os.Chmod(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	after, err := c.Store.KeptAvatar(ctx, string(uri))
+	if err != nil || after.CT != before.CT {
+		t.Fatalf("the kept copy's reference changed: %v", err)
+	}
+	if has, err := c.hasAvatarCopy(ctx, uri); !has || err != nil {
+		t.Fatalf("the kept copy wasn't usable again: %v %v", has, err)
 	}
 }
 

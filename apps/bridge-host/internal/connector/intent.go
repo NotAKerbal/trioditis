@@ -717,6 +717,9 @@ func (in *Intent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStrin
 	if in.kind != intentGhost {
 		return nil
 	}
+	// Kept before anything else: the person who needs this picture may only turn up once its
+	// upload is long gone.
+	in.c.keepAvatar(ctx, avatarURL)
 	return in.c.ghostProfileChanged(ctx, in.ghostID, nil, &avatarURL)
 }
 
@@ -898,13 +901,17 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	if kind == "" {
 		kind = "group"
 	}
+	var newAvatar *protocol.Attachment
 	if avatarURL != "" {
-		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
+		att, known := c.avatarFor(ctx, avatarURL, o.userID)
+		if att != nil {
 			plain.Avatar = att
+			if !known {
+				newAvatar = att
+			}
 		} else {
-			// The avatar exists but neither its upload nor a kept reference is left (an avatar
-			// from before references were kept). Saying so keeps clients from taking a name
-			// change as the avatar's removal.
+			// The avatar exists but no copy of it is left (an avatar from before copies were
+			// kept). Saying so keeps clients from taking a name change as the avatar's removal.
 			plain.AvatarUnchanged = true
 		}
 	}
@@ -939,6 +946,9 @@ func (c *Connector) emitChat(ctx context.Context, roomID id.RoomID, override cha
 	evt.IsRequest = state
 	if err = c.emit(ctx, evt); err != nil {
 		return err
+	}
+	if newAvatar != nil {
+		c.putAvatarRef(ctx, o.userID, avatarURL, newAvatar)
 	}
 	sent()
 	return nil
@@ -1089,6 +1099,8 @@ func numbersRoom(userID, loginID string) string { return "numbers:" + userID + "
 
 func contactRoom(userID string) string { return "contacts:" + userID }
 
+// emitContact sends a ghost's profile to the person, with the name and avatar given or else
+// the saved ones.
 func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.UserID, name *string, avatar *id.ContentURIString) error {
 	var plain protocol.ContactPlaintext
 	var avatarURL id.ContentURIString
@@ -1108,53 +1120,38 @@ func (c *Connector) emitContact(ctx context.Context, o *owner, ghost networkid.U
 	if avatar != nil {
 		avatarURL = *avatar
 	}
+	var newAvatar *protocol.Attachment
 	if avatarURL != "" {
-		if att := c.avatarFor(ctx, avatarURL, o.userID); att != nil {
+		att, known := c.avatarFor(ctx, avatarURL, o.userID)
+		if att != nil {
 			plain.Avatar = att
+			if !known {
+				newAvatar = att
+			}
 		} else {
 			plain.AvatarUnchanged = true
+			// No copy of it is left (rather than one that couldn't be made for this person just
+			// now): the picture is fetched from the network again, which sends it to everyone who
+			// has the contact.
+			if has, err := c.hasAvatarCopy(ctx, avatarURL); err == nil && !has {
+				c.queueAvatarRepair(ghost)
+			}
 		}
 	}
-	return c.emitContactProfile(ctx, o, ghost, plain)
-}
-
-// avatarKind is what a kept avatar reference is sealed as. It is sealed to the bridge key
-// only: the bridge host reads it back, nobody else does.
-const avatarKind seal.Kind = "avatarRef"
-
-// avatarFor is the owner's sealed copy of an avatar, to put in a chat or contact's metadata.
-// An avatar's upload lives only minutes, but its sealed copy stays in the media store, so the
-// first copy is kept (sealed to the bridge key) and attached again once the upload is gone:
-// otherwise a later change to the name alone would carry no avatar, and a device that never
-// saw it would show none. Nil when there is neither.
-func (c *Connector) avatarFor(ctx context.Context, uri id.ContentURIString, ownerUserID string) *protocol.Attachment {
-	sealCtx := seal.Context{Kind: avatarKind, OwnerUserID: ownerUserID, ObjectID: string(uri)}
-	att, err := c.Media.AttachmentFor(uri, ownerUserID)
-	if err == nil {
-		kept, err := seal.SealJSON(att, []seal.PublicKey{c.BridgeKey.Public}, sealCtx)
-		if err == nil {
-			err = c.Store.PutAvatarRef(ctx, ownerUserID, string(uri), kept)
-		}
-		if err != nil {
-			// The avatar still goes now; only a later resend of it is lost.
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Keeping an avatar's reference failed")
-		}
-		return att
+	if err = c.emitContactProfile(ctx, o, ghost, plain); err != nil {
+		return err
 	}
-	kept, err := c.Store.AvatarRef(ctx, ownerUserID, string(uri))
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Reading an avatar's reference failed")
+	// Recorded once it's sent, so a person who has the reference was sent the avatar.
+	if newAvatar != nil {
+		c.putAvatarRef(ctx, o.userID, avatarURL, newAvatar)
+	}
+	if plain.Avatar != nil {
+		// On failure the next start's repair sends the contact again, harmlessly.
+		if err = c.Store.PutAvatarSent(ctx, o.userID, string(ids.GhostMXID(ghost)), string(avatarURL)); err != nil {
+			c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("Recording that a contact's avatar was sent failed")
 		}
-		return nil
 	}
-	var ref protocol.Attachment
-	if err = seal.OpenJSON(kept, c.BridgeKey, sealCtx, &ref); err != nil {
-		// Sealed to an earlier bridge key, say: the avatar is left as the client has it.
-		c.Log.Warn().Str("error_type", fmt.Sprintf("%T", err)).Msg("An avatar's reference couldn't be opened")
-		return nil
-	}
-	return &ref
+	return nil
 }
 
 // emitContactProfile seals a contact's profile and sends it to the person.
@@ -1293,7 +1290,8 @@ func (c *Connector) anyOwnerFor(ctx context.Context, userID string, ghost networ
 	}
 	for _, room := range rooms {
 		o, err := c.owner(ctx, id.RoomID(room))
-		if errors.Is(err, errNotPortal) {
+		if errors.Is(err, errNotPortal) || errors.Is(err, errNoLogin) {
+			// A chat of a login that's gone can't be the one the person shares with them.
 			continue
 		} else if err != nil {
 			return nil, err
