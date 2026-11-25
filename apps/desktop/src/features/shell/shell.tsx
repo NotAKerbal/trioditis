@@ -59,13 +59,33 @@ export function Shell() {
   // choose waits here until Accounts has started its login.
   const firstRun = useFirstRun()
   const [firstLogin, setFirstLogin] = useState<Login | null>(null)
+  // The guide's control that opened Settings, for focus to come back to when it closes. Once
+  // installing a network has replaced it, the guide's first control stands in for it.
+  const guideOpener = useRef<HTMLElement | null>(null)
+  const fromGuide = () => {
+    guideOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  const backToGuide = () => {
+    const opener = guideOpener.current
+    guideOpener.current = null
+    if (!opener) return null
+    if (opener.isConnected && opener.checkVisibility()) return opener
+    return (
+      [...document.querySelectorAll<HTMLElement>('[data-first-network] button')].find((b) => b.checkVisibility()) ??
+      null
+    )
+  }
   const firstNetwork = firstRun ? (
     <FirstNetwork
       onChoose={(login) => {
+        fromGuide()
         setFirstLogin(login)
         openSettings('accounts', 'connect')
       }}
-      onInstall={() => openSettings('networks')}
+      onInstall={() => {
+        fromGuide()
+        openSettings('networks')
+      }}
     />
   ) : null
   const [newChat, setNewChat] = useState(false)
@@ -220,6 +240,7 @@ export function Shell() {
         list={!!search.list}
         start={firstLogin}
         onStarted={() => setFirstLogin(null)}
+        returnFocus={backToGuide}
         onSectionChange={openSettings}
       />
       <PeopleDialog view={search.people} onViewChange={openPeople} onOpenChat={openStarted} />

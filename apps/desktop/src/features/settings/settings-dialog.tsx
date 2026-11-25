@@ -92,6 +92,7 @@ export function SettingsDialog({
   list,
   start,
   onStarted,
+  returnFocus,
   onSectionChange,
 }: {
   section: SettingsSection | undefined
@@ -102,6 +103,11 @@ export function SettingsDialog({
   /** A login chosen in the first-run guide, for Accounts to start; `onStarted` once it has. */
   start: Login | null
   onStarted: () => void
+  /**
+   * Where focus goes when the dialog closes, if somewhere. Opened from the URL, the dialog has no
+   * trigger of its own to give it back to.
+   */
+  returnFocus?: () => HTMLElement | null
   onSectionChange: (s: SettingsSection | undefined, how?: 'list') => void
 }) {
   return (
@@ -111,6 +117,12 @@ export function SettingsDialog({
       <DialogContent
         className="flex h-[620px] w-[min(900px,calc(100vw-32px))] max-md:top-0 max-md:left-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none"
         aria-describedby={undefined}
+        onCloseAutoFocus={(e) => {
+          const to = returnFocus?.()
+          if (!to) return
+          e.preventDefault()
+          to.focus()
+        }}
       >
         <Panel
           section={section}

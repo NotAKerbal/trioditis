@@ -16,7 +16,7 @@ export function FirstNetwork({ onChoose, onInstall }: { onChoose: (login: Login)
   // The list's box waits for the networks, rather than showing empty while they load.
   const networks = useNetworks()
   return (
-    <div className="mx-auto w-full max-w-md">
+    <div data-first-network className="mx-auto w-full max-w-md">
       <h2 className="mb-3 px-1 text-lg font-bold">Connect your first network</h2>
       {networks ? (
         <Group>

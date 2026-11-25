@@ -5,7 +5,7 @@ import { NetworkBadge } from '@trioditis/ui/network-badge'
 import { toast } from '@trioditis/ui/toast'
 import { cn } from '@trioditis/ui/lib/utils'
 import { useAction, useMutation } from 'convex/react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type Ref } from 'react'
 import { accountLabels, type AccountLabel } from '~/data/account-label.ts'
 import { networkName, useAccounts, useNetworkHealth, useNetworks, useServerInfo } from '~/data/chats.ts'
 import { errorMessage, sessionChanged } from '~/lib/errors.ts'
@@ -47,6 +47,12 @@ export function Accounts({
   // Back and forward can bring `connect` in or take it away while Accounts stays open.
   useEffect(() => setBrowsing(connect || null), [connect])
   const open = browsing ?? accounts?.length === 0
+  // The terms warning for a new connection takes focus, so it's read before anything else, and a
+  // login started from outside (the first-run guide) doesn't leave focus where it was.
+  const warning = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (confirmRisk && !confirmRisk.reconnect) warning.current?.focus()
+  }, [confirmRisk])
   // Waits for the networks, so a network with a terms warning still shows it first (begin).
   useEffect(() => {
     if (!start || !networks) return
@@ -92,8 +98,12 @@ export function Accounts({
   const views = (accounts ?? []).map((a) => ({ account: a, view: accountView(a, bridgeDown(a.network)) }))
   const groups: AccountGroup[] = ['attention', 'connected', 'loggedOut']
 
-  const riskWarning = (login: Login) => (
-    <div className="bg-warning-soft px-4 py-3.5 text-sm text-warning-ink last:rounded-b-xl">
+  const riskWarning = (login: Login, ref?: Ref<HTMLDivElement>) => (
+    <div
+      ref={ref}
+      tabIndex={ref ? -1 : undefined}
+      className="bg-warning-soft px-4 py-3.5 text-sm text-warning-ink outline-none last:rounded-b-xl"
+    >
       {/* Every network marked termsRisk is one whose terms forbid unofficial clients like this one. */}
       <b className="font-semibold">
         Connecting {networkName(login.network)} this way is against its terms, and can get the account banned.
@@ -227,7 +237,7 @@ export function Accounts({
         <Disclosure open={open} onOpenChange={setBrowsing}>
           Connect a network
         </Disclosure>
-        {open && confirmRisk && !confirmRisk.reconnect ? riskWarning(confirmRisk) : null}
+        {open && confirmRisk && !confirmRisk.reconnect ? riskWarning(confirmRisk, warning) : null}
         {open ? <ConnectList onChoose={begin} onInstall={onInstall} /> : null}
       </Group>
       {server?.demo ? (
