@@ -12,13 +12,23 @@ import { errorMessage, sessionChanged } from '~/lib/errors.ts'
 import { useSession } from '~/lib/session.tsx'
 import { accountView, disconnectFailure, disconnectResult, GROUP_TITLES, type AccountGroup } from './account-groups.ts'
 import { Disclosure, Group, Heading, Setting } from './layout.tsx'
+import { ConnectList, type Login } from './connect-list.tsx'
 import { LoginStepper } from './login-stepper.tsx'
 
-type Login = { network: string; flowId: string; reconnect?: string }
-
 /** Settings → Accounts: the person's accounts, by how they're doing, and connecting more. */
-export function Accounts({ connect }: { connect: boolean }) {
-  const session = useSession()
+export function Accounts({
+  connect,
+  start,
+  onStarted,
+  onInstall,
+}: {
+  connect: boolean
+  /** A login chosen outside Settings (the first-run guide) to start here at once. */
+  start: Login | null
+  onStarted: () => void
+  /** Takes an admin to Networks, to install some when there are none. */
+  onInstall: () => void
+}) {
   const networks = useNetworks()
   const accounts = useAccounts()
   const health = useNetworkHealth()
@@ -37,6 +47,12 @@ export function Accounts({ connect }: { connect: boolean }) {
   // Back and forward can bring `connect` in or take it away while Accounts stays open.
   useEffect(() => setBrowsing(connect || null), [connect])
   const open = browsing ?? accounts?.length === 0
+  // Waits for the networks, so a network with a terms warning still shows it first (begin).
+  useEffect(() => {
+    if (!start || !networks) return
+    begin(start)
+    onStarted()
+  }, [start, networks])
 
   const labels = accountLabels((accounts ?? []).map((a) => ({ id: a._id, network: a.network, hint: a.hint })))
   const label = (id: Id<'networkAccounts'>, network: string): AccountLabel =>
@@ -212,38 +228,7 @@ export function Accounts({ connect }: { connect: boolean }) {
           Connect a network
         </Disclosure>
         {open && confirmRisk && !confirmRisk.reconnect ? riskWarning(confirmRisk) : null}
-        {open
-          ? (networks ?? []).flatMap((n) =>
-              n.flows.map((f) => (
-                <Button
-                  variant="bare"
-                  key={`${n.network}:${f.id}`}
-                  type="button"
-                  onClick={() => begin({ network: n.network, flowId: f.id })}
-                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left last:rounded-b-xl hover:bg-surface-2"
-                >
-                  <NetworkBadge network={n.network} label={n.name} size={26} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-semibold">{n.name}</span>
-                    <span className="block text-sm text-muted-foreground">
-                      {f.name}
-                      {n.maturity === 'stable' ? '' : n.maturity === 'experimental' ? ' · Experimental' : ' · Beta'}
-                      {bridgeDown(n.network) ? (
-                        <span className="text-warning"> · The server’s bridge isn’t responding</span>
-                      ) : null}
-                    </span>
-                  </span>
-                </Button>
-              )),
-            )
-          : null}
-        {open && networks && networks.length === 0 ? (
-          <p className="px-4 py-3 text-sm text-muted-foreground">
-            {session.role === 'admin'
-              ? 'No networks are installed yet. Install them in Settings → Admin → Networks.'
-              : 'No networks are installed yet. An admin installs them.'}
-          </p>
-        ) : null}
+        {open ? <ConnectList onChoose={begin} onInstall={onInstall} /> : null}
       </Group>
       {server?.demo ? (
         <Group>

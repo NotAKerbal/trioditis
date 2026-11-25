@@ -88,6 +88,8 @@ interface SidebarProps {
   /** Counts the changes of what the list is showing (search, open sheet, filters). */
   contextRef: { current: number }
   chatsRef: { current: Map<string, Chat> }
+  /** The first-run guide, for someone with no account yet: a phone shows it when the list is empty. */
+  firstNetwork: ReactNode
 }
 
 const SIMPLE_SHOWS: { view: ChatView; label: string; icon: ReactNode }[] = [
@@ -110,6 +112,7 @@ export function Sidebar({
   shownRef,
   contextRef,
   chatsRef,
+  firstNetwork,
 }: SidebarProps) {
   const [layout] = useSidebarLayout()
   const session = useSession()
@@ -458,6 +461,19 @@ export function Sidebar({
   }
   const showLabel = SIMPLE_SHOWS.find((s) => s.view === simpleShow)!
 
+  // An empty list says so. With no account yet, a phone shows the first-run guide in its place; a
+  // wide window shows it beside the list (shell.tsx).
+  const noChats = (say: string | null) =>
+    say ? (
+      <Empty>{say}</Empty>
+    ) : firstNetwork ? (
+      <>
+        <Empty className="max-md:hidden">No chats yet.</Empty>
+        <div className="px-1 py-6 md:hidden">{firstNetwork}</div>
+      </>
+    ) : (
+      <Empty>No chats yet.</Empty>
+    )
   return (
     <>
       <div className="flex h-(--bar-h) shrink-0 items-center gap-1 border-b border-border px-2.5">
@@ -609,11 +625,7 @@ export function Sidebar({
                 <AutoLoad lists={[main]} />
               </>
             ) : (
-              <Empty>
-                {simpleShow === 'inbox' && !filterActive
-                  ? 'No chats yet. Connect a network in Settings → Accounts.'
-                  : 'Nothing here.'}
-              </Empty>
+              noChats(simpleShow === 'inbox' && !filterActive ? null : 'Nothing here.')
             )
           ) : unread.length || counts?.inbox.count || counts?.woke.count ? (
             // Shown too when the server counts unread chats not loaded yet: they're on their way.
@@ -629,9 +641,7 @@ export function Sidebar({
           ) : filling ? (
             <ListSkeleton />
           ) : (
-            <Empty>
-              {everything.length ? 'You’re all caught up.' : 'No chats yet. Connect a network in Settings → Accounts.'}
-            </Empty>
+            noChats(everything.length ? 'You’re all caught up.' : null)
           )}
         </div>
         {drawer ? (
@@ -951,8 +961,8 @@ function AutoLoad({ lists }: { lists: Pick<ChatList, 'canLoadMore' | 'loading' |
   return <div ref={ref}>{lists.some((l) => l.loading) ? <ListSkeleton rows={2} /> : null}</div>
 }
 
-function Empty({ children }: { children: ReactNode }) {
-  return <p className="px-3 py-8 text-center text-sm text-subtle-foreground">{children}</p>
+function Empty({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={cn('px-3 py-8 text-center text-sm text-subtle-foreground', className)}>{children}</p>
 }
 
 function ListSkeleton({ rows = 6 }: { rows?: number }) {
